@@ -30,8 +30,22 @@ def rank_hr_channels(rec, trains: dict[str, BeatTrain]) -> tuple[str, pd.DataFra
 
 ### Algorithm — pass 1
 1. Decimate to ~2 kHz (`ftype='fir'`, `zero_phase=True`), then band-limit
-   **1–100 Hz** with `sos`. Band-limiting alone takes RR error 1.3% → 0.2%.
-2. `findpeaks`, prominence `3 × MAD-σ`, refractory `R_MIN`.
+   **10–150 Hz** with `sos`.
+2. `findpeaks`, prominence **`6 × MAD-σ`**, refractory `R_MIN`.
+
+> **RULED 2026-09-21 — 10–150 Hz at k=6 is binding.** This section previously
+> said 1–100 Hz at k=3; that was the earlier measurement and my correction never
+> landed here. Both animal J (template SNR 611 vs 446, long-interval rate 2.0%
+> vs 3.6%) and the synthetic (0 false beats vs 25 over 3160 true beats) favour
+> 10–150 / k=6. In 1–100 the in-band noise floor collapses to ~0.6 µV while a
+> weak beat still carries ~18 µV of prominence, so noise and signal sit on the
+> same side of 3σ.
+>
+> **A.4's `1-100` for the hrv consumer was the same stale number, not a separate
+> decision, and it moves too.** The contamination band for that consumer must be
+> the band its detector actually reads. `BANDS` now carries `10-150` (100 ms
+> window, 2·B·T = 28) in place of `1-100`, which is otherwise an orphan with no
+> consumer. **Task 02's 1–100 peri-R row needs re-measuring at 10–150.**
 3. Drop any peak closer than `0.55 × local median RR` (median over ±10 intervals).
 
 **`R_MIN` must be measured, not inherited.** The 90 ms value is from the human ECG
@@ -63,7 +77,23 @@ a beat raises the local median, which raises the threshold, which drops more bea
 | 0.70 | short 0.75%, long **10.96%** | short 0.09%, long 1.85% |
 | 0.75 | **collapses** — RRmed 330 ms, 54% dropped | short 0.00%, long 2.05% |
 
-The global version is monotone and stable to 0.85. Compute the threshold from
+The global version is monotone and stable to 0.85.
+
+> **The runaway does not reproduce on the current synthetic, and that is a
+> generator gap, not evidence against it.** It needs false peaks to seed the
+> feedback, and `make_ecg` produces almost none. On animal J the short-interval
+> population clustered at **~90 ms ≈ 0.55 × RR** — the signature of detecting the
+> **T wave** as well as the R peak.
+>
+> **Add `make_ecg(t_wave=True)`**: a second deflection at 0.5–0.6 × RR, ~30–50% of
+> R amplitude. That reproduces both the short-interval cluster *and* the runaway,
+> and makes this claim testable in CI rather than only on real data.
+>
+> Also add a real-data regression test against
+> **`gems_j_t01_ms3_bl_230315`** (animal J baseline, 601 s), where the collapse
+> was observed: local form at frac 0.75 → RR median 330 ms and 54% of peaks
+> dropped; global form → 3511 beats, RR 166.1 ms, short 0.00%, long 2.05%. It
+> skips when the file is unreachable. Compute the threshold from
 `median(RR)` over the whole file, restricted to 80–500 ms. **Operating point:
 `0.75 × global RR` (≈124 ms here).** This is the same failure mode as the adaptive
 QRS threshold in §10.1 — adaptive state contaminated by the artifact it is meant
@@ -139,6 +169,16 @@ choose argmax SNR subject to implausible_frac and rescue_rate gates
 SNR measures **reproducibility**, which predicts HRV reliability, and it is
 self-policing: a channel detecting artifacts averages to a near-flat template. Worked
 values from simulation — clean 234, noisy-with-amplitude-wander 27.6, no-cardiac 4.7.
+
+**Veto thresholds are PROVISIONAL and must be set in build-order step 9**, from
+the cross-animal set, not from one animal or a synthetic. Use
+`PROVISIONAL_MAX_IMPLAUSIBLE_FRAC = 0.10` and
+`PROVISIONAL_MAX_RESCUE_RATE = 0.25` until then — the prefix is the point, so a
+provisional number cannot quietly become a constant. For calibration: animal J
+sits near 2% implausible at the good operating point and 14–20% at k=3; the
+synthetic's wander channel is 28%. Raising when **every** channel is vetoed is
+correct — silently returning the least-bad channel is how a bad recording enters
+an analysis.
 
 Gates (veto, not ranking): `implausible_frac` and `rescue_rate` above threshold
 disqualify a channel outright. Beat count vs the median across channels is a sanity
@@ -248,7 +288,7 @@ BANDS: dict[str, BandSpec] = {
     #  name        lo     hi    window_s     2*B*T
     "300-3000": (  300., 3000.,   0.025),   # 135  <- time-resolution choice
     "100-300":  (  100.,  300.,   0.075),   #  30
-    "1-100":    (    1.,  100.,   0.150),   #  29.7
+    "10-150":   (   10.,  150.,   0.100),   #  28   (was 1-100/150 ms: see task 05)
     "2-50":     (    2.,   50.,   0.310),   #  29.8
     "0.5-3":    (   0.5,    3.,   6.000),   #  30
     "0-2":      (   0.0,    2.,   7.500),   #  30
@@ -278,7 +318,7 @@ CONSUMERS = [
     ("mmc",             "stomach_ref",      "2-50",     "3 x moving MAD"),
     ("slow_wave",       "stomach_ref",      "0-2",      "peak displacement"),
     ("breathing",       "best_hr_channel",  "0.5-3",    "peak inserted or lost"),
-    ("hrv",             "best_hr_channel",  "1-100",    "operational: beat train unchanged"),
+    ("hrv",             "best_hr_channel",  "10-150",   "operational: beat train unchanged"),
 ]
 ```
 

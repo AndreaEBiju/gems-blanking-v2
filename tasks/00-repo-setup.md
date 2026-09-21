@@ -85,6 +85,25 @@ def make_multichannel(fs, dur_s, n_cuff=2, n_stomach=3, common_mode=True, seed=0
     Returns (Recording, ground_truth_dict)."""
 ```
 
+### Measured properties to preserve
+
+- **Pass-2 false-positive rate on genuinely empty windows: ~2.8% (1 in 36).** The
+  rescue returns only peaks the trace actually contains — it never fabricates a
+  sample — but a relaxed 1.2σ threshold plus a width prior plus a template argmax
+  will occasionally all pass on noise. This is the price of the relaxed
+  threshold and is reported, not engineered away with a correlation floor the
+  design does not specify.
+- **`PASS2_MULTIPLE_TOLERANCE = 0.40` is a judgement, not a measurement.** At the
+  synthetic's 3.3% RR CV it is indistinguishable from 0.20 (161/161 admitted
+  either way); it only bites at realistic spread — 10% CV: 78% → 98%, 20% CV:
+  52% → 85%. Test the *rule's* behaviour across CVs; do not assert the constant.
+- **`weak_frac` in `make_ecg` is calibrated against the BROADBAND MAD, and
+  detection band-limits.** Band-limiting moves σ by 4–9× (0.62 µV in 1–100,
+  2.89 µV in 10–150, 5.46 µV broadband), so an "8–13 µV weak beat" lands ~30×
+  above the in-band threshold and cannot be missed. Use `weak_amp_uv` to
+  calibrate against the band actually detected in. The trap is that
+  band-limiting is *precisely what makes weak beats detectable*.
+
 ### Tests
 `tests/test_constants.py` — **every band named in `CONSUMERS` is a key of
 `BANDS`.** This one line would have caught the 300-5000/300-3000 contradiction
@@ -181,7 +200,7 @@ BANDS: dict[str, BandSpec] = {
     #  name        lo     hi    window_s     2*B*T
     "300-3000": (  300., 3000.,   0.025),   # 135  <- time-resolution choice
     "100-300":  (  100.,  300.,   0.075),   #  30
-    "1-100":    (    1.,  100.,   0.150),   #  29.7
+    "10-150":   (   10.,  150.,   0.100),   #  28   (was 1-100/150 ms: see task 05)
     "2-50":     (    2.,   50.,   0.310),   #  29.8
     "0.5-3":    (   0.5,    3.,   6.000),   #  30
     "0-2":      (   0.0,    2.,   7.500),   #  30
@@ -211,7 +230,7 @@ CONSUMERS = [
     ("mmc",             "stomach_ref",      "2-50",     "3 x moving MAD"),
     ("slow_wave",       "stomach_ref",      "0-2",      "peak displacement"),
     ("breathing",       "best_hr_channel",  "0.5-3",    "peak inserted or lost"),
-    ("hrv",             "best_hr_channel",  "1-100",    "operational: beat train unchanged"),
+    ("hrv",             "best_hr_channel",  "10-150",   "operational: beat train unchanged"),
 ]
 ```
 

@@ -151,7 +151,7 @@ BANDS: dict[str, BandSpec] = {
     #  name        lo     hi    window_s     2*B*T
     "300-3000": (  300., 3000.,   0.025),   # 135  <- time-resolution choice
     "100-300":  (  100.,  300.,   0.075),   #  30
-    "1-100":    (    1.,  100.,   0.150),   #  29.7
+    "10-150":   (   10.,  150.,   0.100),   #  28   (was 1-100/150 ms: see task 05)
     "2-50":     (    2.,   50.,   0.310),   #  29.8
     "0.5-3":    (   0.5,    3.,   6.000),   #  30
     "0-2":      (   0.0,    2.,   7.500),   #  30
@@ -181,7 +181,7 @@ CONSUMERS = [
     ("mmc",             "stomach_ref",      "2-50",     "3 x moving MAD"),
     ("slow_wave",       "stomach_ref",      "0-2",      "peak displacement"),
     ("breathing",       "best_hr_channel",  "0.5-3",    "peak inserted or lost"),
-    ("hrv",             "best_hr_channel",  "1-100",    "operational: beat train unchanged"),
+    ("hrv",             "best_hr_channel",  "10-150",   "operational: beat train unchanged"),
 ]
 ```
 
