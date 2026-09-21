@@ -85,9 +85,11 @@ class ScanResult:
     candidates
         The tied epochs, for ``ambiguous``.
     unparsed_stim_tokens
-        Tokens that look like stimulation parameters but are in neither frequency
-        map - the old cohort's ``E1000``/``M100``. Non-empty blocks the row, because
-        dropping one would merge two conditions and interpreting one would be a guess.
+        Stimulation-shaped tokens that resolve to no level on either axis. Non-empty
+        blocks the row.
+    token_conflict
+        Tokens that disagreed on one axis, where the explicit-Hz form won. Recorded
+        rather than dropped, and does **not** block.
     duplicate_of
         For ``duplicate``, the path already seen with this content.
     condition_source
@@ -104,6 +106,7 @@ class ScanResult:
     matched_rule: str | None = None
     candidates: tuple[str, ...] = ()
     unparsed_stim_tokens: tuple[str, ...] = ()
+    token_conflict: tuple[str, ...] = ()
     duplicate_of: Path | None = None
     condition_source: Literal["rule", "human"] = "rule"
 
@@ -283,6 +286,7 @@ def scan(
             matched_rule=classification.matched_rule,
             candidates=classification.candidates,
             unparsed_stim_tokens=classification.unparsed_stim_tokens,
+            token_conflict=classification.token_conflict,
         )
 
         if digest is not None and digest in seen_hash:
@@ -307,6 +311,7 @@ def scan(
                     matched_rule=None,
                     candidates=(),
                     unparsed_stim_tokens=(),
+                    token_conflict=(),
                     condition_source="human",
                 )
         results.append(result)
@@ -397,6 +402,10 @@ def apply_corrections(
 
         document["animal"] = animal
         document["session"] = session
+        if result.token_conflict:
+            # Recorded, not dropped: the precedence rule made the row parseable and
+            # this is what makes the choice auditable afterwards.
+            document["token_conflict"] = list(result.token_conflict)
         if correction.condition is not None:
             document["condition"] = rules.validate_condition(correction.condition).to_json()
             document["condition_source"] = "human"

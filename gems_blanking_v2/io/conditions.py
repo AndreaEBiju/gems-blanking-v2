@@ -54,6 +54,7 @@ __all__ = [
     "ELECTRICAL_PULSE_WIDTH_MS",
     "ELECTRICAL_WAVEFORM",
     "MECHANICAL_DUTY_FRACTION",
+    "OLD_COHORT_AMPLITUDE_UA",
     "Classification",
     "ClassificationStatus",
     "Condition",
@@ -88,18 +89,27 @@ ELECTRICAL_WAVEFORM: Final = "square_bipolar"
 MECHANICAL_DUTY_FRACTION: Final = 0.5
 """Mechanical duty cycle. Fixed across MS1-MS3."""
 
-_STIM_LIKE = re.compile(r"(?<![a-z])([em])(\d{1,4})(?![0-9])", re.IGNORECASE)
+_EXPLICIT_HZ = re.compile(r"(?<![a-z])([em])(\d{1,4})(?![0-9])", re.IGNORECASE)
 # The lookbehind excludes letters but NOT digits, on purpose: in `M100E10` the
 # `E10` is preceded by `0`, and excluding digits too would hide half of a name
 # that encodes two stimulation parameters. Letters are excluded so `CME2` and
 # `mec100` do not produce phantom tokens.
-"""A token that looks like a stimulation parameter but is not in either map.
+"""The old cohort's explicit-Hz form: ``E1000`` is 1000 Hz electrical.
 
-The old cohort writes ``E1000``, ``E100``, ``M100``, ``M10`` and ``M100E10``,
-which look like frequencies in Hz but are **not defined** by the ES/MS table. They
-are reported rather than interpreted: in ``M100_JEL_MS2_bl_1945`` the recognised
-``MS2`` means 50 Hz while an unrecognised ``M100`` sits beside it, and if that
-encodes 100 Hz the two disagree. Guessing would quietly merge two conditions.
+**RESOLVED 2026-09-21:** ``E<n>`` and ``M<n>`` are frequencies in Hz on the same
+two axes the ES/MS ordinals name, so the conventions merge and pooling cohorts on
+frequency loses nothing. ``M100E10`` is mechanical 100 Hz *and* electrical 10 Hz.
+
+Note the old form has no token for 50 Hz mechanical, which is ``MS2``.
+"""
+
+OLD_COHORT_AMPLITUDE_UA: Final[float | None] = None
+"""Electrical amplitude for the old cohort: **unknown**.
+
+The new cohort fixes it at :data:`ELECTRICAL_AMPLITUDE_UA` (1000 uA) and the old
+cohort's filenames encode frequency only. Confirm the old amplitude before
+treating the two cohorts as one dataset *on amplitude*; frequency comparisons are
+unaffected. None here means unknown, and it is not defaulted to 1000.
 """
 
 DEFAULT_CONDITIONS_YAML: Final = """\
@@ -287,11 +297,20 @@ class Classification:
     candidates: tuple[str, ...] = ()
     """Epochs that tied, for ``ambiguous``. Empty otherwise."""
     unparsed_stim_tokens: tuple[str, ...] = ()
-    """Tokens that look like stimulation parameters but are in neither map.
+    """Stimulation-shaped tokens that resolve to no level on either axis.
 
-    Non-empty blocks the row. The old cohort's ``E1000``/``M100`` are exactly this:
-    dropping one would silently merge two different stimulation conditions, and
-    interpreting one would be a guess.
+    Non-empty **blocks** the row. Since the E/M forms were resolved to explicit Hz
+    this fires only on genuinely unknown tokens - an ``E42`` that lands on no
+    defined level, not the old cohort's ``E1000``.
+    """
+    token_conflict: tuple[str, ...] = ()
+    """Tokens that disagreed, when a name carried both forms of one axis.
+
+    The explicit-Hz token wins - ``M100_JEL_MS2_bl_1945`` is 100 Hz from ``M100``,
+    not 50 from ``MS2`` - and both tokens are recorded here. This does **not**
+    block: the precedence rule makes the row parseable and the record makes it
+    auditable. A cluster of these would say the old filenames are less trustworthy
+    than they look.
     """
 
     @property
@@ -374,12 +393,43 @@ class Rules:
                 break
         return core
 
-    def _frequency(self, core: str, mapping: Mapping[str, float]) -> float | None:
-        """Return the frequency a recognised token encodes, or None."""
+    def _ordinal(self, core: str, mapping: Mapping[str, float]) -> tuple[str, float] | None:
+        """Return the ``(token, hz)`` an ES/MS ordinal encodes, or None."""
         for token, hz in mapping.items():
             if re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![0-9])", core, re.IGNORECASE):
-                return float(hz)
+                return token.upper(), float(hz)
         return None
+
+    def _explicit(self, core: str, axis: str) -> tuple[str, float] | None:
+        """Return the ``(token, hz)`` an explicit ``E<n>``/``M<n>`` encodes, or None."""
+        for match in _EXPLICIT_HZ.finditer(core):
+            if match.group(1).lower() == axis:
+                return match.group(0).upper(), float(match.group(2))
+        return None
+
+    def _axis(
+        self, core: str, axis: str, mapping: Mapping[str, float]
+    ) -> tuple[float | None, tuple[str, ...], tuple[str, ...]]:
+        """Resolve one stimulation axis.
+
+        Returns ``(hz, conflict_tokens, unparsed_tokens)``. An explicit-Hz token
+        beats an ordinal when both are present and disagree, and both tokens are
+        reported so the choice is auditable rather than silent.
+        """
+        explicit = self._explicit(core, axis)
+        ordinal = self._ordinal(core, mapping)
+        levels = {float(v) for v in mapping.values()}
+
+        if explicit is not None and explicit[1] not in levels:
+            # Shaped like this axis but on no defined level: parsed, not placed.
+            return (ordinal[1] if ordinal else None), (), (explicit[0],)
+        if explicit is not None and ordinal is not None and explicit[1] != ordinal[1]:
+            return explicit[1], (explicit[0], ordinal[0]), ()
+        if explicit is not None:
+            return explicit[1], (), ()
+        if ordinal is not None:
+            return ordinal[1], (), ()
+        return None, (), ()
 
     def _timepoint(self, core: str) -> str | None:
         """Return the timepoint as ``t01``, or None."""
@@ -387,16 +437,6 @@ class Rules:
         if match is None:
             return None
         return f"t{int(match.group(1)):02d}"
-
-    def _unparsed_stim_tokens(self, core: str) -> tuple[str, ...]:
-        """Return stimulation-looking tokens that neither map defines."""
-        known = {t.lower() for t in (*self.estim_hz, *self.mstim_hz)}
-        found: list[str] = []
-        for match in _STIM_LIKE.finditer(core):
-            token = match.group(0)
-            if token.lower() not in known:
-                found.append(token.upper())
-        return tuple(dict.fromkeys(found))
 
     def classify(self, stem: str) -> Classification:
         """Classify one filename stem into a four-field record. Never defaults.
@@ -406,10 +446,11 @@ class Rules:
         result is ``ambiguous`` - the tie is reported, not broken arbitrarily.
         """
         core = self.core_of(stem)
-        estim = self._frequency(core, self.estim_hz)
-        mstim = self._frequency(core, self.mstim_hz)
+        estim, estim_conflict, estim_unparsed = self._axis(core, "e", self.estim_hz)
+        mstim, mstim_conflict, mstim_unparsed = self._axis(core, "m", self.mstim_hz)
         timepoint = self._timepoint(core)
-        unparsed = self._unparsed_stim_tokens(core)
+        unparsed = estim_unparsed + mstim_unparsed
+        conflict = estim_conflict + mstim_conflict
 
         hits = [r for r in self.rules if re.search(r.pattern, core, re.IGNORECASE)]
         if not hits:
@@ -422,6 +463,7 @@ class Rules:
                 ),
                 status="unknown",
                 unparsed_stim_tokens=unparsed,
+                token_conflict=conflict,
             )
 
         best = min(r.priority for r in hits)
@@ -438,6 +480,7 @@ class Rules:
                 status="ambiguous",
                 candidates=tuple(sorted(epochs)),
                 unparsed_stim_tokens=unparsed,
+                token_conflict=conflict,
             )
 
         winner = sorted(level, key=lambda r: r.id)[0]
@@ -451,6 +494,7 @@ class Rules:
             status="matched",
             matched_rule=winner.id,
             unparsed_stim_tokens=unparsed,
+            token_conflict=conflict,
         )
 
     def animal(self, stem: str) -> str | None:

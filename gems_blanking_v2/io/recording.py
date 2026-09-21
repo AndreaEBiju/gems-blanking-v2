@@ -21,6 +21,7 @@ the conversion their type does not carry:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -28,7 +29,7 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
-from gems_blanking_v2.io.channel_map import ChannelMap, resolve_channel_map
+from gems_blanking_v2.io.channel_map import META_NAME, ChannelMap, resolve_channel_map
 from gems_blanking_v2.io.detector_core import import_detector_module
 from gems_blanking_v2.io.store import GemsStore
 from gems_blanking_v2.types import Recording
@@ -58,6 +59,34 @@ def spans_from_matlab_intervals(
         msg = f"intervals must be (k, 2), got {array.shape}"
         raise ValueError(msg)
     return [((int(a) - 1) / fs, int(b) / fs) for a, b in array]
+
+
+def _condition_provenance(
+    store: GemsStore | None, animal: str, session: str
+) -> dict[str, Any]:
+    """Return the condition record and any token conflict, for provenance.
+
+    Task 03A's ruling: a row resolved by the explicit-Hz precedence rule carries
+    ``token_conflict`` in ``meta.json`` **and in provenance**. Provenance is the
+    only place a later reader of a model sees it, so it is copied through here
+    rather than left in the store for someone to go and look up.
+    """
+    if store is None:
+        return {}
+    path = store.session_dir(animal, session) / META_NAME
+    if not path.is_file():
+        return {}
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    out: dict[str, Any] = {}
+    if isinstance(document.get("condition"), dict):
+        out["condition"] = dict(document["condition"])
+        out["condition_source"] = str(document.get("condition_source") or "rule")
+    if document.get("token_conflict"):
+        out["token_conflict"] = list(document["token_conflict"])
+    return out
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +231,7 @@ def load_recording(
         "native_dtype": str(np.asarray(native.y).dtype),
         "config": mapping.config,
         "geometry_source": "explicit" if channel_map is not None else "stored",
+        **_condition_provenance(store, animal, session_id),
         "direction_valid": mapping.direction_valid,
     }
 

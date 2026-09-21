@@ -18,6 +18,7 @@ from gems_blanking_v2.io.conditions import (
     ELECTRICAL_PULSE_WIDTH_MS,
     ELECTRICAL_WAVEFORM,
     MECHANICAL_DUTY_FRACTION,
+    OLD_COHORT_AMPLITUDE_UA,
     Condition,
     ConditionRule,
     Rules,
@@ -481,12 +482,25 @@ def test_the_frequency_axes_are_ordered_numbers(rules: Rules) -> None:
     assert mstim == sorted(v for v in mstim if v is not None)
 
 
-def test_a_baseline_has_no_stimulation_frequency(rules: Rules) -> None:
+def test_a_baseline_with_no_stim_token_has_no_frequency(rules: Rules) -> None:
     """Absent is a fact about the recording, not a gap in the data."""
-    condition = rules.classify("E1000_JEL_E1000_bl_1315").condition
+    condition = rules.classify("gems_d_t01_bl_164012").condition
     assert condition.epoch == "baseline"
     assert condition.estim_hz is None
     assert condition.mstim_hz is None
+
+
+def test_an_old_cohort_baseline_carries_its_arms_frequency(rules: Rules) -> None:
+    """``E1000_JEL_E1000_bl_1315`` is a baseline *and* says 1000 Hz electrical.
+
+    That follows from the ruling that ``E<n>`` is Hz, and it is worth noticing:
+    the frequency identifies which protocol arm the baseline belongs to, not that
+    stimulation was applied during it. A model treating ``estim_hz`` as an applied
+    stimulus would be wrong on these rows.
+    """
+    condition = rules.classify("E1000_JEL_E1000_bl_1315").condition
+    assert condition.epoch == "baseline"
+    assert condition.estim_hz == 1000.0
 
 
 def test_the_fixed_protocol_parameters_are_recorded() -> None:
@@ -536,36 +550,88 @@ def test_a_frequency_off_the_defined_levels_is_rejected(rules: Rules) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_an_undefined_stim_token_is_reported_not_interpreted(rules: Rules) -> None:
-    """``E1000``/``M100`` look like frequencies but the ES/MS table does not define them.
+def test_the_old_explicit_hz_form_resolves_onto_the_same_axis(rules: Rules) -> None:
+    """RESOLVED 2026-09-21: ``E<n>``/``M<n>`` are Hz on the ES/MS axes.
 
-    Interpreting one would be a guess; dropping one would silently merge two
-    stimulation conditions. So the row is blocked and the tokens are named.
+    So the two conventions merge and pooling cohorts on frequency loses nothing.
+    These rows used to block; they now parse.
     """
     result = rules.classify("E1000_FRE_E1000_stim_rec_1406")
     assert result.status == "matched"
     assert result.condition.epoch == "stim_recovery"
+    assert result.condition.estim_hz == 1000.0
+    assert result.unparsed_stim_tokens == ()
+    assert not result.needs_a_human
+
+
+@pytest.mark.parametrize(
+    ("stem", "estim", "mstim"),
+    [
+        ("x_a_E10_bl_1", 10.0, None),
+        ("x_a_E100_bl_1", 100.0, None),
+        ("x_a_E1000_bl_1", 1000.0, None),
+        ("x_a_M10_bl_1", None, 10.0),
+        ("x_a_M100_bl_1", None, 100.0),
+        ("M100E10_LOL_CME_sr_1", 10.0, 100.0),
+    ],
+)
+def test_the_explicit_hz_table(
+    rules: Rules, stem: str, estim: float | None, mstim: float | None
+) -> None:
+    """E10/E100/E1000 and M10/M100, plus the combined form."""
+    condition = rules.classify(stem).condition
+    assert condition.estim_hz == estim
+    assert condition.mstim_hz == mstim
+
+
+def test_an_explicit_token_on_no_defined_level_still_blocks(rules: Rules) -> None:
+    """``unparsed_stim_tokens`` survives, for tokens genuinely outside both tables."""
+    result = rules.classify("X_JEL_E42_bl_01")
+    assert result.unparsed_stim_tokens == ("E42",)
     assert result.condition.estim_hz is None
-    assert result.unparsed_stim_tokens == ("E1000",)
     assert result.needs_a_human
 
 
-def test_a_recognised_and_an_unrecognised_token_together_are_flagged(rules: Rules) -> None:
-    """Carry both a recognised and an unrecognised token, and flag the row.
+def test_the_old_cohort_amplitude_is_recorded_as_unknown() -> None:
+    """The new cohort fixes 1000 uA; the old cohort's filenames encode frequency only.
 
-    ``M100_JEL_MS2_bl_1945`` has both, and they disagree if ``M100`` is 100 Hz: MS2
-    is 50 Hz by the table. Recording 50 and ignoring M100 would be a silent choice
-    between two readings of the same filename.
+    None means unknown and is not defaulted to 1000: confirm before pooling the
+    cohorts *on amplitude*. Frequency comparisons are unaffected.
+    """
+    assert OLD_COHORT_AMPLITUDE_UA is None
+    assert ELECTRICAL_AMPLITUDE_UA == 1000.0
+
+
+def test_the_explicit_hz_token_wins_a_conflict_and_the_loser_is_recorded(
+    rules: Rules,
+) -> None:
+    """``M100_JEL_MS2_bl_1945`` says 100 Hz (M100) and 50 Hz (MS2). Explicit wins.
+
+    The precedence rule makes the row parseable; recording both tokens makes the
+    choice auditable, and a cluster of these would say the old filenames are less
+    trustworthy than they look. It does not block.
     """
     result = rules.classify("M100_JEL_MS2_bl_1945")
-    assert result.condition.mstim_hz == 50.0
-    assert result.unparsed_stim_tokens == ("M100",)
-    assert result.needs_a_human
+    assert result.condition.mstim_hz == 100.0
+    assert result.token_conflict == ("M100", "MS2")
+    assert result.unparsed_stim_tokens == ()
+    assert not result.needs_a_human
 
 
-def test_both_undefined_tokens_are_reported(rules: Rules) -> None:
+def test_agreeing_forms_are_not_a_conflict(rules: Rules) -> None:
+    """``M10`` and ``MS1`` both mean 10 Hz, so there is nothing to record."""
+    result = rules.classify("M10_JEL_MS1_bl_1945")
+    assert result.condition.mstim_hz == 10.0
+    assert result.token_conflict == ()
+
+
+def test_the_combined_form_fills_both_axes(rules: Rules) -> None:
+    """``M100E10`` is mechanical 100 Hz **and** electrical 10 Hz."""
     result = rules.classify("M100E10_LOL_CME2_stim_rec_2253")
-    assert set(result.unparsed_stim_tokens) == {"M100", "E10"}
+    assert result.condition.mstim_hz == 100.0
+    assert result.condition.estim_hz == 10.0
+    assert result.unparsed_stim_tokens == ()
+    assert not result.needs_a_human
 
 
 def test_a_clean_new_cohort_name_has_no_unparsed_tokens(rules: Rules) -> None:
@@ -573,12 +639,21 @@ def test_a_clean_new_cohort_name_has_no_unparsed_tokens(rules: Rules) -> None:
         assert rules.classify(stem).unparsed_stim_tokens == ()
 
 
-def test_how_many_real_old_cohort_ids_carry_undefined_tokens(rules: Rules) -> None:
-    """Measured 2026-09-21: 7 of the 14 recovered ids, which is the finding.
+def test_every_real_old_cohort_id_now_parses(rules: Rules) -> None:
+    """Measured after the ruling: 0 of 14 blocked, where 7 blocked before.
 
-    The four-field record is fully defined for the new cohort and under-defined for
-    the old one, so those rows need either a rule addition or a human.
+    Resolving ``E<n>``/``M<n>`` to Hz merged the two conventions, so the whole
+    recovered set is corpus-eligible on its condition.
     """
-    flagged = [s for s in REAL_IDS if rules.classify(s).unparsed_stim_tokens]
-    assert len(flagged) == 7
-    assert all(rules.classify(s).status == "matched" for s in flagged)
+    blocked = [s for s in REAL_IDS if rules.classify(s).needs_a_human]
+    assert blocked == []
+    assert all(rules.classify(s).unparsed_stim_tokens == () for s in REAL_IDS)
+
+
+def test_two_real_ids_carry_a_token_conflict(rules: Rules) -> None:
+    """Both are ``M100 … MS2``: 100 Hz explicit against 50 Hz ordinal."""
+    conflicted = {s: rules.classify(s).token_conflict for s in REAL_IDS}
+    conflicted = {s: c for s, c in conflicted.items() if c}
+    assert len(conflicted) == 2
+    assert all(c == ("M100", "MS2") for c in conflicted.values())
+    assert all(rules.classify(s).condition.mstim_hz == 100.0 for s in conflicted)

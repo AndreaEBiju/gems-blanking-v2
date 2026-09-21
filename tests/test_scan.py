@@ -127,25 +127,45 @@ def test_a_matched_recording_carries_its_rule_and_animal(tmp_path: Path, rules: 
     assert result.corpus_eligible
 
 
-def test_an_old_cohort_row_matches_but_blocks_on_its_undefined_tokens(
+def test_an_old_cohort_row_resolves_onto_the_same_axes(
     tmp_path: Path, rules: Rules
 ) -> None:
-    """``E1000`` looks like a frequency and the ES/MS table does not define it.
-
-    The epoch resolves, so the row is ``matched``, but it still needs a human: a
-    dropped stimulation token would merge two conditions in the mixed models.
-    """
+    """``E1000`` is 1000 Hz electrical, so the row parses and is eligible."""
     root = tmp_path / "data"
     write_recording(root / "E1000_FRE_E1000_stim_rec_1406.mat")
 
     (result,) = scan(root, rules)
     assert result.status == "matched"
     assert result.condition.epoch == "stim_recovery"
+    assert result.condition.estim_hz == 1000.0
     assert result.matched_rule == "stim_rec_old"
     assert result.animal == "F"
-    assert result.unparsed_stim_tokens == ("E1000",)
-    assert result.needs_a_human
-    assert not result.corpus_eligible
+    assert result.unparsed_stim_tokens == ()
+    assert result.corpus_eligible
+
+
+def test_a_token_conflict_is_carried_and_written_to_meta_json(
+    tmp_path: Path, rules: Rules, store: GemsStore
+) -> None:
+    """Recorded rather than dropped, in the scan row and in ``meta.json``."""
+    root = tmp_path / "data"
+    path = write_recording(root / "M100_JEL_MS2_bl_1945.mat")
+
+    (result,) = scan(root, rules)
+    assert result.token_conflict == ("M100", "MS2")
+    assert result.condition.mstim_hz == 100.0
+    assert result.corpus_eligible
+
+    (written,) = apply_corrections(
+        [result],
+        [Correction(path=path, condition=result.condition)],
+        "andrea",
+        store,
+        rules,
+    )
+    document = json.loads(written.read_text(encoding="utf-8"))
+    assert document["token_conflict"] == ["M100", "MS2"]
+    assert document["condition"]["mstim_hz"] == 100.0
 
 
 def test_an_unrecognised_name_is_unknown_and_blocks(tmp_path: Path, rules: Rules) -> None:
