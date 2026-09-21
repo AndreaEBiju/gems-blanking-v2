@@ -14,6 +14,7 @@ pretending the conflict cannot happen.
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -50,6 +51,32 @@ _CONFLICT_RE: Final = re.compile(r"^events\.jsonl(\.[^/\\]*)?( \(\d+\))?$")
 Drive for desktop resolves a clashing write by appending ``" (1)"`` to the name. A
 conflict copy holds real lines that a reader must not drop, so it is a shard too.
 """
+
+
+def _optional_str(raw: dict[str, Any], key: str) -> str:
+    """Read an optional string field, treating absent and ``null`` alike.
+
+    ``str(raw.get(key, ""))`` looks equivalent and is not: when the key is present
+    and ``null`` it yields the four-character string ``"None"``, inventing a value
+    and making the same fact fail to dedupe across two spellings of "unset".
+    """
+    value = raw.get(key)
+    return "" if value is None else str(value)
+
+
+def _required_str(raw: dict[str, Any], key: str, line: str) -> str:
+    """Read a required string field, or raise naming it.
+
+    A required field that is absent or ``null`` makes the line malformed. It is
+    never defaulted: a registry line with no ``model_id`` is not an event about the
+    empty model, it is a corrupt line, and inventing a value would put a fact in the
+    log that nobody wrote.
+    """
+    value = raw.get(key)
+    if value is None:
+        msg = f"registry line is missing required field {key!r}: {line[:120]!r}"
+        raise ValueError(msg)
+    return str(value)
 
 
 class RegistryAction(StrEnum):
@@ -101,12 +128,38 @@ class RegistryEvent:
     corpus_id: str = ""
     metrics: dict[str, float] = field(default_factory=dict)
 
-    def to_json_line(self) -> str:
-        """Return the canonical one-line JSON form.
+    def __post_init__(self) -> None:
+        """Reject a non-finite metric, which JSON cannot represent.
 
-        Canonical means sorted keys and no incidental whitespace, so two clients
-        logging the same fact produce byte-identical lines and the union dedupes
-        them. Without that, a conflict copy would double every entry it contains.
+        ``json.dumps`` emits bare ``NaN`` / ``Infinity`` - accepted by Python, invalid
+        JSON for every other reader - and ``nan != nan``, so such an event does not
+        even equal its own reparse. The project convention that a missing scalar is
+        ``np.nan`` stops at the edge of a JSON file: a metric that could not be
+        computed is **omitted**, and an absent key reads back as absent.
+        """
+        for key, value in self.metrics.items():
+            if not math.isfinite(value):
+                msg = (
+                    f"metric {key!r} is {value!r}, which JSON cannot represent; "
+                    "omit the key instead of storing a non-finite value"
+                )
+                raise ValueError(msg)
+
+    def to_json_line(self) -> str:
+        r"""Return the canonical one-line JSON form.
+
+        Canonical means sorted keys, no incidental whitespace and ASCII escaping, so
+        two clients logging the same fact produce byte-identical lines and the union
+        dedupes them. Without that, a conflict copy would double every entry it
+        contains.
+
+        ``ensure_ascii`` is left at its default **on purpose**. With it off, a text
+        field containing U+2028, U+2029 or U+0085 lands in the line literally, and
+        although this module's own reader splits on ``\n`` alone, any reader using
+        ``str.splitlines()`` - or another language's line splitter - would see one
+        event as two malformed lines. A JSONL file on a shared drive is read by other
+        people's tools, so the line stays pure ASCII; unicode still round-trips
+        exactly, escaped as ``\uXXXX``.
         """
         payload: dict[str, Any] = {
             "ts": self.ts,
@@ -118,7 +171,7 @@ class RegistryEvent:
             "corpus_id": self.corpus_id,
             "metrics": dict(self.metrics),
         }
-        return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
     @classmethod
     def from_json_line(cls, line: str) -> RegistryEvent:
@@ -136,19 +189,22 @@ class RegistryEvent:
         except json.JSONDecodeError as exc:
             msg = f"malformed registry line: {line[:120]!r}"
             raise ValueError(msg) from exc
+        if not isinstance(raw, dict):
+            msg = f"registry line is not a JSON object: {line[:120]!r}"
+            raise ValueError(msg)
         try:
             action = RegistryAction(raw["action"])
         except (KeyError, ValueError) as exc:
             msg = f"registry line has an unknown action: {line[:120]!r}"
             raise ValueError(msg) from exc
         return cls(
-            ts=str(raw["ts"]),
-            user=str(raw.get("user", "")),
+            ts=_required_str(raw, "ts", line),
+            user=_optional_str(raw, "user"),
             action=action,
-            model_id=str(raw["model_id"]),
-            mode=str(raw.get("mode", "")),
-            animal=str(raw.get("animal", "")),
-            corpus_id=str(raw.get("corpus_id", "")),
+            model_id=_required_str(raw, "model_id", line),
+            mode=_optional_str(raw, "mode"),
+            animal=_optional_str(raw, "animal"),
+            corpus_id=_optional_str(raw, "corpus_id"),
             metrics=dict(raw.get("metrics") or {}),
         )
 
