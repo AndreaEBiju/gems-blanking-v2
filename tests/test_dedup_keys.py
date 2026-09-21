@@ -390,15 +390,30 @@ def test_a_timestamp_is_always_a_usable_path_component(when: datetime) -> None:
 
 @settings(max_examples=300, deadline=None)
 @given(
-    when=st.datetimes(
+    a=st.datetimes(
         min_value=datetime(2020, 1, 1),
         max_value=datetime(2099, 12, 31),
         timezones=st.just(UTC),
-    )
+    ),
+    b=st.datetimes(
+        min_value=datetime(2020, 1, 1),
+        max_value=datetime(2099, 12, 31),
+        timezones=st.just(UTC),
+    ),
 )
-def test_timestamps_sort_in_chronological_order_as_strings(when: datetime) -> None:
-    """Replay orders by the stamp as a string, so lexical order must equal time order."""
-    later = when.replace(year=when.year + 1 if when.year < 2099 else when.year)
-    if later == when:
-        return
-    assert (utc_stamp(when) < utc_stamp(later)) == (when < later)
+def test_timestamps_sort_in_chronological_order_as_strings(a: datetime, b: datetime) -> None:
+    """Replay orders by the stamp as a string, so lexical order must equal time order.
+
+    Over arbitrary pairs rather than a fixed offset. An earlier version built the
+    second datetime with ``replace(year=year + 1)``, which hypothesis broke with
+    2020-02-29: that day does not exist in 2021, so the *test* raised. The bug was
+    in the test, which is the argument for property-testing the test's own helper
+    arithmetic too.
+    """
+    stamp_a, stamp_b = utc_stamp(a), utc_stamp(b)
+    if stamp_a == stamp_b:
+        # The stamp has one-second resolution, so equal stamps must mean the same
+        # second - not merely that ordering happened to collapse.
+        assert abs((a - b).total_seconds()) < 1.0
+    else:
+        assert (stamp_a < stamp_b) == (a < b)

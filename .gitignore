@@ -16,3 +16,4 @@ htmlcov/
 !ui-mockup.html
 .DS_Store
 Thumbs.db
+.hypothesis/
