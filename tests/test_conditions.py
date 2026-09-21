@@ -14,6 +14,11 @@ from pathlib import Path
 import pytest
 from gems_blanking_v2.io.conditions import (
     DEFAULT_CONDITIONS_YAML,
+    ELECTRICAL_AMPLITUDE_UA,
+    ELECTRICAL_PULSE_WIDTH_MS,
+    ELECTRICAL_WAVEFORM,
+    MECHANICAL_DUTY_FRACTION,
+    Condition,
     ConditionRule,
     Rules,
     default_rules,
@@ -73,6 +78,9 @@ def rules() -> Rules:
     return Rules(
         vocabulary=base.vocabulary,
         rules=base.rules,
+        estim_hz=base.estim_hz,
+        mstim_hz=base.mstim_hz,
+        timepoint_pattern=base.timepoint_pattern,
         strip_suffixes=base.strip_suffixes,
         source=base.source,
         animal_from=second_token_initial,
@@ -100,22 +108,45 @@ def test_an_unmatched_filename_is_unknown_not_baseline(rules: Rules) -> None:
     ):
         result = rules.classify(stem)
         assert result.status == "unknown", stem
-        assert result.condition == "unknown", stem
-        assert result.condition != "baseline", stem
+        assert result.condition.epoch == "unknown", stem
+        assert result.condition.epoch != "baseline", stem
         assert result.needs_a_human
 
 
-def test_priority_puts_stim_rec_before_stim(rules: Rules) -> None:
-    """``X_stim_rec_01`` is stim_recovery, not stim.
+def test_both_cohorts_recovery_conventions_resolve(rules: Rules) -> None:
+    """``_stim_rec`` is the old cohort's; ``_sr_`` is the new cohort's.
 
-    The current code gets this right only by the accident of testing ``_stim_rec``
-    first with an ``in``; here it is explicit priority, so file order cannot break it.
+    A rule set with only ``_stim_rec`` - which is what the spec shipped - makes
+    every new-cohort recovery file ``unknown``.
     """
-    result = rules.classify("X_stim_rec_01")
-    assert result.condition == "stim_recovery"
-    assert result.matched_rule == "stim_rec"
+    old = rules.classify("E1000_FRE_E1000_stim_rec_1406")
+    assert old.condition.epoch == "stim_recovery"
+    assert old.matched_rule == "stim_rec_old"
 
-    assert rules.classify("X_stim_01").condition == "stim"
+    new = rules.classify("gems_d_t01_es1_sr_204720")
+    assert new.condition.epoch == "stim_recovery"
+    assert new.matched_rule == "stim_rec_new"
+
+
+def test_the_longer_recovery_convention_wins_on_priority(rules: Rules) -> None:
+    """``_stim_rec`` is tried before ``_sr`` so the short form cannot shadow it.
+
+    A name carrying both resolves through the old rule, by explicit priority rather
+    than by file order or by the accident of an ``in`` test.
+    """
+    both = rules.classify("x_stim_rec_sr_01")
+    assert both.condition.epoch == "stim_recovery"
+    assert both.matched_rule == "stim_rec_old"
+
+
+def test_a_bare_stim_token_is_not_an_epoch(rules: Rules) -> None:
+    """``stim`` was a level in the single-label vocabulary and is not an epoch now.
+
+    The four-field table has ``baseline`` and ``stim_recovery`` only; a file whose
+    name says ``_stim_`` and nothing else does not say which epoch it is.
+    """
+    assert rules.classify("X_stim_01").condition.epoch == "unknown"
+    assert "stim" not in rules.vocabulary
 
 
 def test_equal_priority_disagreement_is_ambiguous() -> None:
@@ -123,13 +154,13 @@ def test_equal_priority_disagreement_is_ambiguous() -> None:
     rules = Rules(
         vocabulary=("baseline", "stim", "unknown"),
         rules=(
-            ConditionRule(id="a", pattern="_x", condition="baseline", priority=10),
-            ConditionRule(id="b", pattern="_x", condition="stim", priority=10),
+            ConditionRule(id="a", pattern="_x", epoch="baseline", priority=10),
+            ConditionRule(id="b", pattern="_x", epoch="stim", priority=10),
         ),
     )
     result = rules.classify("rec_x_01")
     assert result.status == "ambiguous"
-    assert result.condition == "unknown"
+    assert result.condition.epoch == "unknown"
     assert result.candidates == ("baseline", "stim")
     assert result.needs_a_human
 
@@ -139,13 +170,13 @@ def test_equal_priority_agreement_is_not_ambiguous() -> None:
     rules = Rules(
         vocabulary=("baseline", "unknown"),
         rules=(
-            ConditionRule(id="a", pattern="_x", condition="baseline", priority=10),
-            ConditionRule(id="b", pattern="_x_", condition="baseline", priority=10),
+            ConditionRule(id="a", pattern="_x", epoch="baseline", priority=10),
+            ConditionRule(id="b", pattern="_x_", epoch="baseline", priority=10),
         ),
     )
     result = rules.classify("rec_x_01")
     assert result.status == "matched"
-    assert result.condition == "baseline"
+    assert result.condition.epoch == "baseline"
 
 
 # ---------------------------------------------------------------------------
@@ -153,19 +184,19 @@ def test_equal_priority_agreement_is_not_ambiguous() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_a_condition_outside_the_vocabulary_is_rejected_at_write_time(rules: Rules) -> None:
+def test_an_epoch_outside_the_vocabulary_is_rejected_at_write_time(rules: Rules) -> None:
     """'stim', 'Stim' and 'stimulation' as three levels would wreck the models."""
-    assert rules.validate_condition("stim") == "stim"
-    for bad in ("stimulation", "Stim", "STIM", "baseline2", ""):
+    assert rules.validate_epoch("baseline") == "baseline"
+    for bad in ("stimulation", "Stim", "STIM", "baseline2", "", "sham", "drug"):
         with pytest.raises(ValueError, match="closed vocabulary"):
-            rules.validate_condition(bad)
+            rules.validate_epoch(bad)
 
 
 def test_a_rule_proposing_an_unknown_condition_fails_to_load() -> None:
     with pytest.raises(ValueError, match="closed vocabulary"):
         Rules(
             vocabulary=("baseline", "unknown"),
-            rules=(ConditionRule(id="a", pattern="_x", condition="stimulation", priority=1),),
+            rules=(ConditionRule(id="a", pattern="_x", epoch="stimulation", priority=1),),
         )
 
 
@@ -181,8 +212,8 @@ def test_duplicate_rule_ids_are_rejected() -> None:
         Rules(
             vocabulary=("baseline", "unknown"),
             rules=(
-                ConditionRule(id="same", pattern="_a", condition="baseline", priority=1),
-                ConditionRule(id="same", pattern="_b", condition="baseline", priority=2),
+                ConditionRule(id="same", pattern="_a", epoch="baseline", priority=1),
+                ConditionRule(id="same", pattern="_b", epoch="baseline", priority=2),
             ),
         )
 
@@ -192,7 +223,7 @@ def test_an_invalid_pattern_is_rejected_with_the_rule_id() -> None:
         Rules(
             vocabulary=("baseline", "unknown"),
             rules=(
-                ConditionRule(id="bad", pattern="_(unclosed", condition="baseline", priority=1),
+                ConditionRule(id="bad", pattern="_(unclosed", epoch="baseline", priority=1),
             ),
         )
 
@@ -208,14 +239,14 @@ def test_an_invalid_pattern_is_rejected_with_the_rule_id() -> None:
 )
 def test_matching_is_case_insensitive(rules: Rules, stem: str) -> None:
     """Cross-platform rule 7, and the real data needs it: ``lol`` beside ``LOL``."""
-    assert rules.classify(stem).condition == "stim_recovery"
+    assert rules.classify(stem).condition.epoch == "stim_recovery"
 
 
 @pytest.mark.parametrize(
     "suffix", ["_notched", "_notchblanked", "_blankmotion", "_NOTCHED"]
 )
 def test_processing_suffixes_are_stripped_before_matching(rules: Rules, suffix: str) -> None:
-    assert rules.classify(f"E1000_JEL_E1000_bl_1315{suffix}").condition == "baseline"
+    assert rules.classify(f"E1000_JEL_E1000_bl_1315{suffix}").condition.epoch == "baseline"
     assert rules.core_of(f"E1000_JEL_E1000_bl_1315{suffix}") == "E1000_JEL_E1000_bl_1315"
 
 
@@ -240,7 +271,7 @@ def test_every_real_recording_id_classifies(rules: Rules) -> None:
     unresolved = {s: c.status for s, c in statuses.items() if c.status != "matched"}
     assert unresolved == {}
 
-    conditions = {s: c.condition for s, c in statuses.items()}
+    conditions = {s: c.condition.epoch for s, c in statuses.items()}
     assert sum(1 for v in conditions.values() if v == "baseline") == 4
     assert sum(1 for v in conditions.values() if v == "stim_recovery") == 10
 
@@ -257,14 +288,14 @@ def test_the_specs_baseline_rule_alone_misses_this_labs_convention() -> None:
             ConditionRule(
                 id="stim_rec",
                 pattern=r"_stim_rec(\b|_)",
-                condition="stim_recovery",
+                epoch="stim_recovery",
                 priority=10,
             ),
-            ConditionRule(id="stim", pattern=r"_stim(\b|_)", condition="stim", priority=20),
+            ConditionRule(id="stim", pattern=r"_stim(\b|_)", epoch="stim", priority=20),
             ConditionRule(
                 id="base",
                 pattern=r"_base(line)?(\b|_)",
-                condition="baseline",
+                epoch="baseline",
                 priority=30,
             ),
         ),
@@ -338,7 +369,7 @@ def test_the_shipped_yaml_text_parses(tmp_path: Path) -> None:
     path.write_text(DEFAULT_CONDITIONS_YAML, encoding="utf-8", newline="\n")
     rules = load_rules(path)
     assert "unknown" in rules.vocabulary
-    assert rules.classify("E1000_JEL_E1000_bl_1315").condition == "baseline"
+    assert rules.classify("E1000_JEL_E1000_bl_1315").condition.epoch == "baseline"
 
 
 def test_the_written_file_is_utf8_with_lf(tmp_path: Path) -> None:
@@ -359,11 +390,11 @@ def test_a_malformed_rule_file_names_the_problem(tmp_path: Path) -> None:
     path = tmp_path / "conditions.yaml"
 
     path.write_text("vocabulary: []\n", encoding="utf-8", newline="\n")
-    with pytest.raises(ValueError, match="non-empty `vocabulary`"):
+    with pytest.raises(ValueError, match="non-empty `epochs`"):
         load_rules(path)
 
     path.write_text("vocabulary: [unknown]\nrules: 3\n", encoding="utf-8", newline="\n")
-    with pytest.raises(ValueError, match="`rules` must be a list"):
+    with pytest.raises(ValueError, match="`epoch_rules` must be a list"):
         load_rules(path)
 
     path.write_text(
@@ -371,7 +402,7 @@ def test_a_malformed_rule_file_names_the_problem(tmp_path: Path) -> None:
         encoding="utf-8",
         newline="\n",
     )
-    with pytest.raises(ValueError, match="missing"):
+    with pytest.raises(ValueError, match="needs both"):
         load_rules(path)
 
     path.write_text("vocabulary: [unknown]\nrules: [[]]\n", encoding="utf-8", newline="\n")
@@ -386,10 +417,10 @@ def test_a_malformed_rule_file_names_the_problem(tmp_path: Path) -> None:
 
 def test_a_proposed_rule_reports_its_blast_radius_before_saving(rules: Rules) -> None:
     """The loop shows how many other scanned rows a new rule would also match."""
-    also = rules.would_match(REAL_IDS, r"_mecfreq", "drug")
+    also = rules.would_match(REAL_IDS, r"_mecfreq", "baseline")
     assert also == []
 
-    also = rules.would_match(REAL_IDS, r"^mecfreq", "drug")
+    also = rules.would_match(REAL_IDS, r"^mecfreq", "baseline")
     assert len(also) == 3
     assert all(s.startswith("mecfreq") for s in also)
 
@@ -397,3 +428,157 @@ def test_a_proposed_rule_reports_its_blast_radius_before_saving(rules: Rules) ->
 def test_a_proposed_rule_with_an_invalid_condition_is_refused(rules: Rules) -> None:
     with pytest.raises(ValueError, match="closed vocabulary"):
         rules.would_match(REAL_IDS, r"_x", "stimulation")
+
+
+# ---------------------------------------------------------------------------
+# the four-field record
+# ---------------------------------------------------------------------------
+
+NEW_COHORT_IDS: dict[str, Condition] = {
+    "gems_d_t01_ms1_bl_164012": Condition("baseline", None, 10.0, "t01"),
+    "gems_d_t01_es1_sr_204720": Condition("stim_recovery", 10.0, None, "t01"),
+    "gems_d_t02_es3_sr_101500": Condition("stim_recovery", 1000.0, None, "t02"),
+    "gems_d_t03_ms3_bl_090000": Condition("baseline", None, 100.0, "t03"),
+    "gems_j_t12_ms2_es2_sr_123456": Condition("stim_recovery", 100.0, 50.0, "t12"),
+}
+"""New-cohort names and the record each must produce.
+
+ES1/2/3 = 10/100/1000 Hz, MS1/2/3 = 10/50/100 Hz.
+"""
+
+
+@pytest.mark.parametrize(("stem", "expected"), list(NEW_COHORT_IDS.items()))
+def test_a_new_cohort_name_yields_the_whole_record(
+    rules: Rules, stem: str, expected: Condition
+) -> None:
+    """Epoch, both frequencies and the timepoint, from one filename."""
+    result = rules.classify(stem)
+    assert result.status == "matched"
+    assert result.condition == expected
+    assert not result.needs_a_human
+
+
+def test_both_stimulation_axes_can_be_present_at_once(rules: Rules) -> None:
+    """``msX_esY`` means both at once, which a single label cannot express."""
+    condition = rules.classify("gems_j_t12_ms2_es2_sr_123456").condition
+    assert condition.estim_hz == 100.0
+    assert condition.mstim_hz == 50.0
+    assert condition.has_stim
+
+
+def test_the_frequency_axes_are_ordered_numbers(rules: Rules) -> None:
+    """Check the axes are ordered numbers rather than unrelated categories.
+
+    Amplitude, pulse width, waveform and duty cycle are held fixed across levels,
+    which is what makes ES1->ES2->ES3 one axis.
+    """
+    estim = [rules.classify(f"gems_d_t01_es{n}_sr_0000").condition.estim_hz for n in (1, 2, 3)]
+    assert estim == [10.0, 100.0, 1000.0]
+    assert estim == sorted(v for v in estim if v is not None)
+
+    mstim = [rules.classify(f"gems_d_t01_ms{n}_bl_0000").condition.mstim_hz for n in (1, 2, 3)]
+    assert mstim == [10.0, 50.0, 100.0]
+    assert mstim == sorted(v for v in mstim if v is not None)
+
+
+def test_a_baseline_has_no_stimulation_frequency(rules: Rules) -> None:
+    """Absent is a fact about the recording, not a gap in the data."""
+    condition = rules.classify("E1000_JEL_E1000_bl_1315").condition
+    assert condition.epoch == "baseline"
+    assert condition.estim_hz is None
+    assert condition.mstim_hz is None
+
+
+def test_the_fixed_protocol_parameters_are_recorded() -> None:
+    """They are what make the two frequencies axes rather than labels."""
+    assert ELECTRICAL_AMPLITUDE_UA == 1000.0
+    assert ELECTRICAL_PULSE_WIDTH_MS == 0.3
+    assert ELECTRICAL_WAVEFORM == "square_bipolar"
+    assert MECHANICAL_DUTY_FRACTION == 0.5
+
+
+def test_a_timepoint_is_normalised_to_two_digits(rules: Rules) -> None:
+    assert rules.classify("gems_d_t1_ms1_bl_0000").condition.timepoint == "t01"
+    assert rules.classify("gems_d_t01_ms1_bl_0000").condition.timepoint == "t01"
+    assert rules.classify("gems_d_t12_ms1_bl_0000").condition.timepoint == "t12"
+    assert rules.classify("E1000_JEL_E1000_bl_1315").condition.timepoint is None
+
+
+def test_the_record_round_trips_through_json(rules: Rules) -> None:
+    """Absent, not null: the JSON half of the missing-scalar convention."""
+    for stem in NEW_COHORT_IDS:
+        condition = rules.classify(stem).condition
+        raw = condition.to_json()
+        assert "null" not in str(raw)
+        assert Condition.from_json(raw) == condition
+
+    sparse = Condition(epoch="baseline")
+    assert sparse.to_json() == {"epoch": "baseline"}
+    assert Condition.from_json({"epoch": "baseline"}) == sparse
+    assert Condition.from_json({"epoch": "baseline", "estim_hz": None}) == sparse
+
+
+def test_a_frequency_off_the_defined_levels_is_rejected(rules: Rules) -> None:
+    """Reject a frequency that is not one of the defined levels.
+
+    The axes are fixed by the protocol, so a value off them is either a mistake or
+    a new level to add deliberately.
+    """
+    rules.validate_condition(Condition("stim_recovery", 100.0, 50.0, "t01"))
+    with pytest.raises(ValueError, match="not one of the defined levels"):
+        rules.validate_condition(Condition("stim_recovery", 42.0, None, "t01"))
+    with pytest.raises(ValueError, match="not one of the defined levels"):
+        rules.validate_condition(Condition("baseline", None, 75.0, None))
+
+
+# ---------------------------------------------------------------------------
+# the old cohort's undefined frequency tokens
+# ---------------------------------------------------------------------------
+
+
+def test_an_undefined_stim_token_is_reported_not_interpreted(rules: Rules) -> None:
+    """``E1000``/``M100`` look like frequencies but the ES/MS table does not define them.
+
+    Interpreting one would be a guess; dropping one would silently merge two
+    stimulation conditions. So the row is blocked and the tokens are named.
+    """
+    result = rules.classify("E1000_FRE_E1000_stim_rec_1406")
+    assert result.status == "matched"
+    assert result.condition.epoch == "stim_recovery"
+    assert result.condition.estim_hz is None
+    assert result.unparsed_stim_tokens == ("E1000",)
+    assert result.needs_a_human
+
+
+def test_a_recognised_and_an_unrecognised_token_together_are_flagged(rules: Rules) -> None:
+    """Carry both a recognised and an unrecognised token, and flag the row.
+
+    ``M100_JEL_MS2_bl_1945`` has both, and they disagree if ``M100`` is 100 Hz: MS2
+    is 50 Hz by the table. Recording 50 and ignoring M100 would be a silent choice
+    between two readings of the same filename.
+    """
+    result = rules.classify("M100_JEL_MS2_bl_1945")
+    assert result.condition.mstim_hz == 50.0
+    assert result.unparsed_stim_tokens == ("M100",)
+    assert result.needs_a_human
+
+
+def test_both_undefined_tokens_are_reported(rules: Rules) -> None:
+    result = rules.classify("M100E10_LOL_CME2_stim_rec_2253")
+    assert set(result.unparsed_stim_tokens) == {"M100", "E10"}
+
+
+def test_a_clean_new_cohort_name_has_no_unparsed_tokens(rules: Rules) -> None:
+    for stem in NEW_COHORT_IDS:
+        assert rules.classify(stem).unparsed_stim_tokens == ()
+
+
+def test_how_many_real_old_cohort_ids_carry_undefined_tokens(rules: Rules) -> None:
+    """Measured 2026-09-21: 7 of the 14 recovered ids, which is the finding.
+
+    The four-field record is fully defined for the new cohort and under-defined for
+    the old one, so those rows need either a rule addition or a human.
+    """
+    flagged = [s for s in REAL_IDS if rules.classify(s).unparsed_stim_tokens]
+    assert len(flagged) == 7
+    assert all(rules.classify(s).status == "matched" for s in flagged)

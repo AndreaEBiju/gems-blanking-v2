@@ -11,7 +11,12 @@ from pathlib import Path
 
 import pytest
 from gems_blanking_v2.io.channel_map import meta_path, save_geometry
-from gems_blanking_v2.io.conditions import ConditionRule, Rules, default_rules
+from gems_blanking_v2.io.conditions import (
+    Condition,
+    ConditionRule,
+    Rules,
+    default_rules,
+)
 from gems_blanking_v2.io.scan import (
     Correction,
     ScanResult,
@@ -33,6 +38,9 @@ def rules() -> Rules:
     return Rules(
         vocabulary=base.vocabulary,
         rules=base.rules,
+        estim_hz=base.estim_hz,
+        mstim_hz=base.mstim_hz,
+        timepoint_pattern=base.timepoint_pattern,
         strip_suffixes=base.strip_suffixes,
         source=base.source,
         animal_from=second_token_initial,
@@ -108,15 +116,36 @@ def test_the_scan_writes_nothing_into_the_store(
 
 def test_a_matched_recording_carries_its_rule_and_animal(tmp_path: Path, rules: Rules) -> None:
     root = tmp_path / "data"
+    write_recording(root / "gems_d_t01_es1_sr_204720.mat")
+
+    (result,) = scan(root, rules)
+    assert result.status == "matched"
+    assert result.condition == Condition("stim_recovery", 10.0, None, "t01")
+    assert result.matched_rule == "stim_rec_new"
+    assert result.animal == "D"
+    assert result.session == "gems_d_t01_es1_sr_204720"
+    assert result.corpus_eligible
+
+
+def test_an_old_cohort_row_matches_but_blocks_on_its_undefined_tokens(
+    tmp_path: Path, rules: Rules
+) -> None:
+    """``E1000`` looks like a frequency and the ES/MS table does not define it.
+
+    The epoch resolves, so the row is ``matched``, but it still needs a human: a
+    dropped stimulation token would merge two conditions in the mixed models.
+    """
+    root = tmp_path / "data"
     write_recording(root / "E1000_FRE_E1000_stim_rec_1406.mat")
 
     (result,) = scan(root, rules)
     assert result.status == "matched"
-    assert result.condition == "stim_recovery"
-    assert result.matched_rule == "stim_rec"
+    assert result.condition.epoch == "stim_recovery"
+    assert result.matched_rule == "stim_rec_old"
     assert result.animal == "F"
-    assert result.session == "E1000_FRE_E1000_stim_rec_1406"
-    assert result.corpus_eligible
+    assert result.unparsed_stim_tokens == ("E1000",)
+    assert result.needs_a_human
+    assert not result.corpus_eligible
 
 
 def test_an_unrecognised_name_is_unknown_and_blocks(tmp_path: Path, rules: Rules) -> None:
@@ -126,8 +155,8 @@ def test_an_unrecognised_name_is_unknown_and_blocks(tmp_path: Path, rules: Rules
 
     (result,) = scan(root, rules)
     assert result.status == "unknown"
-    assert result.condition == "unknown"
-    assert result.condition != "baseline"
+    assert result.condition.epoch == "unknown"
+    assert result.condition.epoch != "baseline"
     assert not result.corpus_eligible
     assert result.needs_a_human
 
@@ -136,8 +165,8 @@ def test_an_ambiguous_name_reports_its_candidates(tmp_path: Path) -> None:
     rules = Rules(
         vocabulary=("baseline", "stim", "unknown"),
         rules=(
-            ConditionRule(id="a", pattern="_x", condition="baseline", priority=10),
-            ConditionRule(id="b", pattern="_x", condition="stim", priority=10),
+            ConditionRule(id="a", pattern="_x", epoch="baseline", priority=10),
+            ConditionRule(id="b", pattern="_x", epoch="stim", priority=10),
         ),
         animal_from=second_token_initial,
     )
@@ -271,8 +300,8 @@ def test_an_unknown_recording_cannot_enter_a_corpus(tmp_path: Path, rules: Rules
 
 def test_a_fully_resolved_scan_passes_the_corpus_check(tmp_path: Path, rules: Rules) -> None:
     root = tmp_path / "data"
-    write_recording(root / "E1000_JEL_E1000_bl_1315.mat", b"aaa")
-    write_recording(root / "M100_LOL_MS2_stim_rec_2031.mat", b"bbbb")
+    write_recording(root / "gems_d_t01_ms1_bl_164012.mat", b"aaa")
+    write_recording(root / "gems_d_t01_es1_sr_204720.mat", b"bbbb")
 
     assert_corpus_eligible(scan(root, rules))
 
@@ -290,15 +319,19 @@ def test_a_correction_records_who_and_when(
     results = scan(root, rules)
 
     (written,) = apply_corrections(
-        results, [Correction(path=path, condition="drug")], "andrea", store, rules
+        results,
+        [Correction(path=path, condition=Condition("baseline", None, None, "t01"))],
+        "andrea",
+        store,
+        rules,
     )
     document = json.loads(written.read_text(encoding="utf-8"))
 
-    assert document["condition"] == "drug"
+    assert document["condition"] == {"epoch": "baseline", "timepoint": "t01"}
     assert document["condition_source"] == "human"
     assert document["corrections"][0]["who"] == "andrea"
     assert document["corrections"][0]["when"].endswith("Z")
-    assert document["corrections"][0]["condition"] == "drug"
+    assert document["corrections"][0]["condition"]["epoch"] == "baseline"
 
 
 def test_a_human_condition_survives_a_rescan(
@@ -309,12 +342,13 @@ def test_a_human_condition_survives_a_rescan(
     path = write_recording(root / "E1000_JEL_E1000_bl_1315.mat")
 
     first = scan(root, rules, store=store)
-    assert first[0].condition == "baseline"
+    assert first[0].condition.epoch == "baseline"
 
-    apply_corrections(first, [Correction(path=path, condition="sham")], "andrea", store, rules)
+    human = Condition("stim_recovery", 100.0, None, "t01")
+    apply_corrections(first, [Correction(path=path, condition=human)], "andrea", store, rules)
 
     (rescanned,) = scan(root, rules, store=store)
-    assert rescanned.condition == "sham"
+    assert rescanned.condition == human
     assert rescanned.condition_source == "human"
     assert rescanned.status == "matched"
     assert rescanned.corpus_eligible
@@ -329,13 +363,13 @@ def test_a_rule_derived_condition_is_re_derived_on_rescan(
     path = meta_path(store, "J", "E1000_JEL_E1000_bl_1315")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps({"condition": "stim", "condition_source": "rule"}),
+        json.dumps({"condition": {"epoch": "stim_recovery"}, "condition_source": "rule"}),
         encoding="utf-8",
         newline="\n",
     )
 
     (result,) = scan(root, rules, store=store)
-    assert result.condition == "baseline"
+    assert result.condition.epoch == "baseline"
     assert result.condition_source == "rule"
 
 
@@ -348,7 +382,11 @@ def test_a_correction_outside_the_vocabulary_is_refused_at_write_time(
 
     with pytest.raises(ValueError, match="closed vocabulary"):
         apply_corrections(
-            results, [Correction(path=path, condition="stimulation")], "andrea", store, rules
+            results,
+            [Correction(path=path, condition=Condition("stimulation"))],
+            "andrea",
+            store,
+            rules,
         )
     assert not meta_path(store, "J", "Z_JEL_mystery_2026").exists()
 
@@ -363,7 +401,11 @@ def test_a_correction_contradicting_a_matched_rule_flags_that_rule(
     assert results[0].matched_rule == "baseline_bl"
 
     (written,) = apply_corrections(
-        results, [Correction(path=path, condition="sham")], "andrea", store, rules
+        results,
+        [Correction(path=path, condition=Condition("stim_recovery"))],
+        "andrea",
+        store,
+        rules,
     )
     entry = json.loads(written.read_text(encoding="utf-8"))["corrections"][0]
     assert entry["contradicted_rule"] == "baseline_bl"
@@ -377,7 +419,11 @@ def test_a_correction_agreeing_with_the_rule_flags_nothing(
     results = scan(root, rules)
 
     (written,) = apply_corrections(
-        results, [Correction(path=path, condition="baseline")], "andrea", store, rules
+        results,
+        [Correction(path=path, condition=results[0].condition)],
+        "andrea",
+        store,
+        rules,
     )
     entry = json.loads(written.read_text(encoding="utf-8"))["corrections"][0]
     assert "contradicted_rule" not in entry
@@ -395,13 +441,17 @@ def test_a_correction_preserves_the_geometry_block(
     results = scan(root, rules)
 
     (written,) = apply_corrections(
-        results, [Correction(path=path, condition="sham")], "andrea", store, rules
+        results,
+        [Correction(path=path, condition=Condition("stim_recovery"))],
+        "andrea",
+        store,
+        rules,
     )
     document = json.loads(written.read_text(encoding="utf-8"))
 
     assert len(document["channels"]) == 9
     assert document["units"] == "uV"
-    assert document["condition"] == "sham"
+    assert document["condition"] == {"epoch": "stim_recovery"}
 
 
 def test_corrections_accumulate_rather_than_replace(
@@ -412,10 +462,22 @@ def test_corrections_accumulate_rather_than_replace(
     path = write_recording(root / "Z_JEL_mystery_2026.mat")
     results = scan(root, rules)
 
-    apply_corrections(results, [Correction(path=path, condition="drug")], "andrea", store, rules)
+    apply_corrections(
+        results,
+        [Correction(path=path, condition=Condition("baseline"))],
+        "andrea",
+        store,
+        rules,
+    )
     (written,) = apply_corrections(
         results,
-        [Correction(path=path, condition="sham", note="misread the log")],
+        [
+            Correction(
+                path=path,
+                condition=Condition("stim_recovery"),
+                note="misread the log",
+            )
+        ],
         "sam",
         store,
         rules,
@@ -425,7 +487,7 @@ def test_corrections_accumulate_rather_than_replace(
     assert len(document["corrections"]) == 2
     assert [c["who"] for c in document["corrections"]] == ["andrea", "sam"]
     assert document["corrections"][1]["note"] == "misread the log"
-    assert document["condition"] == "sham"
+    assert document["condition"] == {"epoch": "stim_recovery"}
 
 
 def test_a_correction_can_set_the_animal_when_the_name_carries_none(
@@ -437,7 +499,11 @@ def test_a_correction_can_set_the_animal_when_the_name_carries_none(
     assert results[0].animal is None
 
     (written,) = apply_corrections(
-        results, [Correction(path=path, animal="J", condition="baseline")], "andrea", store, rules
+        results,
+        [Correction(path=path, animal="J", condition=Condition("baseline"))],
+        "andrea",
+        store,
+        rules,
     )
     assert store.relpath(written) == "data/J/nounderscore/meta.json"
     assert json.loads(written.read_text(encoding="utf-8"))["animal"] == "J"
@@ -453,7 +519,11 @@ def test_a_correction_without_an_animal_anywhere_is_refused(
 
     with pytest.raises(ValueError, match="no animal for this recording"):
         apply_corrections(
-            results, [Correction(path=path, condition="baseline")], "andrea", store, rules
+            results,
+            [Correction(path=path, condition=Condition("baseline"))],
+            "andrea",
+            store,
+            rules,
         )
 
 
@@ -462,7 +532,11 @@ def test_a_correction_for_a_path_not_in_the_scan_is_refused(
 ) -> None:
     with pytest.raises(ValueError, match="not in this scan"):
         apply_corrections(
-            [], [Correction(path=tmp_path / "ghost.mat", condition="baseline")], "u", store, rules
+            [],
+            [Correction(path=tmp_path / "ghost.mat", condition=Condition("baseline"))],
+            "u",
+            store,
+            rules,
         )
 
 
@@ -479,7 +553,11 @@ def test_a_correction_will_not_overwrite_an_unreadable_meta_json(
     results = scan(root, rules)
     with pytest.raises(ValueError, match="refusing to overwrite"):
         apply_corrections(
-            results, [Correction(path=path, condition="sham")], "andrea", store, rules
+            results,
+            [Correction(path=path, condition=Condition("stim_recovery"))],
+            "andrea",
+            store,
+            rules,
         )
 
 
@@ -492,7 +570,7 @@ def test_the_written_meta_json_is_utf8_with_lf(
 
     (written,) = apply_corrections(
         results,
-        [Correction(path=path, condition="drug", note="σ note")],  # noqa: RUF001
+        [Correction(path=path, condition=Condition("baseline"), note="σ note")],  # noqa: RUF001
         "andrea",
         store,
         rules,

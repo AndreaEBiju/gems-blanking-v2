@@ -24,13 +24,13 @@ import logging
 import os
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
 from gems_blanking_v2.io.channel_map import meta_path
-from gems_blanking_v2.io.conditions import Classification, Rules
+from gems_blanking_v2.io.conditions import Classification, Condition, Rules
 from gems_blanking_v2.io.store import GemsStore, sha256_file
 
 __all__ = [
@@ -76,13 +76,18 @@ class ScanResult:
     session
         Proposed session identifier: the stripped stem.
     condition
-        Proposed condition, or ``"unknown"``. Never defaulted.
+        The proposed four-field record. Its ``epoch`` is ``"unknown"`` when no rule
+        matched; it is never defaulted to a real level.
     status
         See :data:`ScanStatus`.
     matched_rule
         Id of the rule that proposed ``condition``, so a correction can flag it.
     candidates
-        The tied conditions, for ``ambiguous``.
+        The tied epochs, for ``ambiguous``.
+    unparsed_stim_tokens
+        Tokens that look like stimulation parameters but are in neither frequency
+        map - the old cohort's ``E1000``/``M100``. Non-empty blocks the row, because
+        dropping one would merge two conditions and interpreting one would be a guess.
     duplicate_of
         For ``duplicate``, the path already seen with this content.
     condition_source
@@ -94,17 +99,18 @@ class ScanResult:
     content_hash: str | None = None
     animal: str | None = None
     session: str | None = None
-    condition: str = "unknown"
+    condition: Condition = field(default_factory=Condition)
     status: ScanStatus = "unknown"
     matched_rule: str | None = None
     candidates: tuple[str, ...] = ()
+    unparsed_stim_tokens: tuple[str, ...] = ()
     duplicate_of: Path | None = None
     condition_source: Literal["rule", "human"] = "rule"
 
     @property
     def needs_a_human(self) -> bool:
         """Whether this row blocks until someone resolves it."""
-        return self.status in ("unknown", "ambiguous")
+        return self.status in ("unknown", "ambiguous") or bool(self.unparsed_stim_tokens)
 
     @property
     def corpus_eligible(self) -> bool:
@@ -118,11 +124,16 @@ class ScanResult:
 
 @dataclass(frozen=True, slots=True)
 class Correction:
-    """A human's answer for one recording."""
+    """A human's answer for one recording.
+
+    ``condition`` is the whole four-field record: an epoch alone cannot express
+    "10 Hz electrical at t02", and a partial answer written as a label is how the
+    frequency axes would get flattened back into categories.
+    """
 
     path: Path
     animal: str | None = None
-    condition: str | None = None
+    condition: Condition | None = None
     note: str = ""
 
 
@@ -194,7 +205,7 @@ def _hash_lazily(
 
 def read_human_condition(
     store: GemsStore, animal: str, session: str
-) -> tuple[str, str] | None:
+) -> tuple[Condition, str] | None:
     """Return ``(condition, source)`` from ``meta.json``, or None if not recorded.
 
     Only a ``source`` of ``"human"`` binds a later scan; a stored rule-derived
@@ -208,10 +219,10 @@ def read_human_condition(
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         log.warning("%s could not be read, ignoring its condition: %s", path, exc)
         return None
-    condition = document.get("condition")
-    if not condition:
+    raw = document.get("condition")
+    if not isinstance(raw, dict) or not raw:
         return None
-    return str(condition), str(document.get("condition_source") or "rule")
+    return Condition.from_json(raw), str(document.get("condition_source") or "rule")
 
 
 def scan(
@@ -271,6 +282,7 @@ def scan(
             status=classification.status,
             matched_rule=classification.matched_rule,
             candidates=classification.candidates,
+            unparsed_stim_tokens=classification.unparsed_stim_tokens,
         )
 
         if digest is not None and digest in seen_hash:
@@ -294,6 +306,7 @@ def scan(
                     status="matched",
                     matched_rule=None,
                     candidates=(),
+                    unparsed_stim_tokens=(),
                     condition_source="human",
                 )
         results.append(result)
@@ -385,11 +398,11 @@ def apply_corrections(
         document["animal"] = animal
         document["session"] = session
         if correction.condition is not None:
-            document["condition"] = rules.validate_condition(correction.condition)
+            document["condition"] = rules.validate_condition(correction.condition).to_json()
             document["condition_source"] = "human"
         entry: dict[str, Any] = {"who": user, "when": when}
         if correction.condition is not None:
-            entry["condition"] = correction.condition
+            entry["condition"] = correction.condition.to_json()
         if correction.animal is not None:
             entry["animal"] = correction.animal
         if correction.note:
