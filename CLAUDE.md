@@ -1,0 +1,265 @@
+# gems-blanking-v2 — project instructions
+
+Motion-artifact detection and per-consumer blanking for 9-channel rodent vagus ENG
+and stomach EMG recorded at 24.4 kHz on TDT hardware.
+
+Design rationale lives in `PIPELINE.md`. Step-by-step build instructions live in
+`IMPLEMENTATION.md`, and `tasks/NN-*.md` are generated from it by
+`python split_tasks.py`. **Never edit `tasks/` by hand** — edit `IMPLEMENTATION.md`
+and regenerate.
+
+---
+
+## Hard invariants
+
+Violating any of these is a bug even if tests pass. If a task appears to require
+violating one, stop and say so rather than working around it.
+
+1. **Masked samples are `NaN`, never `0`.** No emitted array may contain an
+   exact-zero run longer than 2 samples. Zeros are indistinguishable from signal to
+   `processing_new/step1_bandpass.m`, which tests `isnan` only.
+2. **Masks are never merged across consumers.** One boolean mask per
+   `(consumer, signal, band)`. The single exception is *within* a consumer reading
+   two channels: velocity requires `V1` AND `V3` valid, an intersection.
+3. **Every signal is thresholded against its own σ.** Never apply one signal's σ to
+   another. Measured cost of borrowing: 1136 true / 19,624 false detections.
+4. **No feedback loops.** No step may consume anything produced by a
+   higher-numbered step. The one intended feedback (step 12 → step 07 features) is
+   a *precomputed* input, not a loop: velocity runs on its own pass first.
+5. **Reference values are whole-file scalars, computed on the LOG envelope.**
+   `z = (log E − median(log E)) / (1.4826 · MAD(log E))`, one scalar pair per
+   (signal, band), from that file alone. No running baseline, no transfer between
+   files, no iteration. *Measured 2026-09-19:* the original linear form with a
+   10th-percentile reference is mis-centred — median z = 1.00, p90 = 3.05, so ~10%
+   of frames exceed z = 3 per pair. Envelopes are positive and right-skewed; the
+   log makes the null symmetric (median 0, p90 1.44).
+6. **Detection reads all signals, including raw contacts.** Never detect on the
+   tripole alone — the tripole is *defined* by removal of the common mode, which is
+   the best artifact evidence available.
+7. **Thresholds are fixed and stateless.** No detector may carry adaptive state
+   across an artifact.
+8. **Never fabricate a sample, a fiducial, or a label.** Missing data is tagged
+   missing and excluded. Interpolation for filtering is temporary and must be
+   reverted to `NaN` immediately after.
+9. **`unjudged` is not `negative`.** A span no human looked at is excluded from
+   training, never used as a clean example.
+10. **Features must be channel-count independent and animal-invariant.** Aggregate
+    across channels (max/median/fraction); never concatenate per-channel columns.
+    Absolute microvolts enter only via `z`.
+10b. **Thresholding across many (signal × band) pairs is a multiple-comparisons
+    problem.** Per pair the clean flag rate is 0.2–3.4%; the union of 36 pairs
+    reaches 40–55%. Any flag-rate target is **family-wise**, and cross-channel
+    agreement (`nmin`) is the lever that reduces the family. Never quote a
+    per-pair rate as if it were the candidate rate.
+11. **Everything emitted carries provenance**: the full `ModelSpec` (mode, animal,
+    version, corpus hash, calibrator), thresholds, reference values, code commit.
+12. **Never compare two models evaluated under different protocols.** A per-animal
+    model scored leave-one-recording-out and a pooled model scored
+    leave-one-animal-out are solving different problems; the LORO one wins whether
+    or not it is better. Hold the protocol fixed or do not report the comparison.
+13. **Normalisation does not fix corpus-size imbalance.** Feature normalisation
+    addresses covariate shift (scale); training-set size is a variance problem.
+    Any comparison between corpora of different size needs a learning-curve
+    control at matched event count.
+
+14. **Cross-platform by construction.** The tool is developed on macOS and must
+    run unchanged on Windows. See the Cross-platform rules below — most of them
+    are about what gets *written to the shared drive*, because those files are
+    read by other people's machines.
+
+---
+
+## Cross-platform rules (macOS + Windows; Linux best-effort)
+
+Development may happen on **either** macOS or Windows — the first build session
+ran on Windows — and the shared drive is read from both. Breakage on the platform
+you are not sitting at is invisible, so **CI must run the test suite on
+`windows-latest` and `macos-latest` from task 00 onward**, before there is much to
+test. Python 3.12 is the reference interpreter; `requires-python = ">=3.11,<3.14"`.
+
+**Paths**
+
+1. **`pathlib.Path` everywhere.** Never string-concatenate a path, never hardcode
+   `/` or `\`, never `os.path.join` on a string built elsewhere.
+2. **Never store an absolute path in anything shared.** Corpus specs, the
+   registry, provenance, `meta.json`, label files — all store paths **relative to
+   `gems_root`, in POSIX form** (`as_posix()`), and resolve against the local
+   root at read time. An absolute path saved on a Mac cannot resolve on Windows,
+   which would silently break every corpus and every model's provenance.
+3. **`gems_root` is discovered, never assumed**, by locating the `.gems-root`
+   marker. The roots genuinely differ:
+   `~/Library/CloudStorage/GoogleDrive-<acct>/Shared drives/<name>` on macOS,
+   `G:\Shared drives\<name>` on Windows (drive letter varies), rclone on Linux.
+4. **This lab's shared drive is named `BIONICs Lab: Enteric Interfaces Team`, and
+   `:` is illegal in a Windows path.** Google Drive for desktop substitutes
+   illegal characters, so **the folder name is not the same string on Windows**.
+   This alone makes rule 2 non-negotiable. Verify what Windows actually produces
+   before the first Windows user is onboarded, and never reconstruct the root by
+   pasting the drive name.
+5. **Windows `MAX_PATH` is 260** unless long paths are enabled. The real data
+   already sits at ~193 characters on Windows before this tool adds
+   `models/<32-hex>/shap/<feature>.html`. Keep generated path segments short,
+   test the deepest path the layout can produce, and fail with a clear message
+   rather than an `OSError` if it is exceeded.
+6. **Never create symlinks** (Windows needs elevation) and never rely on hard
+   links.
+
+**Filenames**
+
+7. **Match filenames case-insensitively.** Every rule in `conditions.yaml`
+   compiles with `re.IGNORECASE`. This lab's own data mixes case for the same
+   entity — `gems_d_t01_ms1_bl_164012/` beside
+   `GEMS_D_t01_MS1_bl_cam1_....mp4` — so case-sensitive matching would work on
+   macOS and Windows and fail on Linux, or vice versa.
+8. **Never let two paths differ only by case.** macOS and Windows are
+   case-insensitive; such a pair silently collides. Assert on collision when
+   scanning.
+9. **Sanitise anything used to build a filename**: reject `<>:"/\|?*`, trailing
+   dots and spaces, and the Windows reserved names (`CON`, `PRN`, `AUX`, `NUL`,
+   `COM1`–`COM9`, `LPT1`–`LPT9`).
+
+**File I/O**
+
+10. **Text files open with `encoding="utf-8"` and `newline="\n"`, explicitly**,
+    for both read and write. Default encoding is not UTF-8 on all Windows
+    installs, and the registry JSONL must not acquire CRLF.
+11. **Writes are atomic**: write to a temp file in the same directory, then
+    `os.replace()` (atomic on both platforms). Never write a shared file in
+    place.
+12. **Assume a file may be locked.** Windows holds exclusive locks on open files,
+    so a reader can block a writer. The append-only shard design already avoids
+    this — do not add a mutable shared file.
+
+**Runtime**
+
+13. **Guard every entry point with `if __name__ == "__main__":`.** Windows
+    multiprocessing uses `spawn`, not `fork`; without the guard a parallel job
+    re-imports and re-executes the module.
+14. **No shell scripts in the tool.** `gems doctor` and every other command is a
+    Python console-script entry point, not `.sh`. Do not call `sed`, `awk`,
+    `find` or `which` from code.
+15. **Per-user config location** via `platformdirs`, not a hardcoded `~/.gems` —
+    that resolves to `%LOCALAPPDATA%` on Windows. Keep reading the existing
+    `~/.detector/preprocessing_profiles/` for backward compatibility, but write
+    through `platformdirs`.
+16. **No `matplotlib` GUI backend assumptions** — set `Agg` for any headless
+    figure generation.
+
+**This applies to the repo's own tooling too.** `split_tasks.py` read
+`IMPLEMENTATION.md` with the platform default encoding and died on the first em
+dash under cp1252 — rule 10, broken by the file that enforces the rules. Any
+script in this repo obeys the same contract.
+
+**Declared support must equal tested support.** `requires-python` and the CI
+python matrix are one decision, not two. If a version is too expensive to test,
+narrow the declaration instead of leaving it untested.
+
+**Required tests** (these belong in `tests/test_portability.py`)
+
+- no absolute path appears in any emitted corpus spec, registry line or
+  provenance record
+- a corpus spec written with POSIX separators resolves correctly when
+  `gems_root` is a Windows-style path (monkeypatch it)
+- condition rules match the same file whatever the case of its name
+- a scan containing two names differing only in case raises
+- the deepest path the layout can generate is reported, with a failure if it
+  exceeds 260 characters under a Windows-style root
+- every emitted text file round-trips with `\n` endings and UTF-8
+
+---
+
+## Conventions
+
+| Thing | Rule |
+|---|---|
+| Time in public APIs | seconds, `float64` |
+| Time internally | sample indices, `int64`, always paired with an explicit `fs` |
+| Amplitude | microvolts, `float64` |
+| Frequency | Hz |
+| Envelope / z grid | **10 ms**, shared by every band. `n_frames = floor(dur/0.010)` |
+| Band naming | `"300-3000"`, `"100-300"`, `"1-100"`, `"2-50"`, `"0.5-3"`, `"0-2"` — `CONSUMERS` may only name a key of `BANDS`, and a test asserts it |
+| Signal naming | `"V1".."V3"`, `"T"` per cuff, prefixed by cuff: `"L_V1"`, `"R_T"` |
+| Missing scalar | `np.nan`, never `0`, never `-1` |
+| Boolean masks | `True` = **invalid / masked out** |
+| Random seeds | every test and every synthetic generator takes an explicit seed |
+| Filters | design with `output='sos'`, apply with `sosfiltfilt`. **Never** `butter(...,'ba')` at these ratios — a 1 Hz corner at 24.4 kHz is numerically unstable and silently returns garbage |
+| Decimation | `scipy.signal.decimate(..., ftype='fir', zero_phase=True)` before any sub-100 Hz filtering |
+
+---
+
+## Repo layout
+
+```
+gems-blanking-v2/
+  gems_blanking_v2/          <- everything importable lives under here
+    types.py                 A.1 dataclasses (created in task 00)
+    constants.py             GRID_S, BANDS, REFERENCE_STATISTIC, CONSUMERS
+    io/        recording load, channel map, store, scan
+    derive/    derivations (V1,V2,V3,T)
+    physio/    rpeaks, cardiac_window
+    bands/     envelope, reference, zscore
+    detect/    candidates, features
+    model/     train, evaluate, registry  (imports GEMSBlanking)
+    extent/    tolerance, routing
+    emit/      masks, qc, provenance
+    video/     motion
+    velocity/  xcorr
+  tests/       conftest.py + one test module per source module
+  .github/workflows/ci.yml   ubuntu + windows + macos matrix
+  IMPLEMENTATION.md  CLAUDE.md  PROMPTS.md  split_tasks.py  tasks/
+```
+
+**Never a top-level `io/`** — it shadows the stdlib `io` module.
+
+## Reused from `GEMSBlanking` (private, import — do not fork)
+
+`detector/retrain.py`, `detector/review.py` (SHAP), `detector/heldout_eval.py`,
+`detector/animal_id.py`, `detector/recording_io.py`, and the Phase 2 synthetic
+machinery. Paths came from `detector-pyqt/DEVELOPER_GUIDE.md` — **verify each
+before importing** and report any that moved instead of guessing.
+
+## Model modes
+
+Three training modes share every step of the pipeline and differ only in training
+corpus and evaluation protocol (task 12):
+
+- **POOLED** — all animals except the target. **Mandatory**: the only mode that can
+  process an animal with no labels.
+- **ADAPTED** — pooled prior + the target animal's own labelled events. Matches the
+  actual deployment scenario, since ~50 events per new animal get labelled anyway.
+- **PER_ANIMAL** — the target animal only.
+
+Task 12A does **not** choose between them: the user picks the model for every
+inference run, and the registry's job is to present the options with their metrics
+and protocols and to record the choice in provenance. There is no default model and
+no fallback chain.
+`PER_ANIMAL` beating `ADAPTED` is a **task 11 feature-invariance bug**, not a
+result to ship — see task 12.
+
+## Testing
+
+- `pytest` per module against **synthetic signals with known ground truth**.
+- `tests/conftest.py` owns every generator. No test invents its own signal.
+- Every numeric claim in a docstring must have a test that would fail if it were
+  wrong.
+- A test that passes because a threshold was loosened is a failed test. If a
+  tolerance must be widened, say so explicitly in the task report.
+
+## Definition of done, per task
+
+1. Module implemented with type hints and docstrings stating units.
+2. Tests pass, including the task's own acceptance criterion.
+3. `ruff check` and `mypy` clean.
+4. A short report: what was built, what was measured, anything that contradicted
+   `IMPLEMENTATION.md`.
+
+**Contradictions are the most valuable output.** Several constants in this spec
+came from simulation, not from Andrea's data. If real data disagrees, report the
+disagreement — do not tune the code until it matches the spec.
+
+## Do not re-implement
+
+See `PIPELINE.md` §10. In particular: adaptive-threshold QRS detection
+(Pan–Tompkins), cardiac template subtraction, rate targeting, HMM/Viterbi
+smoothing, pooled clean-null calibration, per-cohort model splits, detection on the
+tripole. Each was tested or ruled out on a stated requirement.

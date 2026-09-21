@@ -1,0 +1,1 @@
+"""Camera-derived motion evidence."""

@@ -1,0 +1,2747 @@
+# gems-blanking-v2 — granular implementation instructions
+
+Authoritative build document. `tasks/NN-*.md` are **generated** from this file by
+`python split_tasks.py`; edit here and regenerate.
+
+Read `CLAUDE.md` first — its invariants apply to every task and are not repeated
+per task. Read `PIPELINE.md` for why each decision was made; this document says
+only what to build.
+
+**Ordering is a gate structure, not a preference.** Tasks 01, 02 and 09 are gates:
+work after them is wasted if they fail. Task 09 can invalidate the entire
+architecture, and the correct response is to stop and build the U-Net fallback, not
+to relax the gate.
+
+---
+
+## Part A — shared contracts
+
+Injected into every generated task file.
+
+### A.1 Core data structures
+
+```python
+@dataclass(frozen=True)
+class ChannelInfo:
+    index:         int                 # column in the raw matrix
+    name:          str                 # "RVN", "ANT1", ...
+    role:          Literal["nerve", "stomach", "aux"]
+    cuff_id:       str | None          # "L" / "R"; None for stomach and aux
+    contact_index: int | None          # 1..3 along the cuff; None if not a cuff
+    rostral_end:   int | None          # which contact_index is rostral; None = unknown
+    config:        Literal["hw_tripole", "independent"]
+
+@dataclass(frozen=True)
+class Recording:
+    fs:        float                   # 24414.0625 nominal - read it, never hardcode
+    data:      np.ndarray              # (n_samples, n_channels), float64, microvolts
+    channels:  list[ChannelInfo]
+    animal:    str                     # "F", "J", "L", "O", ...
+    session:   str
+    path:      Path
+
+@dataclass(frozen=True)
+class Candidate:
+    start_s:    float
+    stop_s:     float
+    signals:    tuple[str, ...]        # which derived signals crossed
+    bands:      tuple[str, ...]        # which bands crossed
+    peak_z:     float
+    provenance: Literal["electrical", "video_assisted"]
+
+class TrainingMode(StrEnum):
+    POOLED     = "pooled"       # all animals except the target; the mandatory mode
+    ADAPTED    = "adapted"      # pooled prior + target animal's own labels
+    PER_ANIMAL = "per_animal"   # target animal only
+
+@dataclass(frozen=True)
+class Event:                           # a Candidate after step 08
+    candidate:  Candidate
+    judgement:  Literal["motion", "physiology", "unsure", "unjudged"]
+    p_motion:   float
+    source:     Literal["human", "model", "inherited"]
+```
+
+### A.2 The grid
+
+Every envelope, z-trace and mask lives on a shared grid:
+
+```python
+GRID_S = 0.010
+n_frames = int(np.floor(duration_s / GRID_S))
+frame_centre_s(i) = (i + 0.5) * GRID_S
+```
+
+A band's analysis window is **centred** on the frame centre and may be much longer
+than the grid step. Windows overlap; that is intended.
+
+### A.3 Bands
+
+```python
+BANDS: dict[str, BandSpec] = {
+    #  name        lo     hi    window_s     2*B*T
+    "300-3000": (  300., 3000.,   0.025),   # 135  <- time-resolution choice
+    "100-300":  (  100.,  300.,   0.075),   #  30
+    "1-100":    (    1.,  100.,   0.150),   #  29.7
+    "2-50":     (    2.,   50.,   0.310),   #  29.8
+    "0.5-3":    (   0.5,    3.,   6.000),   #  30
+    "0-2":      (   0.0,    2.,   7.500),   #  30
+}
+REFERENCE_STATISTIC = "median_of_log"   # binding; see hard invariant 5
+```
+
+**There is no `ref_pct`.** The percentile reference was measured to be
+mis-centred (invariant 5) and is superseded by the median of the log envelope.
+The old percentiles (10 / 10 / 10 / 10 / 25 / 25) are recorded in A.5 as history
+only — do not put them in code, where a second reference rule would compete with
+the binding one.
+
+```
+Window lengths come from effective degrees of freedom `2·B·T ≈ 30`. The two slowest
+bands use the 25th percentile because a 10-minute file holds only 80–100 independent
+frames there, where p10 carries ~13% standard error.
+
+### A.4 Consumers
+
+```python
+CONSUMERS = [
+    # name              signal              band        tolerance
+    ("spikes",          "T",                "300-3000", "4.5 sigma, sample level"),
+    ("slow_c",          "T",                "100-300",  "own sigma"),
+    ("velocity",        ("V1","V3"),        "300-3000", "peak ratio > 1"),
+    ("mmc",             "stomach_ref",      "2-50",     "3 x moving MAD"),
+    ("slow_wave",       "stomach_ref",      "0-2",      "peak displacement"),
+    ("breathing",       "best_hr_channel",  "0.5-3",    "peak inserted or lost"),
+    ("hrv",             "best_hr_channel",  "1-100",    "operational: beat train unchanged"),
+]
+```
+
+No 0–2 or 2–50 Hz mask on nerve signals. No 300–5000 Hz mask on stomach signals.
+
+### A.5 Constants measured already — do not re-derive
+
+| Quantity | Value |
+|---|---|
+| Cuff v9 contact pitch / aperture | 1.50 mm / 3.00 mm |
+| 60 Hz notch ring into ENG band | 0.221 µV per mV excursion |
+| Bandpass gain at 60 Hz through `filtfilt` | −36.4 dB |
+| QRS energy above 300 Hz | 0.00–0.54% |
+| QRS energy below 3 Hz | 0.00% |
+| QRS energy in 100–300 Hz (8–12 ms QRS) | 32.1–65.2% |
+| Smooth motion energy below 300 Hz | 98.7–99.7% |
+| Saturating step, energy above 300 Hz | 32.2% |
+| Velocity artifact tolerance | ~1× raw, ~5× band-limited, ~1.4× broadband |
+| Velocity resolution `Δv/v ≈ v/(B·L)` | 4% @ 0.5 m/s, 7% @ 1, 14% @ 2, 35% @ 5 |
+
+---
+
+### A.5b — ENG band upper corner: measured, changed 300–5000 → 300–3000
+
+Tested at Andrea's request. Method: detect events on a wide 300–11000 Hz tripole,
+take the **median** power spectrum of ±1.5 ms event windows against random
+background windows (median, not mean — a handful of giant artifacts otherwise
+dominate by six orders of magnitude), and find where the ratio approaches 1.
+
+On the healthy cuff (R), event energy is concentrated **below ~2 kHz** and reaches
+background by ~4 kHz:
+
+| | 0.5k | 1k | 1.5k | 2k | 2.5k | 3k | 4k | 5k | 7k | 9k |
+|---|---|---|---|---|---|---|---|---|---|---|
+| event/background | 151 | 36 | 9.1 | 2.4 | 1.9 | **1.6** | 1.1 | 1.1 | 1.2 | 1.2 |
+
+Crosses 2× at **2374 Hz** and 1.2× at 3730 Hz. Everything above ~4 kHz in the old
+300–5000 band was noise, and it cost real sensitivity:
+
+| corner | σ(T) µV | events/s | median amp/σ | p90 amp/σ | cardiac peak/base |
+|---|---|---|---|---|---|
+| 300–2000 | 1.83 | 10.5 | 6.09 | 10.88 | 2.93× |
+| **300–3000** | **2.26** | **8.2** | **5.84** | **9.77** | **3.56×** |
+| 300–5000 | 2.96 | 5.8 | 5.62 | 8.43 | 4.31× |
+
+Narrowing to 3 kHz **lowers σ by 24%, raises the event rate 41%, improves
+event-to-threshold separation, and reduces the cardiac peak-to-baseline ratio.**
+300–2000 is better still on every count but clips the 2–2.4 kHz shoulder where the
+ratio is still above 2×, so **3000 Hz is the defensible choice**; revisit 2000 Hz
+if the cross-animal set agrees.
+
+**This breaks comparability with previously processed data.** σ changes, so the
+4.5σ threshold changes, so every historical spike count and firing rate changes.
+Reprocess rather than mix, and record the band in provenance.
+
+**Confirm on the cross-animal set before pinning** — this is one recording.
+
+### A.5c — Per-cuff health check (new QC metric, free)
+
+The same event/background spectrum is a **cuff diagnostic**, and on this recording
+it fails the left cuff:
+
+| | 0.5k | 1k | 2k | 3k | 5k | 9k | peri-R rise |
+|---|---|---|---|---|---|---|---|
+| cuff R | 151 | 36 | 2.4 | 1.6 | 1.1 | 1.2 | **1.3–2.9%** |
+| cuff L | 1.06 | 1.16 | 1.03 | 1.19 | 1.84 | **15.4** | **688–867%** |
+
+Cuff L has no spectral signature of neural events anywhere, its ratio *rises* at
+9 kHz (backwards for real spikes), and its peri-R rise is two orders of magnitude
+larger than cuff R's. Consistent with LVN3's −2.15 V excursion and LVN3 ranking
+last on cardiac template SNR (179 vs 400–600).
+
+**Emit this per cuff per recording**: event/background ratio at 1 kHz, the
+frequency where it crosses 2×, and the ENG-band peri-R rise. A cuff that looks
+like L above should be flagged before its data reaches any analysis.
+
+---
+
+## Part A.6 — Build order
+
+Revised 2026-09-19 after the first real-data gate run. **The gate is measured on
+newly labelled new-cohort data, not on the 43 old recordings.**
+
+Why not the old data: those 4 animals are the hardware-shorted tripole — 5
+channels, one derived signal per nerve. The generator reads the **raw contacts**
+and uses cross-channel agreement to control the multiple-comparisons problem that
+dominated the first run. With no raw contacts, `nmin`, the common-mode features
+and the "detect on contacts, threshold against the tripole" logic are all
+untestable there. Measuring recall for a degraded generator and generalising to a
+different one is not a gate. The old labels were also drawn on notched
+hardware-tripole signal with ±100–500 ms boundary precision — the very imprecision
+this design exists to remove.
+
+```
+ 1  00   repo + test harness
+ 2  00A  Drive store, preflight, registry            ─ everything reads through it
+ 3  01 ◆ zeros -> NaN                                 ─ one line, do it first
+ 4  03   loader + channel map
+    03A  scan + condition inference                   ─ parallel with 04-07
+ 5  04   derivations (0.5/0.5 tripole, no fit)
+ 6  06   band envelopes, log-z, median reference
+ 7  07   candidate generation
+ 8  02   peri-R cardiac window                        ─ needs 05; parallel
+    05   R-peaks (10-150 Hz, k=6, global plausibility)
+ 9  T    CONSUMER TOLERANCE DERIVATION                ─ NEW, see below
+10  16   labelling UI incl. blind recall-audit mode   ─ needed regardless
+11  L    label ~10 min EXHAUSTIVELY, 2-3 new animals  ─ human, ~2-4 h
+12  09 ◆ GATE: real recall + precision vs those labels
+--------------------------------------------------------------------- gate ------
+13  11   features
+14  10   convert old labels to events (what survives)
+15  12   classifier, three modes      12A registry
+16  13   extent      14 routing      15 masks + QC
+17  08   MATLAB fixes                 ─ any time, independent
+18  17   video        18 velocity      03B stim split
+19  19 ◆ end-to-end acceptance
+```
+
+Steps 1–12 are the whole pre-gate commitment: a loader, a candidate generator and
+a labelling UI. **None of that is wasted if the gate fails** — the U-Net fallback
+consumes the same envelopes, the same UI and the same labels.
+
+### Step 9 — consumer tolerance derivation (prerequisite for the gate)
+
+The revised pass condition is "≥98% recall for artifacts **above each consumer's
+tolerance**". Those amplitudes are not yet known, and the gate is unanswerable
+without them. Derive them without labels:
+
+```
+for each consumer, for each artifact kind:
+    for amplitude in a log sweep (10 uV .. 50 mV):
+        inject into a clean span
+        run THAT CONSUMER'S OWN analysis with and without the injection
+        record the change in its output
+    tolerance = the amplitude at which the output first changes materially
+```
+
+"Output changes materially" is consumer-specific and already defined in Part A.4 —
+for R-peaks the beat train changes, for spikes the 4.5σ crossing set changes, for
+slow wave a peak displaces. Report a tolerance curve per consumer, not a scalar.
+
+**First evidence this matters:** a 200 µV common-mode artifact is only rejected
+~2.5× by the tripole (measured), so it still lands at ~27σ on `T`. Intuition about
+what is "small" is unreliable here.
+
+### Step 11 — labelling that doubles as the measurement
+
+Label **complete spans of ~10 minutes total**, exhaustively, across 2–3 new
+animals — not candidate adjudication. Exhaustive labelling of a short stretch is
+what makes recall computable; adjudicating candidates can only measure precision.
+
+---
+
+## Part B — tasks
+
+<!-- TASK:00 slug=repo-setup deps=none gate=no -->
+## Task 00 — Repository skeleton and test harness
+
+**Module:** package root, `tests/conftest.py`
+**Depends on:** nothing
+**Gate:** no
+
+### Purpose
+Create the package and the synthetic-signal generators every later test depends on.
+Doing this first means no task has to invent its own test data.
+
+### Build
+- `pyproject.toml`: python ≥3.11, `numpy scipy pandas h5py pyarrow lightgbm shap
+  matplotlib opencv-python-headless pytest ruff mypy`
+- package dirs per `CLAUDE.md`, each with `__init__.py`
+- `ruff` and `mypy` config, both strict enough to fail CI
+- `gems_blanking_v2/constants.py` holding `GRID_S`, `BANDS`, `REFERENCE_STATISTIC`,
+  `CONSUMERS` and the Part A.5 table as module-level constants
+- **`gems_blanking_v2/types.py` holding the Part A.1 dataclasses verbatim.**
+  Create them here, not in task 03: `make_multichannel` must return a `Recording`,
+  so the types are needed before the loader exists. Task 03 imports them and must
+  not redefine them.
+- **All packages live under `gems_blanking_v2/`** — `gems_blanking_v2/io/`, not a
+  top-level `io/`, which would shadow the stdlib module of that name.
+
+### `tests/conftest.py` — required fixtures
+
+```python
+def make_beats(fs, dur_s, rr_s=0.150, sd_rr_s=0.005, seed=0) -> np.ndarray
+    """Ground-truth R times, seconds. Realistic rat HRV.
+    The drawn intervals are affine-corrected so the REALIZED mean and SD equal
+    rr_s and sd_rr_s exactly -- 2% accuracy on an SD estimate needs ~1250 beats
+    (relative SE = 1/sqrt(2n)) and a 120 s file holds ~800. Consequence: the
+    intervals are not an i.i.d. draw, so do not use this fixture to test an
+    estimator's own sampling behaviour."""
+
+def make_qrs(fs, width_ms=10.0) -> np.ndarray
+    """Triphasic kernel: central positive lobe with two small symmetric negatives.
+    IMPORTANT: the flanking lobes must be <=0.2 of the peak, else the kernel's own
+    rebound is detected as a second peak and every beat is counted twice."""
+
+def make_ecg(fs, dur_s, amp_uv=60.0, weak_frac=0.0, noise_uv=5.0, seed=0) -> (sig, beats, weak_idx)
+    """Beat train convolved with the kernel, on a noise floor.
+    noise_uv is REQUIRED for the weak-beat claim to mean anything: with no noise
+    MAD -> 0 and nothing is below any multiple of it. At noise_uv=5, a 3x MAD-sigma
+    prominence is ~15 uV, above the 8-13 uV attenuated beats and well below the
+    60 uV normal ones. Test that relationship; do not assert it in prose.
+    NOTE the real-data threshold is 6x MAD-sigma in 10-150 Hz (task 05), not 3x."""
+
+def make_eng(fs, dur_s, rate_hz=20.0, spike_uv=80.0, noise_uv=6.0, seed=0)
+    """Poisson spike train, biphasic 0.6 ms waveform, white noise."""
+
+def make_slow(fs, dur_s, freq_hz=0.05, amp_uv=200.0, seed=0)
+    """Gastric slow wave."""
+
+def inject_artifact(sig, fs, t0_s, dur_s, kind, amp_ratio, seed=0)
+    """kind in {'excursion','drift','step','tribo','clip'}.
+
+    amp_ratio is DEFINED as  max|out - in| over the span, divided by the host's
+    MAD-sigma measured BEFORE injection. The first four kinds are purely additive
+    so that definition is exact and the ground truth is recoverable.
+
+    'clip' is the exception and is deliberately NOT additive: it hard-limits the
+    host at +/- amp_ratio * MAD-sigma. Task 14 routes clipping around the
+    classifier precisely because saturation is non-linear and the envelope can
+    UNDERSTATE the damage -- an additive flat-top would not exercise that path.
+    For 'clip' the ground truth is the span and the rail value, not amp_ratio.
+
+    Returns (sig, truth_span). 'step' is the additive flat-topped version that
+    used to be called 'saturation'; the rename exists so the two are not
+    confused."""
+
+def make_multichannel(fs, dur_s, n_cuff=2, n_stomach=3, common_mode=True, seed=0)
+    # returns a Recording from gems_blanking_v2/types.py (created by THIS task,
+    # imported by task 03 -- do not redefine the A.1 dataclasses there)
+    #
+    # Injects ADDITIVE kinds only. A clip rail belongs to one amplifier channel,
+    # so it cannot live in a common-mode trace that is then scaled per channel --
+    # clipping the shared component and multiplying it by 0.8 and 1.25 models
+    # nothing physical. A test needing a saturated channel clips one column of
+    # rec.data directly.
+    """Full synthetic recording with a known common-mode artifact component,
+    per-contact gains, and per-contact independent neural content.
+    Returns (Recording, ground_truth_dict)."""
+```
+
+### Tests
+`tests/test_constants.py` — **every band named in `CONSUMERS` is a key of
+`BANDS`.** This one line would have caught the 300-5000/300-3000 contradiction
+that survived in this document; add it before anything else.
+
+`tests/test_conftest.py` — each generator reproduces its own spec: `make_beats`
+returns the requested mean RR and SD to within 2%; `make_qrs` has exactly one local
+maximum above 0.2 of peak; `inject_artifact` returns a span whose measured
+amplitude ratio matches `amp_ratio` to within 10%.
+
+### Acceptance
+`pytest` green, `ruff` and `mypy` clean on an empty package.
+
+### Do not
+Do not skip testing the generators. A generator bug produces confident wrong
+numbers in every downstream test, which is exactly how the QRS double-peak and the
+unstable `butter` bugs were introduced during design.
+<!-- /TASK -->
+
+<!-- TASK:00A slug=drive-store deps=00 gate=no -->
+## Task 00A — Shared storage on Google Drive
+
+**Module:** `io/store.py`, `io/registry_log.py`
+**Depends on:** 00
+
+### Purpose
+Data, per-trial metadata and trained models all live in a **synced Google Drive
+folder** so anyone in the lab can clone the repo and immediately have both the
+data and the current models. The repo holds **code only** — no data, no models, no
+labels.
+
+```
+git clone <repo>            →  code
+Google Drive (synced)       →  data + labels + models + registry
+config: gems_root = <path>  →  the one thing each user sets locally
+```
+
+### Why this needs care
+Google Drive is a **sync layer, not a database**. It has no atomic rename, no
+locking across clients, and when two users write the same path it silently
+produces `file (1).json`. A registry that is edited in place **will** be corrupted
+the first time two people train on the same day. The layout below is designed so
+that never happens.
+
+### Layout
+
+```
+<gems_root>/
+  data/
+    <animal>/<session>/            raw.h5, channel_map.json, video.mp4
+  trials/
+    <animal>/<session>/trials.jsonl         one line per trial, appended by the
+                                            acquisition machine (single writer).
+                                            NOT one file per trial -- see the
+                                            shared-drive item cap below.
+  labels/
+    <animal>/events_<user>_<utc>.parquet    per-user, per-session, write-once
+  corpora/
+    <corpus_id>.json                        named corpus spec, immutable
+  models/
+    <model_id>/                             model_id = content hash, immutable
+      model.txt  calibrator.pkl  provenance.json  metrics.json  shap/
+  registry/
+    events.jsonl                            APPEND-ONLY log (see below)
+    events.jsonl.<user>.<utc>               conflict-safe shards, merged on read
+  cache/                                    LOCAL ONLY — never inside gems_root
+```
+
+### The three rules that make this safe
+
+1. **Everything is write-once and content-addressed.** `model_id` is the sha256 of
+   the model file plus its corpus hash. A model directory, once written, is never
+   modified. Retraining produces a new `model_id`, never a new version of an old
+   one.
+2. **The registry is an append-only log, never a mutable pointer file.**
+   `registry/events.jsonl` holds one JSON object per line:
+   `{ts, user, action, model_id, mode, animal, corpus_id, metrics}` where `action`
+   ∈ `{trained, promoted, demoted, retired}`. Current state is computed by
+   **replaying the log**, not by reading a field.
+   - Each client appends to its **own shard** `events.jsonl.<user>.<utc>`, and
+     readers take the **union of all shards**. Two users writing at once produce
+     two files, not a conflict.
+   - A periodic `compact` command merges shards into `events.jsonl` — run manually,
+     by one person, never automatically.
+   - Union-of-lines is order-independent and idempotent, so a Drive conflict copy
+     merges correctly by construction.
+3. **Every file carries a sha256, and readers verify it.** Drive can present a
+   partially synced file as complete. A checksum mismatch must raise, not warn —
+   silently training on a truncated parquet is the failure mode this prevents.
+
+### Required behaviours
+- **`gems doctor` and the preflight also report the platform, the resolved root,
+  the longest path the current layout would generate, and whether any stored path
+  is absolute.** Cross-platform breakage is invisible on the machine that caused
+  it.
+- **Preflight check** before any training or inference run: resolve `gems_root`,
+  assert a `.gems-root` marker file exists, verify every file the run needs is
+  present and checksum-clean, and report anything still syncing. **Refuse to start
+  on an incomplete corpus** — a model trained on a half-synced dataset is
+  indistinguishable from a bad model.
+- **Never write scratch or intermediate files into `gems_root`.** Envelopes,
+  feature matrices and temp artifacts go to a local cache keyed by content hash.
+  Syncing 16 GB of envelopes to every lab member is a real risk here.
+- **Large-file hygiene:** mark the `data/` folders the run needs as available
+  offline before a long job; streaming reads from Drive File Stream will otherwise
+  dominate runtime.
+- **Per-user identity** from git config or an explicit setting, recorded in every
+  label file and registry line. "Who labelled this" is scientific metadata.
+- **Role check in preflight:** if the user's effective access to `gems_root` is
+  read-only, say so plainly ("you are a Contributor; Drive for desktop makes that
+  read-only — ask for Content manager") rather than failing later with a confusing
+  permission error mid-run.
+- **Item-count check in `gems doctor`:** report items used against the 500,000 cap,
+  including trash, and warn above 80%.
+- **`gems_root` is per-user config** (`~/.gems/config.toml`), never committed.
+  Provide `gems doctor` to print the resolved root, sync status, shard count and
+  any checksum failures.
+
+### Shared-drive specifics (this lab uses a Google **shared drive**, not a personal Drive)
+
+**Roles — and the trap.** Shared-drive roles are Manager / Content manager /
+Contributor / Commenter / Viewer. "Contributor" looks like the right least-privilege
+choice for lab members, and it is wrong here: **in Google Drive for desktop,
+Contributors have read-only access.** Anyone who labels, trains or exports through
+the synced folder must be **Content manager**.
+
+| Who | Role | Why |
+|---|---|---|
+| everyone who labels / trains / exports | **Content manager** | can add, edit, move and trash; **cannot permanently delete** |
+| one or two owners | Manager | membership, permanent delete, trash purge |
+| collaborators who only read results | Viewer / Commenter | |
+
+Content manager is a real safety net: deletions go to the shared-drive trash and
+only a Manager can purge, so an accidental `rm -rf` inside `gems_root` is
+recoverable. Do **not** grant Manager broadly just to avoid a permissions error.
+
+**Why a shared drive is the right call:** files are owned by the drive, not by a
+person. When a student leaves the lab, nothing disappears and nothing needs
+transferring — which is the failure mode of a personal Drive shared out.
+
+**Item cap: 500,000 items per shared drive**, counting files, folders, shortcuts
+and trash. This is the one limit this design can actually hit, because of
+per-trial metadata.
+
+> **Do not write one file per trial.** Write **one JSONL per session**, appended
+> per trial: `trials/<animal>/<session>/trials.jsonl`. Acquisition is a single
+> writer, so append is safe there, and this keeps the item count in the thousands
+> instead of the hundreds of thousands. It is also far faster to sync — many tiny
+> files is the worst case for Drive for desktop.
+
+Budget the item count before committing to a layout, and report it in
+`gems doctor`. Trash counts toward the cap, so a Manager should purge periodically.
+
+**Other shared-drive limits worth knowing:** 750 GB uploaded per user per 24 h
+(a 25-minute 9-channel float32 recording is ~1.3 GB, so ~570 recordings/day — not
+a practical constraint, but relevant to a bulk initial migration); 5 TB max file
+size; 100 levels of folder nesting; a file lives in exactly one folder (use
+shortcuts, not copies).
+
+**Paths differ per machine**, so `gems_root` stays per-user config with
+auto-discovery by scanning for the `.gems-root` marker. **Nothing written into
+`gems_root` may contain an absolute path** — store POSIX paths relative to the
+root and resolve locally (see the Cross-platform rules in `CLAUDE.md`).
+
+> **This drive's name contains a character Windows cannot use.** It is
+> `BIONICs Lab: Enteric Interfaces Team`, and `:` is illegal in a Windows path,
+> so Drive for desktop substitutes it and **the folder is not the same string on
+> Windows**. Never reconstruct the root from the drive name; always discover it
+> via the marker file. Confirm what Windows actually produces before onboarding
+> the first Windows user.
+>
+> Windows `MAX_PATH` is 260 unless long paths are enabled, and this data already
+> sits at ~193 characters on Windows before the tool appends anything. Keep
+> generated segments short and check the deepest path the layout can produce.
+
+| OS | Typical root |
+|---|---|
+| macOS | `~/Library/CloudStorage/GoogleDrive-<account>/Shared drives/<DriveName>` |
+| Windows | `G:\Shared drives\<DriveName>` |
+| Linux | **no official Drive for desktop client** — rclone or equivalent; confirm before assuming a lab Linux box can participate |
+
+**Streaming vs offline.** Drive for desktop streams shared-drive files by default.
+Random-access reads into a streamed HDF5 are slow enough to dominate training
+runtime, so either mark the needed `data/` folders available offline, or have the
+preflight **copy the run's inputs into the local content-addressed cache first**.
+Do the copy; it is more predictable than relying on pinning.
+
+### Concurrency is still not free — state the limits
+This design tolerates **concurrent appends** and **concurrent reads**. It does not
+make Drive transactional. Two users training the same corpus simultaneously will
+produce two valid models and two log lines, and a human decides which is promoted.
+That is the correct behaviour for a research tool, but say it in the UI rather
+than pretending the conflict cannot happen.
+
+### Tests
+- two simulated clients appending concurrently produce a log whose replay contains
+  both entries, in either merge order
+- a Drive-style conflict copy (`events.jsonl (1)`) is merged, not lost or
+  duplicated
+- a truncated parquet fails the checksum and raises before training starts
+- preflight refuses a corpus with a missing file and names it
+- no code path writes to `gems_root/cache`
+- replaying the log twice is idempotent
+
+### Acceptance
+A second lab member clones the repo, sets `gems_root`, runs `gems doctor`, and can
+immediately list the same models and corpora as the first — with no manual copying
+and no shared-write conflicts.
+<!-- /TASK -->
+
+<!-- TASK:01 slug=nan-interop deps=00 gate=yes -->
+## Task 01 — Zeros → NaN interop fix
+
+**Module:** `GEMSBlanking:detector/labeled_save.py` (or `processing_new/step0_load_data.m`)
+**Depends on:** 00
+**Gate:** YES — everything downstream is contaminated until this lands
+
+### Purpose
+`_blankmotion.mat` currently writes `yOut` with masked ranges **zeroed**.
+`processing_new/step1_bandpass.m:51` recognises only `NaN`:
+
+```matlab
+invalid = isnan(x);
+if any(invalid); xfill = fillmissing(x,'linear','EndValues','nearest'); end
+xf = filtfilt(b, a, xfill);
+xf(invalid) = NaN;
+```
+
+So today every mask boundary is a hard step to zero that rings through an order-8
+zero-phase filter into adjacent *valid* samples. The damage is worst for short
+blanks — which is precisely what good detection produces, so this penalises exactly
+the improvement being built.
+
+### Build
+Write `NaN` instead of `0` into masked ranges. Prefer fixing `labeled_save.py`; if
+that file cannot be changed, convert on read in `step0_load_data.m`.
+
+### Tests
+- `test_no_zero_runs`: round-trip a masked recording; assert no exact-zero run
+  longer than 2 samples in any channel of the emitted `yOut`
+- `test_nan_preserved`: assert masked sample count out == masked sample count in
+- `test_ringing`: filter a synthetic with (a) a zeroed gap and (b) a NaN gap through
+  the actual `step1_bandpass` chain; measure peak deviation in the 50 ms either side
+  of the boundary. The NaN path must be materially lower. **Record both numbers in
+  the task report** — this quantity has never been measured on real data.
+
+### Acceptance
+No exact-zero runs in emitted output; MATLAB side loads the file and produces the
+same valid-sample count Python wrote.
+
+### Do not
+Do not add a `zeros_are_invalid` compatibility flag. Zero is a legal signal value;
+inferring invalidity from it is the bug.
+<!-- /TASK -->
+
+<!-- TASK:02 slug=peri-r-measurement deps=00,01 gate=yes -->
+## Task 02 — Peri-R cardiac window measurement
+
+**Module:** `physio/cardiac_window.py`
+**Depends on:** 00, 01
+**Gate:** YES — this is the largest deterministic win available and it needs no model
+
+### Purpose
+The current pipeline blanks ±15 ms around every R-peak on **all** channels
+(`step1a_blank_cardiac.m:41-43`, `D.y(blank,:) = NaN`). At ~400 bpm that is ~20% of
+every recording. Predicted from QRS energy distribution, almost none of it is needed
+above 300 Hz or below 3 Hz. Measure it rather than assume it.
+
+A working prototype already exists: `periR_window_check.m` (171 lines, delivered
+separately). Port it or call it.
+
+### Signature
+```python
+def measure_cardiac_window(
+    rec: Recording, rpeaks_s: np.ndarray, bands: dict = BANDS,
+    half_window_frac_rr: float = 0.40,   # NOT a fixed 100 ms: must be < RR/2
+    baseline_pct: float = 50.0,
+) -> dict[tuple[str, str], tuple[float, float] | None]:
+    """(channel, band) -> (t_start_s, t_stop_s) relative to R, or None if flat."""
+```
+
+### Algorithm
+1. For each channel and band, compute the band envelope (task 07's function).
+2. Extract ±`halfwidth_s` about every R-peak; average across beats.
+3. Baseline = the `baseline_pct` percentile of the profile's outer thirds.
+4. Window = the **contiguous** span around lag 0 exceeding
+   `baseline + 3 × MAD(outer thirds)`. If no sample exceeds it, return `None`.
+5. Report recovered duty cycle: `1 − (window_duration × beat_rate)` vs the current
+   uniform 30 ms.
+
+### Expected result — falsifies the plan if wrong
+Predicted from QRS energy (superseded by the measurement below — kept for the
+reasoning):
+
+| band | 8 ms QRS | 12 ms | 20 ms |
+|---|---|---|---|
+| 0–2 Hz | 0.00% | 0.00% | 0.00% |
+| 0.5–3 Hz | 0.00% | 0.00% | 0.02% |
+| 2–50 Hz | 4.0% | 12.0% | 38.8% |
+| 1–100 Hz | 23.9% | 52.8% | 89.9% |
+| 100–300 Hz | **65.2%** | **32.1%** | 2.5% |
+| 300–5000 Hz | 0.54% | **0.00%** | **0.00%** |
+
+**MEASURED 2026-09-19 on `gems_j_t01_ms3_bl_230315` (animal J, 10 min, 3511 beats,
+RR 164.7 ms), channels LVN1 / RVN3 / ANT2 — the prediction above is PARTLY WRONG:**
+
+| band | env win | measured rise | measured extent | duty at RR 165 ms |
+|---|---|---|---|---|
+| 300–5000 | 25 ms | **10.4–15.7%** | −15 to +14 ms | 17.8% |
+| 100–300 | 75 ms | 43–65% | −49 to +44 ms | **56%** |
+| 1–100 | 150 ms | 0.4–2.0% | none (ANT2 excepted) | 0% |
+| 2–50 | 310 ms | 0.0–0.6% | none | 0% |
+
+Two corrections follow:
+
+1. **There IS a cardiac window above 300 Hz.** The operationally correct test for
+   the spike consumer — peri-R rate of `|x| > 4.5σ` crossings — gives a
+   **1.53–2.12× rise at lag 0** on all three channels. The current ±15 ms blank in
+   that band is therefore roughly right, **not** the waste this document claimed.
+2. **A measured extent includes the envelope window's own smearing.** The 25 ms
+   envelope contributes ±12.5 ms of the ±15 ms measured at 300–5000 Hz, so true
+   QRS content there is ~±2 ms — consistent with the energy model. For *masking*
+   the smeared extent is the correct one, because it is what the consumer sees.
+3. **Bands whose envelope window exceeds RR cannot show a peri-R modulation at
+   all.** At RR 165 ms the 1–100 Hz (150 ms) and 2–50 Hz (310 ms) windows are
+   0.9× and 1.9× RR, so "no window" there is partly by construction. State the
+   `window/RR` ratio next to every result.
+
+**The peri-R half-window must be < RR/2.** ±100 ms at RR 165 ms overlaps the
+neighbouring beat and contaminates the baseline estimate; use `0.40 × RR`.
+
+### Tests
+- synthetic ECG + ENG: the measured 300–5000 Hz window is `None`
+- synthetic with a deliberately wideband QRS: a window **is** found above 300 Hz
+  (proves the measurement can detect one, so `None` means absence not failure)
+- recovered duty cycle matches an independent hand calculation
+
+### Acceptance
+Run on ≥5 real recordings across ≥3 animals. Report the window per channel per
+band and the recovered duty cycle. **If a substantial 300–5000 Hz window appears on
+real data, stop and report** — it contradicts the QRS energy model and the cardiac
+plan needs revisiting.
+
+### Do not
+Do not revive template subtraction (`step1b_remove_cardiac.m`); see `PIPELINE.md`
+§10.2.
+<!-- /TASK -->
+
+<!-- TASK:03 slug=io-channel-map deps=00 gate=no -->
+## Task 03 — Recording IO and channel map
+
+**Module:** `io/recording.py`, `io/channel_map.py`
+**Depends on:** 00
+**Gate:** no
+
+### Purpose
+Load TDT blocks and attach the geometry the new cohort needs.
+
+### Build
+- Wrap `GEMSBlanking:detector/recording_io.py` (`Recording`, `load_recording`;
+  handles `.mat`, chunked HDF5, flat HDF5). **Verify the path before importing.**
+- Prefer flat HDF5 via `detector-pyqt/scripts/m1_ingest.py` — the viewer is 5× faster
+  on it.
+- Extend the channel table with `cuff_id`, `contact_index`, `rostral_end`, `config`.
+- Persist to `~/.detector/preprocessing_profiles/<animal>.json`, the existing
+  location used by `detector-pyqt/ui/widgets/channel_assignment.py`.
+- Read `fs` from the file. Never hardcode 24414.
+
+### `rostral_end` handling
+It cannot be reconstructed once the animal is gone. If absent:
+- emit **unsigned** velocities
+- attach `direction_valid = False` to every velocity record
+- log a warning once per recording, at WARNING level
+
+**Never guess it** — from channel order, name, or anything else.
+
+### Tests
+- round-trip a synthetic `.mat` and a flat HDF5, assert identical arrays and `fs`
+- a channel table missing `rostral_end` loads, sets `direction_valid=False`, warns
+- old-cohort (`hw_tripole`, 5 channels) and new-cohort (`independent`, 9 channels)
+  files both load and report the right `config`
+
+### Acceptance
+Both cohorts load; `config` is inferred correctly from the channel count and
+`contact_index` presence; the profile JSON round-trips.
+<!-- /TASK -->
+
+<!-- TASK:03A slug=scan-conditions deps=03,00A gate=no -->
+## Task 03A — Folder scan and condition inference
+
+**Module:** `io/scan.py`, `io/conditions.py`
+**Depends on:** 03, 00A
+
+### Purpose
+Point the tool at a parent folder, have it find every recording and **propose** the
+animal and experimental condition for each, let the user correct anything wrong,
+and only then let those recordings become selectable for training. This exists in
+`detector-pyqt` today and is the right interaction — this task keeps it and fixes
+one thing.
+
+### What exists today
+`training_window.py::_on_per_animal_add_folder` calls
+`find_blankmotion_files(Path(folder), recursive=True)`, then per file:
+
+```python
+source_stem = source.stem
+if source_stem.endswith("_notched"):      core = source_stem[:-len("_notched")]
+elif source_stem.endswith("_notchblanked"): core = source_stem[:-len("_notchblanked")]
+else:                                      core = source_stem
+animal   = extract_animal_letter(core)
+rec_type = "stim_rec" if "_stim_rec" in core else "baseline"
+```
+
+### The one thing to fix: **never silently default a condition**
+
+`rec_type = "stim_rec" if ... else "baseline"` means **every unrecognised filename
+becomes `baseline`.** A recording whose name does not match the expected pattern —
+a typo, a new protocol, a file from a collaborator — is silently relabelled as a
+control. Condition is an independent variable in `bulk_mixed_models.m`, so this
+does not produce a visible error; it produces a quiet mislabelling that shifts an
+effect estimate.
+
+Replace with three states:
+
+| State | Meaning | Effect |
+|---|---|---|
+| matched | exactly one rule matched | proposed, user confirms |
+| ambiguous | two or more rules matched with different conditions | **must be resolved by hand** |
+| `unknown` | no rule matched | **must be resolved by hand** — never defaults |
+
+`unknown` and `ambiguous` recordings are listed but **cannot enter a corpus**.
+Blocking is the point: a recording nobody has classified should not silently
+become a control.
+
+### Rules live in a shared, versioned file — not in code
+
+`<gems_root>/conditions.yaml`, so every lab member parses identically and the rule
+set improves over time:
+
+```yaml
+vocabulary: [baseline, stim, stim_recovery, sham, drug, unknown]   # CLOSED list
+rules:
+  - { pattern: '_stim_rec(\b|_)', condition: stim_recovery, priority: 10 }
+  - { pattern: '_stim(\b|_)',     condition: stim,          priority: 20 }
+  - { pattern: '_base(line)?(\b|_)', condition: baseline,   priority: 30 }
+strip_suffixes: ['_notched', '_notchblanked', '_blankmotion']
+animal_pattern: '(?<![A-Za-z])([A-Z])(?=[_\d])'
+```
+
+- **The vocabulary is closed.** Free-text conditions are not allowed — `stim`,
+  `Stim` and `stimulation` as three distinct levels would quietly wreck the mixed
+  models. Adding a level is an explicit edit to `vocabulary`.
+- Rules are tried in `priority` order; the **first** match wins, and the rule id is
+  recorded. Order matters: `_stim_rec` must be tried before `_stim`, which the
+  current code gets right only by accident of the `in` test.
+- If two rules of equal priority match different conditions → `ambiguous`.
+
+### The learning loop
+When the user corrects a condition, offer: *"Add a rule so this is automatic next
+time?"* with the proposed regex pre-filled, and show how many other currently-scanned
+recordings that rule would also match, **before** saving. The rule is appended to
+`conditions.yaml` (write to a per-user shard, merged like the registry — task 00A).
+
+A correction that contradicts a rule that *did* match flags the rule for review.
+That is how a bad rule gets caught rather than propagating.
+
+### Signature
+```python
+@dataclass(frozen=True)
+class ScanResult:
+    path:         Path
+    content_hash: str
+    animal:       str | None
+    session:      str | None
+    condition:    str                  # includes "unknown"
+    status:       Literal["matched","ambiguous","unknown","duplicate","known"]
+    matched_rule: str | None
+    candidates:   list[str]            # for ambiguous
+
+def scan(root: Path, rules: Rules, known: Registry) -> list[ScanResult]
+def apply_corrections(results, corrections, user: str) -> None   # writes meta.json
+```
+
+### Required behaviours
+- **Recursive scan** of the given folder for the configured extensions; default to
+  the shared-drive `data/` tree.
+- **Deduplicate by content hash**, not by path. Folder reorganisations and Drive
+  conflict copies produce the same recording at two paths; flag as `duplicate` and
+  show both paths rather than ingesting twice.
+- **Skip already-known recordings** (status `known`), but re-verify their checksum.
+- **Sort `unknown` and `ambiguous` to the top** of the review table — the rows
+  needing attention should not be buried among hundreds of correct ones.
+- **Bulk edit**: multi-select rows → set animal or condition in one action.
+- Every correction records `who` and `when` in `meta.json`; a user-set condition
+  is marked `source: human` and is never overwritten by a later rescan.
+- Scanning is **read-only** until the user confirms. Nothing is written to
+  `gems_root` during a scan.
+- Scans can be slow over a streamed shared drive — walk metadata only, hash lazily,
+  and show progress.
+
+### Tests
+- a filename matching no rule yields `unknown`, **not** `baseline` (the regression
+  guard on the current behaviour)
+- `X_stim_rec_01` resolves to `stim_recovery`, not `stim` — priority ordering
+- two equal-priority rules matching different conditions yield `ambiguous`
+- the same content at two paths yields one `duplicate` row naming both
+- a human-set condition survives a rescan
+- a condition outside `vocabulary` is rejected at write time
+- corrections are written with user and timestamp
+- an `unknown` recording cannot be added to a corpus spec
+
+### Acceptance
+Point the tool at the shared drive's `data/` root: it lists every recording with a
+proposed animal and condition, flags what it could not determine instead of
+guessing, and after corrections every row is either confirmed or explicitly
+excluded. Report how many of the 43 existing recordings parse cleanly under the
+initial rule set — **and how many the current code would have silently called
+`baseline`.**
+<!-- /TASK -->
+
+<!-- TASK:03B slug=stim-split deps=03,03A gate=no -->
+## Task 03B — Stim / recovery split and epoch exclusion
+
+**Module:** `io/stim_split.py`
+**Depends on:** 03, 03A. **Must run before task 06** — see "why the ordering matters".
+
+> **Build order: not now.** This task is fully specified but is **deliberately not
+> built during the early phases.** It runs at load time inside the finished suite,
+> per file, and nothing in tasks 05 (R-peaks), 02 (cardiac window) or the
+> channel-identification work depends on it — those are validated on baseline
+> recordings first. Build it when the pipeline is assembled, not before.
+
+### Purpose
+A `stim_recovery` recording contains a stimulation epoch followed by a recovery
+epoch. The stim epoch is **excluded from all downstream processing and blanking**;
+only recovery is analysed. This is the "ignore the stim duration" decision, made
+concrete.
+
+**Scope:** this task identifies and excludes the stim epoch. Removing artifact
+*within* the stim epoch remains deferred (Part C) — nothing here depends on it.
+
+### What exists today
+`processing_new/splitStimRecovery.m`, plus `splitStimRecoveryManual.m` for manual
+override and `blank_stim_spikes_nan.m`. Port the mechanism, fix three things.
+
+Current method, on a separate `vib` on/off channel at its own `fs_vib`:
+
+```
+vib_sm  = movmean(vib, max(5, round(0.01*fs_vib)))           % 10 ms smooth
+vib_env = sqrt(movmean(vib_sm.^2, max(5, round(0.1*fs_vib))))% 100 ms RMS
+threshold = (prctile(vib_env,20) + prctile(vib_env,80)) / 2  % if not supplied
+ON = vib_env > threshold
+   -> keep only the LARGEST ON segment
+   -> minDurSec   = 10
+   -> searchPadSec = 2.0  (edge refinement against the envelope crossing)
+writes <base>_stim.mat  {x_stim, stimMask, dig_aligned, fs_sig, detectInfo}
+       <base>_recovery.mat {x_recovery, recoveryMask, ...}
+```
+
+The stim portion is **kept** as a separate file, not deleted. Keep that — it is the
+right call, and it is what lets the deferred stim work happen later.
+
+### The stim duration is known: **120 s, fixed by protocol**
+
+This is the most useful fact available and it changes the method. Detection stops
+being "find the ON region" (two unknowns, onset and offset) and becomes "find the
+onset of a known-width window" (one unknown), with the duration left over as a
+**free validity check**.
+
+**Protocol: 2 min stim followed by 20 min recovery**, every `stim_recovery` file.
+`stim_duration_s: 120`, `recovery_duration_s: 1200`, `stim_tolerance_s: 12` live in
+the protocol config, per cohort, overridable per recording and recorded in
+provenance. **Do not hardcode them** — protocols change, and a silently wrong 120
+would be worse than no prior at all.
+
+The tolerance is 12 s, not a tight few seconds: recording start/stop routinely
+consumes several seconds at the edges, so a narrow band would flag normal captures.
+The known **recovery** duration is a second, independent check — a file whose
+recovery epoch is far from 20 min is suspect regardless of what the stim epoch
+measured.
+
+### Fix 1 — matched-width search, not a threshold
+
+```
+env      = RMS envelope of vib          (10 ms smooth -> 100 ms RMS, as today)
+W        = round(stim_duration_s * fs_vib)
+score(t) = mean(env[t : t+W]) - mean(env outside that window)
+onset    = argmax score(t)
+then refine both edges locally against the envelope crossing (±2 s, as today)
+```
+
+A boxcar of known width slid over the envelope. This is strictly better than a
+threshold on three counts:
+
+- **No duty-cycle assumption at all.** The score is a contrast, so it does not care
+  what fraction of the record is ON.
+- **A mid-stim dropout cannot split the epoch.** A threshold would produce two ON
+  segments and "largest segment" would keep one; the matched filter spans the gap
+  because the window width is fixed.
+- **Lower onset variance**, which matters directly: every recovery analysis is
+  expressed as time since stim offset, so onset error propagates into all of them.
+
+Keep the OFF-anchored threshold (`off_level + 8σ`, where `off_level` and `off_σ`
+come from the bottom decile of the envelope) only for **edge refinement** and as a
+reported cross-check — not as the primary detector.
+
+### Fix 2 — duration becomes a check, not an output
+
+| Condition | Meaning | Action |
+|---|---|---|
+| `\|detected − 120\| ≤ 12 s` | clean capture | pass |
+| detected < 120 and ON at the **first** sample | recording started mid-stim | `clipped_start = True`; offset is still valid, recovery is fine |
+| detected < 120 and ON at the **last** sample | recording stopped during stim | **fail — there is no recovery epoch in this file** |
+| `\|detected − 120\| > 12 s`, not clipped | something is wrong | flag for manual review; do not proceed silently |
+
+Clipping is detected by testing the ON state at the first and last sample, which is
+exactly the case Andrea describes ("recording start/stop sometimes consumes a few
+seconds"). Clipped-at-start is benign and common; clipped-at-end means the file has
+nothing to analyse and must say so rather than emitting a near-empty recovery epoch.
+
+Expected epoch count is **1**. Report the count; more than one is a protocol
+mismatch and goes to manual review.
+
+### Fix 3 — check the historical splits, because the old threshold was out of range
+
+The old auto-threshold `(p20 + p80)/2` is only meaningful when the stim occupies
+roughly 20–80% of the record. With a fixed 120 s stim:
+
+| file duration | stim fraction |
+|---|---|
+| 10 min | 20% — at the very bottom edge |
+| 15 min | 13% |
+| 20 min | 10% |
+| 25 min | **8%** |
+
+**Every stim recording sits at or below the bottom of that range.** At 8%, both the
+20th and 80th percentiles fall inside the OFF distribution, so the threshold is set
+from OFF-state statistics alone and lands inside the OFF noise. What happens next
+depends on how quiet the OFF state is, and `minDurSec = 10` plus the ±2 s edge
+refinement may have rescued some files — which is precisely why this needs
+measuring rather than assuming.
+
+**First subtask: re-split every existing `stim_recovery` recording and diff the
+boundaries against the current MATLAB output.** Report the distribution of
+differences. A file whose old boundary is off by tens of seconds has had that much
+stim contaminating its recovery reference — or that much recovery thrown away.
+
+`minDurSec = 10` is deleted; it is superseded by the known width.
+
+### Why the ordering matters — this is the real reason it must precede task 06
+
+Task 06 computes a **whole-file percentile reference and MAD** per signal per band.
+If the stim epoch is still in the array when that runs, the stim artifacts — the
+largest excursions anywhere in the recording — inflate both. A raised reference and
+an inflated MAD mean artifacts must be *larger* to reach `z > 3` during recovery,
+so detection is suppressed exactly in the window where the post-stim dynamics being
+measured actually live.
+
+Splitting first makes the recovery reference a recovery-only statistic. This is
+also why the running-window baseline was rejected (task 06): same mechanism, same
+consequence.
+
+### Required behaviours
+- **No `vib` / stim-monitor channel on a `stim_recovery` file → block.** Do not
+  infer stim timing from the neural channels; that is circular and unnecessary
+  when a monitor channel exists.
+- Write recovery and stim as separate processing units, each with `t0_offset_s`
+  into the original recording, so absolute time is never lost. Recovery's local
+  `t = 0` is meaningful — the post-stim dynamics start there.
+- **Never filter across the split boundary.** Treat it as an epoch edge: mark the
+  first and last filter-settling window of each epoch `unassessable` (task 13
+  measures the settling time).
+- **Accounting: `excluded_epoch` is not `masked_motion`.** Keep them as separate
+  categories everywhere — QC, retention, and the coverage-confound regression
+  (task 19). A deterministic protocol exclusion counted as model-driven blanking
+  would corrupt exactly the check that is supposed to catch confounds.
+- **Valid-duration denominators use the recovery epoch's duration**, never the
+  original file's. Every rate downstream is wrong by the stim fraction otherwise.
+- The detected boundary is shown to the user with the `vib` envelope and is
+  **confirmable and manually adjustable** — carry over what
+  `splitStimRecoveryManual.m` does.
+- Record boundaries, `stim_duration_s` used, method (`matched` / `manual`),
+  detected duration, clipping flags, duty cycle, epoch count and the
+  threshold cross-check in provenance.
+
+### Tests
+- a synthetic 120 s stim in a 25-minute file (8% duty cycle): the matched-width
+  search recovers the onset to within one envelope window, and the p20/p80 rule
+  does **not** (**assert the old behaviour fails**, so the fix cannot be silently
+  reverted)
+- a 3 s dropout in the middle of the stim: one epoch, not two
+- recording starts 8 s into the stim: `clipped_start = True`, offset still correct,
+  recovery epoch intact
+- recording stops 20 s before the stim ends: **raises**, no recovery epoch emitted
+- a detected duration of 95 s with no clipping flags for review (outside ±12 s)
+- a detected duration of 113 s passes (inside ±12 s) — the tolerance is not tighter
+  than normal start/stop jitter
+- a file with no `vib` channel and condition `stim_recovery` raises
+- `stim_duration_s` is read from config, not hardcoded — changing it to 60 changes
+  the search width
+- the recovery epoch's band reference differs materially from the reference
+  computed on the unsplit file — the quantitative statement of "why the ordering
+  matters"
+- `excluded_epoch` duration never appears in the motion-blanking fraction
+
+### Acceptance
+Run on every existing `stim_recovery` recording. Report per file: detected
+duration against the expected 120 s, clipping flags, epochs found, and the boundary
+difference against the current MATLAB result. **Plot the distribution of detected
+durations** — it should be a tight spike at 120 s with a short tail of clipped
+captures, and anything else is a finding. Call out every file where the two methods
+disagree by more than the edge-refinement window; those are the files whose recovery
+reference has been contaminated, or whose recovery data was being discarded.
+<!-- /TASK -->
+
+<!-- TASK:04 slug=derivations deps=03 gate=no -->
+## Task 04 — Derivations (V1, V2, V3, T)
+
+**Module:** `derive/derivations.py`
+**Depends on:** 03
+**Gate:** no
+
+### Purpose
+Produce the signals every later step consumes. Both representations are kept and
+they do different jobs: raw contacts carry the artifact evidence and the
+inter-contact delay; the tripole has ~6× lower σ and is what spike detection reads.
+
+### Signature
+```python
+def build_derivations(rec: Recording) -> tuple[dict[str, np.ndarray], dict[str, tuple[float,float]]]:
+    """Returns ({signal_name: trace}, {cuff_id: (a, b)}).
+    Names are cuff-prefixed: 'L_V1', 'L_T', 'R_V2', ... plus 'stomach_ref'."""
+```
+
+### Algorithm
+```
+T = a·V1 + b·V3 − V2,    subject to a + b = 1
+```
+**MEASURED 2026-09-19 (animal J): do not fit — use the naive 0.5/0.5.** On cuff L
+both variance-minimising fits went degenerate (`a → 1.0`, i.e. the tripole
+collapsed to a bipolar) and gave σ(T) = 3.35 µV against 2.92 µV for 0.5/0.5. On
+cuff R the fitted and naive weights differ by <1% in σ(T). A bounded search over
+`a ∈ [0.2, 0.8]` lands on 0.50 and 0.59 — no better than naive. Minimising 20–300
+Hz variance reduces that band 32–36× but **does not improve, and can degrade, the
+300–5000 Hz noise floor**, which is the band that matters.
+
+**Measured σ reduction is 2.5–2.8×, not the ~6× this document assumed.** Correct
+any downstream reasoning that used 6×.
+
+**Strong empirical support for invariant 6 (detect on raw contacts, not `T`):**
+the fraction of samples above 4.5σ in 300–5000 Hz is **5.8–6.4% on single contacts
+but 0.044% on the tripole** — a ~130× reduction. Those single-contact "events" are
+overwhelmingly common mode, which is exactly the artifact evidence the tripole is
+defined to remove. Conversely, the clean-file z>3 flag rate is *higher* on the
+tripole (5–9%) than on single contacts (0.2–2.6%), so the tripole is also the
+wrong place to threshold.
+
+Historical note — the original instruction was to fit `(a, b)` per cuff by
+minimising `var(T)` restricted to **20–300 Hz** — the band where motion dominates and neural content is minimal. One
+free parameter, so solve in closed form or with a 1-D scalar minimiser; do not use
+a general optimiser.
+
+This corrects contact-impedance mismatch, which a hardware short cannot. For
+`config == "hw_tripole"` the tripole arrives pre-formed: pass it through and record
+`(a, b) = (nan, nan)`.
+
+Stomach: old cohort was hardware-referenced in TDT; new cohort is raw and referenced
+here. Produce `stomach_ref` for both and record which path was taken.
+
+### Tests
+- inject a known common-mode component with unequal per-contact gains; assert the
+  fitted `(a,b)` recovers the gain ratio to within 5% and that `T` suppresses the
+  common mode by >20 dB
+- assert `a + b == 1` exactly (to floating point)
+- assert σ(`T`) < σ(`V1`) on synthetic data with common-mode present, and that the
+  ratio is ≈1 when it is absent
+- `hw_tripole` input passes through unchanged with NaN weights
+
+### Acceptance
+On real recordings, `(a, b)` lands near `(0.5, 0.5)` and is **stable across
+sessions for the same animal**. Log it — drift in `(a,b)` across weeks is an
+electrode-degradation signal (see task 15).
+
+### Do not
+Do not run detection on `T` alone (invariant 6).
+<!-- /TASK -->
+
+<!-- TASK:05 slug=rpeaks deps=03 gate=no -->
+## Task 05 — R-peaks, gap rescue, best-channel ranking
+
+**Module:** `physio/rpeaks.py`
+**Depends on:** 03
+**Gate:** no
+
+### Purpose
+Produce a beat train good enough for HRV, and choose which of the 9 channels to use
+for it — replacing the manual `hrChanIdx`.
+
+Current method (`HR_BR_HRVAnalysis_new.m:160-179`) runs `findpeaks` on the
+**detrended raw** signal with the low-pass commented out (`yFilt = xFill`) and only
+`MinPeakDistance`. Measured at severe motion: 361/399 beats, 57 false, RR error 1.3%.
+
+### Signature
+```python
+@dataclass(frozen=True)
+class BeatTrain:
+    t_s:        np.ndarray                     # beat times
+    tag:        np.ndarray                     # 'detected'|'rescued'
+    gaps:       list[tuple[float, float, int]] # (t0, t1, m) unrecovered, m beats missing
+    rescue_rate: float
+    implausible_frac: float
+
+def detect_rpeaks(x: np.ndarray, fs: float) -> BeatTrain
+def rank_hr_channels(rec, trains: dict[str, BeatTrain]) -> tuple[str, pd.DataFrame]
+```
+
+### Algorithm — pass 1
+1. Decimate to ~2 kHz (`ftype='fir'`, `zero_phase=True`), then band-limit
+   **1–100 Hz** with `sos`. Band-limiting alone takes RR error 1.3% → 0.2%.
+2. `findpeaks`, prominence `3 × MAD-σ`, refractory `R_MIN`.
+3. Drop any peak closer than `0.55 × local median RR` (median over ±10 intervals).
+
+**`R_MIN` must be measured, not inherited.** The 90 ms value is from the human ECG
+literature where RR is 800–1000 ms. At rat rates it collides with the plausibility
+rule and can suppress real beats:
+
+| HR | RR | 0.55 × RR | vs 90 ms |
+|---|---|---|---|
+| 300 bpm | 200 ms | 110 ms | rule active |
+| 400 bpm | 150 ms | 82 ms | **rule vacuous** |
+| 500 bpm | 120 ms | 66 ms | refractory is 75% of RR |
+| 600 bpm | 100 ms | 55 ms | refractory is **90% of RR** — deletes real beats |
+
+**MEASURED (animal J, 10 min baseline):** HR **363–364 bpm**, RR median
+**164.7 ms**, identical across all 9 channels and every band tested. The RR
+histogram is a tight unimodal spike at 155–180 ms with essentially nothing real
+below 145 ms. So `R_MIN = 60 ms` (0.36 × RR) is safe, and the inherited **90 ms is
+not** — it sits at 0.55 × RR, on top of the plausibility threshold itself. Repeat
+the histogram on ≥5 files before pinning.
+
+### The plausibility rule must use a GLOBAL RR, not the accepted sequence
+
+The local-median form specified above **runs away**, measured on animal J: dropping
+a beat raises the local median, which raises the threshold, which drops more beats.
+
+| frac | local median (self-referential) | global median |
+|---|---|---|
+| 0.60 | short 6.35%, long 2.02% | short 2.11%, long 1.52% |
+| 0.70 | short 0.75%, long **10.96%** | short 0.09%, long 1.85% |
+| 0.75 | **collapses** — RRmed 330 ms, 54% dropped | short 0.00%, long 2.05% |
+
+The global version is monotone and stable to 0.85. Compute the threshold from
+`median(RR)` over the whole file, restricted to 80–500 ms. **Operating point:
+`0.75 × global RR` (≈124 ms here).** This is the same failure mode as the adaptive
+QRS threshold in §10.1 — adaptive state contaminated by the artifact it is meant
+to reject.
+
+### Motion is the dominant error source — measured
+
+Excluding the noisiest fraction of the record (by 10–150 Hz envelope) on LVN1:
+
+| beats kept | short-interval rate | long-interval rate |
+|---|---|---|
+| quietest 100% | 8.16% | 2.04% |
+| quietest 95% | 5.17% | 2.09% |
+| quietest 90% | 3.80% | 2.05% |
+| quietest 80% | **2.31%** | 2.21% |
+| quietest 50% | 0.50% | 2.43% |
+
+**False beats are motion-driven and collapse with noise; missed beats are flat at
+~2% regardless.** So the residual FP population is exactly what blanking removes,
+and the ~2% FN population is what the pass-2 rescue targets. This is the first
+quantitative evidence on real data that the blanking pipeline improves HRV.
+
+### Algorithm — pass 2, gap-targeted re-detection
+```
+for each interval d[j]:
+    lo = local median RR ; m = round(d[j]/lo)
+    if m < 2 or |d[j] − m·lo| > 0.20·lo:  continue      # 0.20 MEASURED TOO STRICT:
+                                                        # only 18-38 of ~350 long
+                                                        # intervals qualified on
+                                                        # animal J. Widen, and
+                                                        # re-measure once the
+                                                        # global-RR plausibility
+                                                        # fix lowers RR CV.
+    for q in 1 .. m−1:
+        win  = det[j] + q·d[j]/m  ±  0.25·lo
+        cand = findpeaks(x[win], prominence = 1.2·MAD-σ,
+                                 width in [0.5, 2.0] × median QRS width)
+        if cand empty:  record gap as unrecovered (store m)   # insert NOTHING
+        else:           take argmax correlation with this channel's QRS template
+                        append, tag 'rescued'
+```
+
+Relaxing the threshold is legitimate **because the search space shrank**: pass 1 has
+~2180 independent opportunities over 120 s (Bonferroni z = 4.08), pass 2 has ~30
+windows (z = 2.95) — a ~28% lower threshold at the same family-wise false-positive
+rate, before the width and template priors are counted.
+
+**Never insert a fabricated beat.** Measured at 9% missed beats, 300 runs:
+
+| handling | RMSSD | SDNN | SD1 | placement error |
+|---|---|---|---|---|
+| gap left in (`diff` across) | +771% | +766% | +771% | — |
+| midpoint insertion | −6.3% | −4.2% | −6.3% | 2.82 ms mean |
+| re-detected in window | +0.0% | +0.0% | +0.0% | 0.24 ms mean |
+
+Midpoint insertion forces the flanking intervals equal, so their successive
+difference is exactly zero — RMSSD/SD1/pNN are all successive-difference
+statistics, so the bias is systematic and **downward**, the same direction as a
+vagal-tone effect.
+
+Downstream contract: rate may use `m` to count missing beats; HRV excludes every
+interval touching an unrecovered gap.
+
+### Algorithm — best-channel ranking
+```
+template  = mean of ±40 ms windows about the beats   (non-time-locked content
+                                                      averages down as 1/sqrt(N))
+SE[j]     = std across beats at sample j / sqrt(n_beats)
+SNR[ch]   = peak_to_peak(template) / mean(SE)
+choose argmax SNR subject to implausible_frac and rescue_rate gates
+```
+
+SNR measures **reproducibility**, which predicts HRV reliability, and it is
+self-policing: a channel detecting artifacts averages to a near-flat template. Worked
+values from simulation — clean 234, noisy-with-amplitude-wander 27.6, no-cardiac 4.7.
+
+Gates (veto, not ranking): `implausible_frac` and `rescue_rate` above threshold
+disqualify a channel outright. Beat count vs the median across channels is a sanity
+print only.
+
+**Re-pick per recording and log it.** A channel that stops being best is a drift
+signal.
+
+### Why no motion mask is needed first
+Beats lost inside artifacts sit in spans that get masked anyway, so the information
+pass 1 cannot recover is information the pipeline was going to discard. This is what
+breaks the R-peak / motion circularity — do not add a dependency on step 08.
+
+### Tests
+- `make_ecg(weak_frac=0.09)`: pass 1 misses the attenuated beats, pass 2 recovers
+  ≥90% of them with fiducial error <1 ms
+- RMSSD/SD1 computed from the rescued train are within 2% of ground truth; the
+  midpoint-insertion variant is **not** (assert the −6% bias reproduces, so the
+  test fails if someone reintroduces insertion)
+- an empty rescue window yields a gap record and **no new beat**
+- `rank_hr_channels` on three synthetic channels reproduces the ordering above
+- a pure-noise channel with artifact-driven "beats" ranks last
+
+### Acceptance
+On real data, the chosen channel matches Andrea's manual `hrChanIdx` on a majority
+of recordings. **Where it disagrees, plot both and report** — do not assume either
+is right.
+
+### Do not
+No adaptive threshold (`PIPELINE.md` §10.1). No insertion of fabricated beats.
+<!-- /TASK -->
+
+<!-- TASK:06 slug=envelopes deps=04,03B gate=no -->
+## Task 06 — Band envelopes, reference, z
+
+**Module:** `bands/envelope.py`, `bands/reference.py`, `bands/zscore.py`
+**Depends on:** 04, **03B** — the stim epoch must already be split off, or its
+artifacts inflate the reference and MAD and suppress detection during recovery
+**Gate:** no
+
+### Signature
+```python
+def band_envelope(x, fs, lo, hi, window_s, grid_s=GRID_S) -> np.ndarray   # (n_frames,)
+def file_reference(env, pct) -> float
+def zscore(env, ref) -> np.ndarray
+```
+
+### Algorithm
+1. Band-limit with `sos`. For bands below ~100 Hz, **decimate first** — a 1 Hz
+   corner at 24.4 kHz is a normalised frequency of 8×10⁻⁵ and `butter(...,'ba')`
+   returns numerical garbage there. This bug produced a MAD-σ of 10²⁰⁸ during
+   design; guard against it with an explicit assertion on the filter output range.
+2. RMS envelope over the band's own window, sampled on the shared 10 ms grid.
+3. Take logs: `l = log(max(env, eps))`. Envelopes are positive and right-skewed;
+   the log is what makes the null symmetric.
+4. `ref = median(l)` and `scale = 1.4826 × MAD(l)`, **one scalar pair per
+   (signal, band), over the whole file**. Then `z = (l − ref) / max(scale, floor)`.
+
+   *Measured 2026-09-19:* the earlier linear form (`ref = p10` of the linear
+   envelope, scale = its MAD) puts median z at 1.00 and p90 at 3.05 — about 10% of
+   frames over z = 3 **per pair**, which the union across 36 pairs turns into
+   40–55% of the file. The log form gives median 0, p90 1.44, p99 4.21. See
+   invariant 5 and task 09.
+5. Gate dead/saturated channels **before** dividing: a flat channel gives MAD → 0
+   and z → ∞.
+
+### Why a whole-file scalar and not a running window
+A running baseline adapts to slow change — and in a post-stim recovery file the
+slow change *is the measurement*. A rising baseline would require artifacts to be
+larger to cross threshold during recovery than at baseline, manufacturing a
+condition confound. It also has no edge problem, which matters because the post-stim
+dynamics live in the first window.
+
+### Memory
+9 channels × 6 bands × 37 M samples is ~16 GB if materialised. **Stream per band**;
+only the 100 Hz envelope is retained.
+
+### NaN handling
+Interpolate-then-restore is fine where gaps are short relative to the band's period
+(30 ms at 300–5000 Hz). For **0–2 and 0.5–3 Hz**, a 1 s gap is half a cycle of the
+signal being measured — process **epoch-wise** with a minimum epoch length and mark
+short epochs `unassessable`.
+
+### Known limitation — do not fix here
+In the ENG band the envelope contains neural activity, so `z` conflates signal and
+noise by construction. Measured: clean-frame p99 rises 2.33 → 22.14 between a quiet
+and an active animal. The discriminators are **classifier features** (onset rate,
+cross-channel commonality, band ratio), not generator parameters. **Do not tune the
+generator to stop over-firing during activity changes.**
+
+### Tests
+- white noise of known σ through each band: measured envelope matches the
+  analytic expectation within 5%
+- effective DOF check: the variance of the envelope matches `2·B·T ≈ 30` within 20%
+  for every band
+- filter-stability assertion fires on a deliberately ill-conditioned `ba` design
+- a flat (dead) channel is gated, not divided by zero
+- slow-band epoch handling: a 1 s gap in a 0.05 Hz signal produces two epochs, not
+  one interpolated trace
+- memory: a 25-minute 9-channel synthetic completes under a stated RSS ceiling
+
+### Acceptance
+All six bands produce finite z on real data; peak memory stays within the ceiling;
+the reference scalars are logged per (signal, band).
+<!-- /TASK -->
+
+<!-- TASK:07 slug=candidates deps=05,06,02 gate=no -->
+## Task 07 — Candidate generation
+
+**Module:** `detect/candidates.py`
+**Depends on:** 02, 05, 06
+**Gate:** no (but task 09 measures whether it worked)
+
+### Signature
+```python
+def generate_candidates(
+    z: dict[tuple[str,str], np.ndarray], beats: BeatTrain,
+    cardiac_windows: dict, video: VideoMotion | None = None,
+    z_enter: float = 3.0, z_exit: float = 1.5,
+    min_dur_s: float = 0.020, merge_gap_s: float = 0.100,
+    duration_cap_s: float | None = None,
+) -> list[Candidate]
+```
+
+### Algorithm
+```
+enter on  z > z_enter
+exit  on  z < z_exit                       # hysteresis
+discard   duration < min_dur_s
+merge     gaps < merge_gap_s
+if duration > duration_cap_s:  route to review, never auto-mask
+suppress inside cardiac_window — 100–300 Hz ONLY
+where video motion exceeds its own threshold:
+    also enter on z > 2.0, tag provenance='video_assisted'
+```
+
+`duration_cap_s` = the **99th percentile of the labelled segment durations in the
+existing 43 recordings**. Compute it once from `*_segment_indices.mat` and pin it;
+do not guess. Anything longer is a sustained level shift, not an event.
+
+### Threshold
+`z_enter = 3.0` is a starting value; the defensible range is 2–4, bounded below by
+class balance (≥5% true positives — with ~150 real artifacts per recording that
+means ≤3000 candidates, i.e. flag ≲3% of frames) and above by recall. **Sweep it in
+task 09 and pin it there**, do not tune it here.
+
+### This step's only job is recall
+Precision is task 12's job. Candidate count is **not** review burden — the
+classifier judges every candidate and humans label a sample.
+
+### Tests
+- injected artifacts at known times: every one produces a candidate whose span
+  contains the injected span
+- hysteresis: a z-trace dipping to 2.0 mid-event yields one candidate, not two
+- a cardiac-only synthetic yields no candidates in 100–300 Hz and **does** yield
+  them in 300–5000 Hz if a real artifact is present there (proves suppression is
+  band-scoped)
+- duration cap routes to review rather than dropping
+- `video_assisted` provenance is set only where video exceeded threshold
+
+### Acceptance
+Candidate count per recording and the fraction of frames flagged, reported per
+animal, at the pinned threshold.
+
+### Do not
+Do not add rate targeting (`PIPELINE.md` §10.3).
+<!-- /TASK -->
+
+<!-- TASK:08 slug=matlab-fixes deps=01 gate=no -->
+## Task 08 — MATLAB correctness fixes in `processing_new`
+
+**Module:** `processing_new/*` (independent of the detector; run in parallel)
+**Depends on:** 01
+**Gate:** no
+
+### Purpose
+**Each of these currently makes a better detector look worse**, because better
+detection produces more, shorter, better-placed gaps. Fixing them first means the
+detector is evaluated on instruments that can register its improvement.
+
+| File | Change |
+|---|---|
+| `step0_load_data.m` | read per-consumer masks; NaN the `removedSegmentIdx` regions if task 01 landed on the MATLAB side |
+| `pipeline_params.m` | `edgeBufferMs` from measured `impz`; `cardiacRemoveWinMs` **and** `envCardiacGuardMs` from task 02 — both, or censoring is inconsistent across stages |
+| `step1a_blank_cardiac.m:41-43` | per-channel, per-band windows instead of `D.y(blank,:) = NaN` |
+| `step2_noise_sigma.m:82-97` | **keep** the Quian Quiroga estimator — it is correct (`std` inflates 35% at 20 spk/s where Quiroga inflates 1.9%) — but take σ from a **fixed session reference**, not a 5 s running window. Quiroga still inflates 12% at 100 spk/s, so a post-stim rate rise raises the 4.5σ threshold and suppresses detection of the effect being measured |
+| `HR_BR_HRVAnalysis_new.m:160-165` | restore a deliberate 1–100 Hz band before `findpeaks` |
+| `HR_BR_HRVAnalysis_new.m:276-287` | runs-aware successive differences for RMSSD, pNN5, SD1, SD2, SampEn, ApEn. The runs list already exists in `dfaRR_gapAware.m:24-25` and was never propagated |
+| `HR_BR_HRVAnalysis_new.m:679` | `heartCountSeries` needs a valid-duration denominator |
+| `HR_BR_HRVAnalysis_new.m` | promote `RR_implausibleFraction` / `br_implausibleFraction` from warnings to masks — for a periodic always-present signal, an implausible rate *is* evidence of contamination |
+| `slowWaveAnalysis_new.m:159-161` | pool peaks across clean runs instead of taking only the longest — two clean 28 s halves in a 60 s window currently return NaN |
+| `bulk_mixed_models.m` | coverage weights + covariate + minimum-coverage exclusion. `nRR_used`, `fr_validFrac`, `validDur_s` are all computed and none is used |
+| `browseMotionArtifacts.m:34` | `validateattributes(..., 'finite')` throws on NaN, so an already-blanked file cannot be re-browsed. Remove if the browser is kept |
+
+**Reuse rather than reinvent:** `dfaGapAware.m` (pooled runs), `step5f_fano_slope.m`
+(epochs + rate-matched surrogates carrying identical censoring — extend the same
+pattern to CV2 and LV), `step5e_multiband_validate.m` (peri-R histogram validation).
+
+### Tests
+MATLAB-side: for each fix, a before/after on one recording with the delta reported.
+The RMSSD fix in particular should move the number materially — if it does not, the
+splice bug was not being hit and that is worth knowing.
+
+### Acceptance
+Every row done or explicitly deferred with a reason. Report the numeric before/after
+for the HRV and slow-wave fixes.
+<!-- /TASK -->
+
+<!-- TASK:09 slug=recall-gate deps=07 gate=yes -->
+## Task 09 — Candidate recall gate
+
+**Module:** `detect/recall.py`, `tests/test_recall.py`
+**Depends on:** 07
+**Gate:** **YES — this can invalidate the whole architecture**
+
+### Purpose
+The two-stage design rests on one assumption: **a candidate is generated wherever a
+real artifact exists.** The classifier can only improve precision; it cannot recover
+an artifact that was never proposed. Measure this before building the classifier.
+
+### Measure on newly labelled NEW-cohort data
+The gate runs against exhaustive human labels on 2–3 new animals (Part A.6, step
+11), **not** against the 43 old recordings — see Part A.6 for why the old cohort
+cannot test this generator. Synthetic injection is demoted to a secondary probe
+for artifact classes the labels may not contain.
+
+### What the old labels are still good for
+Two numbers, read from `*_segment_indices.mat` alone — no signal files, no cost:
+- the **duration cap** for task 07 (99th percentile of labelled segment durations),
+  currently a guess
+- **artifact prevalence** — roughly what fraction of a recording was marked, which
+  says whether a 12–22% clean flag rate is plausible or wild
+
+Grab both opportunistically; do not block on them.
+
+### Method A — synthetic injection (secondary)
+Inject artifacts of known type, amplitude and duration into real clean recordings.
+Reuse the Phase 2 synthetic machinery in `GEMSBlanking` — it moves from a validation
+figure to a runtime component. Sweep amplitude ratio 0.5–20× and duration 5 ms–5 s
+across all four artifact kinds. Report a recall surface, not a scalar.
+
+### Method B — human recall audit
+Sample a few minutes from each of ≥6 recordings, have them scrolled in full (task
+16's audit mode), and count artifacts a human finds that no candidate covers.
+
+### Threshold sweep
+Sweep `z_enter` over 2.0–4.0. For each value report recall, candidate count,
+fraction of frames flagged, and true-positive fraction on the 43 labelled
+recordings. **Pin the value** that meets both: recall ≥98% and ≤3000
+candidates/recording.
+
+### MEASURED 2026-09-19 — first run on real data (animal J baseline, 601 s)
+
+Injected 48 artifacts (4 kinds × 4 absolute amplitudes × 3 durations) as common
+mode with per-channel gain jitter; z on the **log** envelope, median reference,
+6 bands, 9 raw contacts.
+
+| nmin | z | clean flag | cands | 200 µV | 1 mV | 5 mV | 20 mV |
+|---|---|---|---|---|---|---|---|
+| 1 | 4 | 22.1% | 136 | 75% | 92% | **100%** | **100%** |
+| 1 | 6 | 11.9% | 105 | 42% | 75% | **100%** | **100%** |
+| 3 | 4 | 8.4% | 41 | 42% | 83% | **100%** | **100%** |
+| 3 | 6 | **1.8%** | 6 | 0% | 58% | 92% | **100%** |
+
+**Verdict: conditional. Large artifacts (≥5 mV) are caught reliably; ~1 mV is
+marginal; 200 µV is not caught at a usable flag rate.** And 200 µV matters — it
+arrives as common mode, the tripole rejects it only ~2.5×, so it still lands at
+~27σ on `T`.
+
+**Four defects were found in the test itself before these numbers, and each one
+had produced a spurious failure.** Record them so they are not repeated:
+
+1. **z as specified (`ref = p10`, scale = MAD of the linear envelope) is
+   mis-centred.** It puts median z at 1.00 and p90 at 3.05, so ~10% of frames
+   exceed z=3 *per pair*. **Use a robust z on the log envelope** (median
+   reference): median 0, p90 1.44, p99 4.21. Envelopes are positive and
+   right-skewed; the log makes the null symmetric. This also matches the
+   `onset_rate` feature already defined on the log envelope.
+2. **The union across (signal × band) pairs is a multiple-comparisons problem.**
+   Per pair the clean flag rate is only 0.2–3.4%, which is on target — but the
+   union of 36 pairs reaches 40–55%. Any threshold must be set on the
+   **family-wise** rate, or cross-channel agreement (`nmin`) used to reduce the
+   family. The spec's "≤3% of frames" target was silently per-pair.
+3. **Omitting the slow bands made every long artifact look missed.** A 2 s event
+   is 0.25–0.5 Hz and invisible to bands above 2 Hz. Always run all six.
+4. **Amplitudes must be absolute, not multiples of the wideband MAD.** MAD here is
+   26–62 µV, so "16× MAD" is ~500 µV — below this recording's own p99.9 (370–870
+   µV) and far below its real excursions (2 mV to 2 V). Scaling to MAD made
+   realistic artifacts look tiny.
+
+### Pass condition — REVISED
+The original "≥98% of injected synthetics" over a grid that includes artifacts at
+1× the noise floor is **unachievable and wrong**: an artifact at the noise level
+is undetectable by construction and also harmless. The criterion must be tied to
+what damages a consumer:
+
+> ≥98% recall for artifacts **above each consumer's tolerance**, at a family-wise
+> clean flag rate ≤5%.
+
+Deriving the per-consumer damaging amplitude is a prerequisite, not an afterthought.
+
+### Synthetic injection is NOT sufficient as the gate
+It cannot distinguish "the generator over-fires" from "the recording is genuinely
+contaminated", because there are no labels. On this file the clean flag rate at a
+permissive threshold is 12–22%, and **nothing in the experiment can say whether
+that is wrong.**
+
+**Use the 43 already-labelled recordings instead.** Replay the generator against
+the existing human interval labels and measure real recall and real precision.
+That is a direct measurement, needs no injection, and should run before any
+further threshold tuning. Keep injection as a *secondary* probe for artifact
+classes the labels may not contain.
+
+### If it fails
+**Stop. Do not proceed to tasks 10–12.** Two branches:
+1. Recall fails only for a diagnosable class (e.g. slow drifts) → add a band or a
+   generator feature for that class and re-measure.
+2. Recall fails broadly → **abandon the two-stage split** and build the fallback: a
+   1D U-Net over the multi-band envelope stack, trained as dense segmentation with
+   the same LOAO protocol. That learns the detection function instead of
+   thresholding a hand-built statistic.
+
+Record which branch was taken and why.
+
+### Do not
+Do not relax the pass condition to proceed. The gate exists precisely because the
+rest of the architecture is worthless without it.
+<!-- /TASK -->
+
+<!-- TASK:10 slug=label-conversion deps=07,09 gate=no -->
+## Task 10 — Convert 43 recordings to event judgments
+
+**Module:** `model/labels.py`
+**Depends on:** 07, 09
+
+### Purpose
+The existing labels are human-dragged intervals. The new target is one judgment per
+candidate **event**. Convert without inventing negatives.
+
+### Algorithm
+1. Replay candidate generation over all 43 recordings.
+2. A candidate overlapping a human-marked segment inherits `motion`
+   (`source='inherited'`).
+3. **Everything else is `unjudged`, not `negative`.**
+4. Sample the unjudged and have them reviewed to estimate how much was previously
+   being mislabelled as clean.
+
+### Why this matters
+The old design assigned unmarked spans `w_neg = 0.3`, so real artifacts the human
+skipped taught the model that artifacts are clean. That is the most likely reason
+recall resisted five separate reweighting knobs, and it is not fixable by
+reweighting — only by not asserting the label.
+
+### Outputs
+A parquet table: `recording, animal, candidate fields, judgement, source`. Plus a
+report: how many candidates inherited `motion`, how many are `unjudged`, and the
+estimated true-positive rate among the unjudged sample.
+
+### Tests
+- a candidate overlapping a labelled segment by ≥50% inherits `motion`
+- a candidate in an unmarked span is `unjudged` and is **excluded** by the training
+  loader (assert the loader drops it — this is the guard against the old bug)
+
+### Acceptance
+Report the `unjudged` true-positive estimate. If it is high, say so plainly: it
+quantifies how much the previous model was being actively mistrained.
+<!-- /TASK -->
+
+<!-- TASK:11 slug=features deps=07 gate=no -->
+## Task 11 — Features per candidate
+
+**Module:** `detect/features.py` (replaces the Phase 1 parquet builder)
+**Depends on:** 07. Tasks 17 (video) and 18 (velocity) contribute **optional
+columns**; build and ship the feature matrix without them, then add the columns
+when those tasks land. They are not build dependencies — treating them as such
+creates a cycle through 12→13→14→15.
+
+### Hard constraints
+- **Channel-count independent**: aggregate per-channel statistics (max, median,
+  fraction above threshold). **Never concatenate per-channel columns** — one model
+  must serve both the 5-channel and 9-channel cohorts.
+- **Animal-invariant**: ratios and cross-channel relations. Absolute microvolts
+  enter only as `z`.
+
+### Feature families
+- **band-power ratio 100–300 ÷ 300–5000** — motion carries low-band energy a nerve
+  burst does not; close to a free discriminator
+- **spatial**: fraction of channels above threshold; mean pairwise envelope
+  correlation; each channel's power ÷ median across channels; common-mode ÷
+  residual power; within-cuff vs across-cuff agreement (contacts 1.5 mm apart see
+  near-identical artifact and different neural signal)
+- **onset rate** = derivative of the **log** envelope (scale-free fractional rate).
+  This is where sustained-vs-transient discrimination lives: level and derivative
+  are correlated for brief events and decouple for sustained ones
+- **shape**: envelope derivative, slew rate, kurtosis, line length, spectral
+  entropy, spectral edge
+- **clipping fraction** — also a hard mask criterion in task 14
+- all of the above recomputed at ±100, 250, 500 ms of context
+- **video** (task 17): motion energy and its derivative, max over ±100/250/500 ms,
+  time since last motion peak, **per ROI: headstage, tether, commutator**
+- **non-physiological-velocity energy** (task 18), new cohort only
+
+### Tests
+- feature vector length is identical for a 5-channel and a 9-channel recording
+- scaling every channel by 10× leaves all features unchanged except the explicit
+  amplitude ones (the animal-invariance test)
+- the 100–300 ÷ 300–5000 ratio separates injected motion from injected spike bursts
+  with AUC > 0.8 **on synthetic data alone**, before any training
+
+### Acceptance
+Feature matrix builds for both cohorts; the invariance tests pass; per-feature
+missing-value rates reported.
+<!-- /TASK -->
+
+<!-- TASK:12 slug=classify deps=10,11 gate=no -->
+## Task 12 — Classifier: three training modes
+
+**Module:** `model/train.py`, `model/evaluate.py`, `model/modes.py`
+**Depends on:** 10, 11
+
+### Reuse wholesale (import, do not fork)
+`GEMSBlanking:detector/retrain.py` (LightGBM + hyperopt),
+`detector-pyqt/ui/workers/hyperopt_worker.py`, `detector/review.py` (SHAP HTMLs),
+`detector/heldout_eval.py`, `detector/animal_id.py:extract_animal_letter`, and the
+existing promotion / rollback / `current_model` pointer / `provenance.json`
+machinery. Per-animal model support already exists in `GEMSBlanking` — extend it,
+do not rebuild it.
+
+### Target and weighting (all modes)
+- **Target**: one judgment per candidate event — `motion` / `physiology` /
+  `unsure`. Not a per-window label. `unsure` and `unjudged` are excluded from
+  training *and* from scoring.
+- **Weight `provenance='video_assisted'` positives up.** Boundary examples by
+  construction — the electrical threshold missed them, so their signature is weak —
+  and they are the route by which video improves performance on **video-less**
+  recordings. **Measure the cost**: precision on video-less recordings with and
+  without the upweighting. Report both.
+- **No temporal smoothing** (`PIPELINE.md` §10.4).
+
+### Baseline first
+Before training anything, run a **fixed-threshold baseline**: classify every
+candidate as motion. Then a single-feature threshold on the 100–300 ÷ 300–5000
+ratio. Report both. **If no learned mode beats them, ship the threshold.** This is
+the cheapest possible outcome and must be ruled out explicitly.
+
+---
+
+### The three modes
+
+The same features, the same candidate definition, the same hyperparameter search.
+**Only the training corpus and the evaluation protocol change.**
+
+```python
+class TrainingMode(StrEnum):
+    POOLED    = "pooled"      # all animals, target animal fully excluded
+    ADAPTED   = "adapted"     # pooled prior + target animal's own labelled events
+    PER_ANIMAL= "per_animal"  # target animal only
+```
+
+| Mode | Training corpus | Applies to | Protocol |
+|---|---|---|---|
+| **A · POOLED** | every animal except the target | a brand-new animal with **zero** labels | LOAO |
+| **B · ADAPTED** | pooled + the target animal's labelled events, upweighted | a new animal after ~50 labels | LOAO-then-adapt, held-out recordings of the target animal |
+| **C · PER_ANIMAL** | the target animal only | that animal only | LORO within animal |
+
+**Mode A is mandatory.** It is the only mode that can process an animal with no
+labels at all, so it must exist regardless of what the comparison shows. Modes B
+and C are optional and are justified only by beating it.
+
+### Mode B is the one that matches deployment, and it is missing from the two-mode framing
+
+The labelling budget already assumes **~50 judged events per new animal**. So the
+real deployment scenario is **few-shot**, not zero-shot: by the time a new animal's
+data is processed, some of its labels exist. Mode A measures a harder problem than
+the one actually faced, and mode C throws away the other animals entirely. Mode B
+is the one that uses everything available.
+
+Implement B as: train the pooled model, then continue training (LightGBM
+`init_model=`) on a corpus of pooled events plus the target animal's events at
+weight `w_adapt`. Sweep `w_adapt` over `{1, 3, 10, 30}` and report the curve —
+do not pick a value by intuition.
+
+**Strict separation:** the target animal's events used for adaptation must never
+appear in that animal's evaluation set. Split the target animal's labelled events
+by *recording*, not by event, so no recording contributes to both.
+
+---
+
+### How to compare the modes — read this before reporting any number
+
+**Comparing modes A and C directly is invalid**, and this is the main risk in the
+proposal. They are evaluated on different tasks:
+
+- mode A (LOAO) predicts on an animal it has **never seen**
+- mode C (LORO) predicts on a **different recording of an animal it knows**
+
+LORO is the easier task, so mode C will look better whether or not it is better.
+Any comparison must hold the protocol fixed.
+
+**The only valid comparisons:**
+
+| Question | Compare | Protocol held fixed |
+|---|---|---|
+| Is there animal-specific structure worth capturing? | B vs C | both on held-out recordings of the target animal |
+| What does a new animal cost us? | A vs B | both on held-out recordings of the target animal |
+| Is pooling actively harmful? | A vs C | **not directly comparable — do not report this pair** |
+
+**The decisive comparison is B vs C.**
+- If **B ≥ C**, the pooled prior is worth keeping, mode C ships nothing, and you
+  maintain one model plus an adaptation step instead of N models.
+- If **C > B** materially, that is *not* a reason to ship per-animal models. It
+  means the pooled data is actively hurting, which can only happen if the features
+  are **not animal-invariant** — i.e. a task 11 bug. Investigate task 11 first, via
+  SHAP on the features that differ most between the two.
+
+### Corpus-size imbalance — normalisation does not solve this
+
+Feature normalisation (z-scoring, ratio features, animal-invariant construction)
+addresses **covariate shift**: features sitting at different scales across animals.
+It does nothing about **training set size**, which is a *variance* problem, not a
+*scale* problem. A mode-C model trained on one animal's ~10 recordings sees roughly
+1/N the events of the pooled model and will sit at a different point on its
+learning curve. Any A-vs-C or B-vs-C difference is then confounded by corpus size.
+
+**Required control: the learning curve.** Subsample the pooled/adapted training set
+to the *same event count* as the per-animal set and retrain. Report:
+
+```
+performance vs training events, per mode, per animal
+  x: n_training_events, log-spaced, >=5 points
+  y: LOAO / within-animal F1 with bootstrap CI
+```
+
+If the per-animal curve lies on the pooled curve at equal event count, the
+difference was corpus size and there is no animal-specific structure. If it lies
+above, there is. **This plot is the deliverable that answers the colleague's
+question**; the headline F1 numbers do not.
+
+Also report, per animal: labelled event count, positive fraction, and recording
+count — modes cannot be interpreted without them.
+
+### Calibration
+Probabilities from models trained on different corpora are **not comparable**.
+Task 13 thresholds on `P(motion)`, so every mode must be calibrated on held-out
+data (isotonic or Platt) before its probabilities are used, and the calibration
+must be fitted per mode per animal. An uncalibrated mode-C model will mask a
+different amount of data than mode A at the same nominal threshold, and that
+difference will look like a detection difference.
+
+### Prior evidence — state it in the report
+Andrea has already run per-animal training: it **performed worse than pooling all
+animals together**. That is direct evidence against mode C, with one caveat — it is
+not known whether the protocols were matched at the time, so it may have been the
+invalid A-vs-C comparison above. The task is to redo it correctly, not to assume
+either answer.
+
+### Validation protocol
+**Leave-one-animal-out, reported per animal, never averaged.** LORO measures
+within-animal generalisation; the stated goal is cross-animal, so LORO reads
+optimistic. Report both where a mode requires it, but the shipping decision for
+mode A is LOAO.
+
+The 4 new unlabelled animals are a **one-shot prospective test set**. They must be
+labelled **blind, before any model sees them**. Do not iterate against them, and do
+not use them to choose between modes.
+
+### Tests
+- the training loader drops `unjudged` and `unsure` (regression guard on task 10)
+- LOAO folds contain no animal on both sides — assert by animal letter
+- **mode B leakage guard**: assert no recording of the target animal appears in
+  both the adaptation corpus and the evaluation set. This is the easiest mistake in
+  the whole task and it inflates mode B exactly where the comparison matters
+- mode C training corpus contains exactly one animal letter
+- a deliberately leaky feature (recording index) is rejected by a leakage check
+- calibration: post-calibration reliability curve within tolerance on held-out data
+
+### The corpus spec is an explicit, named, immutable object
+Training never takes "all the data". It takes a **corpus spec** built by the user
+on the Train screen (task 16A) and written to `corpora/<corpus_id>.json`:
+
+```json
+{ "corpus_id": "c_2026-09-18_baseline43",
+  "created_by": "andrea", "created_at": "...",
+  "recordings": [ {"animal":"F","session":"...","role":"train"},
+                  {"animal":"O","session":"...","role":"held_out"},
+                  {"animal":"L","session":"...","role":"excluded",
+                   "reason":"electrode failure wk3"} ],
+  "notes": "..." }
+```
+
+`role` ∈ `{train, held_out, excluded}`, per **recording**, not per animal — this
+preserves the flexibility of the existing per-animal tab's `held_out` checkboxes
+while making the choice reproducible and shareable. An `excluded` recording
+**requires a reason string**; exclusions without recorded reasons are how a corpus
+quietly becomes indefensible.
+
+The spec is immutable once used by a training run; editing produces a new
+`corpus_id`. Every model's provenance names the `corpus_id` it was trained on, so
+two lab members can tell whether they trained on the same data.
+
+### Train all three, always
+A training run trains **all three modes** for the selected animals in one pass and
+emits the comparison artifact below. Training one mode in isolation is allowed for
+iteration but does not produce a shippable model — the comparison is part of the
+deliverable, not an optional follow-up.
+
+### The comparison artifact
+`model/compare.py` writes `comparison_<timestamp>.parquet` + a rendered report
+containing, per animal:
+
+| Output | Content |
+|---|---|
+| **Learning curves** | F1 vs `n_training_events`, log-spaced, ≥5 points, one line per mode, bootstrap CI. **The deliverable that answers the per-animal-vs-pooled question.** |
+| Matched-protocol table | B vs C on held-out recordings of the target animal; A vs B likewise. A-vs-C present but explicitly marked `not comparable` |
+| Corpus table | labelled events, positive fraction, recording count, per animal per mode |
+| Calibration | reliability curve per mode |
+| Verdict | B ≥ C, or C > B with the task 11 investigation flagged |
+
+This feeds the dashboard in task 16B; it must be readable as a file on its own too.
+
+### Acceptance
+1. Per-animal, per-mode precision / recall / F1 against both baselines.
+2. The learning-curve plot, per mode per animal.
+3. The B-vs-C verdict, with the task 11 investigation triggered if C > B.
+4. Calibration curves per mode.
+5. SHAP review HTML for the top features of the pooled model.
+6. `provenance.json` recording mode, corpus composition, and `w_adapt`.
+
+### Do not
+Do not report an A-vs-C comparison as if it were meaningful. Do not ship mode C
+without the learning-curve control. Do not tune `w_adapt` against the prospective
+test animals.
+<!-- /TASK -->
+
+<!-- TASK:12A slug=model-registry deps=12 gate=no -->
+## Task 12A — Model registry and **user-selected** inference
+
+**Module:** `model/registry.py`
+**Depends on:** 12
+
+### Purpose
+With three modes there is more than one model, so something must record which
+model scored which recording. **That choice belongs to the user, not to an
+automatic rule** — this is a research tool, and a pipeline that silently swaps
+models between runs makes results unreproducible and unexplainable.
+
+The registry's job is therefore to **present the options honestly and record the
+choice**, never to decide.
+
+### Signature
+```python
+@dataclass(frozen=True)
+class ModelSpec:
+    mode:        TrainingMode
+    animal:      str | None        # None for POOLED
+    version:     str
+    corpus_hash: str               # hash of the training event ids
+    calibrator:  Path
+    trained_at:  datetime
+    metrics:     dict              # the numbers it shipped on, by protocol
+    n_train_events: int
+
+def list_applicable(rec: Recording, registry: Registry) -> list[ModelSpec]
+    """Every model that MAY be applied to this recording, with its metrics
+    attached so the user can choose on evidence. Never returns a default."""
+
+def run_inference(rec: Recording, chosen: ModelSpec, registry: Registry) -> ...
+    """Fails loudly if `chosen` is not in list_applicable(rec)."""
+```
+
+### Rules
+- **No automatic selection anywhere.** There is no "default model", no fallback
+  chain, no `current_model` auto-resolution at inference time. If the user has not
+  chosen, the run does not start.
+- `list_applicable` **excludes** models that cannot legally apply: a `PER_ANIMAL`
+  or `ADAPTED` model for a different animal. Assert on `animal` mismatch and fail
+  loudly rather than filtering silently.
+- Each returned `ModelSpec` carries the metrics it shipped on **and the protocol
+  those metrics came from**, so the picker can show "F1 0.88 (LOAO)" next to
+  "F1 0.94 (LORO)" without inviting the invalid comparison (invariant 12).
+- Mark a model **`unvalidated`** if it has no held-out metrics. It stays
+  selectable — a research tool should not block experimentation — but the choice is
+  flagged in provenance and in the UI.
+- Registry is append-only. Promotion and rollback reuse the existing
+  `current_model` pointer machinery, extended to a pointer **per (mode, animal)**;
+  that pointer is a *label*, not an auto-selector.
+- The chosen `ModelSpec` goes into the mask provenance (task 15). **A mask whose
+  provenance does not name a model is invalid.**
+
+### Batch runs
+For a batch, the user chooses **once per animal**, not once per recording, and the
+UI shows the resolved assignment table for confirmation before anything runs. A
+batch spanning animals with different chosen modes is allowed and is recorded — but
+the QC report must surface it, because mode then varies across the dataset and
+becomes a covariate (see task 19).
+
+### Tests
+- `list_applicable` never returns a `PER_ANIMAL` model for another animal
+- `run_inference` with a model not in `list_applicable` raises
+- no code path produces a `ModelSpec` without an explicit user choice — assert by
+  searching for a default argument in the inference entry point
+- provenance round-trips the full `ModelSpec`
+- an `unvalidated` model is selectable and is flagged in provenance
+
+### Acceptance
+Given an animal with all three modes trained, the picker lists all three with
+their metrics and protocols, and running without a choice is impossible.
+<!-- /TASK -->
+
+<!-- TASK:13 slug=extent deps=12 gate=no -->
+## Task 13 — Extent per consumer
+
+**Module:** `extent/tolerance.py`
+**Depends on:** 12
+
+### Purpose
+A confirmed motion event does not have one duration — it has one duration **per
+consumer**, because a 200 ms excursion destroys spike detection and is invisible to
+the slow-wave analysis.
+
+### Signature
+```python
+def compute_extent(event: Event, z: dict, consumer: str) -> tuple[float, float]
+```
+
+**`P(motion)` must come from a calibrated model** (task 12). Thresholding on raw
+LightGBM output is mode-dependent: the same nominal threshold masks different
+amounts of data under a pooled vs a per-animal model, and that difference reads as
+a detection difference when it is a calibration artifact.
+
+### Algorithm
+For each confirmed motion event × consumer, find the interval where **that band**
+exceeds **that consumer's tolerance** (table in Part A.4), padded by the measured
+filter settling time.
+
+**Measure the settling time**: run `impz` on the actual bandpass and take where it
+falls below 1% of peak. `P.edgeBufferMs` is currently 5; expect 30–50 ms. Report the
+measured value per band.
+
+### The cardiac tolerance is operational, not an amplitude
+Suppress the span, re-run the peak detector, ask whether the beat train changed. A
+1–2 ms fiducial shift moves RMSSD and SD1, so an amplitude threshold is only an
+approximation to this test. Implement the operational version.
+
+### Slow bands
+Extents there are inherently coarse — the 0.5–3 Hz mask has ~6 s resolution and no
+padding logic changes that. Do not pretend to finer resolution than the window
+allows; report the resolution alongside the mask.
+
+### Tests
+- an event that crosses the ENG tolerance but not the slow-wave tolerance produces
+  an extent for `spikes` and **none** for `slow_wave`
+- measured settling time from `impz` matches an independent step-response test
+- the operational cardiac test: an event that shifts a fiducial by 2 ms is caught;
+  one that shifts it by 0.05 ms is not
+
+### Acceptance
+Extent per consumer emitted for every event; measured settling times logged per
+band; slow-band resolution stated.
+<!-- /TASK -->
+
+<!-- TASK:14 slug=routing deps=13 gate=no -->
+## Task 14 — Routing
+
+**Module:** `extent/routing.py`
+**Depends on:** 13
+
+### Purpose
+Rejecting data is the most expensive response. Try the cheaper ones first.
+
+### Order — strictly
+1. **correct** — where contaminant and signal are separable in frequency *within
+   that band*. A baseline drift is already gone from the ENG band after the 100 Hz
+   high-pass, so rejecting that span destroys good data for nothing. **Note the
+   qualifier**: a 0.3 Hz drift *is* in the slow-wave band and this route does not
+   apply there.
+2. **subtract** — stereotyped, timing known, residual verified. Verification is
+   mandatory: emit the residual and assert it is below the band's noise floor.
+3. **reject** — only where the disturbance overlaps the signal in **both** time and
+   frequency.
+
+### Clipping bypasses the classifier
+If the amplifier saturates, the signal is non-linear and the envelope can
+*understate* the damage. Mask directly on the fraction of samples at the rail,
+before and independent of any model decision.
+
+### Tests
+- a pure drift event in the 300–5000 Hz consumer routes to `correct`, not `reject`
+- the same drift in the 0–2 Hz consumer routes to `reject`
+- a clipped span is masked with no model call (assert the classifier is not invoked)
+- a `subtract` route whose residual exceeds the noise floor falls back to `reject`
+
+### Acceptance
+Routing decision recorded per event per consumer, with counts by route.
+<!-- /TASK -->
+
+<!-- TASK:15 slug=emit-qc deps=14 gate=no -->
+## Task 15 — Mask emission, QC, provenance
+
+**Module:** `emit/masks.py`, `emit/qc.py`, `emit/provenance.py`
+**Depends on:** 14
+
+### Emit
+- one boolean mask **per consumer** over the common grid (`True` = invalid)
+- **cosine taper 5–10 ms** at each boundary
+- event table: `start`, `stop`, `P(motion)`, judgement, bands affected, routing
+  decision, provenance
+- **mask provenance**: the full `ModelSpec` from task 12A (mode, animal, version,
+  corpus hash, calibrator), plus thresholds, reference values and code commit.
+  Masks get regenerated as the model improves and every downstream analysis must
+  know which one it used. **A mask whose provenance does not name a model is
+  invalid** — assert this on write, not on read.
+- **recording-level gate**: if retention falls below a threshold, flag the whole
+  recording rather than silently emitting a heavily-masked one
+
+### QC report per recording
+Candidate count, blanking fraction per band, retention, R-peak gap fraction, best
+HR channel, tripole weights `(a,b)`, sustained-event review queue, low-confidence
+velocity windows, rescue rate per channel.
+
+### Drift monitoring across weeks
+Log `(a, b)`, peri-R template amplitude, and the noise floor per session. Three
+numbers that say when an electrode is degrading — free once the pipeline computes
+them, and worthless if not persisted. Write them to a per-animal longitudinal table.
+
+### Tests
+- no exact-zero runs in any emitted array (invariant 1, asserted again here)
+- masks are **not** merged across consumers (invariant 2): assert the `spikes` and
+  `slow_wave` masks differ on a synthetic where only one tolerance is crossed
+- velocity mask is the intersection of `V1` and `V3` validity — the one allowed
+  merge
+- provenance round-trips and is non-empty
+- the retention gate fires on a deliberately over-masked recording
+
+### Acceptance
+MATLAB loads the emitted file and `step1_bandpass.m` produces the expected valid
+sample count. Retention reported per band per channel.
+<!-- /TASK -->
+
+<!-- TASK:16 slug=ui-recall-audit deps=07 gate=no -->
+## Task 16 — Labelling UI changes
+
+**Module:** `detector-pyqt`
+**Depends on:** 07
+
+### Reuse
+`signal_viewer.py`, `overview_strip.py`, `region_table.py`, `predictions_panel.py`,
+`review_panel.py`, `queue_panel.py`, 20-deep undo, keyboard interval stepping.
+
+### Change 1 — candidate adjudication becomes the primary mode
+`review_panel.py` already does candidate review (context plot, SHAP, 1/2/3 scoring,
+Shift+drag to widen). Promote it from a secondary panel to the main interaction,
+replacing free interval marking.
+
+### Change 2 — NEW recall-audit mode
+
+**Blind first, reveal second.** The human marks artifacts on the raw signal with
+candidates **hidden**, commits, and only then are candidates and z-traces revealed.
+If candidates are visible while marking, the labeller anchors on them and measured
+recall is inflated — the gate would be measuring its own output. This is not a
+preference; without it the gate is circular and worthless.
+
+After the reveal: a scroll view over the sampled minutes with candidates overlaid
+**and the band z-traces shown alongside the raw signal**.
+
+The z-traces are the entire point. When the human finds a missed artifact, they
+distinguish:
+- **generator blind spot** — z genuinely low → needs a new band or feature
+- **threshold too high** — z high but sub-threshold → needs a lower `z_enter`
+
+Different diagnoses, different fixes, and **indistinguishable from the raw trace
+alone**. Without this the audit tells you that recall is bad but not why.
+
+### Change 3 — preprocessing defaults
+Set the candidate-harmonic list in the Preprocessing tab to `60` only. Do not enable
+harmonic detection: a 120 Hz notch rings *inside* the ENG band at 2.41 µV/mV
+(threshold at a 7.5 mV excursion) where the 60 Hz notch contributes 0.221 µV/mV.
+
+### Labelling budget — design to this
+~500–1000 judged events across ~12 recordings spanning all animals, one keystroke
+each: **1–3 hours once**. Then ~50 uncertain events per new animal (~15 min). Zero
+per production dataset. If the UI requires materially more than this, it is wrong.
+
+### Acceptance
+Audit mode usable on a real recording; a missed artifact can be classified as blind
+spot vs threshold in one glance.
+<!-- /TASK -->
+
+<!-- TASK:16A slug=app-shell deps=16 gate=no -->
+## Task 16A — Application shell and UI tree
+
+**Module:** `detector-pyqt/ui/`
+**Depends on:** 16
+
+### Principle
+Every irreversible or interpretive decision is the user's, and is **explicit**.
+Every mechanical step is automatic. Anywhere the tool would otherwise pick for the
+user — which model, whether recall is good enough, whether to accept a mask — it
+stops and asks, and records the answer.
+
+### The tree
+
+```
+GEMS Blanking
+│
+├── 1  DATASET                                    [setup, once per animal]
+│     ├─ Import                     → pick TDT blocks / HDF5
+│     ├─ Channel map                ▲ USER: role, cuff_id, contact_index,
+│     │                                    rostral_end, cohort config
+│     │                               saved per animal, reused thereafter
+│     └─ Preprocessing              ▲ USER: notch list (default 60, locked
+│                                          warning if harmonics added)
+│
+├── 2  PHYSIOLOGY                                 [automatic, user reviews]
+│     ├─ R-peaks                    → per-channel beat trains
+│     │    └─ Best-channel table    ▲ USER: accept ranked pick or override
+│     │                               shows template SNR, implausible %, rescue %
+│     ├─ Cardiac windows            → measured per channel per band
+│     └─ Derivations (a, b)         → fitted; flagged if unstable vs history
+│
+├── 3  CANDIDATES                                 [automatic, user tunes]
+│     ├─ Generate                   → candidate list at current z_enter
+│     ├─ Threshold sweep            ▲ USER: pick z_enter from the sweep plot
+│     │                               (recall vs count vs TP-fraction)
+│     └─ Recall audit         ◆GATE ▲ USER: scroll sampled minutes, mark misses
+│          └─ diagnosis             → per miss: blind spot (z low) or
+│                                     threshold (z high, sub-threshold)
+│
+├── 4  LABEL                                      [user work — the only real cost]
+│     ├─ Adjudication queue         ▲ USER: motion / physiology / unsure  (1/2/3)
+│     │                               context plot + SHAP + Shift-drag to widen
+│     ├─ Progress                   → judged / unjudged / by animal
+│     └─ Import prior labels        → 43 recordings → events (task 10)
+│
+├── 5  TRAIN                                      [automatic, user configures]
+│     ├─ Configure                  ▲ USER: animals to include, w_adapt sweep,
+│     │                                    hyperopt budget, seed
+│     ├─ Run                        → trains POOLED + ADAPTED + PER_ANIMAL
+│     └─ ▶ RESULTS DASHBOARD        → task 16B
+│
+├── 6  INFER                                      [user chooses the model]
+│     ├─ Select recordings          ▲ USER
+│     ├─ Select model               ▲ USER — per animal, no default, no fallback
+│     │                               picker lists every applicable model with
+│     │                               its metrics AND the protocol they came from
+│     ├─ Confirm assignment table   ▲ USER: animal → model, shown before running
+│     └─ Run                        → events, extents, routes
+│
+├── 7  MASKS                                      [automatic, user accepts]
+│     ├─ Per-consumer preview       → mask overlay per consumer, retention %
+│     ├─ Sustained-event queue      ▲ USER: events over the duration cap
+│     ├─ Recording-level gate       ▲ USER: accept or reject low-retention files
+│     └─ Export                     → NaN masks + provenance + QC report
+│
+└── 8  MONITOR                                    [longitudinal, read-only]
+      ├─ Per-animal drift           → (a,b), peri-R amplitude, noise floor
+      ├─ Best HR channel history    → changes flag electrode issues
+      └─ Blanking fraction by       → the coverage-confound check
+         condition and by mode
+```
+
+`▲ USER` = input required, the run blocks. `◆GATE` = the step can fail and stop
+the project. Everything else runs unattended.
+
+### Screen by screen
+
+Every screen states its **job** in one line, and every screen has a persistent
+**Drive status strip** (root, sync state, unmerged registry shards, checksum
+failures). A red strip blocks training and inference — see task 00A.
+
+---
+
+**1 · DATASET** — *job: make the recording machine-readable and say where it came
+from.*
+
+Two tabs.
+
+**Scan & review** — point at a parent folder; it walks it, finds every recording,
+and proposes **animal** and **condition** for each from the shared
+`conditions.yaml` rules (task 03A). The review table shows path, animal,
+condition, the rule that matched, and status, with `unknown`, `ambiguous` and
+`duplicate` rows sorted to the top. Nothing is written until confirmed.
+
+**Stim split** — for every `stim_recovery` recording: the `vib` envelope with the
+detected stim epoch shaded, the measured duty cycle, the epoch count, and
+draggable boundaries. The stim epoch is **kept on disk** and excluded from all
+downstream processing; recovery proceeds alone.
+
+**Channel map** — per-channel role, `cuff_id`, `contact_index`, `rostral_end`,
+cohort and notch list, with a sparkline preview. Saved per animal and reused; a
+later recording only asks if the channel count changed.
+
+| You must | Notes |
+|---|---|
+| resolve every `unknown` / `ambiguous` condition | **nothing defaults to `baseline`** — unresolved rows cannot enter a corpus |
+| confirm or drag the stim/recovery boundary on every `stim_recovery` file | a file with no detected epoch **fails loudly** rather than passing through as pure recovery |
+| correct any wrong proposal, and optionally save it as a rule | the rule preview shows how many other recordings it would also match |
+| assign role, `cuff_id`, `contact_index` per channel | inferred from names, always confirmed |
+| enter `rostral_end` | **no default** — absent means unsigned velocity forever |
+| confirm cohort (`hw_tripole` / `independent`) | inferred from channel count |
+| confirm notch list | `60` only; adding 120 shows the in-band ringing warning |
+
+---
+
+**2 · PHYSIOLOGY** — *job: establish the beat train and measure the cardiac window
+before anything else touches the data.*
+
+Contains: per-channel beat-detection table (template SNR, implausible %, rescue %,
+beat count vs median), the ranked best-HR-channel pick, the peri-R band profile
+per channel per band, and the fitted `(a, b)` with its history for that animal.
+
+| You must | Notes |
+|---|---|
+| accept or override the ranked HR channel | override is recorded and shown in QC |
+| glance at the peri-R profiles | a window appearing above 300 Hz contradicts the model and should stop you |
+
+Everything else here is automatic.
+
+---
+
+**3 · CANDIDATES** — *job: get recall high enough that the classifier is worth
+training. This screen can fail the project.*
+
+Contains: the threshold sweep (recall / count / TP-fraction vs `z_enter`), the
+candidate list, and **recall-audit mode** — a scroll over randomly sampled minutes
+with candidates overlaid *and the band z-traces beside the raw trace*.
+
+| You must | Notes |
+|---|---|
+| pick `z_enter` from the sweep | default 3.0, defensible 2–4 |
+| scroll the audit samples and mark missed artifacts | the screen will not report a recall number from zero reviewed samples |
+| classify each miss: blind spot or threshold | z low → new feature needed; z high but sub-threshold → lower the threshold. **The z-traces exist to make this distinguishable** |
+
+◆ **Gate.** Below the recall target, stop and read task 09 before continuing.
+
+---
+
+**4 · LABEL** — *job: produce the training signal. The only screen that costs real
+time.*
+
+Contains: the adjudication queue (context plot, band z-traces, SHAP once a model
+exists), progress by animal, and an importer that replays candidates over the 43
+previously-marked recordings.
+
+| You must | Notes |
+|---|---|
+| judge each candidate: motion / physiology / unsure | one keystroke — 1 / 2 / 3 |
+| widen a boundary where the extent is visibly wrong | Shift+drag, as today |
+
+Budget: ~500–1000 events across ~12 recordings, **1–3 hours once**; then ~50 per
+new animal. `unsure` is excluded from training, and a span nobody judged stays
+`unjudged` — never a negative.
+
+---
+
+**5 · TRAIN** — *job: choose exactly what the model learns from, and make that
+choice reproducible.*
+
+This screen inherits the best part of the existing `training_window.py` — the
+per-animal `held_out` checkboxes and "Only animals" filters — and makes it
+explicit and shareable.
+
+Contains, as tabs:
+
+- **Corpus builder** — one row per recording: animal, session, duration, judged
+  events, positive fraction, **condition**, last trained on, and a three-way
+  `train / held_out / excluded` control. Filters by animal, **condition**, cohort
+  and date. Recordings whose condition is `unknown` or `ambiguous` are shown but
+  **not selectable** — resolve them on screen 1 first.
+  Bulk actions ("hold out all of animal O"). Saves as a **named corpus spec**
+  (`corpora/<corpus_id>.json`) that anyone in the lab can load and reuse.
+- **Configure** — modes to train (all three by default), `w_adapt` sweep set,
+  hyperopt budget, seed.
+- **Run** — progress and log, as today.
+- **Versions** — the registry table, carried over from the existing Versions tab:
+  `model_id`, mode, animal, corpus, created, created_by, and its held-out metrics
+  **with the protocol printed**. Provenance JSON viewer. Promote / demote writes a
+  line to the append-only log (task 00A).
+
+| You must | Notes |
+|---|---|
+| set `train / held_out / excluded` per recording | **`excluded` requires a reason string** — an exclusion without a recorded reason is how a corpus becomes indefensible |
+| name and save the corpus spec | immutable once used; editing creates a new id |
+| choose which modes to train | default all three |
+| promote a model, or not | never automatic |
+
+---
+
+**6 · INFER** — *job: apply a model you consciously chose.*
+
+Contains: recording selector, the **model picker**, and the assignment table.
+
+The picker lists every applicable model with `mode`, `corpus_id`, `created_by`,
+its metrics **and the protocol those metrics came from**, and an `unvalidated`
+flag where there are no held-out numbers. It has **no default selection and no
+fallback**.
+
+| You must | Notes |
+|---|---|
+| pick recordings | |
+| pick a model **per animal** | the run will not start otherwise |
+| confirm the animal → model assignment table | shown before anything executes |
+
+A batch spanning animals with different modes is allowed and recorded, and the QC
+report flags it — mode then varies across the dataset and becomes a covariate.
+
+---
+
+**7 · MASKS** — *job: decide whether the output is good enough to keep.*
+
+Contains: per-consumer mask overlay with retention %, the sustained-event queue
+(events over the duration cap, never auto-masked), the recording-level retention
+gate, and the export panel.
+
+| You must | Notes |
+|---|---|
+| adjudicate sustained events | these are level shifts, not events |
+| accept or reject low-retention recordings | a heavily-masked recording should not leave silently |
+| choose which consumers to export | all, by default |
+
+Export writes NaN masks, the event table, the QC report and full provenance. It
+never modifies a source file.
+
+---
+
+**8 · MONITOR** — *job: notice the electrode degrading before it ruins a cohort.*
+
+Read-only, longitudinal, per animal: fitted `(a, b)` over sessions, peri-R template
+amplitude, noise floor, best-HR-channel changes, and blanking fraction **by
+condition and by mode**.
+
+| You must | Notes |
+|---|---|
+| nothing — but check it weekly | a changing best-HR channel or drifting `(a,b)` is an electrode telling you something |
+
+The blanking-fraction-by-condition plot is the coverage-confound check (task 19)
+and is the single most important panel here scientifically.
+
+---
+
+### Where the user can adjust things — the complete list
+
+| Screen | Control | Default | Consequence of changing it |
+|---|---|---|---|
+| Dataset | channel roles, `cuff_id`, `contact_index` | inferred from names | wrong → derivations and velocity are wrong |
+| Dataset | `rostral_end` | **none — must be entered** | absent → unsigned velocity + warning |
+| Dataset | notch list | `60` | adding 120 rings *inside* the ENG band at 2.41 µV/mV |
+| Physiology | HR channel | ranked pick | override recorded and shown in QC |
+| Candidates | `z_enter` | 3.0 (range 2–4) | ↓ recall ↑, count ↑; ↑ the reverse |
+| Candidates | duration cap | p99 of prior labels | above it → review queue, never auto-masked |
+| Label | judgement | — | the training signal |
+| Train | **`train` / `held_out` / `excluded` per recording** | all `train` | the corpus spec; exclusions need a reason |
+| Train | modes to train | all three | |
+| Train | `w_adapt` sweep | {1,3,10,30} | |
+| Train | hyperopt budget, seed | | reproducibility |
+| Train | promote / demote | — | append-only, reversible |
+| Infer | **model per animal** | **none** | the run will not start without it |
+| Masks | accept / reject recording | — | |
+| Masks | consumer subset to export | all | |
+
+### Hard UI rules
+1. **No silent defaults on anything interpretive.** Model choice, recall
+   sufficiency, and recording acceptance all block on the user.
+2. **Every screen states what it will do before doing it**, and shows the inputs it
+   will use.
+3. **Any override is recorded in provenance** with who/when, and surfaces in QC.
+4. **Nothing is destructive.** Masks are new files; the source is never modified.
+5. **The gate screens cannot be skipped by clicking through.** The recall audit
+   requires marked-or-confirmed samples before it will report a recall number.
+
+### Tests
+- launching inference without a model choice is impossible (asserted at the
+  controller, not just disabled in the widget)
+- an override of the HR channel appears in the exported provenance
+- the recall-audit screen refuses to emit a number from zero reviewed samples
+
+### Acceptance
+A new user can go from raw TDT block to exported masks following the tree, with
+every blocking decision visible and explained on the screen where it is made.
+<!-- /TASK -->
+
+<!-- TASK:16B slug=results-dashboard deps=12,16A gate=no -->
+## Task 16B — Training and evaluation dashboard
+
+**Module:** `ui/dashboard/`, rendered as a self-contained HTML report **and**
+embedded in the app
+**Depends on:** 12, 16A
+
+### Purpose
+This is a research instrument, so the dashboard's job is **interpretation, not
+reassurance**. It must make the underlying data legible before it shows any model
+score, and it must make it easy to see *why* a number is what it is. A dashboard
+that shows F1 and nothing else is worse than no dashboard, because it invites
+shipping a model nobody understands.
+
+**Reliable, not overcomplicated:** six panels, in this order. Anything else is a
+drill-down, not a panel.
+
+---
+
+### Panel 1 — Corpus (before any model score)
+
+What the model was actually trained on. Per animal: recordings, candidates,
+judged events, **positive fraction**, unjudged fraction.
+
+- Form: horizontal bars, animals on the y-axis, sorted by event count
+- A stat-tile row above: total judged events, animals, overall positive fraction,
+  % of candidates still unjudged
+- **Why first:** every downstream number is conditioned on this, and corpus size is
+  the confounder in the mode comparison (invariant 13)
+
+### Panel 2 — Candidate recall (the gate)
+
+- Form: **heatmap**, injected amplitude ratio × duration, cell = recall. Sequential
+  single hue, light→dark. Never a rainbow.
+- Beside it: the threshold sweep — recall, candidate count and TP-fraction vs
+  `z_enter`, with the pinned value marked
+- Two measured lines, labelled: synthetic-injection recall and human-audit recall.
+  They answer different questions and must not be averaged
+
+### Panel 3 — Learning curves **(the most important panel)**
+
+F1 vs `n_training_events`, log x, one line per mode, small multiples per animal,
+bootstrap CI bands.
+
+- Series: POOLED / ADAPTED / PER_ANIMAL → categorical slots 1, 2, 3
+- **This is what answers "is per-animal better, or does it just have different
+  data".** If the per-animal point lies on the pooled curve at matched event count,
+  the difference was corpus size
+- Annotate each animal's actual event count with a vertical rule, so the reader can
+  see where that animal really sits
+
+### Panel 4 — Per-animal performance, never averaged
+
+Grouped bars: precision / recall / F1, grouped by animal, one bar per mode.
+
+- The two baselines (all-motion, single-feature threshold) drawn as **reference
+  rules**, not as extra series
+- Each bar labelled with its **protocol** (LOAO / within-animal). Bars of different
+  protocol are visually separated and carry a "not comparable" marker between
+  groups — the UI must make invariant 12 hard to violate by eye
+- No mean-across-animals row anywhere on this panel
+
+### Panel 5 — Calibration and error inspection
+
+- Reliability curve per mode (predicted vs observed, diagonal reference)
+- Confusion counts at the operating threshold
+- **Click any cell → the actual waveform.** False positives and false negatives open
+  the candidate in the signal viewer with its band z-traces. This is the single
+  most valuable feature on the dashboard for a research tool: a number you cannot
+  trace back to a trace is not evidence
+
+### Panel 6 — Feature behaviour
+
+- SHAP summary for the pooled model (reuse `GEMSBlanking:detector/review.py`)
+- **Per-animal feature distributions** for the top 10 features, as small-multiple
+  ridgelines. A feature whose distribution separates animals is **not
+  animal-invariant** — this is the diagnostic that explains a PER_ANIMAL win and
+  points at the task 11 bug
+
+---
+
+### Chart construction rules
+- Categorical hues assigned in **fixed order**, never cycled: mode 1 = slot 1,
+  mode 2 = slot 2, mode 3 = slot 3, regardless of which modes are present
+- **Never a dual-axis chart.** Recall and candidate count on one plot → two plots
+  or index to a common base
+- Sequential = one hue light→dark (recall heatmap). Diverging = two hues + neutral
+  midpoint (only for signed quantities, e.g. Δ vs baseline)
+- Legend present for ≥2 series; ≤4 series also directly labelled
+- Hover tooltip on every mark; crosshair on the line charts
+- A **table view** for every panel — this is a research tool and the numbers get
+  copied into papers
+- Light and dark both explicitly designed, not an automatic flip
+- Run the palette validator before shipping; do not eyeball CVD safety
+
+### Export
+One button: the whole dashboard as a **self-contained HTML file** with the data
+embedded, plus the underlying parquet. It goes in the lab notebook and into
+supplementary material, so it must open with no server and no network.
+
+### What must NOT be on the dashboard
+- A single headline "accuracy" number
+- Any average across animals
+- An A-vs-C comparison presented as a comparison
+- Any score without its protocol label
+- Green/red pass badges on anything the user has not been shown the evidence for
+
+### Tests
+- panel 4 refuses to render a cross-animal mean
+- a model without held-out metrics renders as `unvalidated`, not as a blank
+- the exported HTML opens offline with all data present
+- palette validator passes for both light and dark
+
+### Acceptance
+Andrea can look at the dashboard after a training run and answer, without asking
+anyone: what was it trained on, did candidate generation work, is per-animal
+actually better or just differently-sized, which animal is worst and why, and what
+does a typical error look like.
+<!-- /TASK -->
+
+<!-- TASK:17 slug=video deps=03 gate=no -->
+## Task 17 — Video motion features
+
+**Module:** `video/motion.py`
+**Depends on:** 03
+
+A prototype already exists: `video_artifact_coincidence.py` (270 lines) — it probes
+the container via `ffprobe`, computes ROI motion energy via OpenCV, loads segment
+labels (v5 and v7.3 `.mat`), fits the sync lag by cross-correlation, and estimates
+drift from the first and last thirds. Start from it.
+
+### Sync
+Camera and TDT share a start trigger, so the **offset** is solved. **Drift is not**:
+100 ppm over 20 minutes is 120 ms, longer than the feature window.
+1. Check for per-frame PTS first.
+2. Failing that, fit **one linear warp per recording** by cross-correlating motion
+   energy against existing labels.
+3. Report the fitted drift in ppm per recording.
+
+### ROIs
+The **tether and commutator**, not just the animal. The cable causes the artifact,
+and cable / connector / headstage sources enter **downstream of the electrode**,
+where no montage can reject them — which is exactly why video adds information the
+electrical channels cannot.
+
+### Accuracy budget
+Feature use needs ~100 ms. **Labelling adjudication needs only ~1 s**, so that use
+works today with no drift correction. Ship adjudication first.
+
+### Unanswered — resolve before building
+Container, fps, and whether per-frame timestamps exist are all unknown. Probe first
+and report, rather than assuming.
+
+### Tests
+- a synthetic video with a known injected lag recovers that lag to within one frame
+- drift estimation recovers a deliberately warped timebase to within 20 ppm
+- ROI motion energy responds to motion in the ROI and not outside it
+
+### Acceptance
+Lag and drift reported per recording; motion-energy traces aligned to the neural
+timebase; coincidence with existing labels reported.
+<!-- /TASK -->
+
+<!-- TASK:18 slug=velocity deps=04 gate=no -->
+## Task 18 — Conduction velocity and direction
+
+**Module:** `velocity/xcorr.py`
+**Depends on:** 04 (new-cohort recordings only)
+
+Runs in **two passes**. Pass 1 needs no mask: it produces the
+non-physiological-energy trace that task 11 consumes as a feature. Pass 2 runs after
+task 15 and uses the velocity mask to produce the reported velocity estimates.
+Keeping these separate is what stops the feature feedback from becoming a loop
+(invariant 4).
+
+### Algorithm
+Cross-correlate contact pairs **band-limited to 300–5000 Hz first**, on segments the
+velocity mask passes. Peak lag gives velocity; its sign against `rostral_end` gives
+direction.
+
+### Measured tolerances
+Raw correlation survives artifact only to ~1× the neural amplitude; band-limited
+first, to ~5×; against a saturating broadband artifact, ~1.4×. Band-limiting is not
+optional.
+
+### Do not restrict the lag search
+Restricting to physiological velocities **does not help and is harmful** — it
+converts an obviously broken estimate into a plausible-looking wrong one. Leave the
+search unrestricted and reject on confidence instead.
+
+### Confidence
+Emit **peak ratio** with every estimate: neural peak height ÷ zero-lag peak height,
+from the same correlation. Below ~1, discard that window. This is stronger than any
+mask because it is derived from the quantity being estimated.
+
+### Feed back to task 11
+Energy above ~50 m/s cannot be neural, so it can only be common-mode contamination.
+That is the strongest artifact feature available on the new configuration. Emit it
+as a per-frame trace for the feature builder. **This is a precomputed input, not a
+loop** — velocity runs its own pass first (invariant 4).
+
+### Geometry — cuff v9
+Pitch **1.50 mm**, aperture **3.00 mm** (measured from the STL: grooves at
+z = 1.00 / 2.50 / 4.00 mm). Resolution `Δv/v ≈ v/(B·L)`: 4% at 0.5 m/s, 7% at 1,
+14% at 2, 35% at 5. **A C-fibre instrument, not an A-fibre one** — say so in the
+output metadata. Delays are never the limit: 3 ms at 1 m/s on the outer pair, 73
+samples at 24.4 kHz.
+
+### Tests
+- a synthetic propagating volley at a known velocity is recovered within the
+  predicted resolution
+- a zero-delay common-mode artifact produces a peak ratio < 1 and is discarded
+- missing `rostral_end` yields unsigned output with `direction_valid=False`
+
+### Acceptance
+Velocity, direction, and peak-ratio confidence emitted per window; the
+non-physiological-energy trace available to task 11.
+<!-- /TASK -->
+
+<!-- TASK:19 slug=acceptance deps=all gate=yes -->
+## Task 19 — End-to-end acceptance
+
+**Depends on:** everything
+**Gate:** YES — this is the ship decision
+
+| Test | Pass condition |
+|---|---|
+| Candidate recall | ≥98% of injected synthetics produce a candidate, at a threshold yielding ≤3000 candidates/recording |
+| Class balance | ≥5% of candidates are true positives on labelled recordings |
+| No zeros | no exact-zero runs in any emitted `yOut`; every mask boundary tapered |
+| Cardiac scope | peri-R profile flat in 300–5000 Hz and below 3 Hz after masking |
+| Retention | reported per band per channel against the current all-channel full-band baseline; **ENG-band retention substantially higher than the slow bands** |
+| Cross-animal | blind-test event recall on the four never-seen animals, reported **individually** |
+| **Coverage confound** | blanking fraction must **not** depend on condition. If stimulation drives movement and this goes unchecked, the pipeline has automated a confound rather than fixed one. Compute it on **`masked_motion` only** — deterministic `excluded_epoch` (stim) and cardiac windows are excluded from the numerator, or the regression measures the protocol rather than the artifact |
+| Downstream | `fracISIclean`, slow-wave non-NaN fraction, DFA `alpha2` availability, `nRR_used`, median `step5f` epoch length — all up; between-animal endpoint variance down |
+| Velocity | peak-ratio confidence emitted with every estimate; unsigned output with a warning where `rostral_end` is missing |
+| **Mode comparison** | learning-curve plot produced per mode per animal; A-vs-C never reported as a comparison; B-vs-C verdict stated with the task 11 investigation triggered if C > B |
+| **Model routing** | every emitted mask names its `ModelSpec`; routing rule logged per recording; re-running a recording selects the same model |
+| **Calibration** | every shipped model calibrated on held-out data; reliability curve within tolerance |
+
+The **coverage confound** row is the one that matters most scientifically and is the
+easiest to skip. Test it explicitly: regress blanking fraction on condition and
+report the coefficient.
+
+**With multiple modes there is a second confound of the same shape:** if different
+animals are scored by different modes, and mode correlates with anything (labelling
+effort, cohort, recording date), then mode becomes a hidden covariate on every
+downstream endpoint. Report blanking fraction **by mode** as well as by condition,
+and carry the mode into `bulk_mixed_models.m` as a factor if it varies across the
+dataset.
+
+### Deliverable
+A single report: every row, pass/fail, with the number. Plus a list of every place
+real data disagreed with a constant in this document.
+<!-- /TASK -->
+
+---
+
+## Part C — deliberately out of scope
+
+- **Artifact removal *within* the stim epoch.** The stim epoch itself is
+  identified and excluded by task 03B, which is what "ignore the stim duration"
+  means operationally — that part **is** in scope and must be built. What remains
+  deferred is *recovering usable signal from inside* the stim epoch: stim artifacts
+  are large, periodic and have known timing from the `vib` channel, so they belong
+  in the same category as cardiac (deterministic, known timing, per-band). Deferred
+  at Andrea's request pending her own validation. The stim epoch is **kept on
+  disk**, not discarded, so this can be revisited without re-acquiring anything.
+- **Stomach referencing change.** Old animals were hardware-referenced in TDT; new
+  ones are raw and referenced in postprocessing. Good for detection (preserves the
+  common mode) but `extract_mmc`'s `k = 3 × MAD` threshold and the slow-wave
+  prominence criteria were tuned on a different signal. **MMC and slow-wave
+  endpoints may not be comparable across cohorts** — flag, do not silently pool.
+- **`Raww` anti-alias setting** is unknown, so whether the ENG low-pass can rise
+  above 5 kHz is undetermined. Ask before changing it.
+
+## Part D — open questions to resolve with Andrea
+
+1. `Raww` anti-alias filter setting.
+2. Video container, fps, and whether per-frame PTS exist.
+3. What the old TDT stomach reference actually was.
+4. Current `recall_real` from the previous model, and the target.
+5. The RR histogram needed to set `R_MIN` (task 05).

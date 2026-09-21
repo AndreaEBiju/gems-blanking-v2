@@ -1,0 +1,554 @@
+<style>
+:root{color-scheme:light;
+ --bg:#f4f3f0; --s1:#fcfcfb; --s2:#eeede9; --s3:#e6e5e0;
+ --tp:#0b0b0b; --ts:#52514e; --tm:#7c7a73; --grid:#e4e3de; --rule:#d9d8d2;
+ --c1:#2a78d6; --c2:#eb6834; --c3:#1baf7a; --warn:#b26a00; --bad:#c0392b; --good:#1b7a4b;
+ --acc:#2a78d6;}
+@media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])){color-scheme:dark;
+ --bg:#111110; --s1:#1a1a19; --s2:#232321; --s3:#2b2b28;
+ --tp:#fff; --ts:#c3c2b7; --tm:#8e8d84; --grid:#2e2e2b; --rule:#3a3a36;
+ --c1:#3987e5; --c2:#d95926; --c3:#199e70; --warn:#d79a3a; --bad:#e66767; --good:#34a06a;
+ --acc:#3987e5;}}
+:root[data-theme="dark"]{color-scheme:dark;
+ --bg:#111110; --s1:#1a1a19; --s2:#232321; --s3:#2b2b28;
+ --tp:#fff; --ts:#c3c2b7; --tm:#8e8d84; --grid:#2e2e2b; --rule:#3a3a36;
+ --c1:#3987e5; --c2:#d95926; --c3:#199e70; --warn:#d79a3a; --bad:#e66767; --good:#34a06a;
+ --acc:#3987e5;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tp);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+.page{max-width:1200px;margin:0 auto;padding:22px 16px 70px}
+.hd{display:flex;flex-wrap:wrap;gap:12px;align-items:baseline;justify-content:space-between}
+h1{font-size:20px;font-weight:650;margin:0;letter-spacing:-.01em}
+.lede{color:var(--ts);font-size:13px;margin:4px 0 16px;max-width:80ch}
+button.tgl{background:var(--s2);color:var(--ts);border:1px solid var(--rule);border-radius:7px;padding:5px 11px;font-size:12px;cursor:pointer}
+/* drive strip */
+.drive{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;background:var(--s1);border:1px solid var(--rule);
+ border-left:3px solid var(--good);border-radius:9px;padding:9px 14px;font-size:12.5px;margin-bottom:16px}
+.drive .k{color:var(--tm)} .drive b{font-weight:600}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--good);display:inline-block;margin-right:6px}
+/* app frame */
+.app{display:grid;grid-template-columns:212px 1fr;gap:0;border:1px solid var(--rule);border-radius:12px;overflow:hidden;background:var(--s1)}
+@media(max-width:780px){.app{grid-template-columns:1fr}}
+nav{background:var(--s2);border-right:1px solid var(--rule);padding:10px 8px}
+nav .ni{display:block;width:100%;text-align:left;background:none;border:0;border-radius:7px;padding:8px 10px;
+ font:inherit;font-size:13px;color:var(--ts);cursor:pointer;margin-bottom:1px}
+nav .ni:hover{background:var(--s3);color:var(--tp)}
+nav .ni.on{background:var(--acc);color:#fff;font-weight:560}
+nav .ni .n{opacity:.62;margin-right:7px;font-variant-numeric:tabular-nums}
+nav .ni .g{float:right;font-size:10px;opacity:.85}
+main{padding:18px 20px 22px;min-height:560px}
+.job{font-size:12.5px;color:var(--ts);background:var(--s2);border-radius:8px;padding:9px 12px;margin:0 0 16px}
+.job b{color:var(--tp)}
+h2{font-size:16px;font-weight:640;margin:0 0 2px;letter-spacing:-.005em}
+.crumb{font-size:11.5px;color:var(--tm);text-transform:uppercase;letter-spacing:.07em;margin-bottom:3px}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--rule);margin:14px 0 14px}
+.tab{background:none;border:0;border-bottom:2px solid transparent;padding:7px 11px;font:inherit;font-size:13px;color:var(--ts);cursor:pointer}
+.tab.on{color:var(--tp);border-bottom-color:var(--acc);font-weight:560}
+table{border-collapse:collapse;width:100%;font-size:12.5px;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:6px 9px;border-bottom:1px solid var(--grid);white-space:nowrap}
+th{color:var(--ts);font-weight:560;font-size:11.5px}
+td.num,th.num{text-align:right}
+td.dim{color:var(--tm)}
+tr.sel td{background:color-mix(in oklab,var(--acc) 12%,transparent)}
+.seg{display:inline-flex;border:1px solid var(--rule);border-radius:6px;overflow:hidden}
+.seg span{padding:2px 8px;font-size:11px;color:var(--ts);border-right:1px solid var(--rule)}
+.seg span:last-child{border-right:0}
+.seg span.on{background:var(--acc);color:#fff;font-weight:560}
+.seg span.ho{background:var(--c2);color:#fff;font-weight:560}
+.seg span.ex{background:var(--s3);color:var(--tm);font-weight:560}
+.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px}
+.btn{background:var(--s2);border:1px solid var(--rule);border-radius:7px;padding:6px 12px;font:inherit;font-size:12.5px;color:var(--tp);cursor:pointer}
+.btn.pri{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:560}
+.btn.pri[disabled]{opacity:.45;cursor:not-allowed}
+.btn.warn{border-color:var(--warn);color:var(--warn)}
+.fld{display:flex;flex-direction:column;gap:3px;font-size:11.5px;color:var(--ts)}
+.fld input,.fld select{background:var(--s1);border:1px solid var(--rule);border-radius:6px;padding:5px 8px;font:inherit;font-size:12.5px;color:var(--tp);min-width:90px}
+.chip{display:inline-block;font-size:10.5px;padding:1px 7px;border-radius:20px;border:1px solid var(--rule);color:var(--ts);background:var(--s2)}
+.chip.ok{border-color:color-mix(in oklab,var(--good) 55%,transparent);color:var(--good)}
+.chip.no{border-color:color-mix(in oklab,var(--bad) 55%,transparent);color:var(--bad)}
+.chip.w{border-color:color-mix(in oklab,var(--warn) 55%,transparent);color:var(--warn)}
+.must{margin-top:16px;border:1px solid var(--rule);border-left:3px solid var(--acc);border-radius:0 9px 9px 0;background:var(--s2);padding:11px 14px}
+.must h4{margin:0 0 6px;font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--ts);font-weight:620}
+.must ol{margin:0;padding-left:19px;font-size:12.5px;color:var(--tp)}
+.must li{margin-bottom:3px}
+.must .auto{color:var(--tm);font-size:12px;margin-top:7px}
+.gate{border-left-color:var(--warn)}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:720px){.two{grid-template-columns:1fr}}
+.card{background:var(--s2);border-radius:9px;padding:12px 14px}
+.card h5{margin:0 0 8px;font-size:12px;color:var(--ts);font-weight:600}
+.kv{display:flex;justify-content:space-between;font-size:12.5px;padding:3px 0;border-bottom:1px solid var(--grid)}
+.kv:last-child{border-bottom:0}
+.kv span:last-child{font-variant-numeric:tabular-nums}
+.wave{background:var(--s1);border:1px solid var(--rule);border-radius:8px;padding:8px}
+svg{display:block;max-width:100%}
+.lbl{font-size:10.5px;fill:var(--tm)}
+.note{font-size:12px;color:var(--ts);background:var(--s2);border-left:2px solid var(--warn);padding:8px 12px;border-radius:0 7px 7px 0;margin-top:12px}
+.note b{color:var(--tp)}
+.bar{height:9px;border-radius:5px;background:var(--s3);overflow:hidden;display:inline-block;width:110px;vertical-align:-1px}
+.bar i{display:block;height:100%;background:var(--c1)}
+.foot{font-size:11.5px;color:var(--tm);margin-top:18px}
+kbd{background:var(--s3);border:1px solid var(--rule);border-radius:4px;padding:0 5px;font:inherit;font-size:11px}
+</style>
+
+<div class="page">
+<div class="hd">
+  <div>
+    <h1>GEMS Blanking — interface walkthrough</h1>
+    <div class="lede">Wireframe mockup, synthetic contents. Click the eight screens on the left. Every screen states its job; the blue box at the bottom of each lists exactly what you have to do there.</div>
+  </div>
+  <button class="tgl" onclick="tg()">Toggle theme</button>
+</div>
+
+<div class="drive" id="drive">
+  <span><span class="dot"></span><b>Drive synced</b></span>
+  <span class="k">root</span> <span>~/Google Drive/GEMS</span>
+  <span class="k">registry</span> <span>1 240 entries · 2 unmerged shards</span>
+  <span class="k">checksums</span> <span class="chip ok">all clean</span>
+  <span class="k">offline-pinned</span> <span>data/F, data/J, data/L, data/O</span>
+  <span style="margin-left:auto"><button class="btn" style="padding:3px 9px">gems doctor</button></span>
+</div>
+
+<div class="app">
+  <nav id="nav"></nav>
+  <main id="main"></main>
+</div>
+
+<div class="foot">The Drive strip is persistent and sits above every screen. It turns amber on unmerged registry shards and red on a checksum failure — red blocks training and inference.</div>
+</div>
+
+<script>
+const SCREENS=[
+ {n:1,k:"dataset",   t:"Dataset"},
+ {n:2,k:"physio",    t:"Physiology"},
+ {n:3,k:"cand",      t:"Candidates", g:"◆"},
+ {n:4,k:"label",     t:"Label"},
+ {n:5,k:"train",     t:"Train"},
+ {n:6,k:"infer",     t:"Infer"},
+ {n:7,k:"masks",     t:"Masks"},
+ {n:8,k:"monitor",   t:"Monitor"},
+];
+let cur="dataset", tab={train:"corpus", ds:"scan"};
+function tg(){const r=document.documentElement;
+ const d=r.getAttribute("data-theme")==="dark"||(!r.getAttribute("data-theme")&&matchMedia("(prefers-color-scheme: dark)").matches);
+ r.setAttribute("data-theme",d?"light":"dark");}
+function nav(){document.getElementById("nav").innerHTML=SCREENS.map(s=>
+ `<button class="ni ${s.k===cur?'on':''}" onclick="go('${s.k}')"><span class="n">${s.n}</span>${s.t}${s.g?`<span class="g">${s.g}</span>`:""}</button>`).join("");}
+function go(k){cur=k;nav();render();window.scrollTo({top:0,behavior:"smooth"})}
+function st(k,v){tab[k]=v;render()}
+const must=(items,auto,gate)=>`<div class="must ${gate?'gate':''}"><h4>${gate?'◆ Gate — what you must do':'What you must do here'}</h4>
+ <ol>${items.map(i=>`<li>${i}</li>`).join("")}</ol>${auto?`<div class="auto">Automatic: ${auto}</div>`:""}</div>`;
+const head=(n,t,job)=>`<div class="crumb">Screen ${n}</div><h2>${t}</h2><div class="job">${job}</div>`;
+
+/* tiny sparkline */
+function spark(vals,w=90,h=20,col="var(--c1)"){
+ const mx=Math.max(...vals),mn=Math.min(...vals);
+ const d=vals.map((v,i)=>`${i?"L":"M"}${i/(vals.length-1)*w},${h-(v-mn)/(mx-mn||1)*h}`).join("");
+ return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}"><path d="${d}" fill="none" stroke="${col}" stroke-width="1.5"/></svg>`;
+}
+const rnd=(s=>()=>((s=s*16807%2147483647)/2147483647))(7);
+const series=(n,a,b)=>Array.from({length:n},()=>a+rnd()*(b-a));
+
+const V={};
+
+V.dataset=()=>{const t=tab.ds||"scan";return head(1,"Dataset","<b>Job:</b> find every recording under a folder, work out which animal and which condition each one is, and make the channel map machine-readable. Nothing downstream is correct if these are wrong.")+`
+<div class="tabs">
+ ${[["scan","Scan &amp; review"],["stim","Stim split"],["chan","Channel map"]].map(([k,l])=>`<button class="tab ${t===k?'on':''}" onclick="st('ds','${k}')">${l}</button>`).join("")}
+</div>`+
+(t==="scan"?`
+<div class="row">
+ <div class="fld" style="flex:1"><label>Scan folder</label><input value="~/Library/CloudStorage/GoogleDrive-lab/Shared drives/GEMS/data" style="width:100%"></div>
+ <button class="btn">Rescan</button>
+ <span class="chip">rules: conditions.yaml · 3 rules · shared</span>
+</div>
+<div class="row" style="margin-top:-4px">
+ <span class="chip no">2 need attention</span><span class="chip">41 matched</span><span class="chip">1 duplicate</span><span class="chip">12 already known</span>
+ <span style="margin-left:auto;color:var(--tm);font-size:11.5px">rows needing attention are sorted to the top</span>
+</div>
+<table>
+<tr><th>File</th><th>Animal</th><th>Condition</th><th>Matched rule</th><th>Status</th></tr>
+${[["O_2026-09-12_postinj_01.mat","O","— choose —","none","unknown"],
+   ["L_2026-06-18_stim_rec_washout.mat","L","stim_recovery / stim?","2 rules","ambiguous"],
+   ["F_2026-04-02_baseline_01.mat","F","baseline","_base(line)?","matched"],
+   ["F_2026-04-09_stim_01.mat","F","stim","_stim","matched"],
+   ["J_2026-05-14_stim_rec_02.mat","J","stim_recovery","_stim_rec","matched"],
+   ["archive/J_2026-05-14_stim_rec_02.mat","J","stim_recovery","_stim_rec","duplicate"],
+   ["L_2026-06-03_baseline_01.mat","L","baseline","_base(line)?","known"]]
+ .map(r=>{
+  const st=r[4], bad=st==="unknown"||st==="ambiguous";
+  const chip=st==="unknown"?'<span class="chip no">unknown</span>'
+    :st==="ambiguous"?'<span class="chip no">ambiguous</span>'
+    :st==="duplicate"?'<span class="chip w">duplicate — same hash</span>'
+    :st==="known"?'<span class="chip">already ingested</span>':'<span class="chip ok">matched</span>';
+  return `<tr class="${bad?'sel':''}"><td>${r[0]}</td><td>${r[1]}</td>
+  <td>${bad?`<select style="font:inherit;font-size:12px;background:var(--s1);border:1px solid var(--bad);border-radius:5px;padding:2px"><option>${r[2]}</option><option>baseline</option><option>stim</option><option>stim_recovery</option><option>sham</option></select>`:r[2]}</td>
+  <td class="dim">${r[3]}</td><td>${chip}</td></tr>`}).join("")}
+</table>
+<div class="row" style="margin-top:12px">
+ <button class="btn">Set condition for selected…</button>
+ <button class="btn">Save correction as a rule…</button>
+ <button class="btn pri" disabled style="margin-left:auto">Confirm 41 recordings — 2 unresolved</button>
+</div>
+<div class="note"><b>Nothing defaults to <code>baseline</code>.</b> The previous tool used <code>rec_type = "stim_rec" if "_stim_rec" in core else "baseline"</code>, so any unrecognised filename silently became a control — invisible in the code, visible only as a shifted effect estimate months later. Unresolved rows here are listed, blocked from entering a corpus, and never guessed.</div>
+<div class="note" style="border-left-color:var(--acc)"><b>Saving a correction as a rule shows its blast radius first.</b> "Add rule <code>_postinj</code> → drug?" reports <i>would also match 6 other recordings</i> before you commit, and the rule goes to the shared <code>conditions.yaml</code> so the whole lab parses identically from then on.</div>
+`:t==="stim"?`
+<div class="row">
+ <div class="fld"><label>Recording</label><select><option>L_2026-06-18_stim_rec_washout</option><option>J_2026-05-14_stim_rec_02</option></select></div>
+ <span class="chip">condition stim_recovery</span><span class="chip">vib channel present</span>
+</div>
+<div class="wave">
+ <div class="lbl" style="margin-bottom:4px">vib envelope — detected stim epoch shaded, boundaries draggable</div>
+ <svg viewBox="0 0 720 96" width="100%" height="96">
+  <rect x="118" y="6" width="196" height="62" fill="var(--c2)" opacity=".16"/>
+  <line x1="118" y1="2" x2="118" y2="72" stroke="var(--c2)" stroke-width="2"/>
+  <line x1="314" y1="2" x2="314" y2="72" stroke="var(--c2)" stroke-width="2"/>
+  <path id="vb" fill="none" stroke="var(--tp)" stroke-width="1" opacity=".8"/>
+  <line x1="0" x2="720" y1="52" y2="52" stroke="var(--c1)" stroke-dasharray="4 3"/>
+  <text class="lbl" x="716" y="48" text-anchor="end" fill="var(--c1)">threshold = off_level + 8σ</text>
+  <text class="lbl" x="130" y="84" fill="var(--c2)">stim 120 s — excluded, kept on disk</text>
+  <text class="lbl" x="360" y="84">recovery — analysed</text>
+ </svg>
+</div>
+<div class="two" style="margin-top:12px">
+ <div class="card"><h5>Detection — matched 120 s window</h5>
+  <div class="kv"><span>expected duration (protocol)</span><span>120.0 s</span></div>
+  <div class="kv"><span>detected duration</span><span>118.7 s <span class="chip ok">within ±3 s</span></span></div>
+  <div class="kv"><span>boundary</span><span>142.8 s → 261.5 s</span></div>
+  <div class="kv"><span>clipped start / end</span><span>no / no</span></div>
+  <div class="kv"><span>epochs found</span><span>1 <span class="chip ok">expected 1</span></span></div>
+  <div class="kv"><span>stim duty cycle</span><span>7.9% of file</span></div>
+  <div class="kv"><span>old p20/p80 rule</span><span><span class="chip no">149.1 s → 268.9 s (Δ 6.3 s)</span></span></div>
+ </div>
+ <div class="card"><h5>Effect on the recovery reference</h5>
+  <div class="kv"><span>300–5000 Hz ref, unsplit file</span><span>18.4 µV</span></div>
+  <div class="kv"><span>300–5000 Hz ref, recovery only</span><span>6.1 µV</span></div>
+  <div class="kv"><span>MAD, unsplit / recovery</span><span>9.7 / 2.2 µV</span></div>
+  <div class="kv"><span>consequence</span><span><span class="chip no">4.4× harder to reach z&gt;3</span></span></div>
+ </div>
+</div>
+<div class="note"><b>At 7.9% duty cycle the old p20/p80 threshold was outside its valid range.</b> That rule only means anything when stim occupies 20–80% of the record; a fixed 120 s stim in a 25-minute file is 8%, so both percentiles fell inside the OFF distribution. The matched-width search does not depend on duty cycle at all — and the known 120 s becomes a validity check instead of an output.</div>
+<div class="note"><b>This is why the split must happen before envelopes are computed.</b> Left in the array, the stim artifacts are the largest excursions anywhere in the file, so they inflate both the reference percentile and the MAD — and detection is then suppressed precisely during recovery, which is the window the experiment is about.</div>
+<div class="row" style="margin-top:12px"><button class="btn">Adjust boundary manually</button><button class="btn pri">Confirm split</button></div>
+`:`
+<div class="row">
+  <div class="fld"><label>Animal</label><select><option>O — 7 sessions</option><option>F — 12</option></select></div>
+  <div class="fld"><label>Session</label><select><option>2026-09-12_baseline</option></select></div>
+  <div class="fld"><label>Cohort</label><select><option>independent (9 ch)</option><option>hw_tripole (5 ch)</option></select></div>
+</div>
+<table>
+<tr><th>#</th><th>Name</th><th>Role</th><th>Cuff</th><th>Contact</th><th>Rostral end</th><th>Preview</th></tr>
+${[["1","RVN_1","nerve","R","1","● contact 1"],["2","RVN_2","nerve","R","2","—"],["3","RVN_3","nerve","R","3","—"],
+   ["4","LVN_1","nerve","L","1","<span class='chip no'>not set</span>"],["5","LVN_2","nerve","L","2","—"],["6","LVN_3","nerve","L","3","—"],
+   ["7","ANT1","stomach","—","—","—"],["8","ANT2","stomach","—","—","—"],["9","ANT3","stomach","—","—","—"]]
+ .map(r=>`<tr><td class="dim">${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td><td>${r[3]}</td><td>${r[4]}</td><td>${r[5]}</td><td>${spark(series(26,0,1))}</td></tr>`).join("")}
+</table>
+<div class="row" style="margin-top:12px">
+  <div class="fld"><label>Notch harmonics</label><input value="60"></div>
+  <span class="chip w">adding 120 Hz rings inside the ENG band at 2.41 µV/mV</span>
+</div>
+<div class="note"><b>rostral_end is not set for cuff L.</b> It cannot be reconstructed after the animal is gone. Leave it unset and every conduction-velocity estimate on this cuff is emitted unsigned, with a warning, forever.</div>
+`)+must(
+ t==="scan"?["Resolve every <b>unknown</b> and <b>ambiguous</b> condition — they cannot enter a corpus until you do.",
+   "Correct any wrong proposal; optionally save the correction as a shared rule.",
+   "Decide what to do with duplicates (same content hash at two paths).",
+   "Confirm the scan — only then is anything written."]
+ :t==="stim"?["Check the detected duration against the protocol\u0027s 120 s, and the clipping flags.",
+   "Confirm the boundary, or drag it. A file clipped at the end has no recovery epoch and fails loudly rather than passing through.",
+   "Confirm the split before anything downstream runs."]
+ :["Confirm role, <code>cuff_id</code> and <code>contact_index</code> for all 9 channels.",
+   "Enter <b>rostral_end</b> per cuff — no default, no guess.",
+   "Confirm the cohort and the notch list."],
+ t==="scan"?"recursive walk, content hashing, dedup, rule matching in priority order, skip-already-known with checksum re-verify."
+ :t==="stim"?"vib smoothing and RMS envelope, matched 120 s window search, edge refinement, clipping detection, per-epoch reference statistics."
+ :"role inference from channel names, sparkline previews, per-animal profile save and reuse.");};
+
+V.physio=()=>head(2,"Physiology","<b>Job:</b> establish the beat train and measure the cardiac window, before anything else touches the data. Both are inputs to candidate generation.")+`
+<table>
+<tr><th>Channel</th><th class="num">Template SNR</th><th class="num">Implausible</th><th class="num">Rescued</th><th class="num">Beats</th><th>Peri-R 1–100 Hz</th><th></th></tr>
+${[["ANT2",234,"0.4%","2.1%",3981,1],["ANT1",96,"0.9%","3.4%",3977,0],["RVN_2",41,"1.8%","6.0%",3962,0],
+   ["LVN_1",27,"2.2%","7.7%",3944,0],["ANT3",4.7,"31.6%","28.4%",5120,-1]]
+ .map(r=>`<tr class="${r[5]===1?'sel':''}"><td>${r[0]}${r[5]===1?' <span class="chip ok">ranked pick</span>':''}${r[5]===-1?' <span class="chip no">gated out</span>':''}</td>
+ <td class="num">${r[1]}</td><td class="num">${r[2]}</td><td class="num">${r[3]}</td><td class="num">${r[4]}</td>
+ <td>${spark(series(24,.2,1),110,18,r[5]===-1?"var(--tm)":"var(--c1)")}</td>
+ <td><button class="btn" style="padding:2px 9px">use</button></td></tr>`).join("")}
+</table>
+<div class="two" style="margin-top:14px">
+ <div class="card"><h5>Measured cardiac window, by band</h5>
+  ${[["300–5000 Hz","none","ok"],["100–300 Hz","−4 to +9 ms","w"],["1–100 Hz","−12 to +21 ms","w"],
+     ["2–50 Hz","−6 to +11 ms","w"],["0.5–3 Hz","none","ok"],["0–2 Hz","none","ok"]]
+    .map(r=>`<div class="kv"><span>${r[0]}</span><span><span class="chip ${r[2]}">${r[1]}</span></span></div>`).join("")}
+ </div>
+ <div class="card"><h5>Tripole weights (a, b) — animal O</h5>
+  <div class="kv"><span>this session</span><span>0.512 / 0.488</span></div>
+  <div class="kv"><span>last 6 sessions</span><span>${spark([.51,.508,.515,.509,.512,.512],110,18,"var(--c3)")}</span></div>
+  <div class="kv"><span>stability</span><span><span class="chip ok">stable</span></span></div>
+ </div>
+</div>
+<div class="note"><b>No window above 300 Hz, none below 3 Hz.</b> That matches the QRS energy model, and it is what returns the ~20% of every recording the old uniform ±15 ms blank was spending. A window appearing at 300–5000 Hz would contradict the model and should stop you.</div>
+`+must([
+ "Accept the ranked HR channel or override it — the override is recorded and shown in QC.",
+ "Glance at the measured cardiac windows and confirm the shape above matches."],
+ "R-peak detection both passes, gap rescue, channel ranking, peri-R measurement, (a,b) fit and its history.");
+
+V.cand=()=>head(3,"Candidates","<b>Job:</b> get recall high enough that a classifier is worth training. A missed artifact here can never be recovered downstream — this screen can fail the project.")+`
+<div class="tabs"><button class="tab on">Threshold sweep</button><button class="tab">Recall audit</button><button class="tab">Candidate list</button></div>
+<div class="two">
+ <div class="wave">
+  <div class="lbl" style="margin-bottom:4px">recall / count vs z_enter</div>
+  <svg viewBox="0 0 330 140" width="100%" height="140">
+   <line x1="40" y1="112" x2="320" y2="112" stroke="var(--grid)"/>
+   <line x1="40" y1="20" x2="320" y2="20" stroke="var(--grid)"/>
+   <path d="M40,24 L110,32 L180,46 L250,72 L320,104" fill="none" stroke="var(--c1)" stroke-width="2"/>
+   <path d="M40,106 L110,92 L180,70 L250,48 L320,30" fill="none" stroke="var(--c2)" stroke-width="2" stroke-dasharray="5 3"/>
+   <line x1="180" y1="14" x2="180" y2="118" stroke="var(--tm)" stroke-dasharray="3 3"/>
+   <text class="lbl" x="184" y="24">pinned 3.0</text>
+   <text class="lbl" x="44" y="34" fill="var(--c1)">recall</text>
+   <text class="lbl" x="44" y="118">2.0</text><text class="lbl" x="300" y="118">4.0</text>
+   <text class="lbl" x="250" y="44" fill="var(--c2)">count</text>
+  </svg>
+ </div>
+ <div class="card"><h5>Audit progress — this is the gate</h5>
+  <div class="kv"><span>sampled minutes reviewed</span><span>14 / 18</span></div>
+  <div class="kv"><span>missed artifacts found</span><span>5</span></div>
+  <div class="kv"><span>&nbsp;&nbsp;↳ blind spot (z low)</span><span>1</span></div>
+  <div class="kv"><span>&nbsp;&nbsp;↳ threshold (z high, sub-3)</span><span>4</span></div>
+  <div class="kv"><span>synthetic-injection recall</span><span>98.4%</span></div>
+  <div class="kv"><span>audit recall</span><span><span class="chip w">94.1% — below target</span></span></div>
+  <div style="margin-top:10px"><button class="btn pri" disabled>Report recall (4 samples left)</button></div>
+ </div>
+</div>
+<div class="wave" style="margin-top:14px">
+ <div class="lbl" style="margin-bottom:4px">recall-audit view — raw trace with band z-traces beside it, candidates shaded</div>
+ <svg viewBox="0 0 720 132" width="100%" height="132">
+  <rect x="150" y="6" width="58" height="52" fill="var(--c1)" opacity=".16"/>
+  <rect x="430" y="6" width="26" height="52" fill="var(--c1)" opacity=".16"/>
+  <rect x="300" y="6" width="34" height="52" fill="var(--c2)" opacity=".20"/>
+  <text class="lbl" x="296" y="14" fill="var(--c2)">missed →</text>
+  <path id="rw" fill="none" stroke="var(--tp)" stroke-width="1" opacity=".75"/>
+  <text class="lbl" x="2" y="12">raw</text>
+  <line x1="0" x2="720" y1="64" y2="64" stroke="var(--rule)"/>
+  <path id="z1" fill="none" stroke="var(--c1)" stroke-width="1.5"/>
+  <path id="z2" fill="none" stroke="var(--c3)" stroke-width="1.5"/>
+  <line x1="0" x2="720" y1="88" y2="88" stroke="var(--tm)" stroke-dasharray="3 3"/>
+  <text class="lbl" x="2" y="86">z=3</text>
+  <text class="lbl" x="660" y="76" fill="var(--c1)">300–5k</text>
+  <text class="lbl" x="655" y="130" fill="var(--c3)">100–300</text>
+ </svg>
+</div>
+<div class="note"><b>Four of five misses were "threshold", not "blind spot".</b> The z-traces are what make that distinguishable — z was high but under 3. That diagnosis says lower <code>z_enter</code>; a blind-spot diagnosis would instead say the generator needs a new feature. Different fixes.</div>
+`+must([
+ "Pick <code>z_enter</code> from the sweep (default 3.0, defensible range 2–4).",
+ "Scroll every sampled audit window and mark artifacts the generator missed.",
+ "Classify each miss as <b>blind spot</b> (z genuinely low) or <b>threshold</b> (z high but sub-threshold).",
+ "Only then read the recall number — the screen refuses to report one from an incomplete audit."],
+ "candidate generation, hysteresis, merging, duration cap, cardiac suppression in 100–300 Hz only.",true);
+
+V.label=()=>head(4,"Label","<b>Job:</b> produce the training signal. This is the only screen that costs real time — about 1–3 hours once, then ~15 minutes per new animal.")+`
+<div class="row">
+ <span class="chip">queue 1 204</span><span class="chip ok">judged 806</span><span class="chip">unsure 38</span>
+ <span class="chip w">unjudged 360 — excluded from training, never counted as clean</span>
+ <div style="margin-left:auto"><button class="btn">Import prior labels (43 recordings)</button></div>
+</div>
+<div class="wave">
+ <div class="lbl" style="margin-bottom:4px">candidate 812 / 1204 · animal O · 2026-09-12 · t = 418.220–418.395 s · peak z 7.4 · provenance video_assisted</div>
+ <svg viewBox="0 0 720 150" width="100%" height="150">
+  <rect x="270" y="4" width="120" height="62" fill="var(--c2)" opacity=".18"/>
+  <path id="lw" fill="none" stroke="var(--tp)" stroke-width="1" opacity=".8"/>
+  <line x1="0" x2="720" y1="72" y2="72" stroke="var(--rule)"/>
+  <path id="lz" fill="none" stroke="var(--c1)" stroke-width="1.5"/>
+  <text class="lbl" x="2" y="16">V1 300–5k</text><text class="lbl" x="2" y="88">z</text>
+  <rect x="270" y="108" width="120" height="8" rx="4" fill="var(--c2)"/>
+  <text class="lbl" x="396" y="116">video motion (tether ROI)</text>
+ </svg>
+</div>
+<div class="row" style="margin-top:12px">
+ <button class="btn pri"><kbd>1</kbd> motion</button>
+ <button class="btn"><kbd>2</kbd> physiology</button>
+ <button class="btn"><kbd>3</kbd> unsure</button>
+ <span class="chip">Shift+drag to widen the extent</span>
+ <span class="chip">⌘Z — 20-deep undo</span>
+</div>
+<div class="two" style="margin-top:14px">
+ <div class="card"><h5>Why the model proposed this (SHAP)</h5>
+  ${[["band_ratio_100300_3005000","+0.31"],["frac_channels_above","+0.18"],["common_mode_ratio","+0.14"],["onset_rate_log","−0.06"]]
+   .map(r=>`<div class="kv"><span>${r[0]}</span><span>${r[1]}</span></div>`).join("")}
+ </div>
+ <div class="card"><h5>Progress by animal</h5>
+  ${[["F",92],["J",88],["L",95],["O",61]].map(r=>`<div class="kv"><span>${r[0]}</span><span><span class="bar"><i style="width:${r[1]}%"></i></span> ${r[1]}%</span></div>`).join("")}
+ </div>
+</div>
+`+must([
+ "Judge each candidate: <b>motion</b>, <b>physiology</b> or <b>unsure</b> — one keystroke.",
+ "Widen the boundary with Shift+drag where the proposed extent is visibly wrong.",
+ "Stop when the queue for an animal is representative — you do not need to empty it."],
+ "queue ordering by uncertainty, context plots, SHAP once a model exists, autosave to Drive per judgement.");
+
+V.train=()=>{const t=tab.train;return head(5,"Train","<b>Job:</b> choose exactly what the model learns from, and make that choice reproducible and shareable. This is where the existing per-animal held-out checkboxes live on, as a named corpus.")+`
+<div class="tabs">
+ ${[["corpus","Corpus builder"],["config","Configure"],["run","Run"],["versions","Versions"]]
+  .map(([k,l])=>`<button class="tab ${t===k?'on':''}" onclick="st('train','${k}')">${l}</button>`).join("")}
+</div>`+
+(t==="corpus"?`
+<div class="row">
+ <div class="fld"><label>Corpus name</label><input value="c_2026-09-18_baseline43" style="min-width:230px"></div>
+ <div class="fld"><label>Filter animal</label><select><option>all</option><option>F</option></select></div>
+ <div class="fld"><label>Filter cohort</label><select><option>all</option><option>independent</option></select></div>
+ <button class="btn">Hold out all of animal O</button>
+ <button class="btn">Add files…</button>
+</div>
+<table>
+<tr><th>Animal</th><th>Session</th><th class="num">Dur</th><th class="num">Events</th><th class="num">Pos frac</th><th>Last trained</th><th>Role</th><th>Reason</th></tr>
+${[["F","2026-04-02_base","18:04",212,.44,"v14","train",""],
+   ["F","2026-04-09_stim","22:11",188,.47,"v14","train",""],
+   ["J","2026-05-14_base","16:40",171,.42,"v14","train",""],
+   ["L","2026-06-03_base","19:55",233,.45,"v13","train",""],
+   ["L","2026-06-18_stim","21:02",0,0,"—","excluded","electrode failure wk3"],
+   ["O","2026-09-05_base","14:20",96,.39,"—","held_out",""],
+   ["O","2026-09-12_base","15:47",84,.41,"—","held_out",""]]
+ .map(r=>{const role=r[6];
+  return `<tr><td>${r[0]}</td><td>${r[1]}</td><td class="num">${r[2]}</td><td class="num">${r[3]||"—"}</td><td class="num">${r[4]?r[4].toFixed(2):"—"}</td><td class="dim">${r[5]}</td>
+  <td><span class="seg"><span class="${role==='train'?'on':''}">train</span><span class="${role==='held_out'?'ho':''}">hold out</span><span class="${role==='excluded'?'ex':''}">exclude</span></span></td>
+  <td class="${r[7]?'':'dim'}">${r[7]||(role==='excluded'?'<span class="chip no">reason required</span>':'—')}</td></tr>`}).join("")}
+</table>
+<div class="row" style="margin-top:12px">
+ <span class="chip">5 train · 2 held out · 1 excluded</span>
+ <span class="chip">804 events</span>
+ <button class="btn pri" style="margin-left:auto">Save corpus spec</button>
+</div>
+<div class="note"><b>An exclusion without a recorded reason is how a corpus quietly becomes indefensible.</b> The reason string is required, travels with the spec, and appears in every model's provenance. Saved specs are immutable and shared through Drive — anyone in the lab can load this exact corpus.</div>
+`:t==="config"?`
+<div class="row">
+ <div class="fld"><label>Modes to train</label><select><option>all three (recommended)</option><option>pooled only</option></select></div>
+ <div class="fld"><label>w_adapt sweep</label><input value="1, 3, 10, 30"></div>
+ <div class="fld"><label>Hyperopt trials</label><input value="60"></div>
+ <div class="fld"><label>Seed</label><input value="11"></div>
+</div>
+<div class="card"><h5>What will run</h5>
+ <div class="kv"><span>POOLED</span><span>4 LOAO folds · 804 events</span></div>
+ <div class="kv"><span>ADAPTED</span><span>4 folds × 4 w_adapt · 804 events</span></div>
+ <div class="kv"><span>PER_ANIMAL</span><span>4 models · 84–233 events each</span></div>
+ <div class="kv"><span>Learning-curve control</span><span>6 subsample points per mode</span></div>
+ <div class="kv"><span>Baselines</span><span>all-motion, single-feature threshold</span></div>
+</div>
+<div class="note"><b>Corpus-size imbalance is why the learning-curve control is not optional.</b> Per-animal models see 84–233 events against the pooled model's 804; without the matched-count subsample you cannot tell a mode difference from a data-volume difference.</div>
+`:t==="run"?`
+<div class="card"><h5>Running — 6 of 12 jobs</h5>
+ ${[["pooled · fold F","done","100"],["pooled · fold J","done","100"],["pooled · fold L","running","64"],
+    ["adapted · w=1","queued","0"],["per_animal · O","queued","0"]]
+  .map(r=>`<div class="kv"><span>${r[0]} <span class="chip">${r[1]}</span></span><span><span class="bar"><i style="width:${r[2]}%"></i></span></span></div>`).join("")}
+</div>
+<div class="wave" style="margin-top:12px"><div class="lbl">log</div>
+<pre style="margin:6px 0 0;font-size:11.5px;color:var(--ts);white-space:pre-wrap">[14:22:06] corpus c_2026-09-18_baseline43 · sha 4f19a2 · preflight OK, 8 files, checksums clean
+[14:22:07] LOAO fold F: train 592 events (3 animals), eval 212
+[14:24:41] fold F  P 0.881  R 0.862  F1 0.871   (protocol LOAO)
+[14:27:15] fold J  P 0.858  R 0.831  F1 0.845   (protocol LOAO)</pre></div>
+`:`
+<div class="row">
+ <div class="fld"><label>Filter</label><select><option>all modes</option><option>pooled</option></select></div>
+ <span class="chip">append-only · promote and demote are log entries, never edits</span>
+</div>
+<table>
+<tr><th>model_id</th><th>Mode</th><th>Animal</th><th>Corpus</th><th>By</th><th class="num">F1</th><th>Protocol</th><th>State</th></tr>
+${[["m_9c14ff","pooled","—","baseline43","andrea",".871","LOAO","current"],
+   ["m_3a77b1","adapted","O","baseline43","andrea",".825","within-animal","current"],
+   ["m_55de02","per_animal","O","baseline43","andrea",".845","within-animal",""],
+   ["m_20ab7e","pooled","—","c_2026-06_v2","rahul",".842","LOAO","retired"],
+   ["m_77f0c3","adapted","F","baseline43","andrea","—","—","unvalidated"]]
+ .map(r=>`<tr class="${r[7]==='current'?'sel':''}"><td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td><td>${r[3]}</td><td class="dim">${r[4]}</td>
+ <td class="num">${r[5]}</td><td class="dim">${r[6]}</td><td>${r[7]==='current'?'<span class="chip ok">current</span>':r[7]==='retired'?'<span class="chip">retired</span>':r[7]==='unvalidated'?'<span class="chip w">unvalidated</span>':''}</td></tr>`).join("")}
+</table>
+<div class="row" style="margin-top:12px"><button class="btn">View provenance JSON</button><button class="btn">Open results dashboard</button><button class="btn pri">Promote selected</button></div>
+<div class="note"><b>F1 is never comparable across the Protocol column.</b> 0.871 LOAO and 0.845 within-animal are measurements of different tasks. The column exists so the table cannot be read the wrong way at a glance.</div>
+`)+must(
+ t==="corpus"?["Set <b>train / hold out / exclude</b> per recording — per recording, not per animal.",
+   "Write a reason for every exclusion; the field is required.",
+   "Name and save the corpus spec. It becomes immutable and is shared lab-wide through Drive."]
+ :t==="config"?["Choose which modes to train — all three by default.","Set the w_adapt sweep, hyperopt budget and seed."]
+ :t==="run"?["Nothing — watch or walk away. Results land in the dashboard."]
+ :["Decide whether to promote a model. Nothing is ever promoted automatically.",
+   "Read F1 only within a Protocol — never across it."],
+ t==="versions"?"append-only registry writes, provenance capture, Drive sync of the model folder.":"corpus hashing, preflight checksum verification, all folds and the learning-curve subsamples.");};
+
+V.infer=()=>head(6,"Infer","<b>Job:</b> apply a model you consciously chose. There is no default model and no fallback — if you have not chosen, the run does not start.")+`
+<div class="row">
+ <span class="chip">12 recordings selected</span><span class="chip">3 animals</span>
+ <button class="btn">Change selection…</button>
+</div>
+<table>
+<tr><th>Animal</th><th class="num">Rec</th><th>Model</th><th>Mode</th><th class="num">Metrics</th><th>Protocol</th><th>Corpus</th></tr>
+<tr><td>F</td><td class="num">5</td><td><select style="font:inherit;font-size:12px;background:var(--s1);border:1px solid var(--rule);border-radius:5px;padding:3px"><option>m_9c14ff</option><option>m_77f0c3</option></select></td><td>pooled</td><td class="num">F1 .871</td><td class="dim">LOAO</td><td class="dim">baseline43</td></tr>
+<tr><td>J</td><td class="num">4</td><td><select style="font:inherit;font-size:12px;background:var(--s1);border:1px solid var(--rule);border-radius:5px;padding:3px"><option>m_9c14ff</option></select></td><td>pooled</td><td class="num">F1 .845</td><td class="dim">LOAO</td><td class="dim">baseline43</td></tr>
+<tr><td>O</td><td class="num">3</td><td><select style="font:inherit;font-size:12px;background:var(--s1);border:1px solid var(--rule);border-radius:5px;padding:3px"><option>— choose —</option><option>m_3a77b1 (adapted)</option><option>m_55de02 (per-animal)</option><option>m_9c14ff (pooled)</option></select></td><td><span class="chip no">not chosen</span></td><td class="num">—</td><td>—</td><td>—</td></tr>
+</table>
+<div class="row" style="margin-top:14px"><button class="btn pri" disabled>Run — choose a model for animal O first</button>
+<span class="chip w">animals will use 2 different modes — recorded, and flagged in QC as a covariate</span></div>
+<div class="note"><b>Two candidate models for animal O, and the tool will not pick.</b> m_55de02 (per-animal, F1 .845) and m_3a77b1 (adapted, F1 .825) were measured on the same protocol, so the comparison is fair — but per-animal winning is itself a signal that a feature is carrying animal identity. That is a judgement call, which is exactly why it is yours.</div>
+`+must([
+ "Select the recordings to process.",
+ "Choose a model <b>per animal</b> — the picker shows each model's metrics and the protocol they came from.",
+ "Confirm the assignment table before anything executes."],
+ "extent per consumer, routing, mask generation — all deterministic once the model is fixed.");
+
+V.masks=()=>head(7,"Masks","<b>Job:</b> decide whether the output is good enough to keep. A heavily-masked recording should never leave this screen silently.")+`
+<table>
+<tr><th>Consumer</th><th>Signal</th><th>Band</th><th class="num">Retention</th><th></th><th class="num">vs old pipeline</th></tr>
+${[["spikes / ECAP","T","300–5000","94.1",94,"+21.6"],["slow-C","T","100–300","88.7",89,"+15.2"],
+   ["velocity","V1 ∧ V3","300–5000","90.3",90,"new"],["MMC","stomach","2–50","81.4",81,"+6.1"],
+   ["slow wave","stomach","0–2","76.2",76,"+2.4"],["breathing","ANT2","0.5–3","79.8",80,"+3.0"],
+   ["HRV","ANT2","1–100","85.5",86,"+9.7"]]
+ .map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td class="dim">${r[2]}</td><td class="num">${r[3]}%</td>
+ <td><span class="bar"><i style="width:${r[4]}%"></i></span></td><td class="num" style="color:var(--good)">${r[5]}</td></tr>`).join("")}
+</table>
+<div class="two" style="margin-top:14px">
+ <div class="card"><h5>Sustained-event queue — never auto-masked</h5>
+  <div class="kv"><span>t = 212.4 s · 4.2 s · V1,V2,V3</span><span><button class="btn" style="padding:2px 8px">review</button></span></div>
+  <div class="kv"><span>t = 689.1 s · 7.8 s · all</span><span><button class="btn" style="padding:2px 8px">review</button></span></div>
+ </div>
+ <div class="card"><h5>Recording gate</h5>
+  <div class="kv"><span>2026-09-12_base</span><span><span class="chip ok">pass</span></span></div>
+  <div class="kv"><span>2026-09-05_base</span><span><span class="chip w">61% retention — accept?</span></span></div>
+ </div>
+</div>
+<div class="row" style="margin-top:14px"><button class="btn">Export all consumers</button><button class="btn pri">Accept and export</button>
+<span class="chip">writes NaN masks, event table, QC report, provenance — never modifies a source file</span></div>
+`+must([
+ "Adjudicate the sustained-event queue — these are level shifts, not events, so they are never masked automatically.",
+ "Accept or reject each recording flagged by the retention gate.",
+ "Choose the consumer subset to export (all, by default)."],
+ "per-consumer extents, routing between correct / subtract / reject, cosine tapers, provenance.");
+
+V.monitor=()=>head(8,"Monitor","<b>Job:</b> notice an electrode degrading before it ruins a cohort — and catch the one confound that would invalidate the whole study.")+`
+<div class="two">
+ <div class="card"><h5>Per-animal drift — animal O</h5>
+  <div class="kv"><span>tripole (a, b)</span><span>${spark([.51,.509,.512,.518,.531,.548],110,18,"var(--c2)")} drifting</span></div>
+  <div class="kv"><span>peri-R amplitude</span><span>${spark([62,61,60,57,54,49],110,18,"var(--c2)")} −21%</span></div>
+  <div class="kv"><span>noise floor</span><span>${spark([6.1,6.2,6.1,6.6,7.2,8.1],110,18,"var(--c2)")} +33%</span></div>
+  <div class="kv"><span>best HR channel</span><span>ANT2 ×4 → <b>ANT1</b> ×2</span></div>
+ </div>
+ <div class="card"><h5>Blanking fraction by condition — the coverage confound</h5>
+  <div class="kv"><span>baseline</span><span><span class="bar"><i style="width:12%"></i></span> 11.8%</span></div>
+  <div class="kv"><span>stim</span><span><span class="bar"><i style="width:31%;background:var(--c2)"></i></span> 30.6%</span></div>
+  <div class="kv"><span>recovery</span><span><span class="bar"><i style="width:19%"></i></span> 18.9%</span></div>
+  <div class="kv"><span>regression on condition</span><span><span class="chip no">β = 0.188, p &lt; 0.001</span></span></div>
+ </div>
+</div>
+<div class="note"><b>Two findings on one screen, both of which need action.</b> Animal O's (a,b) drift, falling peri-R amplitude, rising noise floor and switched HR channel are one story: that electrode is degrading. Separately, blanking fraction depends strongly on condition — if stimulation drives movement and this goes uncorrected, the pipeline has automated a confound rather than fixed one. Carry coverage as a covariate into the mixed models.</div>
+`+must([
+ "Nothing routinely — but check weekly.",
+ "Act on a drifting (a,b), a falling peri-R amplitude or a switched best-HR channel.",
+ "Treat a significant blanking-vs-condition regression as a finding, not a nuisance."],
+ "all four metrics are computed free once the pipeline runs; this screen only persists and plots them.");
+
+function render(){
+ document.getElementById("main").innerHTML=V[cur]();
+ // fill the fake waveforms
+ const mk=(id,n,amp,y0,burst)=>{const e=document.getElementById(id);if(!e)return;
+  let d="";for(let i=0;i<n;i++){const x=i/(n-1)*720;
+   let v=(rnd()-.5)*amp; if(burst&&x>burst[0]&&x<burst[1])v*=6.5;
+   d+=(i?"L":"M")+x.toFixed(1)+","+(y0+v).toFixed(1);}
+  e.setAttribute("d",d);};
+ mk("rw",300,9,32,[300,334]); mk("z1",300,5,100,[150,208]); mk("z2",300,4,116,[430,456]);
+ mk("lw",320,10,38,[270,390]); mk("lz",320,6,100,[270,390]); mk("vb",300,7,36,[118,314]);
+}
+nav();render();
+</script>

@@ -1,0 +1,130 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gems-blanking-v2"
+version = "0.1.0"
+description = "Motion-artifact detection and per-consumer blanking for rodent vagus ENG and stomach EMG"
+readme = "PIPELINE.md"
+requires-python = ">=3.11,<3.14"
+license = { text = "Proprietary" }
+
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    # pandas 3 changed copy-on-write and several dtype defaults; pin below it until
+    # the analysis code is checked against them.
+    "pandas>=2.2,<3",
+    "h5py>=3.10",
+    "pyarrow>=14",
+    "lightgbm>=4.1",
+    # shap pulls scikit-learn. On a Windows machine with Smart App Control enforced
+    # (HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy\VerifiedAndReputablePolicyState
+    # == 1), the newest wheels' unsigned .pyd files are blocked at import with
+    # "An Application Control policy has blocked this file". scikit-learn 1.5.2 and
+    # pandas 2.3.3 load; scikit-learn 1.9.1 and pandas 3.0.6 do not. If an import
+    # fails that way, install an older build of that package - do not touch the
+    # machine's security settings.
+    "shap>=0.44",
+    "matplotlib>=3.8",
+    "opencv-python-headless>=4.9",
+    "platformdirs>=4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "pandas-stubs",
+    "types-PyYAML",
+]
+
+[tool.setuptools.packages.find]
+include = ["gems_blanking_v2*"]
+
+# --------------------------------------------------------------------------
+# ruff
+# --------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["gems_blanking_v2", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",      # pycodestyle
+    "F",           # pyflakes
+    "I",           # isort
+    "N",           # pep8-naming
+    "UP",          # pyupgrade
+    "B",           # bugbear
+    "A",           # builtin shadowing
+    "C4",          # comprehensions
+    "SIM",         # simplify
+    "PTH",         # invariant: pathlib everywhere, never os.path
+    "RUF",
+    "ANN",         # every def annotated
+    "D",           # docstrings
+    "NPY",         # numpy legacy-random and friends
+    "PL",          # pylint subset
+    "TID",         # tidy imports
+]
+ignore = [
+    "D203",    # incompatible with D211
+    "D213",    # incompatible with D212
+    # The synthetic generators' signatures are dictated by IMPLEMENTATION.md; they
+    # take the parameters they take.
+    "PLR0913",
+    "PLR0917",
+    # int(round(x)) is load-bearing: round() on a numpy scalar returns a numpy
+    # scalar, not an int, and a numpy float cannot index an array.
+    "RUF046",
+]
+
+[tool.ruff.lint.flake8-builtins]
+# gems_blanking_v2.io and .types shadow stdlib names only as submodules, which
+# absolute imports are unaffected by. The layout in CLAUDE.md names io/ explicitly.
+builtins-allowed-modules = ["io", "types"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.per-file-ignores]
+# Test modules document themselves through their assertions and names.
+"tests/*" = ["D103", "PLR2004"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.format]
+quote-style = "double"
+
+# --------------------------------------------------------------------------
+# mypy
+# --------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+files = ["gems_blanking_v2", "tests"]
+strict = true
+warn_unreachable = true
+warn_unused_ignores = true
+disallow_any_generics = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+no_implicit_reexport = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = ["scipy.*", "lightgbm.*", "shap.*", "cv2.*", "h5py.*", "matplotlib.*"]
+ignore_missing_imports = true
+
+# --------------------------------------------------------------------------
+# pytest
+# --------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+filterwarnings = ["error"]
