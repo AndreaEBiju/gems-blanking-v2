@@ -9,14 +9,42 @@
 ### Purpose
 Produce the signals every later step consumes. Both representations are kept and
 they do different jobs: raw contacts carry the artifact evidence and the
-inter-contact delay; the tripole has ~6× lower σ and is what spike detection reads.
+inter-contact delay; the tripole has a lower σ and is what spike detection reads.
+
+**Do not quote a σ-reduction factor as a constant.** This document has carried
+both "~6×" and "2.5–2.8×" and **both are wrong as constants.** The ratio is not a
+property of the tripole; it is a property of how much common mode a recording
+happens to contain. Holding contact gains fixed and sweeping only the
+common-mode amplitude moves it from under 2 to nearly 10 (measured in task 04,
+and tested as a monotone sweep rather than asserted). 2.5–2.8× is what animal J's
+baseline contained. Report the measured ratio per recording as a **QC number**;
+never let anything downstream depend on a fixed value.
 
 ### Signature
 ```python
-def build_derivations(rec: Recording) -> tuple[dict[str, np.ndarray], dict[str, tuple[float,float]]]:
-    """Returns ({signal_name: trace}, {cuff_id: (a, b)}).
+def build_derivations(rec: Recording) -> tuple[dict[str, np.ndarray], dict[str, CuffWeights]]:
+    """Returns ({signal_name: trace}, {cuff_id: CuffWeights}).
     Names are cuff-prefixed: 'L_V1', 'L_T', 'R_V2', ... plus 'stomach_ref'."""
+
+@dataclass(frozen=True)
+class CuffWeights:
+    a: float; b: float                  # APPLIED -- always 0.5 / 0.5
+    fitted_a: float; fitted_b: float    # DIAGNOSTIC, never applied; nan if unfittable
+    degenerate: bool                    # fitted a -> 0 or 1: the fit collapsed
 ```
+
+**The fit is computed as a diagnostic and never applied.** The Acceptance below
+asks that `(a, b)` be stable across sessions and reads drift as electrode
+degradation — vacuous if the reported pair is the applied one, which is 0.5/0.5
+by construction and cannot drift. A 2-tuple cannot say which was applied, and
+hiding that is how a later bug gets written. `degenerate` exists so a drift log
+does not read the measured `a → 1.0` collapse as drift.
+
+**Why fitting cannot help much, mechanistically:** 0.5/0.5 cancels a common mode
+**exactly** whenever the outer gains are symmetric about the middle one —
+`(1.2, 1.0, 0.8)` and even `(1.4, 1.0, 0.6)` cancel perfectly. The fit can only
+beat naive on the *asymmetric* part of a mismatch. That is a plausible mechanism
+for the measurement below, and it is now a test.
 
 ### Algorithm
 ```
@@ -29,9 +57,6 @@ cuff R the fitted and naive weights differ by <1% in σ(T). A bounded search ove
 `a ∈ [0.2, 0.8]` lands on 0.50 and 0.59 — no better than naive. Minimising 20–300
 Hz variance reduces that band 32–36× but **does not improve, and can degrade, the
 300–5000 Hz noise floor**, which is the band that matters.
-
-**Measured σ reduction is 2.5–2.8×, not the ~6× this document assumed.** Correct
-any downstream reasoning that used 6×.
 
 **Strong empirical support for invariant 6 (detect on raw contacts, not `T`):**
 the fraction of samples above 4.5σ in 300–5000 Hz is **5.8–6.4% on single contacts
@@ -50,8 +75,20 @@ This corrects contact-impedance mismatch, which a hardware short cannot. For
 `config == "hw_tripole"` the tripole arrives pre-formed: pass it through and record
 `(a, b) = (nan, nan)`.
 
-Stomach: old cohort was hardware-referenced in TDT; new cohort is raw and referenced
-here. Produce `stomach_ref` for both and record which path was taken.
+Stomach: old cohort was hardware-referenced in TDT and passes through. **The new
+cohort's reference was unspecified in this design and is now decided: common
+average across the stomach contacts, recorded and warned.**
+
+**It is not a neutral choice and the warning is load-bearing.** The gastric slow
+wave is largely *common* across the array, so a common average attenuates part
+of the very signal the `slow_wave` and `mmc` consumers read. It is the
+defensible default when no reference electrode was designated, but if one
+actually was, that is a different signal and this must change. Expose
+`build_stomach_reference` publicly and record the path in provenance (task 15) —
+the 2-tuple return has no slot for it.
+
+**Open question for Andrea:** was a specific stomach contact intended as the
+reference in the new cohort, or is common-average correct?
 
 ### Tests
 - inject a known common-mode component with unequal per-contact gains; assert the

@@ -95,6 +95,14 @@ numeric parameters**:
 | `mstim_hz` | `None`, or 10 (MS1) / 50 (MS2) / 100 (MS3) |
 | `timepoint` | `t01`, `t02`, … |
 
+**`estim_hz` / `mstim_hz` name the protocol arm, not an applied stimulus.**
+`E1000_JEL_E1000_bl_1315` is a *baseline* carrying `estim_hz = 1000`: it is the
+baseline recorded for the 1000 Hz arm, with nothing being delivered during it.
+`epoch` is what says whether stimulation was on. Any model treating `estim_hz`
+as an applied stimulus will be wrong on every baseline row — use the
+interaction with `epoch`, or carry an explicit `stim_on = (epoch ==
+"stim_recovery")`.
+
 Fixed across all electrical levels: **1000 µA, 0.3 ms pulse width, square,
 bipolar**. Fixed across all mechanical levels: **50% duty cycle**. So ES1→ES2→ES3
 is one frequency axis (10/100/1000 Hz) and MS1→MS2→MS3 is another
@@ -103,6 +111,44 @@ is one frequency axis (10/100/1000 Hz) and MS1→MS2→MS3 is another
 `conditions.yaml` therefore maps a filename to this **record**, not to a single
 label. The closed vocabulary applies to `epoch`; the two frequency fields are
 validated against their allowed sets.
+
+### RESOLVED 2026-09-21 — the old cohort's tokens are the same axes in Hz
+
+Confirmed by Andrea: **`E<n>` and `M<n>` are frequencies in Hz**, the same two
+axes the ES/MS ordinals name. So the conventions merge directly and nothing is
+lost by pooling cohorts on frequency:
+
+| old form | Hz | new ordinal |
+|---|---|---|
+| `E10` | 10 | ES1 |
+| `E100` | 100 | ES2 |
+| `E1000` | 1000 | ES3 |
+| `M10` | 10 | MS1 |
+| — | 50 | MS2 |
+| `M100` | 100 | MS3 |
+
+`M100E10` is mechanical 100 Hz **and** electrical 10 Hz — the combined case the
+record already handles.
+
+**Precedence when a name carries both forms and they disagree: the explicit-Hz
+token wins.** Ruled on `M100_JEL_MS2_bl_1945` — `mstim_hz = 100` from `M100`,
+not 50 from `MS2`. Generalise it: an explicit-Hz token beats an ordinal, for
+both axes.
+
+**Record the conflict, do not silently drop it.** A row resolved this way
+carries `token_conflict: ["M100", "MS2"]` in its `meta.json` and in provenance.
+The precedence rule makes it parseable; the record makes it auditable, and a
+cluster of these would say the old filenames are less trustworthy than they
+look.
+
+`unparsed_stim_tokens` stays, for tokens genuinely outside both tables — it just
+no longer fires on these seven.
+
+**One thing still unknown, and it matters only if you pool cohorts on
+amplitude:** the new cohort fixes electrical stimulation at 1000 µA, and the old
+cohort's filenames encode frequency only. Confirm the old amplitude was also
+1000 µA before treating the two as one dataset. Frequency comparisons are safe
+either way.
 
 ### The learning loop
 When the user corrects a condition, offer: *"Add a rule so this is automatic next
@@ -116,55 +162,158 @@ That is how a bad rule gets caught rather than propagating.
 ### Signature
 ```python
 @dataclass(frozen=True)
+class Condition:
+    epoch:     Literal["baseline", "stim_recovery"]
+    estim_hz:  int | None      # 10 / 100 / 1000; absent when no electrical stim
+    mstim_hz:  int | None      # 10 / 50 / 100;   absent when no mechanical stim
+    timepoint: str | None      # "t01", ...
+    # serialises with ABSENT keys, never null: estim_hz absent on a baseline means
+    # "no electrical stimulation", which is a fact, not a gap. (CLAUDE.md, the
+    # JSON missing-scalar rule.)
+
+@dataclass(frozen=True)
 class ScanResult:
     path:         Path
-    content_hash: str
-    animal:       str | None
+    content_hash: str | None       # None = "not needed", never "unknown"
+    animal:       str | None       # extract_animal_letter; works on both cohorts
     session:      str | None
-    condition:    str                  # includes "unknown"
+    condition:    Condition | None            # None when unresolved
     status:       Literal["matched","ambiguous","unknown","duplicate","known"]
     matched_rule: str | None
-    candidates:   list[str]            # for ambiguous
+    candidates:   list[str]
+    unparsed_stim_tokens: list[str]  # e.g. ["E1000"] -- see below. NON-EMPTY
+                                     # BLOCKS the row from a corpus even when
+                                     # the epoch matched.
 
 def scan(root: Path, rules: Rules, known: Registry) -> list[ScanResult]
-def apply_corrections(results, corrections, user: str) -> None   # writes meta.json
+def apply_corrections(results, corrections, user: str) -> None   # merges into meta.json
 ```
 
 ### Required behaviours
-- **Recursive scan** of the given folder for the configured extensions; default to
-  the shared-drive `data/` tree.
-- **Deduplicate by content hash**, not by path. Folder reorganisations and Drive
-  conflict copies produce the same recording at two paths; flag as `duplicate` and
-  show both paths rather than ingesting twice.
-- **Skip already-known recordings** (status `known`), but re-verify their checksum.
-- **Sort `unknown` and `ambiguous` to the top** of the review table — the rows
-  needing attention should not be buried among hundreds of correct ones.
-- **Bulk edit**: multi-select rows → set animal or condition in one action.
-- Every correction records `who` and `when` in `meta.json`; a user-set condition
-  is marked `source: human` and is never overwritten by a later rescan.
-- Scanning is **read-only** until the user confirms. Nothing is written to
-  `gems_root` during a scan.
-- Scans can be slow over a streamed shared drive — walk metadata only, hash lazily,
-  and show progress.
+- **`gems doctor` and the preflight also report the platform, the resolved root,
+  the longest path the current layout would generate, and whether any stored path
+  is absolute.** Cross-platform breakage is invisible on the machine that caused
+  it.
+- **Preflight check** before any training or inference run: resolve `gems_root`,
+  assert a `.gems-root` marker file exists, verify every file the run needs is
+  present and checksum-clean, and report anything still syncing. **Refuse to start
+  on an incomplete corpus** — a model trained on a half-synced dataset is
+  indistinguishable from a bad model.
+- **Never write scratch or intermediate files into `gems_root`.** Envelopes,
+  feature matrices and temp artifacts go to a local cache keyed by content hash.
+  Syncing 16 GB of envelopes to every lab member is a real risk here.
+- **Large-file hygiene:** mark the `data/` folders the run needs as available
+  offline before a long job; streaming reads from Drive File Stream will otherwise
+  dominate runtime.
+- **Per-user identity** from git config or an explicit setting, recorded in every
+  label file and registry line. "Who labelled this" is scientific metadata.
+- **Role check in preflight is a WRITE PROBE, not a role query.** Drive roles are
+  not visible from the filesystem. Attempt a write into the root and, on
+  `PermissionError`, emit: "you are a Contributor; Drive for desktop makes that
+  read-only — ask for Content manager". Name the function for what it does.
+- **Item-count check in `gems doctor`:** report items against the 500,000 cap and
+  warn above 80% — but report it as a **bound, not a number**. Walking 500,000
+  items over a streamed Drive is not something a `doctor` run can do, so early-exit
+  at an `--item-cap` and make the full count opt-in. Trash counts toward the cap
+  and is **invisible to the filesystem**, so the figure is always a lower bound;
+  say so in the output.
+- **`gems_root` is per-user config via `platformdirs`** (rule 15 — `%LOCALAPPDATA%`
+  on Windows), never committed. Resolution order: explicit argument → `GEMS_ROOT`
+  env → platformdirs config → legacy `~/.gems/config.toml` → bounded scan for the
+  marker. **Never reconstruct the root from the drive name.**
+  Provide `gems doctor` to print the resolved root, sync status, shard count and
+  any checksum failures.
+
+### Shared-drive specifics (this lab uses a Google **shared drive**, not a personal Drive)
+
+**Roles — and the trap.** Shared-drive roles are Manager / Content manager /
+Contributor / Commenter / Viewer. "Contributor" looks like the right least-privilege
+choice for lab members, and it is wrong here: **in Google Drive for desktop,
+Contributors have read-only access.** Anyone who labels, trains or exports through
+the synced folder must be **Content manager**.
+
+| Who | Role | Why |
+|---|---|---|
+| everyone who labels / trains / exports | **Content manager** | can add, edit, move and trash; **cannot permanently delete** |
+| one or two owners | Manager | membership, permanent delete, trash purge |
+| collaborators who only read results | Viewer / Commenter | |
+
+Content manager is a real safety net: deletions go to the shared-drive trash and
+only a Manager can purge, so an accidental `rm -rf` inside `gems_root` is
+recoverable. Do **not** grant Manager broadly just to avoid a permissions error.
+
+**Why a shared drive is the right call:** files are owned by the drive, not by a
+person. When a student leaves the lab, nothing disappears and nothing needs
+transferring — which is the failure mode of a personal Drive shared out.
+
+**Item cap: 500,000 items per shared drive**, counting files, folders, shortcuts
+and trash. This is the one limit this design can actually hit, because of
+per-trial metadata.
+
+> **Do not write one file per trial.** Write **one JSONL per session**, appended
+> per trial: `trials/<animal>/<session>/trials.jsonl`. Acquisition is a single
+> writer, so append is safe there, and this keeps the item count in the thousands
+> instead of the hundreds of thousands. It is also far faster to sync — many tiny
+> files is the worst case for Drive for desktop.
+
+Budget the item count before committing to a layout, and report it in
+`gems doctor`. Trash counts toward the cap, so a Manager should purge periodically.
+
+**Other shared-drive limits worth knowing:** 750 GB uploaded per user per 24 h
+(a 25-minute 9-channel float32 recording is ~1.3 GB, so ~570 recordings/day — not
+a practical constraint, but relevant to a bulk initial migration); 5 TB max file
+size; 100 levels of folder nesting; a file lives in exactly one folder (use
+shortcuts, not copies).
+
+**Paths differ per machine**, so `gems_root` stays per-user config with
+auto-discovery by scanning for the `.gems-root` marker. **Nothing written into
+`gems_root` may contain an absolute path** — store POSIX paths relative to the
+root and resolve locally (see the Cross-platform rules in `CLAUDE.md`).
+
+> **This drive's name contains a character Windows cannot use.** It is
+> `BIONICs Lab: Enteric Interfaces Team`, and `:` is illegal in a Windows path,
+> so Drive for desktop substitutes it and **the folder is not the same string on
+> Windows**. Never reconstruct the root from the drive name; always discover it
+> via the marker file. Confirm what Windows actually produces before onboarding
+> the first Windows user.
+>
+> Windows `MAX_PATH` is 260 unless long paths are enabled, and this data already
+> sits at ~193 characters on Windows before the tool appends anything. Keep
+> generated segments short and check the deepest path the layout can produce.
+
+| OS | Typical root |
+|---|---|
+| macOS | `~/Library/CloudStorage/GoogleDrive-<account>/Shared drives/<DriveName>` |
+| Windows | `G:\Shared drives\<DriveName>` |
+| Linux | **no official Drive for desktop client** — rclone or equivalent; confirm before assuming a lab Linux box can participate |
+
+**Streaming vs offline.** Drive for desktop streams shared-drive files by default.
+Random-access reads into a streamed HDF5 are slow enough to dominate training
+runtime, so either mark the needed `data/` folders available offline, or have the
+preflight **copy the run's inputs into the local content-addressed cache first**.
+Do the copy; it is more predictable than relying on pinning.
+
+### Concurrency is still not free — state the limits
+This design tolerates **concurrent appends** and **concurrent reads**. It does not
+make Drive transactional. Two users training the same corpus simultaneously will
+produce two valid models and two log lines, and a human decides which is promoted.
+That is the correct behaviour for a research tool, but say it in the UI rather
+than pretending the conflict cannot happen.
 
 ### Tests
-- a filename matching no rule yields `unknown`, **not** `baseline` (the regression
-  guard on the current behaviour)
-- `X_stim_rec_01` resolves to `stim_recovery`, not `stim` — priority ordering
-- two equal-priority rules matching different conditions yield `ambiguous`
-- the same content at two paths yields one `duplicate` row naming both
-- a human-set condition survives a rescan
-- a condition outside `vocabulary` is rejected at write time
-- corrections are written with user and timestamp
-- an `unknown` recording cannot be added to a corpus spec
+- two simulated clients appending concurrently produce a log whose replay contains
+  both entries, in either merge order
+- a Drive-style conflict copy (`events.jsonl (1)`) is merged, not lost or
+  duplicated
+- a truncated parquet fails the checksum and raises before training starts
+- preflight refuses a corpus with a missing file and names it
+- no code path writes to `gems_root/cache`
+- replaying the log twice is idempotent
 
 ### Acceptance
-Point the tool at the shared drive's `data/` root: it lists every recording with a
-proposed animal and condition, flags what it could not determine instead of
-guessing, and after corrections every row is either confirmed or explicitly
-excluded. Report how many of the 43 existing recordings parse cleanly under the
-initial rule set — **and how many the current code would have silently called
-`baseline`.**
+A second lab member clones the repo, sets `gems_root`, runs `gems doctor`, and can
+immediately list the same models and corpora as the first — with no manual copying
+and no shared-write conflicts.
 
 ---
 
