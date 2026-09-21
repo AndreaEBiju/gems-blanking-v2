@@ -3,6 +3,12 @@
 Authoritative build document. `tasks/NN-*.md` are **generated** from this file by
 `python split_tasks.py`; edit here and regenerate.
 
+**`split_tasks.py` is not shipped with this document — the copy in the repo is
+canonical.** It was reverted once by a doc drop that carried an older copy, and
+now that the repo's own tooling is bound by the cross-platform contract, that
+would land as a red CI row rather than a silent regression. Doc updates replace
+`IMPLEMENTATION.md`, `CLAUDE.md`, `PIPELINE.md` and `PROMPTS.md` only.
+
 Read `CLAUDE.md` first — its invariants apply to every task and are not repeated
 per task. Read `PIPELINE.md` for why each decision was made; this document says
 only what to build.
@@ -433,16 +439,26 @@ that never happens.
    `{ts, user, action, model_id, mode, animal, corpus_id, metrics}` where `action`
    ∈ `{trained, promoted, demoted, retired}`. Current state is computed by
    **replaying the log**, not by reading a field.
-   - Each client appends to its **own shard** `events.jsonl.<user>.<utc>`, and
+   - Each client appends to its **own shard** `events.jsonl.<user>.<compact-utc>`, and
      readers take the **union of all shards**. Two users writing at once produce
      two files, not a conflict.
    - A periodic `compact` command merges shards into `events.jsonl` — run manually,
-     by one person, never automatically.
+     by one person, never automatically. This is **the one mutable shared file**
+     the design allows, and it is the exception to rule 12: write atomically, read
+     the merged file back and compare it against the shard union, and only then
+     unlink the shards.
    - Union-of-lines is order-independent and idempotent, so a Drive conflict copy
      merges correctly by construction.
 3. **Every file carries a sha256, and readers verify it.** Drive can present a
    partially synced file as complete. A checksum mismatch must raise, not warn —
    silently training on a truncated parquet is the failure mode this prevents.
+
+   **The checksum lives in the *referencing* document, not in a sidecar.** A
+   corpus spec and a `provenance.json` each carry a manifest of
+   `FileRef{rel_path, sha256, size_bytes}`. Sidecar `.sha256` files would double
+   the item count against the 500,000 cap this whole layout is designed around.
+   Consequence, accepted: a file no document references has no checksum and is
+   unverifiable — that is correct, because nothing reads it either.
 
 ### Required behaviours
 - **`gems doctor` and the preflight also report the platform, the resolved root,
@@ -462,13 +478,20 @@ that never happens.
   dominate runtime.
 - **Per-user identity** from git config or an explicit setting, recorded in every
   label file and registry line. "Who labelled this" is scientific metadata.
-- **Role check in preflight:** if the user's effective access to `gems_root` is
-  read-only, say so plainly ("you are a Contributor; Drive for desktop makes that
-  read-only — ask for Content manager") rather than failing later with a confusing
-  permission error mid-run.
-- **Item-count check in `gems doctor`:** report items used against the 500,000 cap,
-  including trash, and warn above 80%.
-- **`gems_root` is per-user config** (`~/.gems/config.toml`), never committed.
+- **Role check in preflight is a WRITE PROBE, not a role query.** Drive roles are
+  not visible from the filesystem. Attempt a write into the root and, on
+  `PermissionError`, emit: "you are a Contributor; Drive for desktop makes that
+  read-only — ask for Content manager". Name the function for what it does.
+- **Item-count check in `gems doctor`:** report items against the 500,000 cap and
+  warn above 80% — but report it as a **bound, not a number**. Walking 500,000
+  items over a streamed Drive is not something a `doctor` run can do, so early-exit
+  at an `--item-cap` and make the full count opt-in. Trash counts toward the cap
+  and is **invisible to the filesystem**, so the figure is always a lower bound;
+  say so in the output.
+- **`gems_root` is per-user config via `platformdirs`** (rule 15 — `%LOCALAPPDATA%`
+  on Windows), never committed. Resolution order: explicit argument → `GEMS_ROOT`
+  env → platformdirs config → legacy `~/.gems/config.toml` → bounded scan for the
+  marker. **Never reconstruct the root from the drive name.**
   Provide `gems doctor` to print the resolved root, sync status, shard count and
   any checksum failures.
 
@@ -2742,6 +2765,15 @@ real data disagreed with a constant in this document.
 
 1. `Raww` anti-alias filter setting.
 2. Video container, fps, and whether per-frame PTS exist.
+2b. **What Windows Drive substitutes for the `:` in `BIONICs Lab: Enteric
+   Interfaces Team`.** Still open as of 2026-09-21 — Drive for desktop is
+   installed on the Windows build machine but has never been signed in, so
+   nothing is mounted and there is no folder name to read. **Not guessed**:
+   `∶` (U+2236), `` (U+F03A) and `_` are all plausible and are three different
+   strings. Mitigated rather than answered — discovery is by marker only, every
+   stored path is relative, and `tests/test_portability.py` parametrises the root
+   name over all four candidates. `gems doctor` prints the resolved root, so the
+   first signed-in machine answers it in one command.
 3. What the old TDT stomach reference actually was.
 4. Current `recall_real` from the previous model, and the target.
 5. The RR histogram needed to set `R_MIN` (task 05).

@@ -245,6 +245,34 @@ result to ship — see task 12.
 - A test that passes because a threshold was loosened is a failed test. If a
   tolerance must be widened, say so explicitly in the task report.
 
+## Who owns which files
+
+The spec is authored in one place and the code in another, on different
+machines. Clobbering is the hazard, so ownership is explicit:
+
+| File | Owner | Rule |
+|---|---|---|
+| `IMPLEMENTATION.md`, `CLAUDE.md`, `PIPELINE.md`, `PROMPTS.md` | the spec author | Claude Code does **not** edit these. Propose changes in the task report; they come back in the next drop. |
+| `tasks/` | generated | never hand-edited by anyone; regenerate with `split_tasks.py` |
+| `split_tasks.py`, all code, all tests, CI config | the repo | the spec author does **not** ship copies of these |
+
+A doc drop therefore replaces exactly four files and can never overwrite code.
+Once the repo is on a remote, drops become pull requests and this stops being
+a manual step.
+
+## Two testing rules that came from real failures
+
+- **Tests must be hermetic.** No test may read or write the developer's real
+  per-user config, `GEMS_ROOT`, or anything outside `tmp_path`. Use an autouse
+  fixture that isolates both. *Found in 00A:* running `gems init` once made two
+  discovery tests pass for the wrong reason — they would have passed on a clean
+  machine and failed on a colleague's.
+- **Anything used as a dedup or identity key must round-trip exactly.** If
+  `parse(serialise(x)) != x` for any field, deduplication silently fails.
+  *Found in 00A:* `RegistryEvent(metrics=None)` serialised to `{}` and parsed
+  back as `{}`, so an event never equalled its own reparse — and conflict-copy
+  dedup is built on exactly that comparison. Property-test the round trip.
+
 ## Definition of done, per task
 
 1. Module implemented with type hints and docstrings stating units.
