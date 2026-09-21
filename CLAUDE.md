@@ -179,7 +179,9 @@ narrow the declaration instead of leaving it untested.
 | Envelope / z grid | **10 ms**, shared by every band. `n_frames = floor(dur/0.010)` |
 | Band naming | `"300-3000"`, `"100-300"`, `"1-100"`, `"2-50"`, `"0.5-3"`, `"0-2"` — `CONSUMERS` may only name a key of `BANDS`, and a test asserts it |
 | Signal naming | `"V1".."V3"`, `"T"` per cuff, prefixed by cuff: `"L_V1"`, `"R_T"` |
-| Missing scalar | `np.nan`, never `0`, never `-1` |
+| Missing scalar, **in memory** | `np.nan`, never `0`, never `-1` |
+| Missing scalar, **serialised to JSON** | **the key is absent** — never `null`, never `NaN`, never a sentinel. JSON has no NaN: `json.dumps` emits a bare `NaN` that Python reads back and almost nothing else does, and `nan != nan` breaks round-trip equality outright. The `np.nan` convention stops at the edge of a JSON file. A metric that could not be computed is **absent**. |
+| Reading such a field | accept **absent and `null` identically**; write only absent. A required field that is absent or null raises **naming the field**, rather than being defaulted into a record nobody wrote. |
 | Boolean masks | `True` = **invalid / masked out** |
 | Random seeds | every test and every synthetic generator takes an explicit seed |
 | Filters | design with `output='sos'`, apply with `sosfiltfilt`. **Never** `butter(...,'ba')` at these ratios — a 1 Hz corner at 24.4 kHz is numerically unstable and silently returns garbage |
@@ -239,6 +241,12 @@ result to ship — see task 12.
 ## Testing
 
 - `pytest` per module against **synthetic signals with known ground truth**.
+- `hypothesis` for anything serialised, hashed, or compared — property tests, not
+  examples. Example-based coverage is what let three separate serialiser defects
+  through in 00A; the property suite found all three in one pass.
+- **Verify the test, not just the code:** revert each fix in turn and confirm the
+  test written for it actually fails. A test that passes against the bug it was
+  written for is worse than no test.
 - `tests/conftest.py` owns every generator. No test invents its own signal.
 - Every numeric claim in a docstring must have a test that would fail if it were
   wrong.
@@ -267,6 +275,12 @@ a manual step.
   fixture that isolates both. *Found in 00A:* running `gems init` once made two
   discovery tests pass for the wrong reason — they would have passed on a clean
   machine and failed on a colleague's.
+- **Serialised dedup keys use canonical, ASCII-escaped JSON** (`ensure_ascii=True`,
+  sorted keys, fixed separators). `ensure_ascii=False` lets U+2028, U+2029 and
+  U+0085 into a JSONL line literally: a reader splitting on `\n` is fine, but
+  `str.splitlines()` and most other languages' line splitters see one record as
+  two malformed ones — and these files are written to a shared drive for other
+  people's tools. Unicode still round-trips exactly, as `\uXXXX`.
 - **Anything used as a dedup or identity key must round-trip exactly.** If
   `parse(serialise(x)) != x` for any field, deduplication silently fails.
   *Found in 00A:* `RegistryEvent(metrics=None)` serialised to `{}` and parsed
