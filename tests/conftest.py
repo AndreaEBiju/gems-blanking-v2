@@ -867,6 +867,61 @@ def make_multichannel(
     return rec, truth
 
 
+def make_common_mode(
+    fs: float,
+    dur_s: float,
+    lo_hz: float = 20.0,
+    hi_hz: float = 300.0,
+    sigma_uv: float = 50.0,
+    n_components: int = 24,
+    seed: int = 0,
+) -> F64:
+    """Band-limited common-mode trace, for the tripole-rejection tests.
+
+    Built from summed sinusoids with random phases rather than by filtering noise,
+    like every other component here, so the band limits are exact and no filter
+    design can misbehave. Scaled so :func:`robust_sigma` is ``sigma_uv``.
+
+    ``make_multichannel``'s common mode sits at 0.3 Hz plus injected artifacts,
+    which is the right shape for detection tests and the wrong one for a fit that
+    minimises variance in 20-300 Hz - nothing of it lands in that band. This gives
+    a common mode the fit can actually see.
+
+    Parameters
+    ----------
+    fs
+        Sample rate in Hz.
+    dur_s
+        Duration in seconds.
+    lo_hz, hi_hz
+        Band the components are drawn from, inclusive.
+    sigma_uv
+        Target robust scale of the result, microvolts.
+    n_components
+        How many sinusoids to sum. More makes the amplitude distribution more
+        Gaussian; 24 is already indistinguishable for these purposes.
+    seed
+        Seed for the frequencies and phases.
+    """
+    if not 0.0 < lo_hz < hi_hz:
+        msg = f"need 0 < lo_hz < hi_hz, got {lo_hz} and {hi_hz}"
+        raise ValueError(msg)
+    n = _n_samples(fs, dur_s)
+    rng = np.random.default_rng(seed)
+    t = np.arange(n, dtype=np.float64) / fs
+
+    freqs = rng.uniform(lo_hz, hi_hz, size=n_components)
+    phases = rng.uniform(0.0, 2.0 * np.pi, size=n_components)
+    trace = np.sum(
+        [np.sin(2.0 * np.pi * f * t + p) for f, p in zip(freqs, phases, strict=True)], axis=0
+    )
+    scale = robust_sigma(trace)
+    if scale == 0.0:  # pragma: no cover - needs a degenerate draw
+        msg = "common-mode components cancelled; try another seed"
+        raise ValueError(msg)
+    return np.asarray(trace * (sigma_uv / scale), dtype=np.float64)
+
+
 # ---------------------------------------------------------------------------
 # fixtures
 # ---------------------------------------------------------------------------
