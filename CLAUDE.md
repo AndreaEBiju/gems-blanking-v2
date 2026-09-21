@@ -62,7 +62,17 @@ violating one, stop and say so rather than working around it.
     Any comparison between corpora of different size needs a learning-curve
     control at matched event count.
 
-14. **Cross-platform by construction.** The tool is developed on macOS and must
+14. **Units are declared, never inferred.** No loader may guess whether a file
+    holds volts, millivolts or microvolts. `units` is a required argument with no
+    default, validated against the conversion table, and declared once per animal
+    in the profile. Guessing wrong is a 10⁶ error that looks like a plausible
+    signal. Same class as `rostral_end`: irrecoverable if wrong, so it is stated,
+    not inferred.
+15. **Index conventions convert at the boundary, explicitly and with a test.**
+    MATLAB-side intervals are 1-based inclusive; ours are 0-based half-open, so
+    `[5,5]` is one sample → `[4/fs, 5/fs)`. An off-by-one here shifts every mask
+    by a sample and is invisible in a plot.
+16. **Cross-platform by construction.** The tool is developed on macOS and must
     run unchanged on Windows. See the Cross-platform rules below — most of them
     are about what gets *written to the shared drive*, because those files are
     read by other people's machines.
@@ -139,9 +149,12 @@ test. Python 3.12 is the reference interpreter; `requires-python = ">=3.11,<3.14
     Python console-script entry point, not `.sh`. Do not call `sed`, `awk`,
     `find` or `which` from code.
 15. **Per-user config location** via `platformdirs`, not a hardcoded `~/.gems` —
-    that resolves to `%LOCALAPPDATA%` on Windows. Keep reading the existing
-    `~/.detector/preprocessing_profiles/` for backward compatibility, but write
-    through `platformdirs`.
+    that resolves to `%LOCALAPPDATA%` on Windows. **Exception, and it is a real
+    one: a file owned and read by another tool is written where that tool reads
+    it.** The `detector-pyqt` preprocessing profile lives at
+    `~/.detector/preprocessing_profiles/<animal>.json`; writing our copy through
+    `platformdirs` would make the interop useless. Document the exception at the
+    call site. The rule is about config *we* own.
 16. **No `matplotlib` GUI backend assumptions** — set `Agg` for any headless
     figure generation.
 
@@ -267,6 +280,24 @@ machines. Clobbering is the hazard, so ownership is explicit:
 A doc drop therefore replaces exactly four files and can never overwrite code.
 Once the repo is on a remote, drops become pull requests and this stops being
 a manual step.
+
+## Writing into a file another tool owns
+
+Verified the hard way in task 03: `detector-pyqt`'s `Profile.load` reads
+field-by-field, so an unknown key does not raise — but `Profile.save` writes
+`asdict(self)`, so **any top-level key we add is silently dropped the next time
+their UI saves.** Extra fields must go inside a sub-object that tool carries
+through opaquely (`channel_assignment`), and a test must write with our code,
+round-trip through *their* class, and read back.
+
+**Single source of truth for geometry is ours, not theirs.** `cuff_id`,
+`contact_index` and `rostral_end` live in our store
+(`data/<animal>/<session>/meta.json`); the copy in their profile is a **mirror**
+for their UI's benefit and may be regenerated from ours at any time. Their
+`from_review_session` rebuilds the channel list from a dialog that knows nothing
+about geometry, so a user re-running channel assignment in their UI would
+otherwise destroy `rostral_end` — which cannot be recovered once the animal is
+gone.
 
 ## Two testing rules that came from real failures
 

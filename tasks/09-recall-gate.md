@@ -26,6 +26,24 @@ Two numbers, read from `*_segment_indices.mat` alone — no signal files, no cos
 
 Grab both opportunistically; do not block on them.
 
+### Use the real artifact library, not hand-made waveforms
+**Verified 2026-09-21:** the Phase 2 machinery is `GEMSBlanking:detector/synthesize.py`
+(`mark_high_confidence_clean`, `inject_saturation`, `inject_drift`,
+`inject_broadband`, **`inject_transplant`**, `synthesize_positives`,
+`BadChunkLibrary`, `INJECTION_FUNCTIONS`), plus `detector/phase2.py` and
+`scripts/phase2_synthesize.py`.
+
+**`inject_transplant` and `BadChunkLibrary` are better than anything in
+`conftest.py`** — they splice *real* artifact chunks into clean spans, so the
+morphology is real rather than a guess about what motion looks like. The first
+gate run used hand-built waveforms and one of the four (`tribo`) was malformed.
+Prefer transplant for the gate; keep the parametric kinds for the
+amplitude/duration sweep, where a known amplitude is the point.
+
+Reconcile the naming rather than duplicating it: `inject_saturation` spans what
+`conftest` now splits into `step` and `clip`, `inject_drift` → `drift`,
+`inject_broadband` → `tribo`.
+
 ### Method A — synthetic injection (secondary)
 Inject artifacts of known type, amplitude and duration into real clean recordings.
 Reuse the Phase 2 synthetic machinery in `GEMSBlanking` — it moves from a validation

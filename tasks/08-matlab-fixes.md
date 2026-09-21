@@ -14,6 +14,7 @@ detector is evaluated on instruments that can register its improvement.
 | File | Change |
 |---|---|
 | `step0_load_data.m` | read per-consumer masks; NaN the `removedSegmentIdx` regions if task 01 landed on the MATLAB side |
+| `step1_bandpass.m` | **NEW, and load-bearing: the corners are 100–5000 Hz, but A.5b moved this project's ENG band to 300–3000.** If they disagree, every per-consumer extent is computed for a band the consumer does not actually analyse. Change the MATLAB corners to match, and accept that σ and therefore every historical spike count changes with it (A.5b already says reprocess rather than mix) |
 | `pipeline_params.m` | `edgeBufferMs` from measured `impz`; `cardiacRemoveWinMs` **and** `envCardiacGuardMs` from task 02 — both, or censoring is inconsistent across stages |
 | `step1a_blank_cardiac.m:41-43` | per-channel, per-band windows instead of `D.y(blank,:) = NaN` |
 | `step2_noise_sigma.m:82-97` | **keep** the Quian Quiroga estimator — it is correct (`std` inflates 35% at 20 spk/s where Quiroga inflates 1.9%) — but take σ from a **fixed session reference**, not a 5 s running window. Quiroga still inflates 12% at 100 spk/s, so a post-stim rate rise raises the 4.5σ threshold and suppresses detection of the effect being measured |

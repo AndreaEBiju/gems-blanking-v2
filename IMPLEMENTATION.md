@@ -592,7 +592,26 @@ and no shared-write conflicts.
 
 **Module:** `GEMSBlanking:detector/labeled_save.py` (or `processing_new/step0_load_data.m`)
 **Depends on:** 00
-**Gate:** YES — everything downstream is contaminated until this lands
+**Gate:** met 2026-09-21 — **by verification, not by a fix**
+
+> **THE PREMISE OF THIS TASK WAS WRONG.** The fix already landed upstream in
+> GEMSBlanking commit **`a95d1ff` "Blanking: fill bad samples with NaN, not 0"**:
+> `detector/labeled_save.py:205` is `BLANK_FILL_VALUE = float("nan")`, it is the
+> only blank-fill site, the writer upcasts to float64 so NaN survives `savemat`,
+> it records `blank_fill = "nan"` in the sidecar, and a regression test already
+> exists at `tests/test_phase8.py:412`. `step0_load_data.m` converts neither way
+> and `step1_bandpass.m` tests `isnan` only, so the chain is NaN-correct end to
+> end.
+>
+> **I asserted the zeroing behaviour without ever reading `labeled_save.py`** —
+> GEMSBlanking is private and §3 says its paths were taken from
+> `DEVELOPER_GUIDE.md`. That caveat covered the *paths*; I stated the *behaviour*
+> as fact in §0, in invariant 1's justification, and here. Invariant 1 stands on
+> its own merits — zero is a legal signal value, so inferring invalidity from it
+> is a bug regardless — but its justification was stale.
+>
+> What remained, and is now done: the measurement, enforcement so it cannot
+> regress, and an audit for legacy files.
 
 ### Purpose
 `_blankmotion.mat` currently writes `yOut` with masked ranges **zeroed**.
@@ -605,23 +624,62 @@ xf = filtfilt(b, a, xfill);
 xf(invalid) = NaN;
 ```
 
-So today every mask boundary is a hard step to zero that rings through an order-8
-zero-phase filter into adjacent *valid* samples. The damage is worst for short
-blanks — which is precisely what good detection produces, so this penalises exactly
-the improvement being built.
+*Historical — this described the pre-`a95d1ff` writer.* A mask boundary written
+as a hard step to zero rings through an order-4 Butterworth applied by `filtfilt`
+(effective order 8) into adjacent *valid* samples.
+
+**"The damage is worst for short blanks" is withdrawn.** Measured per boundary,
+the zeroed damage is flat-to-rising with gap length and *lowest* at 2 ms. Short
+blanks matter because they produce more boundaries per second, not because each
+boundary does more damage.
 
 ### Build
-Write `NaN` instead of `0` into masked ranges. Prefer fixing `labeled_save.py`; if
-that file cannot be changed, convert on read in `step0_load_data.m`.
+No change to make in either sibling repo — the writer is already correct. What
+this task delivers instead:
+
+- `gems_blanking_v2/io/nan_interop.py` — `find_zero_runs` / `assert_no_zero_runs`
+  enforcing invariant 1 on everything **we** emit (task 15 consumes it), plus a
+  **read-only** audit that flags legacy files: long zero runs and no NaN means
+  `predates_the_nan_fix`, and the file should be re-exported from its labels. The
+  audit **never converts zeros to NaN** — that is the `zeros_are_invalid`
+  inference this task's "Do not" forbids.
+- the ringing measurement above
+- a round-trip acceptance run through real MATLAB
+
+**The residual risk is files exported before `a95d1ff`**, which still contain
+zeroed gaps that nothing detects. Those need an audit pass over the real corpus
+on the shared drive before any of them is trained on — not doable from the build
+machine, which has no Drive mount.
 
 ### Tests
 - `test_no_zero_runs`: round-trip a masked recording; assert no exact-zero run
   longer than 2 samples in any channel of the emitted `yOut`
 - `test_nan_preserved`: assert masked sample count out == masked sample count in
-- `test_ringing`: filter a synthetic with (a) a zeroed gap and (b) a NaN gap through
-  the actual `step1_bandpass` chain; measure peak deviation in the 50 ms either side
-  of the boundary. The NaN path must be materially lower. **Record both numbers in
-  the task report** — this quantity has never been measured on real data.
+- `test_ringing` — **MEASURED 2026-09-21 in real MATLAB R2026a**, the actual
+  chain (order-4 Butterworth 100–5000 Hz through `filtfilt`,
+  `fillmissing(…,'linear','EndValues','nearest')`), median peak deviation in the
+  50 ms either side of a boundary over **100 gap positions**:
+
+  | out-of-band content | gap | zeroed | NaN | ratio |
+  |---|---|---|---|---|
+  | 0 µV | 10 ms | 6.6 | 12.5 | **0.53** |
+  | 60 µV (ECG-scale) | 10 ms | 28.1 | 12.3 | **2.29** |
+  | 60 µV | 50 ms | 30.9 | 12.7 | 2.43 |
+  | 500 µV (drift-scale) | 10 ms | 227.2 | 13.4 | **16.98** |
+  | 500 µV | 100 ms | 260.5 | 18.4 | 14.13 |
+
+  **"The NaN path must be materially lower" is false as stated.** It holds on
+  realistic hosts (2×–21×) and reverses to ~2× *worse* when the host carries
+  nothing outside the passband. Mechanism: zeroing's step is set by the host's
+  instantaneous **raw** value at the boundary, which is dominated by out-of-band
+  ECG, drift and motion; interpolation is continuous with the host and its error
+  does not scale with that content at all (NaN stays ~10–18 µV across the sweep).
+  The decision is unchanged — real hosts are never content-free — but the claim
+  needed qualifying. Same behaviour at this project's 300–3000 Hz band:
+  0.49 / ~2.1 / 16–19.
+
+  *Method note:* a single gap position gave ratios of 0.42–2.58 with no pattern.
+  One draw would have produced a confident wrong number; the sweep is the test.
 
 ### Acceptance
 No exact-zero runs in emitted output; MATLAB side loads the file and produces the
@@ -744,6 +802,13 @@ Load TDT blocks and attach the geometry the new cohort needs.
 - Persist to `~/.detector/preprocessing_profiles/<animal>.json`, the existing
   location used by `detector-pyqt/ui/widgets/channel_assignment.py`.
 - Read `fs` from the file. Never hardcode 24414.
+
+### Known defect carried from 00A — fix in a follow-up
+`store.find_gems_root` resolves explicit → env → config → scan, and **a bad
+explicit root falls through to the scan**. If you name a root and silently get a
+different one, that is the silent-wrong-root failure. Explicit and
+`GEMS_ROOT` must be authoritative and raise. (Found in task 03, in the same
+pattern in `detector_core`, where it was fixed.)
 
 ### `rostral_end` handling
 It cannot be reconstructed once the animal is gone. If absent:
@@ -1487,6 +1552,7 @@ detector is evaluated on instruments that can register its improvement.
 | File | Change |
 |---|---|
 | `step0_load_data.m` | read per-consumer masks; NaN the `removedSegmentIdx` regions if task 01 landed on the MATLAB side |
+| `step1_bandpass.m` | **NEW, and load-bearing: the corners are 100–5000 Hz, but A.5b moved this project's ENG band to 300–3000.** If they disagree, every per-consumer extent is computed for a band the consumer does not actually analyse. Change the MATLAB corners to match, and accept that σ and therefore every historical spike count changes with it (A.5b already says reprocess rather than mix) |
 | `pipeline_params.m` | `edgeBufferMs` from measured `impz`; `cardiacRemoveWinMs` **and** `envCardiacGuardMs` from task 02 — both, or censoring is inconsistent across stages |
 | `step1a_blank_cardiac.m:41-43` | per-channel, per-band windows instead of `D.y(blank,:) = NaN` |
 | `step2_noise_sigma.m:82-97` | **keep** the Quian Quiroga estimator — it is correct (`std` inflates 35% at 20 spk/s where Quiroga inflates 1.9%) — but take σ from a **fixed session reference**, not a 5 s running window. Quiroga still inflates 12% at 100 spk/s, so a post-stim rate rise raises the 4.5σ threshold and suppresses detection of the effect being measured |
@@ -1538,6 +1604,24 @@ Two numbers, read from `*_segment_indices.mat` alone — no signal files, no cos
   says whether a 12–22% clean flag rate is plausible or wild
 
 Grab both opportunistically; do not block on them.
+
+### Use the real artifact library, not hand-made waveforms
+**Verified 2026-09-21:** the Phase 2 machinery is `GEMSBlanking:detector/synthesize.py`
+(`mark_high_confidence_clean`, `inject_saturation`, `inject_drift`,
+`inject_broadband`, **`inject_transplant`**, `synthesize_positives`,
+`BadChunkLibrary`, `INJECTION_FUNCTIONS`), plus `detector/phase2.py` and
+`scripts/phase2_synthesize.py`.
+
+**`inject_transplant` and `BadChunkLibrary` are better than anything in
+`conftest.py`** — they splice *real* artifact chunks into clean spans, so the
+morphology is real rather than a guess about what motion looks like. The first
+gate run used hand-built waveforms and one of the four (`tribo`) was malformed.
+Prefer transplant for the gate; keep the parametric kinds for the
+amplitude/duration sweep, where a known amplitude is the point.
+
+Reconcile the naming rather than duplicating it: `inject_saturation` spans what
+`conftest` now splits into `step` and `clip`, `inject_drift` → `drift`,
+`inject_broadband` → `tribo`.
 
 ### Method A — synthetic injection (secondary)
 Inject artifacts of known type, amplitude and duration into real clean recordings.

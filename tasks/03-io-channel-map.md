@@ -19,6 +19,13 @@ Load TDT blocks and attach the geometry the new cohort needs.
   location used by `detector-pyqt/ui/widgets/channel_assignment.py`.
 - Read `fs` from the file. Never hardcode 24414.
 
+### Known defect carried from 00A — fix in a follow-up
+`store.find_gems_root` resolves explicit → env → config → scan, and **a bad
+explicit root falls through to the scan**. If you name a root and silently get a
+different one, that is the silent-wrong-root failure. Explicit and
+`GEMS_ROOT` must be authoritative and raise. (Found in task 03, in the same
+pattern in `detector_core`, where it was fixed.)
+
 ### `rostral_end` handling
 It cannot be reconstructed once the animal is gone. If absent:
 - emit **unsigned** velocities
