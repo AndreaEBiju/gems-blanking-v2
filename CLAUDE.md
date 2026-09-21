@@ -190,7 +190,7 @@ narrow the declaration instead of leaving it untested.
 | Amplitude | microvolts, `float64` |
 | Frequency | Hz |
 | Envelope / z grid | **10 ms**, shared by every band. `n_frames = floor(dur/0.010)` |
-| Band naming | `"300-3000"`, `"100-300"`, `"1-100"`, `"2-50"`, `"0.5-3"`, `"0-2"` — `CONSUMERS` may only name a key of `BANDS`, and a test asserts it |
+| Band naming | `"300-3000"`, `"100-300"`, `"10-150"`, `"2-50"`, `"0.5-3"`, `"0-2"` — `CONSUMERS` may only name a key of `BANDS`, and a test asserts it |
 | Signal naming | `"V1".."V3"`, `"T"` per cuff, prefixed by cuff: `"L_V1"`, `"R_T"` |
 | Missing scalar, **in memory** | `np.nan`, never `0`, never `-1` |
 | Missing scalar, **serialised to JSON** | **the key is absent** — never `null`, never `NaN`, never a sentinel. JSON has no NaN: `json.dumps` emits a bare `NaN` that Python reads back and almost nothing else does, and `nan != nan` breaks round-trip equality outright. The `np.nan` convention stops at the edge of a JSON file. A metric that could not be computed is **absent**. |

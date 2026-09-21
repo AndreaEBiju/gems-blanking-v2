@@ -3,6 +3,15 @@
 ## Task 06 — Band envelopes, reference, z
 
 **Module:** `bands/envelope.py`, `bands/reference.py`, `bands/zscore.py`
+
+> **This step consumes an EPOCH, not a file.** The whole-file reference is
+> whole-*epoch*. It must **refuse** a recording whose condition is
+> `stim_recovery` and which has not been split — silently accepting one puts the
+> stim artifacts into the reference and the MAD, which is the failure this
+> ordering exists to prevent (see below). Make that a checked precondition, not
+> an assumption: then the dependency on 03B is a contract rather than a
+> build-order coupling, and a baseline recording needs no split at all.
+
 **Depends on:** 04, **03B** — the stim epoch must already be split off, or its
 artifacts inflate the reference and MAD and suppress detection during recovery
 **Gate:** no

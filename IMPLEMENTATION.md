@@ -1550,16 +1550,59 @@ a beat raises the local median, which raises the threshold, which drops more bea
 | 0.70 | short 0.75%, long **10.96%** | short 0.09%, long 1.85% |
 | 0.75 | **collapses** — RRmed 330 ms, 54% dropped | short 0.00%, long 2.05% |
 
-The global version is monotone and stable to 0.85.
+**A sharper property than "monotone and stable", and a better assertion:
+tightening the fraction walks the global form's retained RR *toward* the truth
+and it stops there — it never overshoots.** Measured on the two-population
+generator (true RR 150.4 ms):
 
-> **The runaway does not reproduce on the current synthetic, and that is a
-> generator gap, not evidence against it.** It needs false peaks to seed the
-> feedback, and `make_ecg` produces almost none. On animal J the short-interval
+| fraction | kept | retained RR | vs true |
+|---|---|---|---|
+| 0.60–0.75 | 765 → 694 | 75.7 → 76.7 ms | 0.50× |
+| 0.85 | 472 | 146.0 ms | 0.97× |
+| 0.95 | 396 | **150.4 ms** | **1.00×** |
+
+The local form goes to 2× and locks. Assert the non-overshoot, not the
+monotonicity.
+
+**And a limit on the global rule, worth knowing:** it is only as good as the
+provisional peak set. When a false-peak population approaches the size of the
+real one, the whole-file median lands on the **false** interval — measured at
+85 ms against a true 150.4 ms, i.e. the R-to-T interval. That is not an argument
+for the local form, whose error at the same point is 303–364 ms and unbounded;
+the global rule's error is *bounded by the contamination*. But the operating
+point carries the rule.
+
+**QC consequence:** a `global_rr_s` far from the other channels' means that
+channel's peak set is contaminated — not that the heart rate changed. Emit it
+per channel and compare across channels.
+
+> **The runaway needs TWO populations, not one** — corrected 2026-09-22 after
+> building it. A false-peak population **alone is self-correcting** under the
+> local rule: dropping every T wave leaves exactly the true RR, and the local
+> form recovers 395/395 beats. The runaway needs T waves **plus** a
+> long-interval population (≈50% of beats attenuated below threshold). Then it
+> reproduces across seeds — local 303–364 ms retained RR and 59–63% dropped,
+> against animal J's 330 ms and 54%; global 84.5–87.0 ms and 9–13%.
+>
+> The mechanism is **bistability**: once a run of long intervals lifts the
+> accepted median above one RR, every real interval reads as "too short", which
+> leaves alternate beats, which makes the median 2×RR, which locks it in.
+>
+> It needs false peaks to seed the feedback, and `make_ecg` produces almost
+> none. On animal J the short-interval
 > population clustered at **~90 ms ≈ 0.55 × RR** — the signature of detecting the
 > **T wave** as well as the R peak.
 >
-> **Add `make_ecg(t_wave=True)`**: a second deflection at 0.5–0.6 × RR, ~30–50% of
-> R amplitude. That reproduces both the short-interval cluster *and* the runaway,
+> **Add `make_ecg(t_wave=True)`**: a second deflection at 0.5–0.6 × RR.
+>
+> **WIDTH, not amplitude, decides whether it is detected** — measured, and not
+> what I expected. The band pass is a *shape* filter, so a narrow T wave reads as
+> a QRS however small it is, and sweeping amplitude 0.10→0.50 at fixed width
+> barely moves the peak count because σ moves with it. Sweeping width against
+> 395 true beats: 40 ms → 768 peaks (every beat doubled), 50 ms → 553,
+> **60 ms → 395 (correct)**, 80 ms → 395. Set the width at the crossover
+> (`T_WAVE_WIDTH_FACTOR = 6.0`, 60 ms) so one generator serves both tests: the
+> binding k=6 detector ignores it, the superseded k=3 doubles every beat. That reproduces both the short-interval cluster *and* the runaway,
 > and makes this claim testable in CI rather than only on real data.
 >
 > Also add a real-data regression test against
@@ -1688,6 +1731,15 @@ No adaptive threshold (`PIPELINE.md` §10.1). No insertion of fabricated beats.
 ## Task 06 — Band envelopes, reference, z
 
 **Module:** `bands/envelope.py`, `bands/reference.py`, `bands/zscore.py`
+
+> **This step consumes an EPOCH, not a file.** The whole-file reference is
+> whole-*epoch*. It must **refuse** a recording whose condition is
+> `stim_recovery` and which has not been split — silently accepting one puts the
+> stim artifacts into the reference and the MAD, which is the failure this
+> ordering exists to prevent (see below). Make that a checked precondition, not
+> an assumption: then the dependency on 03B is a contract rather than a
+> build-order coupling, and a baseline recording needs no split at all.
+
 **Depends on:** 04, **03B** — the stim epoch must already be split off, or its
 artifacts inflate the reference and MAD and suppress detection during recovery
 **Gate:** no
