@@ -1022,6 +1022,145 @@ def make_common_mode(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# the stimulation monitor
+# ---------------------------------------------------------------------------
+
+
+class VibSynth(NamedTuple):
+    """Return of :func:`make_vib`."""
+
+    signal: F64
+    """The monitor channel, arbitrary units, ``(n_samples,)``."""
+    stim_start_s: F64
+    """Ground-truth stim onset in seconds. A scalar array so it prints like the rest."""
+    stim_stop_s: F64
+    """Ground-truth stim offset in seconds, exclusive."""
+
+
+VIB_CARRIER_HZ: Final = 60.0
+"""Carrier frequency of the vibration monitor, Hz.
+
+The monitor records a mechanical oscillation, so it is a carrier gated on and off
+rather than a step. That matters for the envelope: a gated carrier has a 100 ms RMS
+envelope with ramped edges, which is what the edge refinement exists to handle.
+"""
+
+VIB_ON_AMP: Final = 1.0
+"""Carrier amplitude while stimulating, arbitrary units.
+
+Arbitrary on purpose: the split is a contrast on the monitor's own envelope, so its
+scale never enters a decision and it carries no declared units. See
+:func:`tests.test_stim_split.test_the_split_is_invariant_to_the_monitors_scale`.
+"""
+
+VIB_OFF_NOISE: Final = 0.02
+"""OFF-state noise, as a fraction of :data:`VIB_ON_AMP`.
+
+Not zero, and that is deliberate: with a noiseless OFF state the envelope's bottom
+decile has no spread, the ``off_level + 8 sigma`` threshold degenerates onto the OFF
+level itself, and the edge refinement would be testing a fallback rather than the
+rule.
+"""
+
+
+def make_vib(
+    fs: float,
+    dur_s: float,
+    stim_start_s: float,
+    stim_duration_s: float,
+    *,
+    carrier_hz: float = VIB_CARRIER_HZ,
+    amp: float = VIB_ON_AMP,
+    noise: float = VIB_OFF_NOISE,
+    dropout: tuple[float, float] | None = None,
+    contaminant: tuple[float, float, float] | None = None,
+    seed: int = 0,
+) -> VibSynth:
+    """Build a stimulation-monitor channel: a gated carrier on a noise floor.
+
+    The ground-truth boundaries are returned, so a detector can be scored against
+    them rather than against another detector.
+
+    Parameters
+    ----------
+    fs
+        Monitor sample rate in Hz. Need not equal the signal's - the real monitor is
+        recorded on its own clock, which is why :func:`make_vib` takes its own rate.
+    dur_s
+        Duration in seconds.
+    stim_start_s
+        Onset of the gated carrier, seconds. Pass a negative value to start the
+        recording mid-stim: the carrier is then ON at the first sample, which is the
+        ``clipped_start`` case.
+    stim_duration_s
+        How long the carrier is ON from ``stim_start_s``, seconds. The gate is
+        truncated at the end of the record, which is the ``clipped_end`` case.
+    carrier_hz
+        Carrier frequency, Hz.
+    amp
+        Carrier amplitude while ON, arbitrary units.
+    noise
+        SD of the additive noise everywhere, in the same arbitrary units.
+    dropout
+        ``(start_s, duration_s)`` of a gap in the middle of the stim, in absolute
+        seconds. The gap in the real data is a stimulator interruption; a matched
+        filter spans it because the window width is fixed, whereas a threshold plus
+        "keep the largest ON segment" keeps only one side of it.
+    contaminant
+        ``(start_s, duration_s, amplitude_fraction)`` of a second, quieter burst -
+        handling noise, say - at ``amplitude_fraction`` of the stim carrier.
+
+        This is what makes the old ``(p20 + p80)/2`` rule fail, and finding it took
+        two attempts worth recording. With a stationary floor the old threshold is
+        badly wrong - it flags 46% of the record at an 8% duty cycle - but "keep the
+        largest ON segment" still recovers the onset to 74 ms, so a clean synthetic
+        cannot demonstrate any failure. A drifting noise floor does not do it either,
+        measured out to a 20x ramp, because the stim carrier stays the loudest thing
+        in the record. What breaks "largest segment" is a *longer* supra-threshold
+        run: a quieter burst lasting more than the stim duration wins on length while
+        losing on amplitude, so the old rule locks onto it and the matched-width
+        search does not.
+    seed
+        Seed for the noise.
+
+    Returns
+    -------
+    VibSynth
+        ``(signal, stim_start_s, stim_stop_s)``, the boundaries clipped to the record.
+    """
+    if dur_s <= 0.0:
+        msg = f"dur_s must be positive, got {dur_s}"
+        raise ValueError(msg)
+    if stim_duration_s <= 0.0:
+        msg = f"stim_duration_s must be positive, got {stim_duration_s}"
+        raise ValueError(msg)
+    if noise < 0.0:
+        msg = f"noise must be non-negative, got {noise}"
+        raise ValueError(msg)
+
+    n = _n_samples(fs, dur_s)
+    t_s = np.arange(n, dtype=np.float64) / fs
+    gate = (t_s >= stim_start_s) & (t_s < stim_start_s + stim_duration_s)
+    if dropout is not None:
+        gap_start, gap_dur = dropout
+        gate &= ~((t_s >= gap_start) & (t_s < gap_start + gap_dur))
+
+    rng = np.random.default_rng(seed)
+    sig = amp * gate * np.sin(2.0 * np.pi * carrier_hz * t_s)
+    if contaminant is not None:
+        burst_start, burst_dur, fraction = contaminant
+        burst = (t_s >= burst_start) & (t_s < burst_start + burst_dur)
+        sig = sig + fraction * amp * burst * np.sin(2.0 * np.pi * carrier_hz * t_s)
+    sig = sig + rng.normal(0.0, noise * amp, size=n)
+
+    return VibSynth(
+        np.asarray(sig, dtype=np.float64),
+        np.asarray(max(stim_start_s, 0.0), dtype=np.float64),
+        np.asarray(min(stim_start_s + stim_duration_s, n / fs), dtype=np.float64),
+    )
+
+
 @pytest.fixture(autouse=True)
 def isolate_user_config(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
