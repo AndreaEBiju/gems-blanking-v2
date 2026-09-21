@@ -48,6 +48,9 @@ ADDITIVE_KINDS: Final[tuple[ArtifactKind, ...]] = ("excursion", "drift", "step",
 injected amplitude.
 """
 
+QRS_WIDTH_MS: Final = 10.0
+"""Default width of the QRS central lobe, milliseconds. Rat QRS is 8-12 ms."""
+
 MIN_QRS_SAMPLES: Final = 3
 """Shortest QRS kernel that can still be triphasic with an odd central lobe."""
 
@@ -204,7 +207,7 @@ def make_beats(
     return np.asarray(beats, dtype=np.float64)
 
 
-def make_qrs(fs: float, width_ms: float = 10.0) -> F64:
+def make_qrs(fs: float, width_ms: float = QRS_WIDTH_MS) -> F64:
     """Triphasic QRS kernel, dimensionless, peak exactly 1.0.
 
     A central positive lobe ``width_ms`` wide, flanked by two symmetric negative
@@ -259,6 +262,54 @@ WEAK_AMP_RANGE_UV: Final = (8.0, 13.0)
 At the default ``noise_uv`` of 5.0 the whole-signal threshold ``3 * 1.4826 * MAD``
 is ~15 uV, so every weak beat falls below it and every normal beat is far above it.
 :func:`tests.test_conftest.test_weak_beats_straddle_the_mad_threshold` holds that.
+
+**That threshold is the broadband one.** Task 05 detects on a band-limited trace,
+where MAD-sigma is 4-9x smaller (measured: 0.62 uV in 1-100 Hz, 2.89 uV in
+10-150 Hz, against 5.46 uV broadband at ``noise_uv=5``), so an 8-13 uV beat is well
+*above* the in-band threshold and ``weak_frac`` alone produces no missed beats.
+Pass ``weak_amp_uv`` to place the attenuated beats against a band-limited threshold
+instead.
+"""
+
+T_WAVE_PHASE_RANGE: Final = (0.50, 0.60)
+"""Where a T wave sits after its R peak, as a fraction of the RR interval.
+
+Measured on animal J: the short-interval population that seeded the plausibility
+runaway clustered at **~90 ms, which is 0.55 x the 164.7 ms RR** - the signature of
+a detector firing on the T wave as well as the R peak.
+"""
+
+T_WAVE_AMP_RANGE: Final = (0.30, 0.50)
+"""T-wave amplitude as a fraction of its beat's R amplitude.
+
+Large enough to be detected at a low threshold and to seed the runaway, small enough
+that a correctly thresholded detector ignores it. Both ends matter: below ~0.3 the
+short-interval population never appears, above ~0.5 every reasonable threshold
+doubles every beat and the file is simply unusable rather than instructively bad.
+"""
+
+T_WAVE_WIDTH_FACTOR: Final = 6.0
+"""T-wave width as a multiple of the QRS width - so 60 ms at the 10 ms default.
+
+**Width, not amplitude, is what decides whether a T wave gets detected**, which was
+not obvious and is worth recording. The band pass is a shape filter, so a narrow T
+wave looks like a QRS however small it is. Measured at the spec's 30-50% amplitude,
+counting peaks against 395 true beats:
+
+======  =================  =================
+width   10-150 Hz, k=6     10-150 Hz, k=3
+======  =================  =================
+40 ms   768 (all doubled)  768
+50 ms   553                766
+60 ms   **395 (correct)**  765
+80 ms   395                764
+======  =================  =================
+
+60 ms is the crossover, and it is the useful place to sit: the binding detector
+ignores the T wave while the superseded ``k=3`` doubles every beat. That makes one
+generator serve both the "a good detector is not fooled" test and the runaway test.
+Sweeping amplitude from 0.10 to 0.50 at a fixed width barely moves the count,
+because sigma moves with the amplitude.
 """
 
 
@@ -269,6 +320,9 @@ def make_ecg(
     weak_frac: float = 0.0,
     noise_uv: float = 5.0,
     seed: int = 0,
+    weak_amp_uv: tuple[float, float] | None = None,
+    rr_s: float = 0.150,
+    t_wave: bool = False,
 ) -> EcgSynth:
     """Beat train convolved with the QRS kernel, on a noise floor.
 
@@ -294,12 +348,34 @@ def make_ecg(
     amp_uv
         Peak amplitude of a normal beat, microvolts.
     weak_frac
-        Fraction of beats attenuated into :data:`WEAK_AMP_RANGE_UV`. Rounded to the
-        nearest whole beat.
+        Fraction of beats attenuated into ``weak_amp_uv``. Rounded to the nearest
+        whole beat.
     noise_uv
         SD of the additive white noise, microvolts. 0.0 gives a noiseless signal.
     seed
         Seed for beats, weak selection, weak amplitudes and noise.
+    weak_amp_uv
+        ``(lo, hi)`` amplitude range of an attenuated beat, microvolts. Defaults to
+        :data:`WEAK_AMP_RANGE_UV`, which is calibrated against the **broadband** MAD
+        threshold; a caller detecting in a band must set this against that band's
+        own sigma, or the "weak" beats will not be weak. See
+        :data:`WEAK_AMP_RANGE_UV`.
+    rr_s
+        Mean RR interval in seconds, passed to :func:`make_beats`. The default 0.150
+        is 400 bpm, near animal J's measured 164.7 ms. Raise the rate to 600 bpm
+        (``rr_s=0.100``) to reach the regime where the inherited 90 ms refractory
+        deletes real beats.
+    t_wave
+        Add a broad second deflection per beat at :data:`T_WAVE_PHASE_RANGE` of the
+        RR interval, at :data:`T_WAVE_AMP_RANGE` of that beat's R amplitude and
+        :data:`T_WAVE_WIDTH_FACTOR` times the QRS width.
+
+        **This is what makes the plausibility runaway reproducible.** Without it the
+        signal has essentially no false-peak population, the local-median and global
+        forms of the rule keep identical beats at every operating point, and the
+        collapse measured on real data cannot be tested at all. ``beats_s`` still
+        holds only the R times: a T wave is not a beat, and a detector that returns
+        one has made a false detection, not a differently-placed true one.
 
     Returns
     -------
@@ -312,9 +388,13 @@ def make_ecg(
     if noise_uv < 0.0:
         msg = f"noise_uv must be non-negative, got {noise_uv}"
         raise ValueError(msg)
+    weak_lo, weak_hi = WEAK_AMP_RANGE_UV if weak_amp_uv is None else weak_amp_uv
+    if not 0.0 < weak_lo <= weak_hi:
+        msg = f"weak_amp_uv must be a positive ascending pair, got {(weak_lo, weak_hi)}"
+        raise ValueError(msg)
 
     n = _n_samples(fs, dur_s)
-    beats = make_beats(fs, dur_s, seed=seed)
+    beats = make_beats(fs, dur_s, rr_s=rr_s, seed=seed)
     kernel = make_qrs(fs)
     half = kernel.size // 2
 
@@ -323,7 +403,7 @@ def make_ecg(
     weak_idx = np.sort(rng.choice(beats.size, size=n_weak, replace=False)).astype(np.int64)
     amps = np.full(beats.size, float(amp_uv), dtype=np.float64)
     if n_weak:
-        amps[weak_idx] = rng.uniform(WEAK_AMP_RANGE_UV[0], WEAK_AMP_RANGE_UV[1], size=n_weak)
+        amps[weak_idx] = rng.uniform(weak_lo, weak_hi, size=n_weak)
 
     sig = np.zeros(n, dtype=np.float64)
     for t_s, amp in zip(beats, amps, strict=True):
@@ -331,6 +411,21 @@ def make_ecg(
         lo, hi = centre - half, centre + half + 1
         k_lo, k_hi = max(0, -lo), kernel.size - max(0, hi - n)
         sig[max(lo, 0) : min(hi, n)] += amp * kernel[k_lo:k_hi]
+
+    if t_wave:
+        t_kernel = np.hanning(int(round(fs * QRS_WIDTH_MS * T_WAVE_WIDTH_FACTOR / 1000.0)) | 1)
+        t_half = t_kernel.size // 2
+        phases = rng.uniform(*T_WAVE_PHASE_RANGE, size=beats.size)
+        fractions = rng.uniform(*T_WAVE_AMP_RANGE, size=beats.size)
+        intervals = np.append(np.diff(beats), rr_s)
+        for t_s, amp, phase, fraction, interval in zip(
+            beats, amps, phases, fractions, intervals, strict=True
+        ):
+            centre = int(round((t_s + phase * interval) * fs))
+            lo, hi = centre - t_half, centre + t_half + 1
+            k_lo, k_hi = max(0, -lo), t_kernel.size - max(0, hi - n)
+            if min(hi, n) > max(lo, 0):
+                sig[max(lo, 0) : min(hi, n)] += fraction * amp * t_kernel[k_lo:k_hi]
 
     if noise_uv > 0.0:
         sig += rng.normal(0.0, noise_uv, size=n)
@@ -956,3 +1051,42 @@ def fs() -> float:
 def seed() -> int:
     """Default seed. Every generator takes one explicitly; this is the shared default."""
     return 0
+
+
+RUNAWAY_RECORDING_STEM: Final = "gems_j_t01_ms3_bl_230315"
+"""The animal-J baseline the plausibility runaway was measured on (601 s, 3511 beats).
+
+Named in task 05 so the real-data regression has a fixed target rather than
+whichever file happens to be around.
+"""
+
+
+@pytest.fixture
+def real_recording() -> Path | None:
+    """Return :data:`RUNAWAY_RECORDING_STEM` on this machine, or ``None``.
+
+    ``None`` rather than a skip, so the test decides and says why. The shared drive
+    is not mounted in CI and usually not on a dev machine either, so a real-data test
+    has to be optional or it is just red.
+
+    Discovery goes through the store, never a hardcoded path - the root differs by
+    platform and the drive name is not even the same string on Windows
+    (cross-platform rules 2-4). ``GEMS_ROOT`` is unset by the autouse
+    :func:`isolate_user_config` fixture, so this looks for the marker from the
+    current directory upward and returns ``None`` when there is none.
+    """
+    from gems_blanking_v2.io.store import MARKER_NAME  # noqa: PLC0415
+
+    root: Path | None = None
+    for candidate in [Path.cwd(), *Path.cwd().parents]:
+        if (candidate / MARKER_NAME).exists():
+            root = candidate
+            break
+    if root is None:
+        return None
+
+    for extension in (".mat", ".h5"):
+        hits = sorted(root.rglob(f"{RUNAWAY_RECORDING_STEM}{extension}"))
+        if hits:
+            return hits[0]
+    return None

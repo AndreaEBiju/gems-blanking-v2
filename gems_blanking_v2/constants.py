@@ -102,7 +102,7 @@ BANDS: Final[dict[str, BandSpec]] = {
     #                      lo       hi     window_s      2*B*T
     "300-3000": BandSpec(300.0, 3000.0, 0.025),  # 135 - a time-resolution choice
     "100-300": BandSpec(100.0, 300.0, 0.075),  # 30
-    "1-100": BandSpec(1.0, 100.0, 0.150),  # 29.7
+    "10-150": BandSpec(10.0, 150.0, 0.100),  # 28 - was 1-100/150 ms; see HR_BAND
     "2-50": BandSpec(2.0, 50.0, 0.310),  # 29.8
     "0.5-3": BandSpec(0.5, 3.0, 6.000),  # 30
     "0-2": BandSpec(0.0, 2.0, 7.500),  # 30
@@ -115,6 +115,26 @@ corner lowers sigma(T) by 24%, raises the event rate 41% and improves
 event-to-threshold separation. This breaks comparability with previously processed
 data - sigma changes, so the 4.5-sigma threshold changes, so every historical spike
 count changes. Reprocess rather than mix, and record the band in provenance.
+
+The cardiac band is ``10-150``, **not** the historical ``1-100``: ruled 2026-09-21
+with task 05. 1-100 was the earlier R-peak detection band and A.4's hrv row carried
+the same stale number, so once detection moved the band had no consumer at all. A
+contamination band has to be the band its consumer's detector actually reads. See
+:data:`HR_BAND`.
+"""
+
+HR_BAND: Final = "10-150"
+"""The band the R-peak detector reads, and therefore the ``hrv`` contamination band.
+
+Ruled 2026-09-21. On animal J, 10-150 Hz at 6 MAD-sigma gives template SNR 611
+against 446 and a long-interval rate of 2.0% against 3.6%; on the synthetic it emits
+0 false beats over 3160 true ones where 1-100 Hz at 3 sigma emits 25. In 1-100 the
+in-band noise floor collapses to ~0.6 uV while a weak beat still carries ~18 uV of
+prominence, so noise and signal sit on the same side of 3 sigma.
+
+Its ``dof`` is 28, not 30: the 100 ms window is a round number rather than the
+107 ms that would hit the target exactly. **Task 02's peri-R measurement was made
+at 1-100 and needs re-measuring here.**
 """
 
 ENG_BAND: Final = "300-3000"
@@ -187,7 +207,7 @@ CONSUMERS: Final[tuple[ConsumerSpec, ...]] = (
     ConsumerSpec("mmc", ("stomach_ref",), "2-50", "3 x moving MAD"),
     ConsumerSpec("slow_wave", ("stomach_ref",), "0-2", "peak displacement"),
     ConsumerSpec("breathing", ("best_hr_channel",), "0.5-3", "peak inserted or lost"),
-    ConsumerSpec("hrv", ("best_hr_channel",), "1-100", "operational: beat train unchanged"),
+    ConsumerSpec("hrv", ("best_hr_channel",), HR_BAND, "operational: beat train unchanged"),
 )
 """The seven mask consumers.
 
