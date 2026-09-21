@@ -32,6 +32,10 @@ dependencies = [
     "platformdirs>=4.0",
 ]
 
+[project.scripts]
+# Cross-platform rule 14: every command is a console-script entry point, not a .sh
+gems = "gems_blanking_v2.cli:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",

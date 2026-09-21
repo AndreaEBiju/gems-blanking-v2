@@ -872,6 +872,25 @@ def make_multichannel(
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def isolate_user_config(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep every test away from the developer's real per-user config and GEMS_ROOT.
+
+    Autouse and unconditional. Without it a test that expects "no root configured"
+    passes on a clean machine and fails on one where someone has run ``gems init`` -
+    which is precisely the non-hermetic behaviour that makes a suite untrustworthy
+    on CI. Discovered the hard way: running ``gems init`` once broke two tests.
+    """
+    fake_home = tmp_path_factory.mktemp("user-config")
+    monkeypatch.setattr("gems_blanking_v2.io.store.config_path", lambda: fake_home / "config.toml")
+    monkeypatch.setattr(
+        "gems_blanking_v2.io.store.legacy_config_path", lambda: fake_home / ".gems" / "config.toml"
+    )
+    monkeypatch.delenv("GEMS_ROOT", raising=False)
+
+
 @pytest.fixture
 def fs() -> float:
     """Nominal TDT sample rate, Hz. Tests that need another rate pass it explicitly."""
