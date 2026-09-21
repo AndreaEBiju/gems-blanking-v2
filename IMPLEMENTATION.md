@@ -409,7 +409,10 @@ that never happens.
 ```
 <gems_root>/
   data/
-    <animal>/<session>/            raw.h5, channel_map.json, video.mp4
+    <animal>/<session>/            raw.h5, meta.json, video.mp4
+                                   (meta.json, NOT channel_map.json: it carries
+                                    geometry from task 03 AND condition/who/when
+                                    from 03A, so both writers read-modify-write)
   trials/
     <animal>/<session>/trials.jsonl         one line per trial, appended by the
                                             acquisition machine (single writer).
@@ -879,25 +882,60 @@ become a control.
 ### Rules live in a shared, versioned file — not in code
 
 `<gems_root>/conditions.yaml`, so every lab member parses identically and the rule
-set improves over time:
+set improves over time.
 
-```yaml
-vocabulary: [baseline, stim, stim_recovery, sham, drug, unknown]   # CLOSED list
-rules:
-  - { pattern: '_stim_rec(\b|_)', condition: stim_recovery, priority: 10 }
-  - { pattern: '_stim(\b|_)',     condition: stim,          priority: 20 }
-  - { pattern: '_base(line)?(\b|_)', condition: baseline,   priority: 30 }
-strip_suffixes: ['_notched', '_notchblanked', '_blankmotion']
-animal_pattern: '(?<![A-Za-z])([A-Z])(?=[_\d])'
-```
+### The two real naming conventions — measured, not assumed
 
-- **The vocabulary is closed.** Free-text conditions are not allowed — `stim`,
-  `Stim` and `stimulation` as three distinct levels would quietly wreck the mixed
-  models. Adding a level is an explicit edit to `vocabulary`.
-- Rules are tried in `priority` order; the **first** match wins, and the rule id is
-  recorded. Order matters: `_stim_rec` must be tried before `_stim`, which the
-  current code gets right only by accident of the `in` test.
-- If two rules of equal priority match different conditions → `ambiguous`.
+**The lab has two, one per cohort, and a rule set written for either alone fails
+on the other.** Verified 2026-09-21: 14 old-cohort ids recovered from
+`GEMSBlanking`'s LORO summaries, and new-cohort directory names read directly
+off the shared drive.
+
+| | old cohort (the 43) | new cohort (2026 chronic) |
+|---|---|---|
+| example | `E1000_FRE_…`, `M100_JEL_…`, `einh_fre_…` | `gems_d_t01_ms1_bl_164012`, `gems_d_t01_es1_sr_204720` |
+| animal | 2nd underscore token's initial (`FRE`→F) | 2nd token (`d`→D) |
+| baseline | `_bl_` | `_bl_` |
+| stim recovery | `_stim_rec` | **`_sr_`** |
+| case | mixed, sometimes all-lowercase | lowercase |
+
+Three consequences:
+
+1. **`_sr` must be a rule.** The spec shipped `_stim_rec` only; every new-cohort
+   recovery file would be `unknown`. Order matters — try `_stim_rec` before
+   `_sr`, and both before any baseline rule.
+2. **The spec's `animal_pattern` regex is withdrawn.** `(?<![A-Za-z])([A-Z])(?=[_\d])`
+   was wrong on 100% of real ids — it takes `E` from `E1000_FRE_…` and nothing at
+   all from a lowercase-led name. Use
+   `GEMSBlanking:detector/animal_id.py:extract_animal_letter` (second underscore
+   token's initial), which is dependency-free and works on **both** conventions.
+   Animal is the grouping variable for LORO and for the per-animal mode, so this
+   is not cosmetic.
+3. **Everything matches case-insensitively** — the same cohort writes
+   `gems_d_t01_ms1_bl_164012/` and `GEMS_D_t01_MS1_bl_cam1_….mp4`.
+
+### Condition is not one string — it is four fields
+
+`ES` is electrical stim and `MS` is mechanical, and `msX_esY` means both at once.
+Flattening these into condition labels would produce a dozen one-off levels in
+the mixed models, when they are in fact a small factorial with **ordered
+numeric parameters**:
+
+| field | values |
+|---|---|
+| `epoch` | `baseline` \| `stim_recovery` |
+| `estim_hz` | `None`, or 10 (ES1) / 100 (ES2) / 1000 (ES3) |
+| `mstim_hz` | `None`, or 10 (MS1) / 50 (MS2) / 100 (MS3) |
+| `timepoint` | `t01`, `t02`, … |
+
+Fixed across all electrical levels: **1000 µA, 0.3 ms pulse width, square,
+bipolar**. Fixed across all mechanical levels: **50% duty cycle**. So ES1→ES2→ES3
+is one frequency axis (10/100/1000 Hz) and MS1→MS2→MS3 is another
+(10/50/100 Hz) — model them as ordered numbers, not as unrelated categories.
+
+`conditions.yaml` therefore maps a filename to this **record**, not to a single
+label. The closed vocabulary applies to `epoch`; the two frequency fields are
+validated against their allowed sets.
 
 ### The learning loop
 When the user corrects a condition, offer: *"Add a rule so this is automatic next

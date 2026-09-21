@@ -29,7 +29,10 @@ that never happens.
 ```
 <gems_root>/
   data/
-    <animal>/<session>/            raw.h5, channel_map.json, video.mp4
+    <animal>/<session>/            raw.h5, meta.json, video.mp4
+                                   (meta.json, NOT channel_map.json: it carries
+                                    geometry from task 03 AND condition/who/when
+                                    from 03A, so both writers read-modify-write)
   trials/
     <animal>/<session>/trials.jsonl         one line per trial, appended by the
                                             acquisition machine (single writer).
