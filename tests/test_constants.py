@@ -137,9 +137,13 @@ def test_every_band_but_the_eng_band_was_sized_for_thirty_degrees_of_freedom() -
 def test_the_eng_band_does_not_meet_the_stated_dof_rationale() -> None:
     """The ENG band's ``2*B*T`` is 135, as A.3 now records against that row.
 
-    It was 235 before the corner moved to 3 kHz. Task 06's acceptance test "dof
-    within 20% for every band" must exempt this band; the window is not to be
-    shortened to 5.6 ms to make it pass, because 25 ms is a time-resolution choice.
+    It was 235 before the corner moved to 3 kHz, and the window is not to be shortened
+    to 5.6 ms to make it hit 30, because 25 ms is a time-resolution choice.
+
+    It needs **no exemption** from task 06's dof check, which compares each band's
+    measured dof to its own spec value rather than to a global 30 - measured 135.3
+    against 135.0. The earlier claim here that an exemption was required has been
+    corrected in ``constants.py``.
     """
     assert ENG_BAND_DOF_IS_EXCEPTION
     assert BANDS[ENG_BAND].dof == pytest.approx(135.0)

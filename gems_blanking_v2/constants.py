@@ -151,10 +151,16 @@ ENG_BAND_DOF_IS_EXCEPTION: Final = True
 """The ENG band does not meet :data:`BAND_DOF_TARGET` and was never going to.
 
 ``2*B*T`` for ``300-3000`` at a 25 ms window is 135 (it was 235 at ``300-5000``); the
-other five bands land at 29.7-30.0. The 25 ms window is a *time-resolution* choice -
-a burst must not be smeared across a frame - not a dof choice. A.3 now carries the
-per-band figure, so task 06's "dof within 20% for every band" check must exempt this
-band rather than the band being reshaped to pass it.
+other five bands land at 28.0-30.0. The 25 ms window is a *time-resolution* choice -
+a burst must not be smeared across a frame - not a dof choice, and the band is not to
+be reshaped to hit 30.
+
+**It needs no exemption from task 06's dof check**, and the earlier claim here that it
+did was wrong. That check compares each band's *measured* effective dof against **its
+own** spec value, not against :data:`BAND_DOF_TARGET`; the ENG band measures 135.3
+against a spec 135.0 and passes on the nose. Comparing every band to a global 30 would
+have been the thing needing an exemption - for two bands, not one, since ``10-150``
+is 28.
 """
 
 REFERENCE_STATISTIC: Final = "median_of_log"

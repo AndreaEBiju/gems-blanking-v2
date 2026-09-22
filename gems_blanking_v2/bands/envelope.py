@@ -24,6 +24,7 @@ decimation as a stability measure; it is both.
 
 from __future__ import annotations
 
+import functools
 import logging
 import math
 from dataclasses import dataclass
@@ -31,7 +32,7 @@ from typing import Final
 
 import numpy as np
 import numpy.typing as npt
-from scipy.signal import butter, decimate, sosfiltfilt
+from scipy.signal import butter, decimate, sosfilt, sosfiltfilt, unit_impulse
 
 from gems_blanking_v2.constants import BANDS, GRID_S, BandSpec, n_frames
 from gems_blanking_v2.types import Recording
@@ -40,16 +41,19 @@ __all__ = [
     "DECIMATE_TARGET_HZ",
     "ENVELOPE_FLOOR_UV",
     "FILTER_SANITY_GAIN",
+    "IMPULSE_DECAY_FRACTION",
     "MIN_SEGMENT_CYCLES",
-    "SETTLING_WINDOWS",
     "AnalysisEpoch",
     "FilterSanityError",
     "Segment",
+    "Settling",
     "analysis_epoch",
     "assert_filter_sane",
     "band_envelope",
     "band_envelope_for",
+    "impulse_response_length_s",
     "log_envelope",
+    "settling_for",
     "settling_s",
     "valid_segments",
 ]
@@ -83,35 +87,130 @@ below a microvolt cannot affect any real measurement, and a channel quiet enough
 reach it is dead and gated separately.
 """
 
-SETTLING_WINDOWS: Final = 1.0
-"""Filter settling time at a segment edge, in analysis windows.
+IMPULSE_DECAY_FRACTION: Final = 0.01
+"""Where a filter's impulse response is judged to have decayed, as a fraction of peak.
 
-**Measured here, and it answers a question 03B had to leave open.** ``sosfiltfilt``
-leaves a transient at each end of a segment, and in the slow bands it is large enough
-to dominate the whole-epoch envelope statistics. Effective degrees of freedom over
-8 seeds of 10-minute white noise, against each band's own spec value:
-
-==========  ===========  ==================  ========
-band        untrimmed    one window trimmed  spec dof
-==========  ===========  ==================  ========
-300-3000    135.3        135.3               135.0
-100-300     30.5         30.6                30.0
-10-150      28.5         28.5                28.0
-2-50        27.8         29.9                29.8
-**0.5-3**   **22.9**     **32.0**            30.0
-**0-2**     **26.3**     **31.7**            30.0
-==========  ===========  ==================  ========
-
-Untrimmed, individual seeds in the 0.5-3 band came back with an effective dof as low
-as 0.7 - the transient alone accounting for more envelope variance than the signal.
-Trimming exactly one analysis window from each end removes it, the fast bands are
-untouched, and every band lands within 7% of its own dof.
-
-So the settling width for *this* filter is one analysis window, per band, and
-:func:`settling_s` reports it. 03B carries ``unassessable_head_s = None`` because
-task 13 owns the general number; this is the envelope's part of it, measured rather
-than assumed, and a caller can hand it to ``Epoch.with_settling``.
+Task 13's instrument, used here so the two settling measurements are comparable:
+"run ``impz`` on the actual bandpass and take where it falls below 1% of peak".
 """
+
+
+@dataclass(frozen=True, slots=True)
+class Settling:
+    """How much of a segment's edge is unusable, and why - **both terms, separately**.
+
+    The two are different quantities that currently coincide by accident in four of
+    the six bands, and **not** in the other two. The filter term is a property of
+    ``(lo, hi, fs, order)``; the window term is a property of the dof budget, since
+    ``window_s`` was chosen as roughly ``dof / 2B``. Change either independently and a
+    single combined number would move without anyone noticing which term moved.
+
+    Measured per band, at the rate each one actually runs at:
+
+    ==========  ==================  ==========  ==========
+    band        impulse response    window_s    max
+    ==========  ==================  ==========  ==========
+    300-3000    0.005 s             0.025       0.025 (window)
+    100-300     0.034 s             0.075       0.075 (window)
+    **10-150**  **0.141 s**         0.100       **0.141 (filter)**
+    **2-50**    **0.486 s**         0.310       **0.486 (filter)**
+    0.5-3       3.988 s             6.000       6.000 (window)
+    0-2         1.146 s             7.500       7.500 (window)
+    ==========  ==================  ==========  ==========
+
+    Two bands are filter-limited, so the earlier one-window trim was **too short**
+    there. That is exactly the silent breakage separating the terms was meant to
+    catch.
+
+    Attributes
+    ----------
+    impulse_response_s
+        Where the one-way impulse response falls below
+        :data:`IMPULSE_DECAY_FRACTION` of peak.
+    window_s
+        The band's analysis window: a frame centred less than half a window from the
+        edge is computed from a truncated window whatever the filter is doing.
+    total_s
+        ``max`` of the two. What the envelope actually trims.
+    """
+
+    impulse_response_s: float
+    window_s: float
+
+    @property
+    def total_s(self) -> float:
+        """The binding term, seconds."""
+        return max(self.impulse_response_s, self.window_s)
+
+    @property
+    def filter_limited(self) -> bool:
+        """Whether the impulse response, not the window, is what sets the trim."""
+        return self.impulse_response_s > self.window_s
+
+
+@functools.lru_cache(maxsize=64)
+def impulse_response_length_s(lo_hz: float, hi_hz: float, fs: float) -> float:
+    """Return where this band's impulse response decays, seconds - **measured**.
+
+    Runs the actual ``sos`` design on a unit impulse and returns the last time its
+    magnitude exceeds :data:`IMPULSE_DECAY_FRACTION` of peak. Not inherited from
+    ``window_s``, not inferred from the filter order: the default ``padlen``
+    ``sosfiltfilt`` picks *is* inferred from the order, and at a 0.5 Hz corner that
+    gives 13 ms of padding against a 4 s impulse response.
+
+    ``fs`` is the rate the filter runs at, **after** any decimation, because that is
+    the only rate at which the question has an answer.
+
+    Cached: the design depends on three numbers and the response of a 0.5 Hz
+    bandpass is 120k samples to compute.
+    """
+    sos = _design(fs, lo_hz, hi_hz)
+    scale = lo_hz if lo_hz > 0.0 else hi_hz
+    length = int(np.clip(round(40.0 / max(scale, 1e-3) * fs), 1024, 4_000_000))
+    response = np.asarray(sosfilt(sos, unit_impulse(length)), dtype=np.float64)
+
+    peak = float(np.max(np.abs(response)))
+    if peak <= 0.0:
+        msg = f"the {lo_hz:g}-{hi_hz:g} Hz design has a zero impulse response at {fs} Hz"
+        raise FilterSanityError(msg)
+
+    above = np.flatnonzero(np.abs(response) > IMPULSE_DECAY_FRACTION * peak)
+    decayed_s = float(above[-1] + 1) / fs
+    if above[-1] >= length - 1:
+        log.warning(
+            "the %g-%g Hz impulse response had not decayed to %g of peak within %.1f s; "
+            "the settling estimate is a lower bound",
+            lo_hz,
+            hi_hz,
+            IMPULSE_DECAY_FRACTION,
+            length / fs,
+        )
+    return decayed_s
+
+
+def settling_for(lo_hz: float, hi_hz: float, fs: float, window_s: float) -> Settling:
+    """Return both settling terms for one band at the rate it runs at."""
+    return Settling(
+        impulse_response_s=impulse_response_length_s(lo_hz, hi_hz, fs),
+        window_s=window_s,
+    )
+
+
+def settling_s(lo_hz: float, hi_hz: float, fs: float, window_s: float) -> float:
+    """Return ``max(impulse_response_length_s, window_s)``, seconds.
+
+    **This is the detection-side term only, and it is not an epoch's settling time.**
+    Hard invariant 19: a settling time is a maximum over *every* filter that touches
+    the edge, and the consumer chains (task 13) are different filters. A partially
+    known maximum is ``None``, not the part that is known, so
+    ``stim_split.Epoch.unassessable_head_s`` stays ``None`` until task 13 lands -
+    handing it this number would report a maximum that is too small, and too-small is
+    the direction that silently loses coverage.
+
+    Use :func:`settling_for` when the two terms are wanted separately.
+    """
+    return settling_for(lo_hz, hi_hz, fs, window_s).total_s
+
 
 MIN_SEGMENT_CYCLES: Final = 3.0
 """Shortest usable segment, in cycles of the band's lowest frequency.
@@ -275,40 +374,50 @@ def assert_filter_sane(x: F64, y: F64, name: str) -> None:
         raise FilterSanityError(msg)
 
 
+def _decimated_rate(fs: float, hi_hz: float) -> float:
+    """Return the rate this band's filter will actually run at, Hz.
+
+    Needed on its own as well as inside :func:`_decimate_for`, because the settling
+    time has to be measured at the rate the filter runs at rather than at the rate
+    the file was recorded at.
+    """
+    if hi_hz >= DECIMATE_TARGET_HZ / 2.0:
+        return fs
+    return fs / max(int(fs // DECIMATE_TARGET_HZ), 1)
+
+
 def _decimate_for(x: F64, fs: float, hi_hz: float) -> tuple[F64, float]:
     """Decimate toward :data:`DECIMATE_TARGET_HZ` when the band's top allows it."""
-    if hi_hz >= DECIMATE_TARGET_HZ / 2.0:
+    rate = _decimated_rate(fs, hi_hz)
+    if rate == fs:
         return x, fs
-    factor = max(int(fs // DECIMATE_TARGET_HZ), 1)
-    if factor == 1:
-        return x, fs
-    return np.asarray(decimate(x, factor, ftype="fir", zero_phase=True)), fs / factor
+    return np.asarray(decimate(x, int(round(fs / rate)), ftype="fir", zero_phase=True)), rate
+
+
+def _design(fs: float, lo_hz: float, hi_hz: float) -> npt.NDArray[np.float64]:
+    """Return the band's ``sos`` design at ``fs``. One definition, two callers.
+
+    Shared with :func:`impulse_response_length_s` deliberately: a settling time
+    measured from a different design than the one applied would be measuring nothing.
+    """
+    nyquist = fs / 2.0
+    hi = min(hi_hz, 0.9 * nyquist)
+    if lo_hz <= 0.0:
+        return np.asarray(butter(4, hi / nyquist, btype="lowpass", output="sos"))
+    return np.asarray(butter(4, [lo_hz / nyquist, hi / nyquist], btype="bandpass", output="sos"))
 
 
 def _band_limit(x: F64, fs: float, lo_hz: float, hi_hz: float, name: str) -> F64:
     """Band-limit with ``sos`` and check the result is not numerical garbage."""
-    nyquist = fs / 2.0
-    hi = min(hi_hz, 0.9 * nyquist)
-    if lo_hz <= 0.0:
-        sos = butter(4, hi / nyquist, btype="lowpass", output="sos")
-    else:
-        sos = butter(4, [lo_hz / nyquist, hi / nyquist], btype="bandpass", output="sos")
+    sos = _design(fs, lo_hz, hi_hz)
     y = np.asarray(sosfiltfilt(sos, x), dtype=np.float64)
     assert_filter_sane(x, y, name)
     return y
 
 
-def settling_s(window_s: float) -> float:
-    """Return the filter settling width at a segment edge, seconds.
-
-    One analysis window - see :data:`SETTLING_WINDOWS` for the measurement. Frames
-    inside it come back ``nan`` from :func:`band_envelope` rather than carrying a
-    number computed partly from a transient.
-    """
-    return SETTLING_WINDOWS * window_s
-
-
-def valid_segments(x: F64, fs: float, lo_hz: float, window_s: float) -> list[Segment]:
+def valid_segments(
+    x: F64, fs: float, lo_hz: float, hi_hz: float, window_s: float
+) -> list[Segment]:
     """Split ``x`` into contiguous finite runs, marking the too-short ones.
 
     Interpolating across a NaN gap is fine where the gap is short relative to the
@@ -324,8 +433,9 @@ def valid_segments(x: F64, fs: float, lo_hz: float, window_s: float) -> list[Seg
         The signal, with NaN marking invalid samples.
     fs
         Sample rate, Hz.
-    lo_hz
-        The band's lower corner.
+    lo_hz, hi_hz
+        The band's corners. Both are needed because the settling floor depends on the
+        filter, not only on the lowest frequency.
     window_s
         The band's analysis window, which is a second floor: a segment that cannot
         fill one window cannot produce an envelope sample either. It is also the
@@ -341,7 +451,8 @@ def valid_segments(x: F64, fs: float, lo_hz: float, window_s: float) -> list[Seg
     # A segment must hold its settling edges plus at least one clear window between
     # them, or every frame in it would be inside a transient.
     by_cycles = MIN_SEGMENT_CYCLES / lo_hz if lo_hz > 0.0 else 0.0
-    minimum = int(math.ceil(max(by_cycles, window_s * (1.0 + 2.0 * SETTLING_WINDOWS)) * fs))
+    settle = settling_s(lo_hz, hi_hz, _decimated_rate(fs, hi_hz), window_s)
+    minimum = int(math.ceil(max(by_cycles, window_s + 2.0 * settle) * fs))
     return [
         Segment(start=start, stop=stop, assessable=(stop - start) >= minimum)
         for start, stop in zip(starts, stops, strict=True)
@@ -429,7 +540,7 @@ def band_envelope(
 
     name = f"{lo_hz:g}-{hi_hz:g} Hz"
     envelope = np.full(frames, np.nan, dtype=np.float64)
-    for segment in valid_segments(x, fs, lo_hz, window_s):
+    for segment in valid_segments(x, fs, lo_hz, hi_hz, window_s):
         if not segment.assessable:
             continue
         piece = x[segment.start : segment.stop]
@@ -439,9 +550,9 @@ def band_envelope(
         # Only frames whose centre falls inside the segment get a value: a frame
         # centred in a gap has no data, and borrowing the nearest segment's would be
         # inventing one.
-        # Skip the settling window at each edge: sosfiltfilt leaves a transient
-        # there, and in the slow bands it dominates the epoch's statistics entirely.
-        settle = settling_s(window_s)
+        # Skip the settling span at each edge: sosfiltfilt leaves a transient there,
+        # and in the slow bands it dominates the epoch's statistics entirely.
+        settle = settling_s(lo_hz, hi_hz, rate, window_s)
         first = int(math.ceil((segment.start / fs + settle) / grid_s - 0.5))
         last = int(math.floor((segment.stop / fs - settle) / grid_s - 0.5)) + 1
         span = slice(max(first, 0), min(last, frames))

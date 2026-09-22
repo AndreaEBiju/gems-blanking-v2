@@ -146,10 +146,15 @@ bound must be re-established by the flag below rather than by the hold.
 
 **The outward walk is unbounded by design, so it needs a censoring flag rather
 than a clamp.** If either edge walks more than `stim_tolerance_s` beyond the
-matched window, set `walk_extended = True` and force status `review`. This is a
-diagnostic, not a new gate: a file needing more extension than the tolerance
-allows is already outside tolerance, so the flag can only fire on files that
-would reach `review` anyway — it explains *why* they did. Report the extension
+matched window, set `walk_extended = True` and force status `review`.
+**`walk_extended` is evaluated before `clipped_start`**, and the claim first made
+here — that the flag "can only fire on files that would reach `review` anyway" —
+is wrong in exactly one case, which is why the order matters. A `clipped_start`
+file *skips* the tolerance check, so an overrunning walk on one would otherwise
+pass unremarked. It must not: the recovery epoch's `t0` rides on the offset
+boundary, and a walk that overran by more than the tolerance means that boundary
+is uncertain by more than the tolerance. Everywhere else the original claim
+holds and the flag is a diagnostic rather than a gate. Report the extension
 distance per edge in provenance. The 220 s case above would be reported as a
 measured 220 s with `walk_extended` set, never as a silent 220 s duration.
 
