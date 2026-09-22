@@ -77,6 +77,15 @@ violating one, stop and say so rather than working around it.
     are about what gets *written to the shared drive*, because those files are
     read by other people's machines.
 
+17. **Any array slice handed out of a loader is a read-only view.** Epochs,
+    channel selections and windows are returned as `numpy` views (a 20-minute
+    9-channel epoch costs ~2 GB to copy), and invariant 1 means consumers write
+    NaN into what they are given. A writeable view therefore silently corrupts
+    the parent buffer. Set `arr.flags.writeable = False` before returning; a
+    consumer that must modify takes its own copy of the span it actually needs.
+    Corollary: a view keeps the whole parent alive, so a loop over recordings
+    must not accumulate them.
+
 ---
 
 ## Cross-platform rules (macOS + Windows; Linux best-effort)

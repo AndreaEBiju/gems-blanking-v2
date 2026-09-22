@@ -682,3 +682,30 @@ Ruled out on principle. The tripole is *defined* by removal of the common-mode
 component, which is the single best evidence for motion. Detecting there
 guarantees missed artifacts. Detection uses all signals; the tripole is a consumer,
 thresholded against its own σ.
+
+### 10.8 Bottom-decile OFF statistics for the stim threshold (03B)
+
+Ruled out on measurement. Taking `off_level` and `off_σ` from the lowest decile of
+the vib envelope is truncation-biased by construction: σ came out 0.000321 against
+a true 0.001119 (3.5× low), 21% of genuine OFF samples then crossed the threshold,
+and onset error was −1.945 s. Anchor on the OFF population *outside* the matched
+window instead — an unselected sample of the same distribution — which gave
+−50 ms. The general form: never estimate a spread from a set you selected by
+magnitude.
+
+### 10.9 Bounding the stim edge refinement by the search width (03B)
+
+Ruled out because it makes the check it exists to serve impossible. A ±2 s
+refinement around a 120 s matched window can only ever report 120 ± 2 s, so a 95 s
+stim passes the duration check at "120.0 s". The matched filter **locates**; a
+first/last crossing followed outward, unbounded, **measures**. Any future
+"tighten the refinement window" proposal is this mistake again.
+
+### 10.10 Low duty cycle as the reason the old split failed (03B)
+
+Recorded because it was *asserted here and then falsified*, which is the same
+class of error as 10.2's premise. At the real 8% duty the old `(p20+p80)/2` rule
+recovers the onset to 74 ms — `keep the largest ON segment` rescues it, because
+the spurious ON segments the low threshold produces are all short. The old rule
+fails on a *competing long segment* (measured +400 s), not on duty cycle. Don't
+re-motivate the historical audit on duty-cycle grounds.
