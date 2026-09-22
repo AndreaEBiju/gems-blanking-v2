@@ -416,6 +416,86 @@ Google Drive (synced)       →  data + labels + models + registry
 config: gems_root = <path>  →  the one thing each user sets locally
 ```
 
+### The root, decided 2026-09-22
+
+**`<gems_root>` = the `GEMS-Andrea` folder on the shared drive.** Measured
+spellings, which differ and must never be reconstructed from each other:
+
+```
+Windows  G:\Shared drives\BIONICs Lab  Enteric Interfaces Team\GEMS-Andrea
+macOS    /Users/<user>/Library/CloudStorage/GoogleDrive-<acct>/Shared drives/BIONICs Lab: Enteric Interfaces Team/GEMS-Andrea
+```
+
+Google Drive substitutes **U+0020 SPACE** for the illegal colon on Windows,
+giving **two consecutive spaces**. Not U+2236, not U+F03A, not an underscore —
+four plausible guesses, all wrong, which is the argument *for* rule 2 rather
+than against it: the difference is confined to the root, the root is found by
+marker, and a stored path such as
+`data/J/t01_bl_230315/gems_j_t01_ms3_bl_230315_sig.mat` round-trips
+`rel → abs → rel` byte-identically on both machines.
+
+### Root is not scan scope — keep them separate
+
+`GEMS-Andrea` contains `processing_new`, `TDTMatlabSDK`, `nerve-processing` and
+`IACUC Inspection 092026`: code and admin, not data. **The root is a path
+anchor; it is not a licence to walk everything under it.** Config carries an
+explicit list:
+
+```yaml
+gems_root: <the path above>          # the anchor for every stored path
+scan_roots:                          # the ONLY places recordings are looked for
+  - "August-September Chronic Recordings"
+  - "081526BalloonTrial"
+  # ... listed explicitly, POSIX-relative to gems_root
+```
+
+A recording outside every `scan_root` is not in the corpus. Adding a folder is
+an edit to this list, never an automatic consequence of someone dropping files
+on the drive. This also keeps the `SHARED_DRIVE_ITEM_CAP` accounting honest,
+since the code trees stop counting toward it.
+
+### Measured cost of the drive, and what it forbids
+
+Streaming (not mirrored), one 983 MB `_sig.mat`:
+
+| operation | time |
+|---|---|
+| `stat` | 0 ms |
+| first 10 MB, cold | 1.12 s |
+| **last** 10 MB, cold (seek) | 1.06 s |
+| full 983 MB | 77.6 s (12.7 MB/s) |
+| either end, after a full read | ~0.02 s |
+
+**Random access into a streamed placeholder is not the hazard it looked like** —
+seeking to the tail costs the same as reading the head, because Drive fetches
+ranges rather than materialising the file. Header-only and metadata-only passes
+are cheap and should be preferred everywhere they suffice.
+
+Directory enumeration is the slow part: **4.7 directories per second**, 3442
+directories, so a bare walk of the corpus is **12 minutes**. Two consequences,
+both binding:
+
+- **Task 03A's scan must be cached, not interactive.** A 12-minute walk cannot
+  sit in front of a user pressing "scan". Persist the index under
+  `cache/` (local, never inside `gems_root`), key entries by path plus mtime
+  plus size, and re-walk only what changed. The UI shows the cached tree
+  immediately and refreshes behind it.
+- **A full-sample pass over the corpus is an overnight job**, not a step in a
+  task. 967 `_sig.mat` files at ~78 s each is on the order of **21 hours**, and
+  it also pulls the whole corpus onto local disk, which streaming mode exists to
+  avoid. Any task whose acceptance says "run on every recording" — 03B above all
+  — must say whether it needs samples or only headers, and be runnable in
+  resumable batches.
+
+### The corpus is 967 recordings, not 43
+
+Several tasks below say "the 43 old recordings". That number is the **old
+labelled cohort**, and it is now the minority: the drive holds **967 `_sig.mat`
+files across 3442 directories**, each with a `_vib.mat` beside it. Where a task
+says 43 it means the old labelled cohort specifically; where it means the corpus
+it says corpus. **No `*_segment_indices.mat` exists anywhere under the root**, so
+the old cohort's labels are not on this drive — see task 07's `duration_cap_s`.
+
 ### Why this needs care
 Google Drive is a **sync layer, not a database**. It has no atomic rename, no
 locking across clients, and when two users write the same path it silently
@@ -1238,6 +1318,25 @@ onset of a known-width window" (one unknown), with the duration left over as a
 the protocol config, per cohort, overridable per recording and recorded in
 provenance. **Do not hardcode them** — protocols change, and a silently wrong 120
 would be worse than no prior at all.
+
+**Scope, decided 2026-09-22: the chronic recordings only.** `protocol.yaml` sits
+at `<gems_root>/protocol.yaml` and each protocol entry names the `scan_roots` it
+governs:
+
+```yaml
+protocols:
+  - name: chronic_2min_20min
+    applies_to: ["August-September Chronic Recordings"]
+    stim_duration_s: 120
+    recovery_duration_s: 1200
+    stim_tolerance_s: 12
+```
+
+The balloon trials are a different experiment and **must not inherit the 120 s
+prior**. A `stim_recovery` file that no protocol entry covers is a **refusal**,
+not a default — same rule as a missing `vib` channel. Silently splitting a
+balloon trial against a protocol that does not describe it would produce a
+confident, wrong boundary, which is worse than stopping.
 
 The tolerance is 12 s, not a tight few seconds: recording start/stop routinely
 consumes several seconds at the edges, so a narrow band would flag normal captures.
@@ -2264,7 +2363,14 @@ where video motion exceeds its own threshold:
 existing 43 recordings**. Compute it once from `*_segment_indices.mat` and pin it;
 do not guess. Anything longer is a sustained level shift, not an event.
 
-Until the archive is reachable it is `None`, meaning **no cap was applied and
+**The labels are not on this drive.** A full walk of all 3442 directories under
+`<gems_root>` on 2026-09-22 found **zero** `*_segment_indices.mat`. This is no
+longer "the archive is unreachable" — the archive is mounted and the files are
+not in it. Before concluding they are lost, search for the companion
+`*_segments.mat` that `browseMotionArtifacts` writes, and the sibling folders on
+the shared drive (`GEMS-Lyna`, `Louise`, `Arjun`).
+
+Until they are found it is `None`, meaning **no cap was applied and
 that fact is recorded** — provenance key absent, per the conventions table,
 never null and never a stand-in infinity. An empty `over_cap` under `None` means
 no cap ran; it must not be read as "nothing exceeded the cap".
