@@ -43,6 +43,7 @@ __all__ = [
     "FILTER_SANITY_GAIN",
     "IMPULSE_DECAY_FRACTION",
     "MIN_SEGMENT_CYCLES",
+    "PAD_TYPE",
     "AnalysisEpoch",
     "FilterSanityError",
     "Segment",
@@ -85,6 +86,47 @@ ENVELOPE_FLOOR_UV: Final = 1e-12
 ``log(0)`` is ``-inf`` and would poison the median and the MAD. A floor twelve orders
 below a microvolt cannot affect any real measurement, and a channel quiet enough to
 reach it is dead and gated separately.
+"""
+
+PAD_TYPE: Final = "constant"
+"""Edge extension ``sosfiltfilt`` uses. **Not scipy's default**, and measured.
+
+scipy defaults to ``"odd"``, which reflects antisymmetrically about the endpoint.
+For a band pass with a low corner that injects a large artificial low-frequency
+excursion straight into the band being measured, and it is the whole of the edge
+transient. Effective dof with **no trim**, at the default ``padlen``, 8 seeds of
+10-minute white noise, worst single seed in brackets:
+
+==========  ==========  =============  =============  ==============
+band        spec dof    odd            even           **constant**
+==========  ==========  =============  =============  ==============
+300-3000    135.0       135.3 (134.3)  135.3 (134.3)  135.3 (134.3)
+100-300     30.0        30.5 (30.1)    30.5 (30.1)    30.5 (30.1)
+10-150      28.0        28.5 (28.1)    28.5 (28.1)    28.5 (28.1)
+2-50        29.8        27.8 (24.3)    29.9 (28.9)    **29.9 (28.9)**
+0.5-3       30.0        22.9 (0.7)     25.0 (7.5)     **30.6 (24.6)**
+0-2         30.0        26.3 (3.1)     24.8 (5.8)     **31.6 (27.4)**
+==========  ==========  =============  =============  ==============
+
+``constant`` is best or tied-best in all six, and the only one of the three that is
+never worse than ``odd``. **``even`` is not a general alternative**: it matches
+``constant`` on the band passes above 2 Hz but is worse than ``odd`` on ``0-2``. An
+earlier three-band spot check made ``even`` look viable because it was run at a
+*raised* pad, where it does work; at the default pad it does not.
+
+Why ``constant`` wins differs between the two kinds, and the band-pass argument does
+not carry over:
+
+- **Band passes.** A constant extension is pure DC, so the filter removes it in-band
+  by construction. Odd extension manufactures in-band energy; that is the defect.
+- **The ``0-2`` low pass.** DC is *inside* its passband, so it is not rejected - yet
+  ``constant`` still wins by the largest margin of any band. The reason is different:
+  a flat extension is continuous in value and has zero slope at the boundary, so
+  there is no step for the filter to ring on. A DC offset shifts the envelope's mean
+  and leaves its relative variance, which is what ``dof`` measures, alone.
+
+The three fast bands are indifferent - the default pad is 27 samples and their
+transients are milliseconds - which is the other half of why this went unseen.
 """
 
 IMPULSE_DECAY_FRACTION: Final = 0.01
@@ -410,7 +452,7 @@ def _design(fs: float, lo_hz: float, hi_hz: float) -> npt.NDArray[np.float64]:
 def _band_limit(x: F64, fs: float, lo_hz: float, hi_hz: float, name: str) -> F64:
     """Band-limit with ``sos`` and check the result is not numerical garbage."""
     sos = _design(fs, lo_hz, hi_hz)
-    y = np.asarray(sosfiltfilt(sos, x), dtype=np.float64)
+    y = np.asarray(sosfiltfilt(sos, x, padtype=PAD_TYPE), dtype=np.float64)
     assert_filter_sane(x, y, name)
     return y
 

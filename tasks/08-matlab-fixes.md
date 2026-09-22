@@ -25,6 +25,7 @@ detector is evaluated on instruments that can register its improvement.
 | `slowWaveAnalysis_new.m:159-161` | pool peaks across clean runs instead of taking only the longest — two clean 28 s halves in a 60 s window currently return NaN |
 | `bulk_mixed_models.m` | coverage weights + covariate + minimum-coverage exclusion. `nRR_used`, `fr_validFrac`, `validDur_s` are all computed and none is used |
 | `browseMotionArtifacts.m:34` | `validateattributes(..., 'finite')` throws on NaN, so an already-blanked file cannot be re-browsed. Remove if the browser is kept |
+| every `filtfilt` call at a low corner | **`padtype` — carried over from task 06, and MATLAB has no option for it.** MATLAB's `filtfilt` always uses odd extension, which task 06 measured injecting artificial low-frequency energy directly into a low-corner band: effective dof fell from 30 to as low as 0.9 on the worst segment. Anywhere `processing_new` band-passes below ~10 Hz on a short segment — the slow-wave chain above all — the first and last few seconds of the output are transient, not signal. **Audit which of those outputs feed a statistic rather than a plot**, and pad manually with the endpoint value (or discard `max(impz, window)` at each end) before filtering. Report the before/after on `slowWaveAnalysis_new.m`, where segments are short and the corner is lowest |
 
 **Reuse rather than reinvent:** `dfaGapAware.m` (pooled runs), `step5f_fano_slope.m`
 (epochs + rate-matched surrogates carrying identical censoring — extend the same

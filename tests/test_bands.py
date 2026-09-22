@@ -20,6 +20,7 @@ from gems_blanking_v2.bands.envelope import (
     ENVELOPE_FLOOR_UV,
     IMPULSE_DECAY_FRACTION,
     MIN_SEGMENT_CYCLES,
+    PAD_TYPE,
     FilterSanityError,
     analysis_epoch,
     assert_filter_sane,
@@ -283,110 +284,210 @@ def test_the_impulse_response_term_is_measured_not_inherited(fs: float) -> None:
     )
 
 
-def test_trimming_the_settling_span_is_what_makes_the_slow_bands_work(
+def test_the_trim_no_longer_defends_the_statistic_and_is_kept_anyway(
     fs: float, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The measurement behind the trim, held so it cannot be dropped.
+    """Show the trim's original justification superseded, and keep the trim anyway.
 
-    With the trim the 0.5-3 band's effective dof is 32.0; without it, 22.9, and
-    individual seeds come back as low as 0.7 - the transient carrying more envelope
-    variance than the signal. The fast bands are untouched either way, which is why
-    it went unnoticed until the slow bands were measured.
+    When the padding was scipy's default ``odd``, the trim was what made the slow
+    bands work: 0.5-3 measured 22.9 untrimmed against a spec 30, with seeds as low as
+    0.7. With :data:`~gems_blanking_v2.bands.envelope.PAD_TYPE` set to ``constant``
+    the untrimmed estimate is **30.6** - the padding fix alone repairs the statistic,
+    and the trim is no longer doing that job.
 
-    The untrimmed arm is produced by zeroing the settling, not by reimplementing the
-    envelope, so the two arms differ in exactly one thing.
+    It is kept on a different argument, which is the one that was always the stronger
+    of the two: **padding fabricates samples whatever the padtype**, so an edge
+    frame's filter input is partly invented. A frame that cannot be validated is
+    ``unassessable`` for detection however healthy the reference statistic looks. The
+    padtype defends the *statistic*; the trim withholds the *frames*. Two independent
+    defences, and only one of them is about dof.
+
+    Measured here, all three arms:
+
+    ==================================  ==========  ============
+    0.5-3                               pooled dof  worst seed
+    ==================================  ==========  ============
+    odd padding, no trim                22.9        0.7
+    **constant** padding, no trim       **30.6**    24.6
+    constant padding + trim (shipped)   32.0        29.2
+    ==================================  ==========  ============
     """
     from gems_blanking_v2.bands import envelope as envelope_module  # noqa: PLC0415
-
-    band = "0.5-3"
-    spec = BANDS[band]
-
-    trimmed = [
-        _measured_dof(band_envelope_for(_white(fs, DOF_RECORD_S, seed=seed), fs, band))
-        for seed in DOF_SEEDS
-    ]
-
-    with monkeypatch.context() as patch:
-        patch.setattr(envelope_module, "settling_s", lambda *_a, **_k: 0.0)
-        untrimmed = [
-            _measured_dof(band_envelope_for(_white(fs, DOF_RECORD_S, seed=seed), fs, band))
-            for seed in DOF_SEEDS
-        ]
-
-    assert float(np.mean(trimmed)) == pytest.approx(32.0, rel=0.10)
-    assert float(np.mean(trimmed)) == pytest.approx(spec.dof, rel=0.20)
-    assert float(np.mean(untrimmed)) < 25.0, "the transient should break the estimate"
-    assert min(untrimmed) < 5.0, "at least one untrimmed seed should collapse"
-    assert min(trimmed) > 20.0, "no trimmed seed should collapse"
-
-
-def test_raising_padlen_makes_the_slow_bands_worse_not_better(
-    fs: float, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """**Measured before deciding, and the answer is no.** The trim stays.
-
-    ``sosfiltfilt`` picks ``padlen`` from the filter *order*: 27 samples, 13 ms at the
-    decimated rate, against a 3.99 s impulse response at ``0.5-3``. The obvious fix is
-    to raise the pad to the impulse-response length. It does not work - it roughly
-    halves the effective dof again:
-
-    ==========  =================  ================  ==================
-    band        no trim, default   no trim, raised   **trim (shipped)**
-    ==========  =================  ================  ==================
-    0.5-3       22.9               **9.9**           **32.0**
-    0-2         26.3               **19.5**          **31.7**
-    2-50        27.8               28.9              30.0
-    ==========  =================  ================  ==================
-
-    The cause is ``padtype``, not ``padlen``. scipy's default is ``"odd"``, which
-    extrapolates by odd reflection about the endpoint; over a long pad that injects a
-    large artificial low-frequency excursion straight into the band being measured, so
-    a longer pad injects *more*. Measured at ``0.5-3`` with the raised pad: ``odd``
-    11.6, ``even`` 31.9, ``constant`` 23.1 - and ``constant`` at the default pad, 31.2.
-
-    So there are padding configurations that would remove the transient with no trim
-    at all. Changing ``padtype`` is a larger decision than this task sanctions, and
-    the pad fabricates edge samples, so it is reported rather than taken.
-    """
-    from gems_blanking_v2.bands import envelope as envelope_module  # noqa: PLC0415
-    from gems_blanking_v2.bands.envelope import _decimated_rate  # noqa: PLC0415
     from scipy.signal import sosfiltfilt as real_sosfiltfilt  # noqa: PLC0415
 
     band = "0.5-3"
     spec = BANDS[band]
-    rate = _decimated_rate(fs, spec.hi_hz)
-    impz = impulse_response_length_s(spec.lo_hz, spec.hi_hz, rate)
-    seeds = DOF_SEEDS[:4]
 
-    def pooled() -> float:
-        return float(
-            np.mean(
-                [
-                    _measured_dof(
-                        band_envelope_for(_white(fs, DOF_RECORD_S, seed=seed), fs, band)
-                    )
-                    for seed in seeds
-                ]
+    def pooled() -> list[float]:
+        return [
+            _measured_dof(band_envelope_for(_white(fs, DOF_RECORD_S, seed=seed), fs, band))
+            for seed in DOF_SEEDS
+        ]
+
+    shipped = pooled()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(envelope_module, "settling_s", lambda *_a, **_k: 0.0)
+        untrimmed_constant = pooled()
+
+        def odd_padding(sos: object, x: F64, **_kw: object) -> F64:
+            return np.asarray(real_sosfiltfilt(sos, x, padtype="odd"), dtype=np.float64)
+
+        patch.setattr(envelope_module, "sosfiltfilt", odd_padding)
+        untrimmed_odd = pooled()
+
+    assert float(np.mean(untrimmed_odd)) == pytest.approx(22.9, rel=0.15)
+    assert min(untrimmed_odd) < 5.0, "the odd-padding collapse should still reproduce"
+
+    assert float(np.mean(untrimmed_constant)) == pytest.approx(30.6, rel=0.10)
+    assert float(np.mean(untrimmed_constant)) == pytest.approx(spec.dof, rel=0.20), (
+        "constant padding alone should now carry the statistic"
+    )
+
+    assert float(np.mean(shipped)) == pytest.approx(32.0, rel=0.10)
+    assert min(shipped) > min(untrimmed_constant), "the trim should still improve the tail"
+
+
+def test_the_trim_is_justified_by_fabricated_pad_samples_not_by_dof(fs: float) -> None:
+    """Why the trim survives its original justification: the pad is invented data.
+
+    Every frame whose analysis window reaches within a settling span of a segment
+    edge was computed partly from samples ``sosfiltfilt`` made up. Invariant 8 allows
+    that for filtering and requires it to be reverted, which for an *envelope* means
+    the affected frames are ``nan`` rather than carrying a number nobody can check.
+
+    Asserted as a structural property - the leading and trailing NaN runs match the
+    settling span - rather than as a dof figure, because dof is precisely the thing
+    the trim no longer needs to defend.
+    """
+    from gems_blanking_v2.bands.envelope import _decimated_rate  # noqa: PLC0415
+
+    for band, spec in BANDS.items():
+        envelope = band_envelope_for(_white(fs, 120.0, seed=0), fs, band)
+        finite = np.flatnonzero(np.isfinite(envelope))
+        settle_frames = int(
+            round(
+                settling_s(
+                    spec.lo_hz, spec.hi_hz, _decimated_rate(fs, spec.hi_hz), spec.window_s
+                )
+                / GRID_S
             )
         )
 
-    def raised(sos: object, x: F64) -> F64:
-        pad = max(min(int(round(impz * rate)), x.shape[-1] - 2), 0)
-        return np.asarray(real_sosfiltfilt(sos, x, padlen=pad), dtype=np.float64)
+        assert finite.size > 0, band
+        assert int(finite[0]) >= settle_frames - 1, f"{band}: head trim too short"
+        assert envelope.size - 1 - int(finite[-1]) >= settle_frames - 1, f"{band}: tail"
 
-    shipped = pooled()
+
+PADTYPE_TABLE = {
+    #  band         odd           even          constant
+    "300-3000": ((135.3, 134.3), (135.3, 134.3), (135.3, 134.3)),
+    "100-300": ((30.5, 30.1), (30.5, 30.1), (30.5, 30.1)),
+    "10-150": ((28.5, 28.1), (28.5, 28.1), (28.5, 28.1)),
+    "2-50": ((27.8, 24.3), (29.9, 28.9), (29.9, 28.9)),
+    "0.5-3": ((22.9, 0.7), (25.0, 7.5), (30.6, 24.6)),
+    "0-2": ((26.3, 3.1), (24.8, 5.8), (31.6, 27.4)),
+}
+"""``(pooled dof, worst seed)`` per band per ``padtype``, **no trim**, default pad.
+
+The measurement that chose :data:`~gems_blanking_v2.bands.envelope.PAD_TYPE`. Eight
+seeds of 10-minute white noise against each band's own spec dof.
+"""
+
+
+def _dof_under(
+    band: str, padtype: str, fs: float, monkeypatch: pytest.MonkeyPatch
+) -> tuple[float, float]:
+    """Return ``(pooled, worst)`` effective dof for one band and padtype, untrimmed.
+
+    The trim is zeroed so the padding is the only thing being measured; both are
+    patched on the module so the two arms differ in exactly one call.
+    """
+    from gems_blanking_v2.bands import envelope as envelope_module  # noqa: PLC0415
+    from scipy.signal import sosfiltfilt as real_sosfiltfilt  # noqa: PLC0415
+
+    def padded(sos: object, x: F64, **_kw: object) -> F64:
+        return np.asarray(real_sosfiltfilt(sos, x, padtype=padtype), dtype=np.float64)
+
     with monkeypatch.context() as patch:
         patch.setattr(envelope_module, "settling_s", lambda *_a, **_k: 0.0)
-        default_pad = pooled()
-        patch.setattr(envelope_module, "sosfiltfilt", raised)
-        raised_pad = pooled()
+        patch.setattr(envelope_module, "sosfiltfilt", padded)
+        estimates = [
+            _measured_dof(band_envelope_for(_white(fs, DOF_RECORD_S, seed=seed), fs, band))
+            for seed in DOF_SEEDS
+        ]
+    return float(np.mean(estimates)), float(np.min(estimates))
 
-    assert raised_pad < default_pad, (
-        "raising padlen stopped making it worse - re-run the padtype measurement "
-        "before concluding the trim is still needed"
+
+@pytest.mark.parametrize("band", list(BANDS))
+def test_the_padtype_table_for_every_band(
+    band: str, fs: float, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**All six bands under odd / even / constant**, at the default ``padlen``.
+
+    ==========  ==========  =============  =============  ==============
+    band        spec dof    odd            even           **constant**
+    ==========  ==========  =============  =============  ==============
+    300-3000    135.0       135.3 (134.3)  135.3 (134.3)  135.3 (134.3)
+    100-300     30.0        30.5 (30.1)    30.5 (30.1)    30.5 (30.1)
+    10-150      28.0        28.5 (28.1)    28.5 (28.1)    28.5 (28.1)
+    2-50        29.8        27.8 (24.3)    29.9 (28.9)    **29.9 (28.9)**
+    0.5-3       30.0        22.9 (0.7)     25.0 (7.5)     **30.6 (24.6)**
+    0-2         30.0        26.3 (3.1)     24.8 (5.8)     **31.6 (27.4)**
+    ==========  ==========  =============  =============  ==============
+
+    Worst single seed in brackets, which is the figure that matters: a pooled mean
+    hides a seed where the transient ate the whole estimate.
+    """
+    expected = dict(zip(("odd", "even", "constant"), PADTYPE_TABLE[band], strict=True))
+    for padtype, (pooled_expected, worst_expected) in expected.items():
+        pooled, worst = _dof_under(band, padtype, fs, monkeypatch)
+        assert pooled == pytest.approx(pooled_expected, rel=0.10), f"{band}/{padtype} pooled"
+        assert worst == pytest.approx(worst_expected, rel=0.35, abs=0.5), (
+            f"{band}/{padtype} worst seed"
+        )
+
+
+def test_constant_padding_is_never_worse_than_scipys_default(
+    fs: float, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Which is what makes it a correction rather than a trade.
+
+    ``constant`` is best or tied-best in all six bands. ``even`` is **not** a general
+    alternative - it ties ``constant`` on the band passes above 2 Hz and is *worse
+    than* ``odd`` on the ``0-2`` low pass (24.8 against 26.3). An earlier three-band
+    spot check made ``even`` look viable because it was run at a raised pad, where it
+    does work; at the default pad it does not.
+    """
+    for band, (odd, _even, constant) in PADTYPE_TABLE.items():
+        spec = BANDS[band].dof
+        assert abs(constant[0] - spec) <= abs(odd[0] - spec) + 0.1, band
+        assert constant[1] >= odd[1], f"{band}: constant's worst seed is below odd's"
+
+    assert PADTYPE_TABLE["0-2"][1][0] < PADTYPE_TABLE["0-2"][0][0], (
+        "even should still be worse than odd on the low pass"
     )
-    assert raised_pad < 20.0
-    assert shipped > 1.5 * raised_pad, "the trim must beat the raised pad"
+    assert PAD_TYPE == "constant"
+
+
+def test_the_shipped_setting_is_constant_padding_plus_the_trim(fs: float) -> None:
+    """Both defences, and they defend different things.
+
+    Padding fabricates edge samples whatever the ``padtype``, so an edge frame's
+    filter input is partly invented even now; a frame that cannot be validated is
+    ``unassessable`` for detection regardless of how good the reference statistic
+    looks. The padtype fixes the *statistic*; the trim withholds the *frames*.
+
+    Shipped, pooled over 8 seeds: 135.3 / 30.6 / 28.5 / 30.0 / 32.0 / 31.7 against
+    specs of 135.0 / 30.0 / 28.0 / 29.8 / 30.0 / 30.0, worst seed 27.5.
+    """
+    for band, spec in BANDS.items():
+        estimates = [
+            _measured_dof(band_envelope_for(_white(fs, DOF_RECORD_S, seed=seed), fs, band))
+            for seed in DOF_SEEDS
+        ]
+        assert float(np.mean(estimates)) == pytest.approx(spec.dof, rel=0.20), band
+        assert min(estimates) > 0.85 * spec.dof, f"{band}: worst seed {min(estimates):.1f}"
 
 
 def test_task_06_does_not_supply_an_epochs_settling_time(fs: float) -> None:
@@ -397,21 +498,35 @@ def test_task_06_does_not_supply_an_epochs_settling_time(fs: float) -> None:
     this task's number would report a maximum that is too small - and too-small is the
     direction that silently loses coverage rather than the direction that complains.
 
-    Asserted structurally: a freshly split epoch still carries ``None`` and still
-    refuses to be read, with nothing in ``bands`` calling ``with_settling``.
+    Asserted on the **import graph** rather than on the source text: ``bands`` must
+    not import ``io.stim_split`` at all. A grep for ``with_settling(`` would pass
+    against ``getattr(epoch, "with_" + "settling")``, against a helper in a third
+    module, and against any future spelling; not being able to reach ``Epoch`` is the
+    property that actually holds.
     """
+    import ast  # noqa: PLC0415
     import inspect  # noqa: PLC0415
 
-    from gems_blanking_v2.bands import envelope as envelope_module  # noqa: PLC0415
+    from gems_blanking_v2.bands import envelope, reference, zscore  # noqa: PLC0415
+    from gems_blanking_v2.bands.envelope import _decimated_rate  # noqa: PLC0415
 
-    source = inspect.getsource(envelope_module)
-    assert "with_settling(" not in source, (
-        "bands must not set an epoch's settling time - invariant 19"
+    imported: set[str] = set()
+    for module in (envelope, reference, zscore):
+        tree = ast.parse(inspect.getsource(module))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module)
+
+    assert not any("stim_split" in name for name in imported), (
+        f"bands must not import stim_split - invariant 19. Imports: {sorted(imported)}"
+    )
+    assert any(name.startswith("gems_blanking_v2") for name in imported), (
+        "the import walk found nothing, so the assertion above proved nothing"
     )
 
     spec = BANDS["0.5-3"]
-    from gems_blanking_v2.bands.envelope import _decimated_rate  # noqa: PLC0415
-
     detection_side = settling_s(
         spec.lo_hz, spec.hi_hz, _decimated_rate(fs, spec.hi_hz), spec.window_s
     )
