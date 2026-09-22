@@ -13,6 +13,13 @@ union of 36 pairs. :data:`CombineRule` is a parameter, and
 :class:`FlagRates` reports the per-pair rates, the union, and what the chosen rule
 actually produced - three different numbers that are routinely conflated.
 
+**Downstream consumers take :class:`CandidateReport`, never the bare list.** The
+over-cap routing and the ``cardiac_windows=None`` state live on the report, so a
+stage handed only ``list[Candidate]`` has silently lost both. Task 15 must never
+auto-mask an over-cap candidate and cannot tell which those are from the list alone,
+so :attr:`CandidateReport.auto_maskable` is the affordance it should reach for -
+``candidates`` is there for inspection and for tests.
+
 **Cross-band coincidence is not a suppression rule here.** It is a task 11 classifier
 feature. Gating candidates on it would throw away exactly the evidence task 12 needs
 to learn from, and a generator that has already made the decision leaves the
@@ -185,6 +192,27 @@ class CandidateReport:
     def n_candidates(self) -> int:
         """How many candidates were generated."""
         return len(self.candidates)
+
+    @property
+    def auto_maskable(self) -> list[Candidate]:
+        """Candidates a downstream stage may mask without a human looking.
+
+        **What task 15 should call.** Excludes everything in :attr:`over_cap`, which
+        is routed to review: a span longer than the 99th percentile of labelled
+        segment durations is a sustained level shift, and masking one automatically
+        would blank a stretch of recording on the strength of a threshold crossing
+        nobody adjudicated.
+
+        Taking ``candidates`` instead is the mistake this property exists to make
+        unnecessary, which is why the report and not the list is the contract.
+        """
+        over = set(self.over_cap)
+        return [c for index, c in enumerate(self.candidates) if index not in over]
+
+    @property
+    def review_required(self) -> list[Candidate]:
+        """Candidates over the duration cap. Never auto-masked; never dropped either."""
+        return [self.candidates[index] for index in self.over_cap]
 
     def to_provenance(self) -> dict[str, Any]:
         """Return a JSON-ready record of the operating point and what it produced."""

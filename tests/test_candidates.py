@@ -589,3 +589,73 @@ def test_an_empty_pair_set_yields_nothing() -> None:
     """No z is not an error, it is no candidates."""
     assert generate_candidates({}, _no_beats(), None) == []
     assert flag_rates({}).n_frames == 0
+
+
+# ---------------------------------------------------------------------------
+# the exported contract
+# ---------------------------------------------------------------------------
+
+
+def test_the_report_is_the_downstream_contract_not_the_bare_list() -> None:
+    """A stage handed ``list[Candidate]`` has silently lost two things.
+
+    The over-cap routing and the ``cardiac_windows=None`` state both live on the
+    report. :attr:`CandidateReport.auto_maskable` is what task 15 should reach for,
+    so that doing the right thing needs no extra care.
+    """
+    trace = _with_event(_quiet(8000), 10.0, 40.0, peak=7.0)
+    trace = _with_event(trace, 60.0, 60.3, peak=7.0)
+    report = candidate_report({("L_T", ENG): trace}, _no_beats(), duration_cap_s=5.0)
+
+    assert len(report.over_cap) == 1
+    assert len(report.auto_maskable) == report.n_candidates - 1
+    assert len(report.review_required) == 1
+    assert report.review_required[0] not in report.auto_maskable
+    assert report.review_required[0] in report.candidates, "routed, not dropped"
+
+    longest = max(report.candidates, key=lambda c: c.stop_s - c.start_s)
+    assert longest in report.review_required
+    assert all(c.stop_s - c.start_s <= 5.0 for c in report.auto_maskable)
+
+
+def test_auto_maskable_is_everything_when_no_cap_was_measured() -> None:
+    """An unmeasured cap must not silently withhold candidates from masking.
+
+    ``None`` means no cap ran, so nothing is *known* to be over one. The state is
+    still recorded - a reader checks ``duration_cap_s`` - but the routing cannot
+    invent a decision nobody made.
+    """
+    trace = _with_event(_quiet(8000), 10.0, 40.0, peak=7.0)
+    report = candidate_report({("L_T", ENG): trace}, _no_beats(), duration_cap_s=None)
+
+    assert report.duration_cap_s is None
+    assert report.auto_maskable == report.candidates
+    assert report.review_required == []
+
+
+def test_no_module_outside_detect_reaches_past_the_report() -> None:
+    """Enforced on the import graph, so a future task 15 cannot take the bare list.
+
+    A convention in a docstring is not a contract. This walks every module in the
+    package and fails if anything outside ``detect`` imports ``generate_candidates``
+    - which is the only way to obtain candidates without the report.
+    """
+    import ast  # noqa: PLC0415
+    import pathlib  # noqa: PLC0415
+
+    root = pathlib.Path(__file__).resolve().parent.parent / "gems_blanking_v2"
+    offenders: list[str] = []
+    for path in root.rglob("*.py"):
+        if path.parent.name == "detect":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module and "candidates" in node.module:
+                names = {alias.name for alias in node.names}
+                if "generate_candidates" in names:
+                    offenders.append(f"{path.relative_to(root).as_posix()}")
+
+    assert not offenders, (
+        f"these take the bare list instead of the CandidateReport: {offenders}"
+    )
+    assert (root / "detect" / "candidates.py").is_file(), "the walk found no package"

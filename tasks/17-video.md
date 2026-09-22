@@ -10,6 +10,13 @@ the container via `ffprobe`, computes ROI motion energy via OpenCV, loads segmen
 labels (v5 and v7.3 `.mat`), fits the sync lag by cross-correlation, and estimates
 drift from the first and last thirds. Start from it.
 
+
+> **Task 07 declared `VideoMotion` as a structural `Protocol`** because this task
+> names ROIs, sync and drift but never a type. **Satisfy that protocol; do not
+> redefine it.** Minimum shape: a motion trace on the shared 10 ms grid plus its
+> own threshold. If 17 needs a richer object, widen the protocol in task 07 and
+> say so — do not let two shapes exist.
+
 ### Sync
 Camera and TDT share a start trigger, so the **offset** is solved. **Drift is not**:
 100 ppm over 20 minutes is 120 ms, longer than the feature window.
