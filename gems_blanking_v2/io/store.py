@@ -317,7 +317,12 @@ def find_gems_root(explicit: Path | None = None, *, scan: bool = True) -> Path:
     Parameters
     ----------
     explicit
-        A caller-supplied root, checked like any other.
+        A caller-supplied root. **Authoritative**: if it carries no marker this
+        raises rather than falling through to the env var, the config or a scan. A
+        caller who names a root has made a decision, and silently resolving a
+        different one is how a corpus gets written against the wrong tree - the
+        exact failure this module exists to prevent. ``detector_core.find_detector_core``
+        already works this way; this was the outstanding half of that fix.
     scan
         Whether to look under mounted shared drives when nothing else answers.
         Tests pass False to stay off the real filesystem.
@@ -332,13 +337,35 @@ def find_gems_root(explicit: Path | None = None, *, scan: bool = True) -> Path:
     FileNotFoundError
         If no candidate carries the marker. The message lists what was tried -
         a silent wrong root is the failure this whole module exists to prevent.
+        Also raised immediately when ``explicit`` or ``GEMS_ROOT`` names a directory
+        with no marker, without trying anything further.
     """
     tried: list[str] = []
     candidates: list[Path] = []
-    if explicit is not None:
-        candidates.append(Path(explicit))
-    if (env := os.environ.get("GEMS_ROOT")) is not None:
-        candidates.append(Path(env))
+
+    # An explicitly named root, from the argument or the environment, is a decision
+    # rather than a suggestion. Both raise here instead of being appended to the
+    # candidate list, because falling through would resolve a *different* root than
+    # the one the caller asked for and say nothing about it.
+    named_sources = (
+        ("explicit argument", explicit),
+        ("GEMS_ROOT", os.environ.get("GEMS_ROOT")),
+    )
+    for source, named in named_sources:
+        if named is None:
+            continue
+        root = Path(named)
+        if not (root / MARKER_NAME).is_file():
+            msg = (
+                f"{source} names {root}, which has no {MARKER_NAME} marker.\n"
+                "Refusing to fall through to discovery: you asked for this root, and "
+                "resolving a different one silently is how a corpus gets written "
+                f"against the wrong tree. Create the marker with `gems init`, or drop "
+                f"the {source} to let discovery run."
+            )
+            raise FileNotFoundError(msg)
+        return root
+
     if (cfg := read_config_root()) is not None:
         candidates.append(cfg)
 

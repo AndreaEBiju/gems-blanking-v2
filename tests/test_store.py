@@ -445,3 +445,51 @@ def test_item_count_is_bounded_and_reports_incompleteness(store: GemsStore) -> N
     count, complete = store.count_items(cap=SHARED_DRIVE_ITEM_CAP)
     assert complete
     assert count >= 30
+
+
+def test_an_explicit_root_without_a_marker_raises_rather_than_falling_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A named root is a decision, not a suggestion. The 00A defect, fixed.
+
+    ``find_gems_root`` appended the explicit root to a candidate list and carried on
+    to ``GEMS_ROOT``, the config and a filesystem scan. So a caller who named the
+    wrong directory got a *different* root resolved silently, and wrote a corpus
+    against a tree they had not asked for - the exact failure the module exists to
+    prevent. ``detector_core.find_detector_core`` was fixed this way in task 03; this
+    was the outstanding half.
+    """
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / MARKER_NAME).write_text("", encoding="utf-8", newline="\n")
+    wrong = tmp_path / "wrong"
+    wrong.mkdir()
+
+    monkeypatch.setenv("GEMS_ROOT", str(real))
+
+    with pytest.raises(FileNotFoundError, match="Refusing to fall through"):
+        find_gems_root(wrong, scan=False)
+
+    # and it really would have fallen through: the env var alone resolves fine
+    assert find_gems_root(scan=False) == real
+
+
+def test_an_explicit_gems_root_env_var_without_a_marker_also_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same rule for the environment variable: naming a root is naming a root."""
+    wrong = tmp_path / "wrong"
+    wrong.mkdir()
+    monkeypatch.setenv("GEMS_ROOT", str(wrong))
+
+    with pytest.raises(FileNotFoundError, match="GEMS_ROOT names"):
+        find_gems_root(scan=False)
+
+
+def test_an_explicit_root_with_a_marker_is_used_unchanged(tmp_path: Path) -> None:
+    """The other half: an explicit root that is valid wins over everything else."""
+    root = tmp_path / "named"
+    root.mkdir()
+    (root / MARKER_NAME).write_text("", encoding="utf-8", newline="\n")
+
+    assert find_gems_root(root, scan=False) == root

@@ -43,13 +43,21 @@ DRIVE_NAME_VARIANTS = pytest.mark.parametrize(
         pytest.param("BIONICs Lab\u2236 Enteric Interfaces Team", id="u2236-ratio"),
         pytest.param("BIONICs Lab\uf03a Enteric Interfaces Team", id="uf03a-private-use"),
         pytest.param("BIONICs Lab_ Enteric Interfaces Team", id="underscore"),
+        pytest.param("BIONICs Lab  Enteric Interfaces Team", id="space-MEASURED"),
     ],
 )
-"""The four names the shared-drive folder could plausibly have on disk.
+"""The names the shared-drive folder could have on disk, and the one it does.
 
-The first is only creatable on POSIX; the test that uses it skips on Windows. The
-others are what Drive for desktop might substitute. Whichever is real, discovery is
-by marker and stored paths are relative, so nothing downstream changes.
+**Measured 2026-09-22, Google Drive for desktop on Windows 11: the colon becomes
+U+0020 SPACE.** The folder is literally ``BIONICs Lab  Enteric Interfaces Team``
+with two consecutive spaces - the original space after the colon, plus the space
+that replaced it. Not U+2236 RATIO, not U+F03A, not an underscore; the first four
+entries here were all guesses and **none of them was right**, which is the whole
+argument for discovering the root by marker instead of reconstructing it.
+
+The literal-colon variant is only creatable on POSIX and its test skips on Windows.
+Whichever name is real, discovery is by marker and stored paths are relative, so
+nothing downstream changes - confirmed against the real mount.
 """
 
 
