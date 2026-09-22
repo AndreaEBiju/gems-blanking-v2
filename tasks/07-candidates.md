@@ -39,6 +39,28 @@ class balance (≥5% true positives — with ~150 real artifacts per recording t
 means ≤3000 candidates, i.e. flag ≲3% of frames) and above by recall. **Sweep it in
 task 09 and pin it there**, do not tune it here.
 
+### How (signal, band) pairs combine — state it explicitly
+
+The signature takes z for **every** pair and the algorithm above does not say how
+they are combined. Left implicit it becomes a union over ~36 pairs, which hard
+invariant 10b names as a multiple-comparisons problem: at a per-pair rate of
+0.2–3.4%, the union runs 40–55%. Make the rule an explicit parameter, because
+task 09 has to sweep it alongside `z_enter`:
+
+```
+combine: "any" | "k_of_n"      # default "any"
+k: int = 1                     # ignored unless combine == "k_of_n"
+```
+
+`"any"` is the recall-maximising default and this step's only job is recall — so
+it is the right starting point, not the right answer. Record the per-pair and
+union flag rates in the candidate report so task 09 sweeps against measured
+numbers rather than the 0.2–3.4% estimate.
+
+Cross-band coincidence is **not** a suppression rule here. It is a classifier
+feature (task 11); using it to gate candidates would destroy the evidence task
+12 needs.
+
 ### This step's only job is recall
 Precision is task 12's job. Candidate count is **not** review burden — the
 classifier judges every candidate and humans label a sample.
@@ -47,9 +69,11 @@ classifier judges every candidate and humans label a sample.
 - injected artifacts at known times: every one produces a candidate whose span
   contains the injected span
 - hysteresis: a z-trace dipping to 2.0 mid-event yields one candidate, not two
-- a cardiac-only synthetic yields no candidates in 100–300 Hz and **does** yield
-  them in 300–5000 Hz if a real artifact is present there (proves suppression is
-  band-scoped)
+- a cardiac-only synthetic yields no candidates in `100-300` and **does** yield
+  them in `300-3000` if a real artifact is present there (proves suppression is
+  band-scoped). *The band name here read `300–5000` until 2026-09-22; A.5b moved
+  the ENG band and this line did not follow. Band names are the exact strings in
+  A.3, everywhere, always.*
 - duration cap routes to review rather than dropping
 - `video_assisted` provenance is set only where video exceeded threshold
 
