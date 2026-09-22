@@ -2218,8 +2218,24 @@ the reference scalars are logged per (signal, band).
 ## Task 07 — Candidate generation
 
 **Module:** `detect/candidates.py`
-**Depends on:** 02, 05, 06
+**Depends on:** 05, 06 for behaviour; **02 for types only**
 **Gate:** no (but task 09 measures whether it worked)
+
+> **The old header said "Depends on: 02, 05, 06" and contradicted A.6**, which
+> puts 02 after 07. A.6 is right and the header was sloppy: 02 needs real
+> recordings to measure a peri-R window, 07 needs only the *shape* of what 02
+> returns. Build 07 against task 02's declared return type and accept
+> `cardiac_windows=None`.
+>
+> **`None` means "not yet measured" and must be recorded as such.** It does not
+> mean "no cardiac contamination" — those are different claims and only the
+> first is true today. The report says which.
+
+**Downstream consumers take the `CandidateReport`, not the bare list.** The
+over-cap routing and the `cardiac_windows=None` state live on the report, so a
+stage handed only `list[Candidate]` has silently lost both. Task 15 in
+particular must never auto-mask an over-cap candidate, and it cannot know which
+those are from the list alone.
 
 ### Signature
 ```python
@@ -2248,6 +2264,11 @@ where video motion exceeds its own threshold:
 existing 43 recordings**. Compute it once from `*_segment_indices.mat` and pin it;
 do not guess. Anything longer is a sustained level shift, not an event.
 
+Until the archive is reachable it is `None`, meaning **no cap was applied and
+that fact is recorded** — provenance key absent, per the conventions table,
+never null and never a stand-in infinity. An empty `over_cap` under `None` means
+no cap ran; it must not be read as "nothing exceeded the cap".
+
 ### Threshold
 `z_enter = 3.0` is a starting value; the defensible range is 2–4, bounded below by
 class balance (≥5% true positives — with ~150 real artifacts per recording that
@@ -2272,9 +2293,41 @@ it is the right starting point, not the right answer. Record the per-pair and
 union flag rates in the candidate report so task 09 sweeps against measured
 numbers rather than the 0.2–3.4% estimate.
 
+Measured on 36 independent clean pairs at `z_enter = 3.0`: worst pair
+**0.13%**, union **4.6%** — a factor of **35**. Note what that measurement is
+and is not. Synthetic pairs are *independent*; real `(signal, band)` pairs are
+correlated, because one artifact lands in several bands at once, so for a given
+per-pair rate the real union is **lower** than the independence prediction.
+Real per-pair rates are also higher than 0.13%. The two effects push opposite
+ways and neither is small, so **task 09 re-measures both on real recordings**
+and the 35× is the independent-case bound, not a forecast.
+
 Cross-band coincidence is **not** a suppression rule here. It is a classifier
 feature (task 11); using it to gate candidates would destroy the evidence task
 12 needs.
+
+### Rules the algorithm left open, now closed
+
+**NaN frames are no evidence, not evidence of quiet.** Task 06 emits `nan` for
+unassessable frames (settling edges, short segments). A NaN can neither open nor
+sustain a candidate. But `merge_gap_s` **does** bridge across one: a gap is not
+evidence of a second event whether it is quiet or unmeasured, and the two error
+directions are not symmetric — bridging over-masks a span nobody assessed, while
+refusing to bridge leaves unassessed samples unmasked next to a known artifact.
+For a gap under 100 ms the first is clearly the right way to be wrong.
+
+**`video_assisted` marks a span that exists *because* the bar was lowered** —
+no pair reached the unassisted `z_enter` anywhere in it. A span that would have
+been found with the camera off is `electrical` whether or not the animal moved,
+which keeps the tag a record of evidence rather than of coincidence. Caveat to
+carry into task 13: a span can be `electrical` and still have its **extent**
+influenced by the lowered threshold. Existence and extent have different
+provenance; 13 owns extent and should not read `electrical` as "no video input".
+
+**`VideoMotion` is a structural `Protocol` declared here**, because task 17
+describes ROIs, sync and drift but never names a type. Minimum shape: a motion
+trace on the shared 10 ms grid, plus its own threshold. **Task 17 must satisfy
+this protocol**, not redefine it.
 
 ### This step's only job is recall
 Precision is task 12's job. Candidate count is **not** review burden — the
@@ -2286,7 +2339,13 @@ classifier judges every candidate and humans label a sample.
 - hysteresis: a z-trace dipping to 2.0 mid-event yields one candidate, not two
 - a cardiac-only synthetic yields no candidates in `100-300` and **does** yield
   them in `300-3000` if a real artifact is present there (proves suppression is
-  band-scoped). *The band name here read `300–5000` until 2026-09-22; A.5b moved
+  band-scoped). **The artifact must sit entirely inside one peri-R window** or
+  the test does not discriminate: a 400 ms artifact against a 40 ms window
+  survives band-wide suppression too. This matters at the real rate — at animal
+  J's 364 bpm a beat arrives every 165 ms, so 40 ms windows cover **24%** of the
+  recording, and band-wide suppression would silently discard a quarter of all
+  short ENG artifacts in a band where A.5 measures the QRS carrying
+  0.00–0.54% of its energy. *The band name here read `300–5000` until 2026-09-22; A.5b moved
   the ENG band and this line did not follow. Band names are the exact strings in
   A.3, everywhere, always.*
 - duration cap routes to review rather than dropping
@@ -3463,6 +3522,13 @@ A prototype already exists: `video_artifact_coincidence.py` (270 lines) — it p
 the container via `ffprobe`, computes ROI motion energy via OpenCV, loads segment
 labels (v5 and v7.3 `.mat`), fits the sync lag by cross-correlation, and estimates
 drift from the first and last thirds. Start from it.
+
+
+> **Task 07 declared `VideoMotion` as a structural `Protocol`** because this task
+> names ROIs, sync and drift but never a type. **Satisfy that protocol; do not
+> redefine it.** Minimum shape: a motion trace on the shared 10 ms grid plus its
+> own threshold. If 17 needs a richer object, widen the protocol in task 07 and
+> say so — do not let two shapes exist.
 
 ### Sync
 Camera and TDT share a start trigger, so the **offset** is solved. **Drift is not**:
