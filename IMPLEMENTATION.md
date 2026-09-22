@@ -2095,25 +2095,62 @@ The cause is scipy's default `padtype="odd"`. Odd extension reflects
 antisymmetrically about the endpoint, which for a band-pass with a low corner
 injects a large artificial **low-frequency** excursion directly into the band
 being measured — so a longer pad injects more of it, and the "fix" makes the
-defect worse. At `0.5-3` with the raised pad: `odd` 11.6, `even` **31.9**,
-`constant` 23.1; `constant` at the **default** pad, **31.2**.
+defect worse.
 
-**`padtype="constant"` at the default `padlen` is the specified setting.** A
-constant pad at the endpoint value is continuous with the signal and is pure DC,
-so for every band-pass here it is removed in-band by construction; odd extension
-is the only one of the three that manufactures in-band energy. This is a
-one-parameter correction to a demonstrated defect, not a tuning choice, and it
-is in scope. **Measure all six bands** under `odd` / `even` / `constant` at the
-default pad before committing — only three were measured, and `0-2` is a
-low-pass where the DC argument does not apply the same way.
+**`padtype="constant"` at the default `padlen` is binding.** All six bands, no
+trim, 8 seeds × 10-minute white noise, worst single seed in brackets:
 
-**The trim stays.** Padding fabricates samples, so an edge frame's filter input
-is partly invented whatever the `padtype`; a frame that cannot be validated is
-`unassessable` for detection regardless of how good the reference statistic
-looks. The two are independent defences and the 12 s per segment at `0.5-3` is
-not worth recovering: at this stage NaNs come from acquisition dropouts, not
-from masking (which happens later), so segments are not in fact fragmented, and
-the cost is ~1% of a 1200 s recovery epoch.
+| band | type | spec | `odd` | `even` | **`constant`** |
+|---|---|---|---|---|---|
+| 300-3000 | bandpass | 135.0 | 135.3 (134.3) | 135.3 (134.3) | 135.3 (134.3) |
+| 100-300 | bandpass | 30.0 | 30.5 (30.1) | 30.5 (30.1) | 30.5 (30.1) |
+| 10-150 | bandpass | 28.0 | 28.5 (28.1) | 28.5 (28.1) | 28.5 (28.1) |
+| 2-50 | bandpass | 29.8 | 27.8 (24.3) | 29.9 (28.9) | **29.9 (28.9)** |
+| 0.5-3 | bandpass | 30.0 | 22.9 (0.7) | 25.0 (7.5) | **30.6 (24.6)** |
+| 0-2 | **lowpass** | 30.0 | 26.3 (3.1) | 24.8 (5.8) | **31.6 (27.4)** |
+
+`constant` is best or tied-best in all six and never worse than `odd`, so this
+is a correction, not a trade.
+
+**`even` is not an alternative and must not be substituted.** It ties on the
+band-passes above 2 Hz and is **worse than `odd`** on the `0-2` low-pass
+(24.8 against 26.3). It looked viable in a three-band spot check run at a
+*raised* pad, where it does work; at the default pad it does not. Two mechanisms
+are at work and only one of them is the DC argument:
+
+- **Band-passes (five of six):** a constant pad is pure DC, which the
+  high-pass side rejects in-band by construction.
+- **The `0-2` low-pass:** DC is *inside* the passband, so it is not rejected —
+  yet `constant` still wins by the largest margin of any band. The reason is
+  continuity, not rejection: a flat extension matches the endpoint in value and
+  has zero slope, so there is no step for the filter to ring on, and a DC offset
+  moves the envelope's mean while leaving the relative variance that dof
+  measures untouched.
+
+**The trim stays, and its justification is now different from the one it was
+introduced with.** Under `odd` the trim was what made the slow bands work
+(`0.5-3` was 22.9 untrimmed). Under `constant` the untrimmed figure is **30.6**,
+so the padding alone carries the statistic and that argument is spent. The
+remaining argument was always the stronger one: **padding fabricates samples**,
+so an edge frame's filter input is partly invented whatever the `padtype`, and
+a frame whose input cannot be validated is `unassessable` for detection however
+healthy the aggregate dof looks. The padtype defends the *statistic*; the trim
+withholds the *frames*.
+
+Note the direction of the bias, which is what makes withholding the right
+response rather than a conservative one: the pad is quiet, so edge frames are
+biased **toward looking clean**. An untrimmed edge is a systematic
+false-negative region — the same failure shape as a stim-inflated reference,
+detection suppressed silently in a fixed part of every recording.
+
+Note also that trimming now *raises* measured dof slightly away from spec
+(`0.5-3`: 30.6 untrimmed, 32.0 trimmed) because it shortens `T`. **That is not
+a reason to remove it.** Anyone optimising this number later will find that
+argument and it is answered here.
+
+The cost is ~1% of a 1200 s recovery epoch: at this stage NaNs come from
+acquisition dropouts, not from masking (which happens later), so segments are
+not in fact fragmented.
 
 Enforce the separation from 03B as an **import-graph** assertion — `bands` must
 not import `stim_split` — rather than by grepping module source for a call name.
@@ -2217,6 +2254,28 @@ class balance (≥5% true positives — with ~150 real artifacts per recording t
 means ≤3000 candidates, i.e. flag ≲3% of frames) and above by recall. **Sweep it in
 task 09 and pin it there**, do not tune it here.
 
+### How (signal, band) pairs combine — state it explicitly
+
+The signature takes z for **every** pair and the algorithm above does not say how
+they are combined. Left implicit it becomes a union over ~36 pairs, which hard
+invariant 10b names as a multiple-comparisons problem: at a per-pair rate of
+0.2–3.4%, the union runs 40–55%. Make the rule an explicit parameter, because
+task 09 has to sweep it alongside `z_enter`:
+
+```
+combine: "any" | "k_of_n"      # default "any"
+k: int = 1                     # ignored unless combine == "k_of_n"
+```
+
+`"any"` is the recall-maximising default and this step's only job is recall — so
+it is the right starting point, not the right answer. Record the per-pair and
+union flag rates in the candidate report so task 09 sweeps against measured
+numbers rather than the 0.2–3.4% estimate.
+
+Cross-band coincidence is **not** a suppression rule here. It is a classifier
+feature (task 11); using it to gate candidates would destroy the evidence task
+12 needs.
+
 ### This step's only job is recall
 Precision is task 12's job. Candidate count is **not** review burden — the
 classifier judges every candidate and humans label a sample.
@@ -2225,9 +2284,11 @@ classifier judges every candidate and humans label a sample.
 - injected artifacts at known times: every one produces a candidate whose span
   contains the injected span
 - hysteresis: a z-trace dipping to 2.0 mid-event yields one candidate, not two
-- a cardiac-only synthetic yields no candidates in 100–300 Hz and **does** yield
-  them in 300–5000 Hz if a real artifact is present there (proves suppression is
-  band-scoped)
+- a cardiac-only synthetic yields no candidates in `100-300` and **does** yield
+  them in `300-3000` if a real artifact is present there (proves suppression is
+  band-scoped). *The band name here read `300–5000` until 2026-09-22; A.5b moved
+  the ENG band and this line did not follow. Band names are the exact strings in
+  A.3, everywhere, always.*
 - duration cap routes to review rather than dropping
 - `video_assisted` provenance is set only where video exceeded threshold
 
