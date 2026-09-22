@@ -120,9 +120,27 @@ EDGE_HOLD_S: Final = 0.25
 
 The walk that measures the epoch's extent follows each edge outward until the
 envelope falls back below threshold **and stays below for this long**, so ripple
-around the edge does not terminate it early. It is deliberately not the old
-refinement pad: the walk is unbounded by the window width, which is the whole point,
-and this only sets how patient it is about a momentary dip.
+around a real edge does not terminate it early.
+
+**It also bounds the damage from a mis-set threshold, and that is a second reason to
+keep it short.** A too-low threshold makes OFF noise cross intermittently and the
+walk hops from one excursion to the next; the hold is what stops the hopping.
+Measured with the truncation-biased threshold of :data:`OFF_ANCHOR_SIGMA` in place,
+varying only the hold:
+
+========  ====================  ==================
+hold      biased onset error    ratio to anchored
+========  ====================  ==================
+**0.25**  **0.641 s**           **12.8x**
+1.0       20.955 s              419x
+2.0       220.765 s             4415x
+========  ====================  ==================
+
+So the hold is doing **two jobs** - tolerating a brief dip at a real edge, and
+capping runaway - and they have no reason to want the same value. **Do not retune it
+to make a test pass.** If edge dips ever demand a longer hold, the runaway bound has
+to be re-established by :attr:`SplitReport.walk_extended` rather than by the hold.
+``tests.test_stim_split`` holds the table above so a widening has to be deliberate.
 """
 
 EDGE_REFINE_PAD_S: Final = 2.0
@@ -371,6 +389,21 @@ class SplitReport:
     threshold_crosscheck_s
         What the OFF-anchored threshold alone would have called the onset. A
         cross-check, never the decision.
+    walk_extended
+        True when either edge walked more than ``stim_tolerance_s`` beyond the matched
+        window. **A censoring flag, not a clamp** - the measured duration is still
+        reported as measured, and this says the measurement needed more room than the
+        protocol's tolerance allows. Forces ``review``.
+    head_extension_s, tail_extension_s
+        How far each measured edge sits outside the matched window, seconds. Reported
+        per edge because the two mean different things: a head extension moves the
+        recovery epoch's ``t0``, a tail extension changes how much stim is in it.
+    recovery_duration_flag
+        True when the recovery epoch is further than ``stim_tolerance_s`` from
+        ``recovery_duration_s``. **Evaluated independently of the stim status**, which
+        is what makes it worth having: a ``clipped_start`` file has a censored stim
+        duration but an *uncensored* recovery duration, so this is the only validation
+        that still works on it.
     method
         ``"matched"`` or ``"manual"``.
     protocol
@@ -394,6 +427,10 @@ class SplitReport:
     vib_channel: str | None = None
     fs_vib: float | None = None
     recovery_duration_s: float = float("nan")
+    walk_extended: bool = False
+    head_extension_s: float = 0.0
+    tail_extension_s: float = 0.0
+    recovery_duration_flag: bool = False
 
     def to_provenance(self) -> dict[str, Any]:
         """Return a JSON-ready provenance record.
@@ -411,6 +448,10 @@ class SplitReport:
             "duty_cycle": self.duty_cycle,
             "epoch_count": self.epoch_count,
             "epoch_count_min_s": self.protocol.secondary_epoch_min_s,
+            "walk_extended": self.walk_extended,
+            "head_extension_s": self.head_extension_s,
+            "tail_extension_s": self.tail_extension_s,
+            "recovery_duration_flag": self.recovery_duration_flag,
             "method": self.method,
             "reason": self.reason,
             "protocol": self.protocol.to_json(),
@@ -640,7 +681,12 @@ def _on_runs(mask: npt.NDArray[np.bool_]) -> list[tuple[int, int]]:
 
 @dataclass(frozen=True, slots=True)
 class _Window:
-    """Internal: the located stim window on the vib time base."""
+    """Internal: the located stim window on the vib time base.
+
+    ``head_extension_s`` and ``tail_extension_s`` are how far each measured edge sits
+    *outside* the matched window. They are diagnostics, never a clamp: the measured
+    duration is always what was measured.
+    """
 
     onset: int
     offset: int
@@ -648,6 +694,8 @@ class _Window:
     contrast: float
     crosscheck_onset: int | None
     epoch_count: int
+    head_extension_s: float = 0.0
+    tail_extension_s: float = 0.0
     extras: list[tuple[float, float]] = field(default_factory=list)
 
 
@@ -723,6 +771,8 @@ def find_stim_window(env: F64, fs_vib: float, protocol: ProtocolSpec) -> _Window
         contrast=contrast,
         crosscheck_onset=crosscheck_onset,
         epoch_count=1 + len(extras),
+        head_extension_s=max(onset - refined_onset, 0) / fs_vib,
+        tail_extension_s=max(refined_offset - min(onset + width, env.size), 0) / fs_vib,
         extras=extras,
     )
 
@@ -788,6 +838,18 @@ def _slice(rec: Recording, start: int, stop: int) -> Recording:
     )
 
 
+def _recovery_flag(recovery_s: float, protocol: ProtocolSpec) -> bool:
+    """Return whether the recovery epoch is further than the tolerance from expected.
+
+    The second, **independent** check on a file, and the only one that still works on
+    a ``clipped_start`` capture: clipping censors the stim duration but leaves the
+    recovery duration intact. A clipped file whose recovery is also short is a
+    different and worse thing than one whose recovery is a full 20 minutes, and the
+    two have to be distinguishable.
+    """
+    return abs(recovery_s - protocol.recovery_duration_s) > protocol.stim_tolerance_s
+
+
 def _status(
     detected_s: float,
     protocol: ProtocolSpec,
@@ -795,6 +857,7 @@ def _status(
     clipped_start: bool,
     clipped_end: bool,
     epoch_count: int,
+    walk_extended: bool = False,
 ) -> tuple[SplitStatus, str]:
     """Resolve the status, first match wins, in the order the task specifies.
 
@@ -802,19 +865,36 @@ def _status(
     overlap: an 8 s clipped start gives a 112 s duration, which is *inside* a 12 s
     tolerance, so evaluating them together makes the outcome depend on ordering.
 
-    ``clipped_end`` -> ``fail`` -> ``clipped_start`` -> tolerance -> ``review``.
+    ``clipped_end`` -> ``walk_extended`` -> ``clipped_start`` -> ``epoch_count`` ->
+    tolerance -> ``review``.
 
-    **Where the epoch count sits is an interpretation.** The task's status table does
-    not include it, while the prose says more than one epoch "goes to manual review".
-    Placing it after the two clipping rows keeps the table's stated order intact - a
-    file with no recovery epoch is still a ``fail``, a censored one is still
-    ``clipped_start`` - while a clean file with a second stim-like segment still
-    reaches a human.
+    ``epoch_count`` sits after both clipping rows, as ratified: ``fail`` and
+    ``clipped_start`` are statements about whether *this file's* recovery epoch is
+    usable, and a second segment elsewhere makes neither an absent recovery epoch
+    present nor an intact one unusable. The count is carried in provenance and
+    surfaced in the audit whatever the status, so the escalation declined here happens
+    in the report instead.
+
+    **``walk_extended`` sits ahead of ``clipped_start``, and that is a judgement.**
+    The task says the flag "can only fire on files that would reach review anyway",
+    which is true wherever the tolerance check runs - but a ``clipped_start`` file
+    *skips* that check, so the two can disagree there. It is placed first because,
+    unlike a second segment elsewhere, a walk that overran says the boundary of *this
+    file* is uncertain by more than the tolerance, and the recovery epoch's ``t0``
+    rides on that boundary. Clipping censors the duration; an overrunning walk
+    questions the number itself.
     """
     if clipped_end:
         return "fail", (
             "the vib channel is still ON at the last sample, so the recording stopped "
             "during stimulation - there is no recovery epoch in this file"
+        )
+    if walk_extended:
+        return "review", (
+            f"the edge walk ran more than {protocol.stim_tolerance_s:.0f} s past the "
+            f"matched window to reach {detected_s:.1f} s. The duration is reported as "
+            "measured, not clamped, but a measurement needing that much room is not "
+            "one to act on unexamined"
         )
     if clipped_start:
         return "clipped_start", (
@@ -921,13 +1001,18 @@ def split_stim_recovery(
 
     clipped_start = bool(env[0] > window.threshold)
     clipped_end = bool(env[-1] > window.threshold)
+    walk_extended = (
+        max(window.head_extension_s, window.tail_extension_s) > protocol.stim_tolerance_s
+    )
     status, reason = _status(
         detected_s,
         protocol,
         clipped_start=clipped_start,
         clipped_end=clipped_end,
         epoch_count=window.epoch_count,
+        walk_extended=walk_extended,
     )
+    recovery_s = max(duration_s - offset_s, 0.0)
 
     report = SplitReport(
         onset_s=onset_s,
@@ -946,7 +1031,11 @@ def split_stim_recovery(
         reason=reason,
         vib_channel=name,
         fs_vib=rate,
-        recovery_duration_s=max(duration_s - offset_s, 0.0),
+        recovery_duration_s=recovery_s,
+        walk_extended=walk_extended,
+        head_extension_s=window.head_extension_s,
+        tail_extension_s=window.tail_extension_s,
+        recovery_duration_flag=_recovery_flag(recovery_s, protocol),
     )
 
     if status == "fail":
@@ -993,6 +1082,7 @@ def _manual_split(
         clipped_end=False,
         epoch_count=1,
     )
+    recovery_s = duration_s - stim_end_s
     report = SplitReport(
         onset_s=0.0,
         offset_s=stim_end_s,
@@ -1006,7 +1096,8 @@ def _manual_split(
         method="manual",
         protocol=protocol,
         reason=f"declared stim end, no search run: {reason}",
-        recovery_duration_s=duration_s - stim_end_s,
+        recovery_duration_s=recovery_s,
+        recovery_duration_flag=_recovery_flag(recovery_s, protocol),
     )
     return _epochs(rec, 0.0, stim_end_s, report)
 
@@ -1057,6 +1148,8 @@ AUDIT_COLUMNS: Final = (
     "status",
     "clipped_start",
     "clipped_end",
+    "walk_extended",
+    "recovery_duration_flag",
     "epoch_count",
     "duty_cycle",
     "onset_s",
@@ -1175,6 +1268,10 @@ def audit_stim_splits(
             "status": report.status,
             "clipped_start": report.clipped_start,
             "clipped_end": report.clipped_end,
+            "walk_extended": report.walk_extended,
+            "recovery_duration_flag": report.recovery_duration_flag,
+            # Carried whatever the status: the escalation the status order declines
+            # for a clipped or failing file happens here instead.
             "epoch_count": report.epoch_count,
             "duty_cycle": report.duty_cycle,
             "onset_s": report.onset_s,
@@ -1218,9 +1315,16 @@ def audit_summary(table: pd.DataFrame) -> dict[str, float]:
         summary[f"{column}_median"] = float(np.median(values))
         summary[f"{column}_iqr"] = q3 - q1
         summary[f"{column}_n"] = float(values.size)
-    if "competing_segment" in table:
-        competing = table["competing_segment"].fillna(value=False)
-        summary["competing_segment_n"] = float(competing.sum())
+    for column in ("competing_segment", "walk_extended", "recovery_duration_flag"):
+        if column in table:
+            # Counted by identity rather than fillna: these columns hold True, False
+            # and None, and None must count as "not flagged" while a coerced NaN would
+            # count as truthy. pandas also warns about downcasting an object column.
+            summary[f"{column}_n"] = float(sum(1 for v in table[column] if v is True))
+    if "epoch_count" in table:
+        counts = table["epoch_count"].dropna()
+        if counts.size:
+            summary["epoch_count_above_one_n"] = float((counts > 1).sum())
     return summary
 
 

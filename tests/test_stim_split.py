@@ -977,6 +977,167 @@ def test_off_statistics_from_the_bottom_decile_are_truncation_biased() -> None:
     assert abs(at_old_pad[0] / FS_VIB - float(true_start)) > 100.0
 
 
+def test_an_overrunning_walk_is_flagged_and_forced_to_review(protocol: ProtocolSpec) -> None:
+    """``walk_extended`` is a **censoring flag, not a clamp**.
+
+    A 140 s stim against a 120 s prior: the matched window lands inside the ON region
+    and one edge has to walk 19.9 s to reach the truth, past the 12 s tolerance. The
+    duration still comes back as the measured 140.1 s - clamping it to 120 would be
+    the exact failure the unbounded walk exists to prevent - and the status says the
+    number needs looking at.
+    """
+    vib, _s, _e = make_vib(FS_SIG, FILE_S, STIM_START_S, 140.0, seed=0)
+    _stim, _recovery, report = split_stim_recovery(_recording(vib), protocol=protocol)
+
+    assert report.walk_extended
+    assert report.status == "review"
+    assert report.detected_duration_s == pytest.approx(140.1, abs=0.15)
+    assert max(report.head_extension_s, report.tail_extension_s) > protocol.stim_tolerance_s
+    assert "reported as measured, not clamped" in report.reason
+
+
+@pytest.mark.parametrize(("stim_s", "overrun_s"), [(140.0, 20.0), (160.0, 40.0)])
+def test_the_extension_is_reported_per_edge(
+    stim_s: float, overrun_s: float, protocol: ProtocolSpec
+) -> None:
+    """Two different meanings, so two numbers - and their **sum** is the invariant.
+
+    A head extension moves the recovery epoch's ``t0``; a tail extension changes how
+    much stim ends up inside it, so reporting one combined number would hide which
+    happened. But *which* edge does the walking is an argmax tie-break inside the ON
+    region - measured at 1 kHz the head walks 19.9 s and the tail 0.2 s, at 2 kHz it
+    is 1.2 s and 18.9 s - so only the total is a property of the signal. It equals the
+    amount by which the stim exceeds the prior, to within the envelope window.
+    """
+    vib, _s, _e = make_vib(FS_SIG, FILE_S, STIM_START_S, stim_s, seed=0)
+    _stim, _recovery, report = split_stim_recovery(_recording(vib), protocol=protocol)
+    record = report.to_provenance()
+
+    head = float(record["head_extension_s"])
+    tail = float(record["tail_extension_s"])
+    assert head >= 0.0
+    assert tail >= 0.0
+    assert head + tail == pytest.approx(overrun_s, abs=ENVELOPE_RMS_S * 1.5)
+    assert max(head, tail) > protocol.stim_tolerance_s
+    assert record["walk_extended"] is True
+
+
+def test_a_clean_capture_does_not_set_walk_extended(protocol: ProtocolSpec) -> None:
+    """The flag must not fire on files it has nothing to say about."""
+    for stim_s in (95.0, 113.0, 120.0):
+        vib, _s, _e = make_vib(FS_SIG, FILE_S, STIM_START_S, stim_s, seed=0)
+        _stim, _recovery, report = split_stim_recovery(_recording(vib), protocol=protocol)
+
+        assert not report.walk_extended, f"{stim_s} s fired the flag"
+        assert max(report.head_extension_s, report.tail_extension_s) < 1.0
+
+
+def test_the_hold_is_short_because_it_caps_the_runaway() -> None:
+    """**Regression test on the reason ``EDGE_HOLD_S`` is 0.25 s**, so widening is deliberate.
+
+    The hold does two jobs - tolerating a brief dip at a real edge, and stopping a
+    too-low threshold from hopping between OFF excursions - and they have no reason
+    to want the same value. Measured with the truncation-biased threshold in place,
+    varying only the hold:
+
+    ========  ====================  ==================
+    hold      biased onset error    ratio to anchored
+    ========  ====================  ==================
+    **0.25**  **0.641 s**           **12.8x**
+    1.0       20.955 s              419x
+    2.0       220.765 s             4415x
+    ========  ====================  ==================
+
+    If a real edge ever demands a longer hold, the runaway bound has to come back
+    through ``walk_extended``, not by quietly widening this.
+    """
+    assert EDGE_HOLD_S == 0.25
+
+    vib, true_start, _stop = make_vib(FS_VIB, FILE_S, STIM_START_S, STIM_S, seed=0)
+    env = vib_envelope(vib, FS_VIB)
+    protocol = default_protocol()
+    width = int(round(protocol.stim_duration_s * FS_VIB))
+    onset = int(round(STIM_START_S * FS_VIB))
+
+    decile = env[env <= float(np.quantile(env, 0.10))]
+    biased = float(np.median(decile)) + 8.0 * 1.4826 * float(
+        np.median(np.abs(decile - np.median(decile)))
+    )
+
+    errors = {}
+    for hold_s in (0.25, 1.0, 2.0):
+        hold = max(int(round(hold_s * FS_VIB)), 1)
+        start, _stop_idx = rp_measure_extent(env, onset, width, hold, biased)
+        errors[hold_s] = abs(start / FS_VIB - float(true_start))
+
+    assert errors[0.25] == pytest.approx(0.641, abs=0.05)
+    assert errors[1.0] == pytest.approx(20.955, abs=1.0)
+    assert errors[2.0] == pytest.approx(220.765, abs=5.0)
+    assert errors[0.25] < errors[1.0] < errors[2.0]
+
+
+def test_the_recovery_duration_is_checked_independently_of_the_stim(
+    protocol: ProtocolSpec,
+) -> None:
+    """The second check, and **the only one that still works on a clipped file**.
+
+    Clipping censors the stim duration but leaves the recovery duration intact, so a
+    ``clipped_start`` file with a full 20 minutes of recovery and one with 15 minutes
+    are different and worse things - and the stim status alone cannot tell them apart,
+    because it reports ``clipped_start`` for both.
+    """
+    intact_s = 8.0 + protocol.recovery_duration_s + 112.0 - 8.0
+    short_s = intact_s - 300.0
+
+    flags = {}
+    for label, total_s in (("intact", intact_s), ("short", short_s)):
+        vib, _s, _e = make_vib(FS_SIG, total_s, -8.0, STIM_S, seed=0)
+        _stim, recovery, report = split_stim_recovery(
+            _recording(vib, dur_s=total_s), protocol=protocol
+        )
+        assert report.status == "clipped_start", label
+        flags[label] = (report.recovery_duration_flag, recovery.duration_s)
+
+    assert flags["intact"][1] == pytest.approx(protocol.recovery_duration_s, abs=1.0)
+    assert not flags["intact"][0]
+    assert flags["short"][1] == pytest.approx(protocol.recovery_duration_s - 300.0, abs=1.0)
+    assert flags["short"][0], "a 300 s short recovery must be flagged"
+
+
+def test_the_recovery_flag_fires_on_a_passing_file_too(protocol: ProtocolSpec) -> None:
+    """Independent of the stim status means independent, not "only when clipped"."""
+    total_s = STIM_START_S + STIM_S + protocol.recovery_duration_s - 300.0
+    vib, _s, _e = make_vib(FS_SIG, total_s, STIM_START_S, STIM_S, seed=0)
+    _stim, _recovery, report = split_stim_recovery(
+        _recording(vib, dur_s=total_s), protocol=protocol
+    )
+
+    assert report.status == "pass", "the stim epoch itself is a clean capture"
+    assert report.recovery_duration_flag
+    assert report.to_provenance()["recovery_duration_flag"] is True
+
+
+def test_a_clipped_start_file_with_two_segments_stays_clipped_start(
+    protocol: ProtocolSpec,
+) -> None:
+    """The ratified ordering: the count is checked after both clipping rows.
+
+    ``clipped_start`` is a statement about whether *this file's* recovery epoch is
+    usable, and a second segment elsewhere does not make an intact one unusable. The
+    count is not lost - it is carried in provenance and surfaced in the audit whatever
+    the status, so the escalation declined here happens in the report instead.
+    """
+    vib, _s, _e = make_vib(
+        FS_SIG, FILE_S, -8.0, STIM_S, contaminant=(900.0, 30.0, 0.25), seed=0
+    )
+    _stim, _recovery, report = split_stim_recovery(_recording(vib), protocol=protocol)
+
+    assert report.clipped_start
+    assert report.epoch_count == 2
+    assert report.status == "clipped_start"
+    assert report.to_provenance()["epoch_count"] == 2
+
+
 def test_the_returned_epoch_arrays_are_read_only(protocol: ProtocolSpec) -> None:
     """**Hard invariant 17.** A writeable view would silently corrupt the parent.
 
@@ -1084,8 +1245,39 @@ def test_the_audit_reports_one_row_per_recording(
     assert len(table) == 3
     assert table["detected_duration_s"].tolist() == pytest.approx([120.1, 95.1, 113.1], abs=0.2)
     assert table["status"].tolist() == ["pass", "review", "pass"]
+    assert table["epoch_count"].tolist() == [1, 1, 1]
     assert table["error"].isna().all()
     assert not table["path"].str.contains("\\\\").any(), "a path escaped as a Windows string"
+
+
+def test_the_epoch_count_appears_in_every_audit_row(
+    tmp_path: Path, protocol: ProtocolSpec
+) -> None:
+    """Carried whatever the status, which is what makes the ordering safe.
+
+    The status order declines to escalate a clipped or failing file on the strength of
+    a second segment elsewhere. That is only defensible if the count still reaches a
+    human, so it is in the audit row for every status, and ``audit_summary`` counts the
+    files above one.
+    """
+    rows = []
+    for name, start_s, contaminant in (
+        ("clean", STIM_START_S, None),
+        ("clipped", -8.0, (900.0, 30.0, 0.25)),
+        ("review", STIM_START_S, (900.0, 30.0, 0.25)),
+    ):
+        vib, _s, _e = make_vib(
+            FS_SIG, FILE_S, start_s, STIM_S, contaminant=contaminant, seed=0
+        )
+        rows.append((tmp_path / f"{name}.mat", _recording(vib)))
+
+    table = audit_stim_splits(rows, protocol)
+    summary = audit_summary(table)
+
+    assert table["status"].tolist() == ["pass", "clipped_start", "review"]
+    assert table["epoch_count"].tolist() == [1, 2, 2]
+    assert table["epoch_count"].notna().all(), "a status must never suppress the count"
+    assert summary["epoch_count_above_one_n"] == 2.0
 
 
 def test_a_split_that_fails_becomes_a_row_not_a_skip(

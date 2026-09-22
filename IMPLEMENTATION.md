@@ -1243,7 +1243,16 @@ The tolerance is 12 s, not a tight few seconds: recording start/stop routinely
 consumes several seconds at the edges, so a narrow band would flag normal captures.
 The known **recovery** duration is a second, independent check — a file whose
 recovery epoch is far from 20 min is suspect regardless of what the stim epoch
-measured.
+measured. This check was stated in the first draft and given no owner; it is now
+required. Emit `recovery_duration_flag` when
+`|recovery_measured − recovery_duration_s| > stim_tolerance_s`, independently of
+the stim status, and record both durations.
+
+It matters most exactly where the stim check is weakest: **a `clipped_start` file
+has a censored stim duration but an uncensored recovery duration**, so the
+recovery check is the only validation that still works on it. A `clipped_start`
+file whose recovery is also off is a different and worse thing than one whose
+recovery is 20 min, and the two must be distinguishable.
 
 ### Fix 1 — matched-width search, not a threshold
 
@@ -1285,7 +1294,33 @@ Measure the duration instead by crossing, in two stages:
 ```
 
 Verified on synthetic 95 / 113 / 120 / 140 s stim epochs: all four recovered to
-within 110 ms.
+within 110 ms, unchanged by the introduction of the hold.
+
+**`EDGE_HOLD_S` bounds the damage from a mis-set threshold, and that is a second
+reason to keep it short.** Measured, varying only the hold, with the
+truncation-biased threshold of the next paragraph in place:
+
+| hold | onset error with a biased threshold | ratio to a correctly anchored one |
+|---|---|---|
+| **0.25 s** (binding) | 0.641 s | 12.8× |
+| 1.0 s | 20.955 s | 419× |
+| 2.0 s | 220.765 s | 4415× |
+
+A too-low threshold makes OFF noise intermittently cross, and the walk hops from
+one excursion to the next; the hold is what stops the hopping. Note what this
+means: the hold is now doing **two jobs** — tolerating a brief dip at a real edge,
+and capping runaway — and those have no reason to want the same value. Do not
+retune it to make a test pass. If edge dips ever demand a longer hold, the runaway
+bound must be re-established by the flag below rather than by the hold.
+
+**The outward walk is unbounded by design, so it needs a censoring flag rather
+than a clamp.** If either edge walks more than `stim_tolerance_s` beyond the
+matched window, set `walk_extended = True` and force status `review`. This is a
+diagnostic, not a new gate: a file needing more extension than the tolerance
+allows is already outside tolerance, so the flag can only fire on files that
+would reach `review` anyway — it explains *why* they did. Report the extension
+distance per edge in provenance. The 220 s case above would be reported as a
+measured 220 s with `walk_extended` set, never as a silent 220 s duration.
 
 **The ON threshold must be anchored on OFF samples outside the matched window.**
 The original specification took `off_level` and `off_σ` from the bottom decile of
@@ -1328,7 +1363,17 @@ means the file has nothing to analyse and must say so rather than emitting a
 near-empty recovery epoch.
 
 Expected epoch count is **1**. Report the count; more than one is a protocol
-mismatch and goes to manual review. `epoch_count` is defined as the number of ON
+mismatch and goes to manual review. **The count is checked after both clipping
+rows**, not before: `fail` and `clipped_start` are statements about whether this
+file's recovery epoch is usable, and a second segment elsewhere does not make an
+absent recovery epoch present or an intact one unusable. A `clipped_start` file
+with two segments therefore stays `clipped_start`. The count is carried in
+provenance and surfaced in the audit **regardless of status**, so the escalation
+that is being declined here happens in the report instead. This is safe because
+the matched filter is immune to the competing-segment failure mode (PIPELINE
+§10.10) — a second segment is a protocol-conformity note, not a detection risk.
+
+`epoch_count` is defined as the number of ON
 segments anywhere in the record whose duration is at least **10% of
 `stim_duration_s`** after the outward walk — i.e. it is a check on stim-like
 activity *elsewhere* in the file, not a second detector. The 10% figure is a
@@ -1462,10 +1507,13 @@ documentation of what the old code actually does.
 - a 95 / 113 / 140 s stim epoch: the **measured** duration is recovered to within
   150 ms in each case. This is the regression test against re-introducing a
   refinement bounded by the search width — without it, all three report 120.0 s.
-- OFF statistics taken from the bottom decile of the whole envelope give an onset
-  error larger than 1 s on a signal where statistics taken outside the matched
-  window give better than 100 ms. Assert the second; assert the first is worse by
-  at least a factor of ten.
+- OFF statistics taken from the bottom decile of the whole envelope are worse
+  than statistics taken outside the matched window **by at least a factor of
+  ten**. Assert the ratio, not an absolute error. The −1.945 s originally quoted
+  here was measured against the ±2 s clamped refinement and does not survive its
+  removal: under the specified algorithm (`EDGE_HOLD_S = 0.25`) the same biased
+  threshold costs 0.641 s, a ratio of 12.8×. Assert 0.641 s as the measured value
+  and ≥10× as the binding claim.
 - a 3 s dropout in the middle of the stim: one epoch, not two — **note this passes
   on the current MATLAB too**, because `removeShortSegments` bridges OFF gaps
   shorter than `minDurSec`. Keep it as a non-regression test, not as evidence of
@@ -1494,6 +1542,16 @@ documentation of what the old code actually does.
 - a clipped-start file reports status `clipped_start`, **not** `pass`, even when
   its censored duration lands inside ±12 s
 - the returned epoch arrays are not writeable, and an in-place write to one raises
+- a signal whose outward walk runs past `stim_tolerance_s` sets `walk_extended`
+  and reports status `review`, with the measured duration still reported as
+  measured
+- `EDGE_HOLD_S` at 1.0 s and 2.0 s reproduces the runaway table above — a
+  regression test on the reason the hold is short, so a future widening is a
+  deliberate act
+- a recovery epoch 300 s short of `recovery_duration_s` sets
+  `recovery_duration_flag`, and does so on a `clipped_start` file too
+- a `clipped_start` file with `epoch_count = 2` reports status `clipped_start`,
+  and the count still appears in the audit row
 - `excluded_epoch` duration never appears in the motion-blanking fraction
 
 ### Acceptance
