@@ -7,9 +7,23 @@
 **Gate:** no
 
 ### Purpose
-**Each of these currently makes a better detector look worse**, because better
+**Most of these currently make a better detector look worse**, because better
 detection produces more, shorter, better-placed gaps. Fixing them first means the
 detector is evaluated on instruments that can register its improvement.
+
+*Revised 2026-09-22 — the original text said "each of these", and measurement
+does not support the uniform claim.* Two rows are decisive, one is not:
+
+- **Slow wave: decisive.** A **one-second** blank anywhere in a 60 s window
+  currently returns `NaN` for the whole window. Pooling across clean runs
+  recovers 14.24 / 15.00 / 13.85 cpm for 1 s / 4 s / 8 s gaps where the current
+  code returns nothing. This is the instrument problem in its purest form.
+- **Band corners: decisive by construction**, since a per-consumer extent
+  computed for 100–5000 when the consumer analyses 300–3000 is measuring the
+  wrong thing.
+- **HRV: not an instrument problem.** See that row. The fix is kept as hygiene,
+  not as a recovery of lost sensitivity, and **no historical HRV number
+  changes**.
 
 | File | Change |
 |---|---|
@@ -19,13 +33,14 @@ detector is evaluated on instruments that can register its improvement.
 | `step1a_blank_cardiac.m:41-43` | per-channel, per-band windows instead of `D.y(blank,:) = NaN` |
 | `step2_noise_sigma.m:82-97` | **keep** the Quian Quiroga estimator — it is correct (`std` inflates 35% at 20 spk/s where Quiroga inflates 1.9%) — but take σ from a **fixed session reference**, not a 5 s running window. Quiroga still inflates 12% at 100 spk/s, so a post-stim rate rise raises the 4.5σ threshold and suppresses detection of the effect being measured |
 | `HR_BR_HRVAnalysis_new.m:160-165` | restore a deliberate 1–100 Hz band before `findpeaks` |
-| `HR_BR_HRVAnalysis_new.m:276-287` | runs-aware successive differences for RMSSD, pNN5, SD1, SD2, SampEn, ApEn. The runs list already exists in `dfaRR_gapAware.m:24-25` and was never propagated |
+| `HR_BR_HRVAnalysis_new.m:276-287` | runs-aware successive differences for RMSSD, pNN5, SD1, SD2, SampEn, ApEn. The runs list already exists in `dfaRR_gapAware.m:24-25` and was never propagated. **Measured: the fix does not move the number**, by at most 0.2 percentage points across blanking fractions 1.9–13.8% and RR drifts 0–30%; worst realistic case (a 360-beat gap across a steep rate transition) old +1%, new +0.0%. The splice bug is not being hit because the pipeline **drops** the gap-spanning interval rather than emitting it — `dfaRR_gapAware`'s gap formula only makes sense if it does — so the residual error is a difference between two ordinary intervals flanking a hole, not a spliced one. The +771% measured in task 05 was for a train that *retains* the spanning interval, which is what `diff()` on beat times gives you and is not what MATLAB does. **Keep the fix** — it makes the guarantee structural rather than incidental, and `nSplicedDiffs` now reports how many differences were refused — but expect no change to any historical HRV number |
 | `HR_BR_HRVAnalysis_new.m:679` | `heartCountSeries` needs a valid-duration denominator |
 | `HR_BR_HRVAnalysis_new.m` | promote `RR_implausibleFraction` / `br_implausibleFraction` from warnings to masks — for a periodic always-present signal, an implausible rate *is* evidence of contamination |
 | `slowWaveAnalysis_new.m:159-161` | pool peaks across clean runs instead of taking only the longest — two clean 28 s halves in a 60 s window currently return NaN |
 | `bulk_mixed_models.m` | coverage weights + covariate + minimum-coverage exclusion. `nRR_used`, `fr_validFrac`, `validDur_s` are all computed and none is used |
 | `browseMotionArtifacts.m:34` | `validateattributes(..., 'finite')` throws on NaN, so an already-blanked file cannot be re-browsed. Remove if the browser is kept |
-| every `filtfilt` call at a low corner | **`padtype` — carried over from task 06, and MATLAB has no option for it.** MATLAB's `filtfilt` always uses odd extension, which task 06 measured injecting artificial low-frequency energy directly into a low-corner band: effective dof fell from 30 to as low as 0.9 on the worst segment. Anywhere `processing_new` band-passes below ~10 Hz on a short segment — the slow-wave chain above all — the first and last few seconds of the output are transient, not signal. **Audit which of those outputs feed a statistic rather than a plot**, and pad manually with the endpoint value (or discard `max(impz, window)` at each end) before filtering. Report the before/after on `slowWaveAnalysis_new.m`, where segments are short and the corner is lowest |
+| ~~every `filtfilt` call at a low corner~~ | **Audited and withdrawn as a padtype problem — measured, no change needed.** The row predicted that MATLAB's mandatory odd extension would reproduce task 06's transient. It does not, and the reason is worth keeping: MATLAB pads `3·2·n_sections` = **6 samples**, which at 24.4 kHz is **0.246 ms**. Odd and constant padding differ by 11.8% of sd at 0.5 s from the edge, 1.1% at 2 s and **0.00% by 15 s**; peaks surviving the existing edge buffer, **13 either way**. scipy's damage came from odd-extending across a pad long enough for the signal to move; a quarter-millisecond pad of a 0.15 Hz signal cannot. **The settling itself is real and is already handled**: measured `impz` 8.17 s against a 15 s buffer, and the code's `order/cutoff` heuristic (13.33 s) over-estimates it, which is the safe direction. Generalising a scipy result to MATLAB without measuring was the error here |
+| `extract_mmc.m` 2–50 Hz bandpass | **The finding the padtype audit actually produced.** Measured `impz` **0.486 s** and **no edge buffer anywhere**, feeding the MMC statistic. Every other low-corner site is covered: `HR_BR` 1–100 Hz 0.159 s against 0.75 s (4.7×), slow wave 8.17 s against 15 s (1.8×), `step1_bandpass` 0.0051 s against 5 ms (marginal — raise to 10 ms). Read the MMC chain's cardiac-interpolation logic before touching it; the buffer interacts with it |
 
 **Reuse rather than reinvent:** `dfaGapAware.m` (pooled runs), `step5f_fano_slope.m`
 (epochs + rate-matched surrogates carrying identical censoring — extend the same
