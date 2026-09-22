@@ -1,10 +1,12 @@
 """Tests for :mod:`gems_blanking_v2.io.stim_split`.
 
 Every numeric claim in the module's docstrings has a test here that would fail if it
-were wrong. Two of the spec's required tests do not hold as written and say so in
-their own docstrings:
-:func:`test_the_old_percentile_rule_is_rescued_by_largest_segment_on_a_clean_file`
-and :func:`test_a_three_second_dropout_does_not_split_the_epoch`.
+were wrong.
+
+Two of the first draft's required tests did not discriminate and have been replaced,
+with the originals kept alongside as documentation of what the old MATLAB actually
+does: :func:`test_low_duty_cycle_alone_does_not_defeat_either_method` and
+:func:`test_a_three_second_dropout_does_not_split_the_epoch`.
 """
 
 from __future__ import annotations
@@ -17,12 +19,14 @@ import numpy.typing as npt
 import pytest
 from gems_blanking_v2.io.stim_split import (
     AUDIT_COLUMNS,
+    EDGE_HOLD_S,
     EDGE_REFINE_PAD_S,
     ENVELOPE_RMS_S,
     PROTOCOL_FILENAME,
     Epoch,
     ProtocolSpec,
     audit_stim_splits,
+    audit_summary,
     blanking_fraction,
     default_protocol,
     find_stim_window,
@@ -32,6 +36,7 @@ from gems_blanking_v2.io.stim_split import (
     vib_envelope,
     write_protocol,
 )
+from gems_blanking_v2.io.stim_split import _measure_extent as rp_measure_extent
 from gems_blanking_v2.io.stim_split import _status as rp_status
 from gems_blanking_v2.types import ChannelInfo, Recording
 from scipy.signal import butter, sosfiltfilt
@@ -225,21 +230,20 @@ def test_the_matched_search_recovers_the_onset_at_an_eight_percent_duty_cycle() 
         assert window.epoch_count == 1
 
 
-def test_the_old_percentile_rule_is_rescued_by_largest_segment_on_a_clean_file() -> None:
-    """Measure what the spec's required test asks for, which does not hold as written.
+def test_low_duty_cycle_alone_does_not_defeat_either_method() -> None:
+    """**Both** methods recover the onset at 8% duty. Low duty cycle is not the failure.
 
-    The spec asks to "assert the old behaviour fails" at an 8% duty cycle. It does
-    not, on a clean file. The threshold is badly wrong exactly as predicted - it
-    flags **46% of the record** where the true duty cycle is 8% - but "keep the
-    largest ON segment" recovers the onset to **74 ms**, within a hair of the matched
-    search's 50 ms.
+    The prediction was that ``(p20 + p80)/2`` would break at an 8% duty cycle because
+    both percentiles fall inside the OFF distribution. The first half is true - the
+    threshold does land in the OFF noise, flagging **46% of the record** where the
+    real duty cycle is 8% - but the conclusion does not follow. ``keep only the
+    LARGEST ON segment`` rescues it: the spurious segments are all short and the one
+    real 120 s segment wins by a wide margin.
 
-    So the old rule's failure is not a wrong boundary, it is **no margin**: it is one
-    contaminant away from collapsing, which
-    :func:`test_the_old_percentile_rule_locks_onto_a_longer_quieter_burst` shows. The
-    spec anticipated this - "minDurSec = 10 plus the edge refinement may have rescued
-    some files, which is precisely why this needs measuring rather than assuming" -
-    and this is that measurement.
+    Measured: matched-width **-50 ms**, p20/p80 **-74 ms**. So the historical splits
+    are probably mostly fine, and this test asserts that rather than the reverse. The
+    discriminating case is
+    :func:`test_the_old_percentile_rule_locks_onto_a_longer_quieter_burst`.
     """
     vib, true_start, _stop = make_vib(FS_VIB, FILE_S, STIM_START_S, STIM_S, seed=0)
     env = vib_envelope(vib, FS_VIB)
@@ -251,25 +255,27 @@ def test_the_old_percentile_rule_is_rescued_by_largest_segment_on_a_clean_file()
 
     old = _old_percentile_rule(env, FS_VIB)
     assert old is not None
-    assert abs(old[0] - float(true_start)) < 0.10, (
-        "the old rule failed here, so the 'no margin' framing needs re-measuring"
-    )
+    assert old[0] - float(true_start) == pytest.approx(-0.074, abs=0.02)
+
+    matched = find_stim_window(env, FS_VIB, default_protocol())
+    assert matched.onset / FS_VIB - float(true_start) == pytest.approx(-0.050, abs=0.005)
 
 
 def test_the_old_percentile_rule_locks_onto_a_longer_quieter_burst() -> None:
-    """Where the old rule genuinely breaks, and the matched search does not.
+    """**The discriminating case.** Where the old rule breaks and the matched one does not.
 
-    A 300 s burst of handling noise at 15% of the stim carrier wins on *length* while
-    losing on amplitude, so "keep the largest ON segment" locks onto it: measured
-    **+400 s** of onset error, against the matched search's unchanged -50 ms. This is
-    the failure the spec's required test was reaching for.
+    A 300 s burst - sustained handling, a motor left running, a cable rubbing on the
+    monitor - at a quarter of the stim carrier wins on *length* while losing on
+    amplitude, so "keep the largest ON segment" locks onto it: measured **+400 s** of
+    onset error against the matched search's unchanged -50 ms. The matched filter is
+    immune because the width is fixed and the score is a contrast, so a long
+    low-amplitude segment scores worse than the real one.
 
-    The split correctly reports two epochs and sends the file to review, which is the
-    right answer - a second stim-like burst is a protocol mismatch, not something to
-    resolve silently.
+    The split reports two epochs and sends the file to review, which is right - a
+    second stim-like burst is a protocol mismatch, not something to resolve silently.
     """
     vib, true_start, _stop = make_vib(
-        FS_VIB, FILE_S, STIM_START_S, STIM_S, contaminant=(700.0, 300.0, 0.15), seed=0
+        FS_VIB, FILE_S, STIM_START_S, STIM_S, contaminant=(700.0, 300.0, 0.25), seed=0
     )
     env = vib_envelope(vib, FS_VIB)
 
@@ -407,29 +413,33 @@ def test_a_clean_capture_passes(protocol: ProtocolSpec) -> None:
 def test_a_recording_that_starts_mid_stim_is_clipped_but_usable(protocol: ProtocolSpec) -> None:
     """Starting 8 s into the stim: benign, offset still valid, recovery intact.
 
-    Also the case that shows the spec's status rows overlap. A 112 s detected duration
-    is **inside** the 12 s tolerance, so this row and "clean capture" both match.
-    Clipping is therefore a flag evaluated independently, never a status.
+    The censored-duration case: 112 s is **inside** the 12 s tolerance, and reporting
+    that as ``pass`` would be a false reassurance, because the true stim was longer
+    than what is in the file. The tolerance check is skipped, not passed, and the
+    status says so.
     """
     vib, _s, _e = make_vib(FS_SIG, FILE_S, -8.0, STIM_S, seed=0)
     stim, recovery, report = split_stim_recovery(_recording(vib), protocol=protocol)
 
     assert report.clipped_start
     assert not report.clipped_end
-    assert report.status == "pass"
+    assert report.status == "clipped_start"
     assert report.detected_duration_s == pytest.approx(112.0, abs=0.5)
     assert abs(report.detected_duration_s - protocol.stim_duration_s) < protocol.stim_tolerance_s
+    assert "skipped rather than passed" in report.reason
     assert report.offset_s == pytest.approx(112.0, abs=0.5)
     assert recovery.t0_offset_s == pytest.approx(report.offset_s, abs=0.01)
     assert stim is not None
     assert stim.t0_offset_s == pytest.approx(0.0, abs=0.01)
 
 
-def test_a_badly_clipped_start_still_passes_on_the_clipping_flag(protocol: ProtocolSpec) -> None:
-    """Starting 40 s in: outside the tolerance, but clipped, so still usable.
+def test_a_badly_clipped_start_reports_the_same_status(protocol: ProtocolSpec) -> None:
+    """Starting 40 s in: far outside the tolerance, and the status is unchanged.
 
-    This is the row that needs the flag to be independent - at 80 s detected the
-    tolerance check fails and only the ON-at-first-sample test rescues it.
+    Both clipped cases report ``clipped_start`` whether the censored duration happens
+    to land inside the tolerance or not, because in neither case was the tolerance
+    check meaningful. The file is still usable - the offset is valid and the recovery
+    epoch is intact.
     """
     vib, _s, _e = make_vib(FS_SIG, FILE_S, -40.0, STIM_S, seed=0)
     _stim, recovery, report = split_stim_recovery(_recording(vib), protocol=protocol)
@@ -437,7 +447,7 @@ def test_a_badly_clipped_start_still_passes_on_the_clipping_flag(protocol: Proto
     assert report.clipped_start
     assert report.detected_duration_s == pytest.approx(80.0, abs=0.5)
     assert abs(report.detected_duration_s - protocol.stim_duration_s) > protocol.stim_tolerance_s
-    assert report.status == "pass"
+    assert report.status == "clipped_start"
     assert "started mid-stim" in report.reason
     assert recovery.duration_s > 0.9 * protocol.recovery_duration_s
 
@@ -475,11 +485,15 @@ def test_the_status_table_fails_only_on_a_clipped_end(protocol: ProtocolSpec) ->
     short, _r3 = rp_status(80.0, protocol, clipped_start=True, clipped_end=False, epoch_count=1)
     at_end, reason = rp_status(95.0, protocol, clipped_start=False, clipped_end=True, epoch_count=1)
     two, _r5 = rp_status(120.0, protocol, clipped_start=False, clipped_end=False, epoch_count=2)
+    both, _r6 = rp_status(95.0, protocol, clipped_start=True, clipped_end=True, epoch_count=1)
 
-    assert (clean, at_start, short) == ("pass", "pass", "pass")
+    assert clean == "pass"
+    assert at_start == "clipped_start", "a censored duration inside tolerance is not a pass"
+    assert short == "clipped_start", "and neither is one outside it"
     assert at_end == "fail"
     assert "stopped during stimulation" in reason
     assert two == "review"
+    assert both == "fail", "clipped_end wins: there is no recovery epoch to salvage"
 
 
 def test_a_detected_duration_of_95_seconds_goes_to_review(protocol: ProtocolSpec) -> None:
@@ -819,43 +833,35 @@ def test_the_split_is_logged(protocol: ProtocolSpec, caplog: pytest.LogCaptureFi
 
 
 def test_the_stim_epoch_inflates_the_band_reference_it_is_split_out_of() -> None:
-    """**The quantitative statement of why 03B precedes 06**, and it is not what I expected.
+    """**Why 03B precedes 06**, as a number, at the real 8% protocol.
 
     The reference is the median and MAD of the *log* envelope (invariant 5). Leaving
-    the stim epoch in inflates both, so an artifact during recovery needs to be larger
-    to reach ``z > 3`` - suppressed exactly where the post-stim dynamics live.
-
-    Measured on a 100 x sigma stim contaminant in the 100-300 Hz band, expressed as
-    what a genuine recovery frame at ``z = 3.00`` reads when the reference was
-    computed on the unsplit file:
+    the stim epoch in inflates both, so a frame that should clear a ``z > 3`` gate
+    does not. Expressed as what a genuine recovery frame at ``z = 3.00`` reads when
+    the reference came from the unsplit file:
 
     ==============  ==========  ===============  ==================
     stim fraction   file        MAD inflation    a recovery z=3.00
     ==============  ==========  ===============  ==================
-    8%              25 min      1.17x            **2.47**
+    **8%**          25 min      **1.17x**        **2.47**
     10%             20 min      1.23x            2.33
     20%             10 min      1.61x            1.66
     40%             -           3.61x            0.40
     ==============  ==========  ===============  ==================
 
-    Two things worth recording. The damage is driven by the **MAD inflation**, not by
-    the median shift, which is under a third of a MAD at realistic fractions. And it
-    is **independent of the stim amplitude** - identical to four decimal places from
-    10x to 1000x sigma - because the log reference responds to the *fraction* of
-    contaminated frames, not their size: once the stim frames are all above the
-    recovery ones they occupy the top of the sorted distribution whatever their
-    magnitude. So the cost of not splitting is a predictable function of the duty
-    cycle alone, which is a point in favour of invariant 5's log form and means this
-    test does not need a realistic artifact amplitude to be meaningful.
-
-    At the real 8% protocol it still matters: a recovery frame at ``z = 3.00`` reads
-    2.47 and is missed by any threshold at 3.
+    The **MAD inflation** does the damage; the median shift is a tenth of a MAD at 8%.
+    A frame that should clear the gate reads 2.47 and is silently dropped, which is
+    the whole argument, and it is a fixed property of the protocol rather than
+    something that varies with how violent a particular stim was - see
+    :func:`test_the_reference_inflation_does_not_depend_on_the_stim_amplitude`.
     """
     fs = FS_SIG
-    dur_s = 600.0
-    stim_fraction = 0.20
+    dur_s = 1500.0
+    stim_fraction = STIM_S / dur_s
+    assert stim_fraction == pytest.approx(0.08, abs=0.001), "this is the real protocol"
+
     signal, _spikes = make_eng(fs, dur_s, seed=0)
-    stim_end = int(round(stim_fraction * dur_s * fs))
+    stim_end = int(round(STIM_S * fs))
     contaminated = signal.copy()
     rng = np.random.default_rng(0)
     contaminated[:stim_end] += rng.normal(0.0, 100.0 * float(np.std(signal)), size=stim_end)
@@ -864,36 +870,198 @@ def test_the_stim_epoch_inflates_the_band_reference_it_is_split_out_of() -> None
     unsplit_median, unsplit_mad = _log_envelope_reference(contaminated, fs, band)
     recovery_median, recovery_mad = _log_envelope_reference(contaminated[stim_end:], fs, band)
 
-    assert unsplit_mad / recovery_mad == pytest.approx(1.61, abs=0.05)
-    assert (unsplit_median - recovery_median) / recovery_mad == pytest.approx(0.32, abs=0.05)
-
     a_real_z3_frame = recovery_median + 3.0 * recovery_mad
     reads_as = (a_real_z3_frame - unsplit_median) / unsplit_mad
-    assert reads_as == pytest.approx(1.66, abs=0.05)
+
+    assert reads_as <= 2.6, f"a true z=3.00 recovery frame reads {reads_as:.2f}, expected <= 2.6"
+    assert reads_as == pytest.approx(2.47, abs=0.10)
     assert reads_as < 3.0, "the ordering argument depends on this being a suppression"
+    assert unsplit_mad / recovery_mad == pytest.approx(1.17, abs=0.05)
 
 
 def test_the_reference_inflation_does_not_depend_on_the_stim_amplitude() -> None:
-    """The surprising half of the result above, held so it cannot quietly change.
+    """The surprising half of the result above, at the same 8% protocol.
 
     A 10x and a 1000x stim contaminant give the same inflated reference to within
-    1e-4 - a relative difference of 1.3e-4 - because the median and MAD of a log
-    envelope respond to how many frames are contaminated, not by how much.
+    1e-4 - a relative difference of 1.3e-4 - and therefore the same shrinkage of a
+    ``z = 3.00`` frame. It follows from invariant 5: the median and MAD of a log
+    envelope respond to *how many* frames are contaminated, not by how much. A frame
+    is either in the stim population or it is not, and making it larger moves it
+    further out along a tail both statistics already ignore.
     """
     fs = FS_SIG
-    dur_s = 600.0
+    dur_s = 1500.0
     signal, _spikes = make_eng(fs, dur_s, seed=0)
-    stim_end = int(round(0.20 * dur_s * fs))
+    stim_end = int(round(STIM_S * fs))
     sigma = float(np.std(signal))
+    recovery = _log_envelope_reference(signal[stim_end:], fs, (100.0, 300.0))
 
-    references = []
+    shrunk_to = []
     for multiple in (10.0, 1000.0):
         contaminated = signal.copy()
         rng = np.random.default_rng(0)
         contaminated[:stim_end] += rng.normal(0.0, multiple * sigma, size=stim_end)
-        references.append(_log_envelope_reference(contaminated, fs, (100.0, 300.0)))
+        median, mad = _log_envelope_reference(contaminated, fs, (100.0, 300.0))
+        shrunk_to.append(((recovery[0] + 3.0 * recovery[1]) - median) / mad)
 
-    assert references[0] == pytest.approx(references[1], abs=1e-3)
+    assert shrunk_to[0] == pytest.approx(shrunk_to[1], abs=1e-3)
+    assert all(value <= 2.6 for value in shrunk_to)
+
+
+def test_off_statistics_from_the_bottom_decile_are_truncation_biased() -> None:
+    """The measurement behind anchoring the ON threshold outside the matched window.
+
+    The bottom decile is the *lower tail* of the OFF distribution, so selecting it and
+    taking its spread underestimates sigma badly - measured **0.000321 against
+    0.001119**, 3.5x low. With the threshold that close to the OFF mean, **21% of
+    genuine OFF samples cross it** against 0.0075%, and the outward walk runs away:
+    onset error **-1.945 s** where anchoring outside the window gives **-50 ms**.
+
+    **The -1.945 s figure does not reproduce under the ratified algorithm, and the
+    reason is worth keeping.** It was measured against the old +/-2 s clamped
+    refinement. The clamp is gone, and the outward walk that replaced it ends after
+    :data:`EDGE_HOLD_S` below threshold, which caps how far a too-low threshold can
+    hop from one OFF excursion to the next. Measured on the same signal, varying only
+    the hold:
+
+    ========  ==================  ================
+    hold      biased onset error  ratio to anchored
+    ========  ==================  ================
+    0.25 s    **0.641 s**         12.8x
+    1.0 s     20.955 s            419x
+    2.0 s     220.765 s           4415x
+    ========  ==================  ================
+
+    So the two fixes interact, and a short hold is worth having for a second reason:
+    it bounds the damage from a mis-set threshold. The sigma figures themselves
+    reproduce exactly - 0.000321 against 0.001119. The assertion is the factor of ten
+    the task asks for, which holds comfortably at 12.8x; the absolute "> 1 s" does not
+    survive the algorithm it was measured against.
+    """
+    vib, true_start, _stop = make_vib(FS_VIB, FILE_S, STIM_START_S, STIM_S, seed=0)
+    env = vib_envelope(vib, FS_VIB)
+    protocol = default_protocol()
+
+    width = int(round(protocol.stim_duration_s * FS_VIB))
+    onset = int(round(STIM_START_S * FS_VIB))
+    outside = np.ones(env.size, dtype=bool)
+    outside[onset : onset + width] = False
+
+    decile = env[env <= float(np.quantile(env, 0.10))]
+    decile_sigma = 1.4826 * float(np.median(np.abs(decile - np.median(decile))))
+    off = env[outside]
+    off_sigma = 1.4826 * float(np.median(np.abs(off - np.median(off))))
+
+    assert off_sigma / decile_sigma > 3.0, "the truncation bias stopped reproducing"
+
+    decile_threshold = float(np.median(decile)) + 8.0 * decile_sigma
+    off_threshold = float(np.median(off)) + 8.0 * off_sigma
+    assert float((off > decile_threshold).mean()) > 0.10
+    assert float((off > off_threshold).mean()) < 0.001
+
+    hold = max(int(round(EDGE_HOLD_S * FS_VIB)), 1)
+    biased = rp_measure_extent(env, onset, width, hold, decile_threshold)
+    anchored = rp_measure_extent(env, onset, width, hold, off_threshold)
+
+    biased_error = abs(biased[0] / FS_VIB - float(true_start))
+    anchored_error = abs(anchored[0] / FS_VIB - float(true_start))
+    assert anchored_error < 0.100
+    assert anchored_error == pytest.approx(0.050, abs=0.005)
+    assert biased_error == pytest.approx(0.641, abs=0.05)
+    assert biased_error > 10.0 * anchored_error
+
+    # And the interaction: the same bias at the old 2 s pad runs away entirely.
+    at_old_pad = rp_measure_extent(
+        env, onset, width, max(int(round(EDGE_REFINE_PAD_S * FS_VIB)), 1), decile_threshold
+    )
+    assert abs(at_old_pad[0] / FS_VIB - float(true_start)) > 100.0
+
+
+def test_the_returned_epoch_arrays_are_read_only(protocol: ProtocolSpec) -> None:
+    """**Hard invariant 17.** A writeable view would silently corrupt the parent.
+
+    Epochs are views because a 20-minute 9-channel epoch costs about 2 GB to copy, and
+    invariant 1 has consumers writing NaN into what they are given. The two together
+    mean a writeable epoch lets a consumer masking the recovery epoch overwrite the
+    stim epoch's samples, and the source array's, without any error. Read-only turns
+    that into an immediate exception at the point of the mistake.
+    """
+    vib, _s, _e = make_vib(FS_SIG, FILE_S, STIM_START_S, STIM_S, seed=0)
+    rec = _recording(vib)
+    stim, recovery, _report = split_stim_recovery(rec, protocol=protocol)
+
+    assert stim is not None
+    for epoch in (stim, recovery):
+        assert not epoch.recording.data.flags.writeable
+        with pytest.raises(ValueError, match="read-only"):
+            epoch.recording.data[0, 0] = np.nan
+
+    assert recovery.recording.data.base is rec.data, "still a view, not a copy"
+    assert rec.data.flags.writeable, "the parent itself is untouched"
+
+
+def test_a_consumer_that_needs_to_mask_takes_its_own_copy(protocol: ProtocolSpec) -> None:
+    """The escape hatch invariant 17 names, and that it does not reach the parent."""
+    vib, _s, _e = make_vib(FS_SIG, FILE_S, STIM_START_S, STIM_S, seed=0)
+    rec = _recording(vib)
+    _stim, recovery, _report = split_stim_recovery(rec, protocol=protocol)
+
+    before = float(rec.data[int(recovery.t0_offset_s * rec.fs), 0])
+    span = recovery.recording.data[:100].copy()
+    span[0, 0] = np.nan
+
+    assert np.isnan(span[0, 0])
+    assert float(rec.data[int(recovery.t0_offset_s * rec.fs), 0]) == before
+
+
+def test_a_consumer_reading_an_unmeasured_settling_width_must_refuse(
+    protocol: ProtocolSpec,
+) -> None:
+    """``None`` means not yet measured, and a consumer may not read it as zero.
+
+    Task 13 owns the settling time. A consumer that defaulted it to zero would filter
+    straight across the split boundary, which is the one thing the epoch edge exists
+    to prevent, and it would do so silently.
+    """
+    vib, _s, _e = make_vib(FS_SIG, FILE_S, STIM_START_S, STIM_S, seed=0)
+    _stim, recovery, _report = split_stim_recovery(_recording(vib), protocol=protocol)
+
+    assert recovery.unassessable_head_s is None
+    with pytest.raises(ValueError, match="not yet measured"):
+        recovery.assessable_bounds_s()
+
+    settled = recovery.with_settling(0.5)
+    assert settled.assessable_bounds_s() == pytest.approx((0.5, settled.duration_s - 0.5))
+
+
+@pytest.mark.parametrize(
+    ("burst_s", "expected"),
+    [(30.0, 2), (6.0, 1)],
+)
+def test_epoch_count_uses_the_ten_percent_reporting_threshold(
+    burst_s: float, expected: int, protocol: ProtocolSpec
+) -> None:
+    """A second stim-like segment counts when it lasts at least 10% of the stim.
+
+    12 s at the 120 s protocol. The threshold is a reporting rule whose only job is to
+    keep envelope ripple out of the count, not a physical constant - so it travels
+    with the count in provenance rather than being left implicit.
+    """
+    assert protocol.secondary_epoch_min_s == pytest.approx(12.0)
+
+    vib, _s, _e = make_vib(
+        FS_SIG,
+        FILE_S,
+        STIM_START_S,
+        STIM_S,
+        contaminant=(900.0, burst_s, 0.25),
+        seed=0,
+    )
+    _stim, _recovery, report = split_stim_recovery(_recording(vib), protocol=protocol)
+
+    assert report.epoch_count == expected
+    assert report.to_provenance()["epoch_count_min_s"] == pytest.approx(12.0)
+    assert report.to_provenance()["epoch_count"] == expected
 
 
 # ---------------------------------------------------------------------------
@@ -983,10 +1151,15 @@ def test_a_recording_the_old_pipeline_never_split_has_no_diff(
     assert table.iloc[0]["status"] == "pass"
 
 
-def test_the_duration_histogram_is_written_headlessly(
+def test_the_acceptance_figures_are_written_headlessly(
     tmp_path: Path, protocol: ProtocolSpec
 ) -> None:
-    """The acceptance plot, on the ``Agg`` backend - no GUI assumption anywhere."""
+    """Three plots on the ``Agg`` backend: durations, signed onsets, signed offsets.
+
+    The two difference distributions are separate because onset error costs pre-stim
+    baseline while offset error contaminates the recovery reference, and only the
+    second damages the science.
+    """
     import matplotlib  # noqa: PLC0415
 
     recordings = [
@@ -996,13 +1169,70 @@ def test_the_duration_histogram_is_written_headlessly(
         )
         for i, d in enumerate((120.0, 118.0, 95.0))
     ]
-    figure_path = tmp_path / "figures" / "stim_durations.png"
+    figure_path = tmp_path / "figures" / "stim.png"
 
     audit_stim_splits(recordings, protocol, figure_path=figure_path)
 
-    assert figure_path.is_file()
-    assert figure_path.stat().st_size > 0
+    for expected in ("stim.png", "stim_onset.png", "stim_offset.png"):
+        written = figure_path.with_name(expected)
+        assert written.is_file(), expected
+        assert written.stat().st_size > 0
     assert matplotlib.get_backend().lower() == "agg"
+
+
+def test_the_audit_summary_reports_signed_medians_and_iqrs(
+    tmp_path: Path, protocol: ProtocolSpec
+) -> None:
+    """A non-zero median is a finding in its own right, so it is reported directly.
+
+    The biases most likely to show up - the truncated OFF sigma and the old +/-2 s
+    clamp - sit inside the refinement window, so a report filtered on disagreement
+    size would show nothing while a systematic onset bias was present.
+    """
+    from scipy.io import savemat  # noqa: PLC0415
+
+    recordings = []
+    for i in range(3):
+        vib, _s, _e = make_vib(FS_SIG, FILE_S, STIM_START_S, STIM_S, seed=i)
+        rec = _recording(vib, seed=i)
+        mask = np.ones(rec.data.shape[0], dtype=bool)
+        # Old boundary 2 s early at both ends: the systematic bias the audit hunts.
+        mask[int(round(298.0 * FS_SIG)) : int(round(418.0 * FS_SIG))] = False
+        savemat(tmp_path / f"rec_{i}_recovery.mat", {"recoveryMask": mask})
+        recordings.append((tmp_path / f"rec_{i}.mat", rec))
+
+    summary = audit_summary(audit_stim_splits(recordings, protocol))
+
+    assert summary["n"] == 3.0
+    assert summary["onset_difference_s_median"] == pytest.approx(1.95, abs=0.2)
+    assert summary["offset_difference_s_median"] == pytest.approx(2.05, abs=0.2)
+    assert summary["onset_difference_s_iqr"] == pytest.approx(0.0, abs=0.01)
+    assert summary["competing_segment_n"] == 0.0
+    assert not any(np.isnan(v) for v in summary.values()), "a missing value must be absent"
+
+
+def test_a_competing_long_segment_is_called_out(
+    tmp_path: Path, protocol: ProtocolSpec
+) -> None:
+    """The files the audit is actually hunting: the old split landed somewhere else.
+
+    Flagged when the two methods disagree by more than the stim duration, not by more
+    than the refinement window - that is the threshold the acceptance now specifies,
+    because the residual biases sit inside the old window.
+    """
+    from scipy.io import savemat  # noqa: PLC0415
+
+    vib, _s, _e = make_vib(FS_SIG, FILE_S, STIM_START_S, STIM_S, seed=0)
+    rec = _recording(vib)
+    mask = np.ones(rec.data.shape[0], dtype=bool)
+    mask[int(round(700.0 * FS_SIG)) : int(round(1000.0 * FS_SIG))] = False
+    savemat(tmp_path / "rec_recovery.mat", {"recoveryMask": mask})
+
+    table = audit_stim_splits([(tmp_path / "rec.mat", rec)], protocol)
+
+    assert bool(table.iloc[0]["competing_segment"])
+    assert float(table.iloc[0]["onset_difference_s"]) == pytest.approx(-400.0, abs=1.0)
+    assert audit_summary(table)["competing_segment_n"] == 1.0
 
 
 def test_the_acceptance_run_against_the_archive(real_recording: Path | None) -> None:

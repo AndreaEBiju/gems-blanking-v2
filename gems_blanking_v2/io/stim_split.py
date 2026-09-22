@@ -67,6 +67,7 @@ __all__ = [
     "SplitReport",
     "SplitStatus",
     "audit_stim_splits",
+    "audit_summary",
     "blanking_fraction",
     "find_stim_window",
     "load_protocol",
@@ -81,8 +82,15 @@ log = logging.getLogger(__name__)
 
 F64 = npt.NDArray[np.float64]
 
-SplitStatus = Literal["pass", "review", "fail"]
-"""``pass`` proceeds, ``review`` needs a human, ``fail`` has no recovery epoch."""
+SplitStatus = Literal["pass", "clipped_start", "review", "fail"]
+"""``pass`` proceeds, ``review`` needs a human, ``fail`` has no recovery epoch.
+
+``clipped_start`` is its own status rather than a passing flag: the recording began
+mid-stim, so the measured duration is **censored** and reporting it as "within
+tolerance" would be a false reassurance. The tolerance check is skipped, not passed.
+The offset is still valid and the recovery epoch is intact, so the file is usable -
+it is just not a clean capture and must not be counted as one.
+"""
 
 EpochName = Literal["stim", "recovery"]
 ExclusionCategory = Literal["excluded_epoch"]
@@ -105,6 +113,16 @@ ENVELOPE_RMS_S: Final = 0.100
 This sets the resolution of everything downstream: the ON and OFF edges become
 ramps about this wide, so the matched window's argmax can sit up to half of it away
 from the true edge. That is what the edge refinement is for.
+"""
+
+EDGE_HOLD_S: Final = 0.25
+"""How long the envelope must stay below the ON threshold to end the outward walk.
+
+The walk that measures the epoch's extent follows each edge outward until the
+envelope falls back below threshold **and stays below for this long**, so ripple
+around the edge does not terminate it early. It is deliberately not the old
+refinement pad: the walk is unbounded by the window width, which is the whole point,
+and this only sets how patient it is about a momentary dip.
 """
 
 EDGE_REFINE_PAD_S: Final = 2.0
@@ -278,6 +296,30 @@ class Epoch:
         """Where this epoch ends in the original recording, seconds."""
         return self.t0_offset_s + self.duration_s
 
+    def assessable_bounds_s(self) -> tuple[float, float]:
+        """Return the assessable interior of this epoch, in **local** seconds.
+
+        Raises when the settling width has not been measured. That refusal is the
+        point: ``None`` means *not yet measured* - task 13 owns the number - and a
+        consumer that quietly read it as zero would filter across the split boundary,
+        which is exactly what the epoch edge exists to prevent. Same rule as the
+        missing-scalar convention, applied to a duration with an owner in a later
+        task.
+
+        Raises
+        ------
+        ValueError
+            If either unassessable width is ``None``.
+        """
+        if self.unassessable_head_s is None or self.unassessable_tail_s is None:
+            msg = (
+                f"epoch {self.name!r} has no measured settling width - it is None, "
+                "meaning not yet measured, and must not be read as zero. Task 13 "
+                "measures it; call with_settling() once it has."
+            )
+            raise ValueError(msg)
+        return self.unassessable_head_s, self.duration_s - self.unassessable_tail_s
+
     def with_settling(self, settling_s: float) -> Epoch:
         """Return a copy carrying ``settling_s`` as the unassessable edge windows.
 
@@ -322,8 +364,10 @@ class SplitReport:
         Fraction of the vib record inside the stim window. Reported because it is
         the quantity the old percentile threshold implicitly assumed.
     epoch_count
-        1, plus stim-like activity found elsewhere in the file. More than 1 is a
-        protocol mismatch - see :data:`SECONDARY_EPOCH_FRACTION`.
+        ON segments anywhere in the record lasting at least
+        ``protocol.secondary_epoch_min_s``. 1 is expected; more is a protocol
+        mismatch. The threshold travels with the count in provenance, because a count
+        without the rule that produced it cannot be compared across protocols.
     threshold_crosscheck_s
         What the OFF-anchored threshold alone would have called the onset. A
         cross-check, never the decision.
@@ -366,6 +410,7 @@ class SplitReport:
             "clipped_end": self.clipped_end,
             "duty_cycle": self.duty_cycle,
             "epoch_count": self.epoch_count,
+            "epoch_count_min_s": self.protocol.secondary_epoch_min_s,
             "method": self.method,
             "reason": self.reason,
             "protocol": self.protocol.to_json(),
@@ -546,14 +591,19 @@ def _off_anchored_threshold(env: F64, onset: int, width: int) -> float:
 
 
 def _measure_extent(
-    env: F64, onset: int, width: int, pad: int, threshold: float
+    env: F64, onset: int, width: int, hold: int, threshold: float
 ) -> tuple[int, int]:
     """Return the ``[start, stop)`` extent of the stim epoch the matched window found.
 
-    First and last crossing **inside** the window, so a stim shorter than the prior is
-    measured exactly, then each edge is followed outward through contiguous
-    supra-threshold samples bridging gaps up to ``pad``, so a longer one is too. See
-    :data:`EDGE_REFINE_PAD_S` for why the spec's fixed-pad search cannot do this.
+    **The matched filter located the epoch; this measures it.** First and last
+    crossing *inside* the window, so a stim shorter than the prior is measured
+    exactly, then each edge is followed **outward, unbounded by the window width**,
+    until the envelope falls below threshold and stays below for ``hold`` samples.
+
+    The outward walk being unbounded is the correction that matters: an edge search
+    clamped to the window can report nothing outside ``W +/- pad``, so the duration
+    check of Fix 2 would be structurally incapable of failing and a 95 s stim would
+    come back as 120.0 s and pass.
     """
     stop_window = min(onset + width, env.size)
     inside = np.flatnonzero(env[onset:stop_window] > threshold)
@@ -565,13 +615,13 @@ def _measure_extent(
 
     on = env > threshold
     while start > 0:
-        lo = max(start - pad, 0)
+        lo = max(start - hold, 0)
         reachable = np.flatnonzero(on[lo:start])
         if reachable.size == 0:
             break
         start = lo + int(reachable[0])
     while stop < env.size:
-        hi = min(stop + pad, env.size)
+        hi = min(stop + hold, env.size)
         reachable = np.flatnonzero(on[stop:hi])
         if reachable.size == 0:
             break
@@ -647,8 +697,8 @@ def find_stim_window(env: F64, fs_vib: float, protocol: ProtocolSpec) -> _Window
     contrast = float(score[onset])
 
     threshold = _off_anchored_threshold(env, onset, width)
-    pad = max(int(round(EDGE_REFINE_PAD_S * fs_vib)), 1)
-    refined_onset, refined_offset = _measure_extent(env, onset, width, pad, threshold)
+    hold = max(int(round(EDGE_HOLD_S * fs_vib)), 1)
+    refined_onset, refined_offset = _measure_extent(env, onset, width, hold, threshold)
     if refined_offset <= refined_onset:
         refined_onset, refined_offset = onset, min(onset + width, env.size)
 
@@ -715,10 +765,22 @@ def _find_vib_channel(rec: Recording) -> str:
 
 
 def _slice(rec: Recording, start: int, stop: int) -> Recording:
-    """Return ``rec`` restricted to ``[start, stop)``. ``data`` stays a view."""
+    """Return ``rec`` restricted to ``[start, stop)`` as a **read-only view**.
+
+    Hard invariant 17. A view rather than a copy because a 20-minute 9-channel epoch
+    costs about 2 GB to copy, and read-only because invariant 1 has consumers writing
+    NaN into what they are given - a writeable view would silently corrupt the parent
+    buffer, and the corruption would surface as a different file's data being wrong.
+    A consumer that must mask takes its own copy of the span it needs.
+
+    The view also keeps the whole parent alive, stim included, so a loop over
+    recordings must not accumulate epochs.
+    """
+    view = rec.data[start:stop]
+    view.flags.writeable = False
     return Recording(
         fs=rec.fs,
-        data=rec.data[start:stop],
+        data=view,
         channels=list(rec.channels),
         animal=rec.animal,
         session=rec.session,
@@ -734,38 +796,43 @@ def _status(
     clipped_end: bool,
     epoch_count: int,
 ) -> tuple[SplitStatus, str]:
-    """Resolve the status table, in priority order.
+    """Resolve the status, first match wins, in the order the task specifies.
 
-    The spec's rows overlap - an 8 s clipped start gives a 112 s duration, which is
-    *inside* a 12 s tolerance, so it matches both "clean capture" and "clipped at
-    start". Clipping is therefore evaluated independently and reported as a flag;
-    only clipped-at-end is a status, because only it means the file holds no recovery
-    epoch.
+    Clipping is decided first and separately from the tolerance, because the two
+    overlap: an 8 s clipped start gives a 112 s duration, which is *inside* a 12 s
+    tolerance, so evaluating them together makes the outcome depend on ordering.
+
+    ``clipped_end`` -> ``fail`` -> ``clipped_start`` -> tolerance -> ``review``.
+
+    **Where the epoch count sits is an interpretation.** The task's status table does
+    not include it, while the prose says more than one epoch "goes to manual review".
+    Placing it after the two clipping rows keeps the table's stated order intact - a
+    file with no recovery epoch is still a ``fail``, a censored one is still
+    ``clipped_start`` - while a clean file with a second stim-like segment still
+    reaches a human.
     """
-    off_by = abs(detected_s - protocol.stim_duration_s)
     if clipped_end:
         return "fail", (
             "the vib channel is still ON at the last sample, so the recording stopped "
             "during stimulation - there is no recovery epoch in this file"
+        )
+    if clipped_start:
+        return "clipped_start", (
+            f"the vib channel is ON at the first sample: the recording started "
+            f"mid-stim, so the measured {detected_s:.1f} s is a lower bound and the "
+            f"{protocol.stim_tolerance_s:.0f} s tolerance check is skipped rather than "
+            "passed. The offset is still valid and the recovery epoch is intact"
         )
     if epoch_count != 1:
         return "review", (
             f"{epoch_count} stim-like epochs found where the protocol has 1 - "
             "protocol mismatch, needs a human"
         )
-    if off_by <= protocol.stim_tolerance_s:
-        clipped = " (clipped at start, which is benign)" if clipped_start else ""
+    if abs(detected_s - protocol.stim_duration_s) <= protocol.stim_tolerance_s:
         return "pass", (
             f"detected {detected_s:.1f} s against the protocol's "
             f"{protocol.stim_duration_s:.0f} s, inside the "
-            f"{protocol.stim_tolerance_s:.0f} s tolerance{clipped}"
-        )
-    if clipped_start:
-        return "pass", (
-            f"detected {detected_s:.1f} s, short of the protocol's "
-            f"{protocol.stim_duration_s:.0f} s, but the vib channel is ON at the first "
-            "sample: the recording started mid-stim, so the offset is still valid and "
-            "the recovery epoch is intact"
+            f"{protocol.stim_tolerance_s:.0f} s tolerance"
         )
     return "review", (
         f"detected {detected_s:.1f} s against the protocol's "
@@ -999,9 +1066,16 @@ AUDIT_COLUMNS: Final = (
     "onset_difference_s",
     "offset_difference_s",
     "contaminated_recovery_s",
+    "competing_segment",
     "error",
 )
-"""Columns of the acceptance table, in order. Fixed so the report is diffable."""
+"""Columns of the acceptance table, in order. Fixed so the report is diffable.
+
+The two boundary differences are **signed and separate** on purpose. Onset error
+costs pre-stim baseline; offset error contaminates the recovery reference; only the
+second damages the science, and a single unsigned "boundary difference" hides which
+one moved and in which direction.
+"""
 
 
 def matlab_boundary(recovery_path: Path, fs: float) -> tuple[float, float] | None:
@@ -1040,12 +1114,19 @@ def audit_stim_splits(
 ) -> pd.DataFrame:
     """Re-split every recording and diff the boundary against the MATLAB output.
 
-    The acceptance step, and the first subtask: **the old auto-threshold was out of
-    range on every stim recording** - at a fixed 120 s stim the duty cycle is 20% of a
-    10-minute file and 8% of a 25-minute one, at or below the bottom of the band
-    ``(p20 + p80)/2`` needs - so where the two methods disagree by more than the
-    edge-refinement window, that file's recovery reference has been contaminated with
-    stim, or that much recovery was thrown away.
+    The acceptance step, and the first subtask - **looking for a rarer thing than
+    originally stated.** Low duty cycle on its own does not defeat the old rule: at 8%
+    it still recovers the onset to 74 ms, because "keep the largest ON segment"
+    rescues a threshold that has landed in the OFF noise. What defeats it is a
+    *competing longer* ON segment - sustained handling, a motor left running, a cable
+    on the monitor - and those files are flagged in ``competing_segment``.
+
+    So most files should agree to well under a second, and the interesting output is
+    the **signed** median and IQR rather than a count of large disagreements. Do not
+    filter to "larger than the refinement window": the two biases this is most likely
+    to surface, the truncated OFF sigma and the old +/-2 s clamp, both sit inside that
+    window, and a filtered report would show nothing while a systematic 2 s onset bias
+    was present.
 
     A file that raises is reported as a row with ``error`` set, not skipped: a split
     that failed is the most interesting row in the table.
@@ -1058,14 +1139,17 @@ def audit_stim_splits(
     protocol
         The protocol to score against.
     figure_path
-        Where to write the detected-duration histogram. The distribution should be a
-        tight spike at ``stim_duration_s`` with a short tail of clipped captures;
-        anything else is a finding. Omitted, no figure is written.
+        Where to write the figures. Three are produced next to this path: the
+        detected-duration distribution, which should be a tight spike at
+        ``stim_duration_s`` with a short tail of clipped captures, and the **signed
+        onset and offset differences as separate distributions**. Omitted, no figure
+        is written.
 
     Returns
     -------
     pandas.DataFrame
-        One row per recording, columns :data:`AUDIT_COLUMNS`.
+        One row per recording, columns :data:`AUDIT_COLUMNS`. Pass it to
+        :func:`audit_summary` for the medians and IQRs.
     """
     import pandas as pd  # noqa: PLC0415
 
@@ -1103,22 +1187,58 @@ def audit_stim_splits(
             row["offset_difference_s"] = report.offset_s - legacy[1]
             # Positive means the old split ended early and left stim in recovery.
             row["contaminated_recovery_s"] = report.offset_s - legacy[1]
+            row["competing_segment"] = (
+                abs(report.onset_s - legacy[0]) > protocol.stim_duration_s
+            )
         rows.append(row)
 
     table = pd.DataFrame(rows, columns=list(AUDIT_COLUMNS))
     if figure_path is not None:
-        _write_duration_histogram(table, protocol, Path(figure_path))
+        _write_audit_figures(table, protocol, Path(figure_path))
     return table
 
 
-def _write_duration_histogram(
+def audit_summary(table: pd.DataFrame) -> dict[str, float]:
+    """Return median and IQR of each signed boundary difference, and the counts.
+
+    **A non-zero median is a finding in its own right**, which is why the medians are
+    reported rather than only the tails: a systematic onset bias of a couple of
+    seconds means every historical file lost that much pre-stim baseline, and it would
+    be invisible to any report that filtered on disagreement size.
+
+    A missing value is **absent from the returned mapping**, never ``nan`` - the
+    serialised-missing convention, so this can go straight into a provenance record.
+    """
+    summary: dict[str, float] = {"n": float(len(table))}
+    for column in ("onset_difference_s", "offset_difference_s", "duration_error_s"):
+        values = table[column].dropna().to_numpy(dtype=np.float64)
+        if values.size == 0:
+            continue
+        q1, q3 = (float(v) for v in np.percentile(values, [25, 75]))
+        summary[f"{column}_median"] = float(np.median(values))
+        summary[f"{column}_iqr"] = q3 - q1
+        summary[f"{column}_n"] = float(values.size)
+    if "competing_segment" in table:
+        competing = table["competing_segment"].fillna(value=False)
+        summary["competing_segment_n"] = float(competing.sum())
+    return summary
+
+
+def _write_audit_figures(
     table: pd.DataFrame, protocol: ProtocolSpec, figure_path: Path
-) -> None:
-    """Write the detected-duration distribution. ``Agg`` only - never a GUI backend."""
+) -> list[Path]:
+    """Write the duration distribution and the two signed difference distributions.
+
+    ``Agg`` only - never a GUI backend (cross-platform rule 16). Returns the paths
+    written, in order.
+    """
     import matplotlib  # noqa: PLC0415
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt  # noqa: PLC0415
+
+    figure_path.parent.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
 
     durations = table["detected_duration_s"].dropna().to_numpy(dtype=np.float64)
     figure, axis = plt.subplots(figsize=(7.0, 4.0))
@@ -1136,9 +1256,32 @@ def _write_duration_histogram(
     axis.set_title(f"n = {durations.size}; expected a spike at {protocol.stim_duration_s:.0f} s")
     axis.legend()
     figure.tight_layout()
-    figure_path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(figure_path, dpi=120)
     plt.close(figure)
+    written.append(figure_path)
+
+    for column, label in (
+        ("onset_difference_s", "onset"),
+        ("offset_difference_s", "offset"),
+    ):
+        values = table[column].dropna().to_numpy(dtype=np.float64)
+        path = figure_path.with_name(f"{figure_path.stem}_{label}{figure_path.suffix}")
+        figure, axis = plt.subplots(figsize=(7.0, 4.0))
+        if values.size:
+            axis.hist(values, bins=40)
+            axis.axvline(float(np.median(values)), linestyle="-", label="median")
+        axis.axvline(0.0, linestyle="--", label="agreement")
+        axis.set_xlabel(f"signed {label} difference, ours minus MATLAB (s)")
+        axis.set_ylabel("recordings")
+        median = float(np.median(values)) if values.size else float("nan")
+        axis.set_title(f"n = {values.size}; median {median:+.3f} s - non-zero is a finding")
+        axis.legend()
+        figure.tight_layout()
+        figure.savefig(path, dpi=120)
+        plt.close(figure)
+        written.append(path)
+
+    return written
 
 
 def blanking_fraction(epoch: Epoch, masked_s: float) -> float:
