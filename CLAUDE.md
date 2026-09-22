@@ -86,6 +86,19 @@ violating one, stop and say so rather than working around it.
     Corollary: a view keeps the whole parent alive, so a loop over recordings
     must not accumulate them.
 
+18. **One word, one meaning — `epoch` and `segment` are not interchangeable.**
+    `Condition.epoch` is `baseline` / `stim_recovery`; `stim_split.Epoch` is the
+    stim-or-recovery slice; a contiguous run of valid (non-NaN) samples is a
+    **`segment`** and is never called an epoch. Three meanings for one word was
+    caught in task 06 before it reached the code; keep it that way.
+
+19. **A settling time is a maximum over every filter that touches the edge,**
+    and a partially-known maximum is `None`, not the part you know. Task 06
+    measures the detection bands; task 13 measures the consumers. Reporting the
+    detection-side number alone would be too small, and too-small is the
+    direction that silently loses coverage rather than the direction that
+    complains.
+
 ---
 
 ## Cross-platform rules (macOS + Windows; Linux best-effort)

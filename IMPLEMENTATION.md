@@ -1315,10 +1315,15 @@ bound must be re-established by the flag below rather than by the hold.
 
 **The outward walk is unbounded by design, so it needs a censoring flag rather
 than a clamp.** If either edge walks more than `stim_tolerance_s` beyond the
-matched window, set `walk_extended = True` and force status `review`. This is a
-diagnostic, not a new gate: a file needing more extension than the tolerance
-allows is already outside tolerance, so the flag can only fire on files that
-would reach `review` anyway — it explains *why* they did. Report the extension
+matched window, set `walk_extended = True` and force status `review`.
+**`walk_extended` is evaluated before `clipped_start`**, and the claim first made
+here — that the flag "can only fire on files that would reach `review` anyway" —
+is wrong in exactly one case, which is why the order matters. A `clipped_start`
+file *skips* the tolerance check, so an overrunning walk on one would otherwise
+pass unremarked. It must not: the recovery epoch's `t0` rides on the offset
+boundary, and a walk that overran by more than the tolerance means that boundary
+is uncertain by more than the tolerance. Everywhere else the original claim
+holds and the flag is a diagnostic rather than a gate. Report the extension
 distance per edge in provenance. The 220 s case above would be reported as a
 measured 220 s with `walk_extended` set, never as a silent 220 s duration.
 
@@ -1962,9 +1967,22 @@ artifacts inflate the reference and MAD and suppress detection during recovery
 ### Signature
 ```python
 def band_envelope(x, fs, lo, hi, window_s, grid_s=GRID_S) -> np.ndarray   # (n_frames,)
-def file_reference(env, pct) -> float
-def zscore(env, ref) -> np.ndarray
+def log_envelope(env) -> np.ndarray                  # log(max(env, eps)), one place
+def epoch_reference(log_env) -> Reference            # (median, scale), NOT one float
+def zscore(log_env, reference) -> np.ndarray         # refuses a foreign (signal, band)
 ```
+
+The first draft of this block contradicted the Algorithm below it in three ways
+and the Algorithm is the binding one. It carried a `pct` argument, which is the
+superseded linear/percentile rule that A.3 deleted so that it could not compete
+with invariant 5 — there is no percentile. It returned one float, but the rule
+produces **two** scalars and `zscore` had nowhere to take the second. And both
+took `env` while steps 3–4 operate on `log(env)`, so either the log happened
+twice or in neither place. `log_envelope` is a separate step precisely so there
+is exactly one site where it happens. `file_reference` is renamed
+`epoch_reference` because the banner above redefines the scope to whole-epoch;
+a function named for a file while operating on an epoch is the same drift that
+left A.4 naming a band `1-100` after detection had moved off it.
 
 ### Algorithm
 1. Band-limit with `sos`. For bands below ~100 Hz, **decimate first** — a 1 Hz
@@ -1994,13 +2012,78 @@ dynamics live in the first window.
 
 ### Memory
 9 channels × 6 bands × 37 M samples is ~16 GB if materialised. **Stream per band**;
-only the 100 Hz envelope is retained.
+only the 100 Hz envelope is retained. "100 Hz" here is the **frame rate** of the
+10 ms grid, not a band — no band is named `1-100` any more. That reading is the
+one that makes the arithmetic above work.
+
+**Ceiling: 1 GB peak RSS.** Streaming one band of one channel at a time gives a
+working set of one channel plus its decimated copy, about 350 MB at
+9 × 25 min × 24.4 kHz, with ~8 MB of retained frame-rate envelope — so 1 GB is
+roughly 3× headroom, loose enough to survive the difference between how macOS
+and Windows account for resident memory. Measure it with `psutil` as a
+**test-only** dependency; `resource` is absent on Windows and `tracemalloc`
+undercounts numpy's buffers. Keep the algorithmic assertions (nothing larger
+than the input is materialised; the retained output is frame-rate) as the
+primary test — they are the property that matters and they hold on every
+platform.
+
+### Filter settling is not negligible in the slow bands — measured
+
+`sosfiltfilt` does not remove the edge transient, it only halves it, and the
+default `padlen` is set from the filter *order* rather than from the length of
+its impulse response. At a 0.5 Hz corner the impulse response runs for seconds
+while the default pad is a fraction of one. The consequence is not cosmetic:
+
+| band | dof, untrimmed | dof, one window trimmed per end | spec |
+|---|---|---|---|
+| 300-3000 | 135.3 | 135.3 | 135.0 |
+| 100-300 | 30.5 | 30.6 | 30.0 |
+| 10-150 | 28.5 | 28.5 | 28.0 |
+| 2-50 | 27.8 | 29.9 | 29.8 |
+| **0.5-3** | **22.9** | **32.0** | 30.0 |
+| **0-2** | **26.3** | **31.7** | 30.0 |
+
+Individual seeds in `0.5-3` reached an effective dof of **0.7** untrimmed — the
+transient carrying more envelope variance than the signal. Trim one analysis
+window at each end of every segment before computing the reference. The fast
+bands are unaffected, which is why this stayed hidden.
+
+**Two quantities are being conflated and they must be separated**, because they
+currently coincide numerically by accident: the **filter** settling time is a
+property of `(lo, hi, fs, order)`, and the **analysis window** is a property of
+the dof budget. `window_s` was chosen as roughly `dof / (2B)`, which is why one
+window happens to cover the transient. Change either one independently and the
+coincidence breaks silently. Measure the filter settling from the impulse
+response (`impz`, per CLAUDE.md) and define
+
+```
+settling_s(band) = max(impulse_response_length_s, window_s)
+```
+
+reporting both terms. Before accepting the trim as it stands, **measure whether
+raising `padlen` to the impulse-response length shrinks the transient enough to
+reduce the trim** — at `0.5-3` the trim costs 12 s per segment per end pair, and
+segments are fragmented by the NaN rule below, so the cost compounds.
+
+**This does not resolve 03B's `None`.** The epoch-boundary `unassessable` width is
+the maximum over *every* filter that touches the boundary, and the consumer
+filters (task 13) are a different chain from these detection bands. Task 06
+supplies the detection-side term only. `Epoch` settling stays `None` until 13
+lands; a partial maximum reported as the answer would be too small, which is the
+one direction that silently loses coverage.
+
+### Vocabulary: three different things are called "epoch"
+
+`Condition.epoch` is `baseline` / `stim_recovery`. `stim_split.Epoch` is the
+stim-or-recovery slice. The NaN rule below means a contiguous run of valid
+samples. **The third one is called a `segment`** and the word "epoch" is never
+used for it anywhere in the codebase.
 
 ### NaN handling
 Interpolate-then-restore is fine where gaps are short relative to the band's period
 (30 ms at 300–5000 Hz). For **0–2 and 0.5–3 Hz**, a 1 s gap is half a cycle of the
-signal being measured — process **epoch-wise** with a minimum epoch length and mark
-short epochs `unassessable`.
+signal being measured — process **segment-wise** with a minimum segment length and
+mark short segments `unassessable`.
 
 ### Known limitation — do not fix here
 In the ENG band the envelope contains neural activity, so `z` conflates signal and
@@ -2012,12 +2095,26 @@ generator to stop over-firing during activity changes.**
 ### Tests
 - white noise of known σ through each band: measured envelope matches the
   analytic expectation within 5%
-- effective DOF check: the variance of the envelope matches `2·B·T ≈ 30` within 20%
-  for every band
+- effective DOF check: the variance of the envelope matches **that band's own
+  spec dof** within 20% — not a global 30, which is only correct for four of the
+  six. There is **no ENG exemption**; `constants.py` claiming one is wrong and
+  should be corrected. All six pass against their own value.
+- the same check at the full sample rate **fails** for `2-50` (effective dof 11
+  against 29.8): decimate-first is load-bearing for *accuracy*, not only for the
+  numerical stability that step 1 gives as its reason
+- the envelope of white noise matches the analytic expectation only when the
+  filter's **equivalent noise bandwidth** is used (`filtfilt` passes ~90% of
+  nominal — twice the 5% tolerance) and when the expectation uses the **input's**
+  Nyquist. White noise of fixed σ is not the same signal at two sample rates, so
+  the fs-independence test uses a sine.
+- settling: `0.5-3` untrimmed gives an effective dof below 25 and trimmed gives
+  30 ± 3; assert both, so the trim cannot be removed silently
+- `settling_s` reports the impulse-response term and the window term separately,
+  and returns their maximum
 - filter-stability assertion fires on a deliberately ill-conditioned `ba` design
 - a flat (dead) channel is gated, not divided by zero
-- slow-band epoch handling: a 1 s gap in a 0.05 Hz signal produces two epochs, not
-  one interpolated trace
+- slow-band segment handling: a 1 s gap in a 0.05 Hz signal produces two
+  segments, not one interpolated trace
 - memory: a 25-minute 9-channel synthetic completes under a stated RSS ceiling
 
 ### Acceptance
