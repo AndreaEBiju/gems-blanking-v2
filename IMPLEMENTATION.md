@@ -2018,7 +2018,9 @@ one that makes the arithmetic above work.
 
 **Ceiling: 1 GB peak RSS.** Streaming one band of one channel at a time gives a
 working set of one channel plus its decimated copy, about 350 MB at
-9 × 25 min × 24.4 kHz, with ~8 MB of retained frame-rate envelope — so 1 GB is
+9 × 25 min × 24.4 kHz, with **64.8 MB** of retained frame-rate envelope
+(9 channels × 6 bands × 150,000 frames × 8 bytes — the 8 MB first written here
+was one channel, not nine) — so 1 GB is
 roughly 3× headroom, loose enough to survive the difference between how macOS
 and Windows account for resident memory. Measure it with `psutil` as a
 **test-only** dependency; `resource` is absent on Windows and `tracemalloc`
@@ -2049,21 +2051,74 @@ window at each end of every segment before computing the reference. The fast
 bands are unaffected, which is why this stayed hidden.
 
 **Two quantities are being conflated and they must be separated**, because they
-currently coincide numerically by accident: the **filter** settling time is a
-property of `(lo, hi, fs, order)`, and the **analysis window** is a property of
-the dof budget. `window_s` was chosen as roughly `dof / (2B)`, which is why one
-window happens to cover the transient. Change either one independently and the
-coincidence breaks silently. Measure the filter settling from the impulse
-response (`impz`, per CLAUDE.md) and define
+coincide numerically by accident: the **filter** settling time is a property of
+`(lo, hi, fs, order)`, and the **analysis window** is a property of the dof
+budget. `window_s` was chosen as roughly `dof / (2B)`. Measure the filter term
+from the designed `sos`'s impulse response, at **1% of peak** (task 13's own
+criterion, so the two are comparable), and define
 
 ```
-settling_s(band) = max(impulse_response_length_s, window_s)
+settling_s(band) = max(impulse_response_length_s, window_s)     # report BOTH
 ```
 
-reporting both terms. Before accepting the trim as it stands, **measure whether
-raising `padlen` to the impulse-response length shrinks the transient enough to
-reduce the trim** — at `0.5-3` the trim costs 12 s per segment per end pair, and
-segments are fragmented by the NaN rule below, so the cost compounds.
+Measured, and the separation was not cosmetic — **two bands are filter-limited**:
+
+| band | impulse response | `window_s` | binding term |
+|---|---|---|---|
+| 300-3000 | 0.005 s | 0.025 | window |
+| 100-300 | 0.034 s | 0.075 | window |
+| **10-150** | **0.141 s** | 0.100 | **filter** |
+| **2-50** | **0.486 s** | 0.310 | **filter** |
+| 0.5-3 | 3.988 s | 6.000 | window |
+| 0-2 | 1.146 s | 7.500 | window |
+
+The one-window trim first specified here was **71%** and **64%** of what those
+two bands actually need. A test moves `window_s` by 10× and asserts the
+impulse-response term does not move.
+
+### `padtype`, not `padlen` — the edge transient is an artifact of odd extension
+
+Raising `padlen` to the impulse-response length makes the slow bands
+**substantially worse**, which is the opposite of the prediction that motivated
+measuring it. Effective dof against a spec of 30, pooled over seeds of
+10-minute white noise:
+
+| band | no trim, default pad | no trim, raised pad | trim (shipped) |
+|---|---|---|---|
+| 0.5-3 | 22.9 | **9.9** | 32.0 |
+| 0-2 | 26.3 | **19.5** | 31.7 |
+| 2-50 | 27.8 | 28.9 | 30.0 |
+
+Worst single seed at `0.5-3`: **0.9** raised, 29.2 trimmed.
+
+The cause is scipy's default `padtype="odd"`. Odd extension reflects
+antisymmetrically about the endpoint, which for a band-pass with a low corner
+injects a large artificial **low-frequency** excursion directly into the band
+being measured — so a longer pad injects more of it, and the "fix" makes the
+defect worse. At `0.5-3` with the raised pad: `odd` 11.6, `even` **31.9**,
+`constant` 23.1; `constant` at the **default** pad, **31.2**.
+
+**`padtype="constant"` at the default `padlen` is the specified setting.** A
+constant pad at the endpoint value is continuous with the signal and is pure DC,
+so for every band-pass here it is removed in-band by construction; odd extension
+is the only one of the three that manufactures in-band energy. This is a
+one-parameter correction to a demonstrated defect, not a tuning choice, and it
+is in scope. **Measure all six bands** under `odd` / `even` / `constant` at the
+default pad before committing — only three were measured, and `0-2` is a
+low-pass where the DC argument does not apply the same way.
+
+**The trim stays.** Padding fabricates samples, so an edge frame's filter input
+is partly invented whatever the `padtype`; a frame that cannot be validated is
+`unassessable` for detection regardless of how good the reference statistic
+looks. The two are independent defences and the 12 s per segment at `0.5-3` is
+not worth recovering: at this stage NaNs come from acquisition dropouts, not
+from masking (which happens later), so segments are not in fact fragmented, and
+the cost is ~1% of a 1200 s recovery epoch.
+
+Enforce the separation from 03B as an **import-graph** assertion — `bands` must
+not import `stim_split` — rather than by grepping module source for a call name.
+The import edge is the invariant; a source-text test breaks on reformatting and
+passes on a re-exported alias.
 
 **This does not resolve 03B's `None`.** The epoch-boundary `unassessable` width is
 the maximum over *every* filter that touches the boundary, and the consumer
@@ -2210,6 +2265,7 @@ detector is evaluated on instruments that can register its improvement.
 | `slowWaveAnalysis_new.m:159-161` | pool peaks across clean runs instead of taking only the longest — two clean 28 s halves in a 60 s window currently return NaN |
 | `bulk_mixed_models.m` | coverage weights + covariate + minimum-coverage exclusion. `nRR_used`, `fr_validFrac`, `validDur_s` are all computed and none is used |
 | `browseMotionArtifacts.m:34` | `validateattributes(..., 'finite')` throws on NaN, so an already-blanked file cannot be re-browsed. Remove if the browser is kept |
+| every `filtfilt` call at a low corner | **`padtype` — carried over from task 06, and MATLAB has no option for it.** MATLAB's `filtfilt` always uses odd extension, which task 06 measured injecting artificial low-frequency energy directly into a low-corner band: effective dof fell from 30 to as low as 0.9 on the worst segment. Anywhere `processing_new` band-passes below ~10 Hz on a short segment — the slow-wave chain above all — the first and last few seconds of the output are transient, not signal. **Audit which of those outputs feed a statistic rather than a plot**, and pad manually with the endpoint value (or discard `max(impz, window)` at each end) before filtering. Report the before/after on `slowWaveAnalysis_new.m`, where segments are short and the corner is lowest |
 
 **Reuse rather than reinvent:** `dfaGapAware.m` (pooled runs), `step5f_fano_slope.m`
 (epochs + rate-matched surrogates carrying identical censoring — extend the same
