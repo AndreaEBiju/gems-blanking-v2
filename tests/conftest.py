@@ -323,6 +323,7 @@ def make_ecg(
     weak_amp_uv: tuple[float, float] | None = None,
     rr_s: float = 0.150,
     t_wave: bool = False,
+    qrs_width_ms: float = QRS_WIDTH_MS,
 ) -> EcgSynth:
     """Beat train convolved with the QRS kernel, on a noise floor.
 
@@ -365,6 +366,12 @@ def make_ecg(
         is 400 bpm, near animal J's measured 164.7 ms. Raise the rate to 600 bpm
         (``rr_s=0.100``) to reach the regime where the inherited 90 ms refractory
         deletes real beats.
+    qrs_width_ms
+        Width of the QRS kernel, milliseconds. The default 10 ms is a Hanning window
+        whose spectrum is essentially exhausted by ~200 Hz, so it carries **no**
+        300-3000 Hz content and the ENG band sees nothing - a real R-wave is far
+        sharper than a Hanning window of its own width. A caller measuring anything
+        in ``300-3000`` must narrow this (1 ms works) or it is testing an empty band.
     t_wave
         Add a broad second deflection per beat at :data:`T_WAVE_PHASE_RANGE` of the
         RR interval, at :data:`T_WAVE_AMP_RANGE` of that beat's R amplitude and
@@ -395,7 +402,7 @@ def make_ecg(
 
     n = _n_samples(fs, dur_s)
     beats = make_beats(fs, dur_s, rr_s=rr_s, seed=seed)
-    kernel = make_qrs(fs)
+    kernel = make_qrs(fs, width_ms=qrs_width_ms)
     half = kernel.size // 2
 
     rng = np.random.default_rng(seed + 1)
@@ -413,7 +420,7 @@ def make_ecg(
         sig[max(lo, 0) : min(hi, n)] += amp * kernel[k_lo:k_hi]
 
     if t_wave:
-        t_kernel = np.hanning(int(round(fs * QRS_WIDTH_MS * T_WAVE_WIDTH_FACTOR / 1000.0)) | 1)
+        t_kernel = np.hanning(int(round(fs * qrs_width_ms * T_WAVE_WIDTH_FACTOR / 1000.0)) | 1)
         t_half = t_kernel.size // 2
         phases = rng.uniform(*T_WAVE_PHASE_RANGE, size=beats.size)
         fractions = rng.uniform(*T_WAVE_AMP_RANGE, size=beats.size)
