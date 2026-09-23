@@ -471,12 +471,16 @@ seeking to the tail costs the same as reading the head, because Drive fetches
 ranges rather than materialising the file. Header-only and metadata-only passes
 are cheap and should be preferred everywhere they suffice.
 
-Directory enumeration is the slow part: **4.7 directories per second**, 3442
-directories, so a bare walk of the corpus is **12 minutes**. Two consequences,
+Directory enumeration is the slow part **on a cold cache**: 4.7 directories per
+second, 3442 directories, a **12-minute** walk. Measured again after that walk:
+**8 seconds**, ~90× faster, because Drive caches directory metadata locally once
+enumerated. So 12 minutes is a first-run-on-a-new-machine cost, not a recurring
+one, and an interactive re-scan is viable after the first. Two consequences,
 both binding:
 
-- **Task 03A's scan must be cached, not interactive.** A 12-minute walk cannot
-  sit in front of a user pressing "scan". Persist the index under
+- **Task 03A's scan must still be cached**, but for the cold case only. A
+  12-minute first walk cannot sit in front of a user pressing "scan"; an 8 s
+  warm one can. Persist the index under
   `cache/` (local, never inside `gems_root`), key entries by path plus mtime
   plus size, and re-walk only what changed. The UI shows the cached tree
   immediately and refreshes behind it.
@@ -831,6 +835,91 @@ def measure_cardiac_window(
    `baseline + 3 × MAD(outer thirds)`. If no sample exceeds it, return `None`.
 5. Report recovered duty cycle: `1 − (window_duration × beat_rate)` vs the current
    uniform 30 ms.
+
+### The envelope is the wrong instrument — average the SIGNAL, not its envelope
+
+The algorithm above averages **envelopes** across beats, and an envelope over
+`window_s` cannot resolve anything shorter than `window_s`. At animal J's
+RR = 165 ms the extraction profile is ±66 ms = 132 ms wide, against these
+windows:
+
+| band | `window_s` | profile / window | envelope method |
+|---|---|---|---|
+| 300-3000 | 25 ms | 5.3× | usable |
+| 100-300 | 75 ms | 1.8× | marginal |
+| 10-150 | 100 ms | 1.3× | **blind** |
+| 2-50 | 310 ms | 0.43× | **structurally impossible** |
+| 0.5-3 | 6 s | 0.022× | **structurally impossible** |
+| 0-2 | 7.5 s | 0.018× | **structurally impossible** |
+
+For the bottom three, every frame in the profile is computed from a window that
+contains lag 0, so the profile **cannot vary with lag** — known before any data
+is read. Worse, the baseline in step 3 comes from the profile's outer thirds,
+which sit inside that same window: baseline equals peak, nothing exceeds
+`baseline + 3·MAD`, and step 4 returns `None`. **`None` there means "cannot
+see", and it is indistinguishable from "no cardiac window in this band", which
+is the opposite conclusion.**
+
+**Average the band-passed signal, not its envelope.** Coherent averaging across
+beats is limited only by the sample rate, and it is the physically right
+operation: the QRS is time-locked to R and the neural signal is not, so the
+average isolates the cardiac contribution and suppresses everything else by
+√n_beats. Then take the extent on the averaged waveform.
+
+```
+1. band-pass the channel (task 06's filter design; padtype="constant")
+2. coherent average of the SIGNAL over ±min(halfwidth_s, 0.45·RR) about each R
+3. extent = contiguous span about lag 0 where |average| exceeds the null (below)
+```
+
+**The null is an anti-phase control, not the profile's own outer thirds.**
+Repeat step 2 triggered on the midpoints between successive R-peaks. That
+control has the same beat periodicity, the same beat count and the same filter,
+and differs only in phase — so anything the R-triggered average shows above it
+is genuinely locked to the QRS. Add a jittered-trigger surrogate (triggers
+displaced by a random offset per beat) as a second null; where the anti-phase
+and jittered nulls disagree, the band is picking up the cardiac *rhythm* rather
+than the QRS, which is the next point.
+
+### Three of the six bands need a different question, not a better measurement
+
+At 364 bpm the heart-rate fundamental is **~6 Hz**, and where that sits relative
+to a band changes what "cardiac contamination" even means:
+
+- **`0-2` and `0.5-3` are below the fundamental.** Predicted QRS energy there is
+  0.00%. The answer is **`no_window`** on spectral grounds and it needs no
+  measurement to defend — run the coherent average anyway as a check, but a null
+  result there is a confirmation, not a failure to see.
+- **`2-50` contains the fundamental and its first harmonics, and its
+  `window_s` (310 ms) exceeds RR (165 ms).** Peri-R blanking is the **wrong
+  instrument** here: the contamination is a continuous narrowband component, not
+  an event, and blanking ±anything around a 6 Hz trigger removes the whole
+  record. Return **`not_applicable`** with that reason. Handling it belongs to
+  task 13/14 as regression or a notch at the beat rate and its harmonics — or as
+  an accepted, modelled confound — never as a blank.
+- **`10-150` contains harmonics 2–25 and its window is 100 ms against RR 165 ms.**
+  Genuinely marginal; the coherent average is what decides it.
+
+**The return value must carry which of these it is.** `tuple | None` cannot, and
+`cardiacRemoveWinMs` and task 13 consume it:
+
+```
+status: "measured" | "no_window" | "unresolvable" | "not_applicable"
+```
+
+`no_window` means resolved and nothing above the null. `unresolvable` means the
+method could not see. `not_applicable` means peri-R blanking is not the right
+operation for this band at this heart rate. **Only `measured` may produce a
+blanking extent**; the other three produce zero blanking and a recorded reason.
+
+### The ENG band gets a third measure, matched to its consumer
+
+For `300-3000` the consumer is spike detection, so measure what the consumer
+does: **threshold-crossing rate per lag bin**, which is sample-resolution and
+needs no envelope at all. This is the measurement that already falsified the
+original prediction — 1.53×2.12× rise at lag 0 on three channels, where the
+prediction said there would be nothing. Keep it, and report it alongside the
+coherent average rather than instead of it.
 
 ### The measured extent is an envelope extent, not a signal extent
 
@@ -2395,9 +2484,11 @@ do not guess. Anything longer is a sustained level shift, not an event.
 **The labels are not on this drive.** A full walk of all 3442 directories under
 `<gems_root>` on 2026-09-22 found **zero** `*_segment_indices.mat`. This is no
 longer "the archive is unreachable" — the archive is mounted and the files are
-not in it. Before concluding they are lost, search for the companion
-`*_segments.mat` that `browseMotionArtifacts` writes, and the sibling folders on
-the shared drive (`GEMS-Lyna`, `Louise`, `Arjun`).
+not in it. That search has now been extended and is exhausted: **zero** `*_segments.mat`
+and zero `*_segment_indices.mat` across **8721 directories** — GEMS-Andrea
+(3442), GEMS-Lyna (2012), Louise (99), Arjun (3168). The old cohort's labels are
+not on this shared drive at all. This is a question for Andrea, not a search
+problem; do not spend more time looking.
 
 Until they are found it is `None`, meaning **no cap was applied and
 that fact is recorded** — provenance key absent, per the conventions table,
