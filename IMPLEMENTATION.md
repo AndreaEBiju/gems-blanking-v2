@@ -512,6 +512,46 @@ Two passes, which costs little:
    scalar, and treat a range spanning more than one √2 grid step as a finding
    about the consumer rather than noise to average away.
 
+#### `clip`'s amplitude axis is inverted — do not let the crossing finder assume monotonicity
+
+For `step`, `drift` and `tribo`, `amp_ratio` scales an **additive** artifact, so
+larger means more damage. For `clip`, `amp_ratio` **is the rail**: a lower rail
+clips more of the signal. Damage therefore **decreases** with amplitude, and at
+0.5σ the rail sits below most of the signal and destroys it.
+
+The tolerance for `clip` is the rail **above** which nothing changes, and a
+crossing finder that scans upward for "first amplitude at which the output
+changes" will return the bottom of the grid for every `clip` row and look
+plausible doing it. Detect the crossing per-kind with the direction declared,
+and report `clip`'s tolerance as an upper-rail figure with its own units and
+sign convention stated.
+
+#### `mmc`'s per-sample criterion cannot produce a threshold — report both
+
+The pre-registered `mmc` criterion is a per-sample set difference on the
+3×moving-MAD boolean. Over a 180 s span that is hundreds of thousands of
+independent borderline decisions, so **any** perturbation flips a few: the
+criterion fires at arbitrarily small amplitude by construction. The +3/−4 seen
+at 0.5σ is that, and it is hard invariant 10b in a third form — first across
+`(signal, band)` pairs, then across lags in task 02, now across samples.
+
+**This is not a criterion to quietly replace after seeing the data** — rule 3
+forbids exactly that. Do both:
+
+1. **Keep the per-sample criterion and report its result honestly**, including
+   "below the grid" if that is what it is. Extend the `mmc` amplitude grid
+   **downward** by five √2 steps (to ≈0.0625σ) so the number is located rather
+   than merely bounded. A consumer whose output changes at 0.06σ is a finding
+   about that consumer.
+2. **Add a burst-level criterion and make it the one task 14 routes on**: a
+   burst added, a burst lost, or a burst onset/offset displaced beyond a floor,
+   where a burst is a contiguous run of the boolean above a stated minimum
+   duration. That matches how the other four consumers are defined (events, not
+   samples) and matches what the science actually uses — MMC bursts, not
+   individual suprathreshold samples.
+
+Report both curves, same runs, same pattern as `hrv`.
+
 #### Report the statistic as well as the fiducial, for `hrv`
 
 A.4 declares `hrv`'s criterion as "beat train unchanged", and the
