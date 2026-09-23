@@ -113,10 +113,10 @@ frames there, where p10 carries ~13% standard error.
 CONSUMERS = [
     # name              signal              band        tolerance
     ("spikes",          "T",                "300-3000", "4.5 sigma, sample level"),
-    ("slow_c",          "T",                "100-300",  "own sigma"),
+    # ("slow_c", "T", "100-300", "own sigma"),   STRUCK 2026-09-23: never implemented anywhere; see Step 9
     ("velocity",        ("V1","V3"),        "300-3000", "peak ratio > 1"),
-    ("mmc",             "stomach_ref",      "2-50",     "3 x moving MAD"),
-    ("slow_wave",       "stomach_ref",      "0-2",      "peak displacement"),
+    ("mmc",             "stomach_referenced", "2-50",   "3 x moving MAD"),
+    ("slow_wave",       "stomach_referenced", "0-2",    "peak displacement"),
     ("breathing",       "best_hr_channel",  "0.5-3",    "peak inserted or lost"),
     ("hrv",             "best_hr_channel",  "10-150",   "operational: beat train unchanged"),
 ]
@@ -286,6 +286,210 @@ This does not move any other boundary. **Python does detection and blanking;
 MATLAB does the science; the handoff is per-consumer masks in `.mat`** — exactly
 what detector-pyqt did and what tasks 08 and 15 already assume. Model training
 stays in Python.
+
+#### The language split, stated precisely
+
+"T is a MATLAB task" means **the consumer runs are MATLAB**. It does not mean
+everything is. The artifact library is Python — `GEMSBlanking:detector/
+synthesize.py` with `inject_saturation` / `inject_drift` / `inject_broadband` /
+`inject_transplant` — and reimplementing artifact morphology in MATLAB would
+repeat the exact error the rule exists to prevent, one level down. So:
+
+```
+Python  generate injected signals, write one .mat per (kind, amplitude, duration)
+MATLAB  driver runs the five consumers over all of them, writes their outputs
+either  diff outputs against the clean baseline, emit consumer_tolerances.json
+```
+
+The rule is **never reimplement the thing you are measuring**. Crossing a
+language boundary with files is not a violation of it; it is the same handoff
+tasks 08 and 15 already use.
+
+#### Artifact kinds: the four that already exist
+
+`step`, `clip`, `drift`, `tribo` — `conftest.py`'s names, reconciling with
+`synthesize.py` as `inject_saturation` spanning `step` + `clip`,
+`inject_drift` → `drift`, `inject_broadband` → `tribo`. Task 09 already sweeps
+these four; T uses the same four so the two are comparable. `inject_transplant`
+is **not** used here: T needs a known amplitude, and a transplanted real chunk
+does not have one.
+
+#### T is a surface, not a curve — duration is the second axis
+
+The slow consumers cannot resolve a brief injection: measured impulse responses
+are `2-50` 486 ms, `0-2` 1146 ms, `0.5-3` 3988 ms, so a 50 ms artifact reaching
+`slow_wave` is smeared across more than a second. Sweep duration
+**{50 ms, 500 ms, 5 s}** alongside amplitude, and check that the longest
+duration exceeds each consumer's own impulse response — for `0.5-3` at 3988 ms
+it barely does, so report that consumer's row as bounded by the sweep rather
+than as a resolved tolerance.
+
+#### Three further rules, and the host recording
+
+2. **Inject into a clean span, and prove it was clean before injecting.** State
+   the criterion used to select it and record the span in the output. An
+   injection on top of existing artifact measures the sum of the two, and a
+   tolerance derived that way is silently too high.
+3. **"Materially" is written down per consumer BEFORE measuring, not after.**
+   A criterion chosen once the curves are in hand is a curve-fitting exercise.
+   A.4's column is the starting point; make each row concrete (how many
+   crossings, how far a peak displaces) and commit to it in the task's output.
+4. **Sweep amplitude logarithmically and report the curve.** A scalar read off
+   a coarse grid is a grid artifact — this project has produced three wrong
+   constants that way (the σ-reduction factor twice, the cardiac window once).
+
+**Host: an old-cohort `bl` recording, and say why in the output.** The five
+consumers run on the 5-channel `_blankmotion.mat` format today, not on the
+9-channel new cohort, so the old cohort is where they can be exercised
+unmodified. `E1000_JEL_E1000_bl_1315` has `bad_fraction` 0.046 — the cleanest of
+the twelve, so clean spans are plentiful. Use a second host as a robustness
+check. **Caveat to record:** tolerances derived on old-cohort noise statistics
+must be re-derived on new-cohort data once the loader path exists; invariant 12
+forbids comparing across them, so they are provisional until then.
+
+**Do not diff against the per-recording `_vengmetrics.mat` / `_mmc.mat` /
+`_slowWaves.mat` / `_HRVMeasures.mat` sitting beside each recording.** They are
+tempting as a free clean baseline and they are the wrong one: they were produced
+by the stale configurations below, with older code. Recompute the clean baseline
+with the corrected consumer, in the same run.
+
+#### Correct the three stale configurations FIRST — approved
+
+`batch_spike_detect.m` hardcodes 300–5000 Hz, 6σ, order 3 and never reads
+`pipeline_params.m`, which already says 300–3000, 4.5σ, order 4,
+`sigmaReference='session'`. `detectSortNerveSpikesECAP.m:156` computes its own
+whole-file σ and ignores the session reference. `HR_BR_HRVAnalysis_new.m:171`
+still has `hrBandHz = [1 100]`, the band task 05 retired on measurement
+(10–150 at k=6: 0 false beats in 3160; 1–100 at k=3: 14).
+
+Step 9's premise is that a tolerance is a property of **the consumer as it
+actually runs**. Run it today and T is stale on arrival, the 09 gate inherits
+the staleness, and the labelling then targets it. **These are task 08 rows that
+task 08 missed** — it listed `step1_bandpass` and `step2_noise_sigma` but not
+the detector that consumes them, which is an omission in the spec, not in the
+work. Fix all three, then derive T once.
+
+Passing the session σ into `detectSortNerveSpikesECAP` also resolves the
+sweep's worst confound for free: a σ recomputed with the injection present is
+inflated by it, which deletes **real** spikes far from the injection site, so
+the tolerance curve would carry a global subtractive term on top of the local
+additive one. The session σ is a median over ~240 windows and one injection
+barely moves it. Report the curve decomposed into **spurious-added** and
+**real-lost** regardless — both are real damage and they have different causes.
+
+Expect the spike curve to be **non-monotonic** and do not "fix" it:
+`maxAmpUV = 150` means an injection above that produces candidates the amplitude
+gate then discards, so beyond 150 µV the damage stops being spurious spikes and
+becomes σ inflation and masking alone. That is the consumer's own crude artifact
+rejection showing up in the measurement, and it belongs in the report.
+
+#### `stomach_ref` — defined 2026-09-23, and it means two different things per cohort
+
+It is the **reference electrode for the stomach EMG**, and how it reaches the
+data changed between cohorts:
+
+| | referencing | stomach channels in the file |
+|---|---|---|
+| **old cohort** | in **hardware** — 3 recording channels against a local reference that was never digitised | 3, already referenced |
+| **new cohort** | **none in the TDT banks**; the reference electrode is digitised as its own channel and subtracted in software | 3 recorded, of which one **is** the reference → 2 usable signals |
+
+**Consequence for T: nothing is blocked.** The old-cohort host is
+hardware-referenced, so `mmc` and `slow_wave` run there unmodified. **Derive
+all five consumers on the old cohort.**
+
+**Consequence for later, which is not small.** Software referencing is not
+equivalent to hardware referencing and the tolerances do not transfer
+unchanged:
+
+- **Noise rises by about √2.** A hardware differential amplifier has one noise
+  source; subtracting two separately digitised channels sums two independent
+  ones. A tolerance expressed against σ therefore shifts.
+- **Gain and phase mismatch between the two ADC paths leaves residual common
+  mode**, which is exactly the motion signal the tripole work exists to remove.
+  Any mismatch shows up as motion surviving the subtraction.
+- **The number of usable stomach signals drops from 3 to 2**, so any statistic
+  pooled across stomach channels is not comparable across cohorts — invariant
+  12 territory.
+
+**The name is wrong and must change before it causes a bug.** `stomach_ref`
+reads as "the reference electrode" and A.4 uses it to mean "the stomach signal
+*after* referencing" — two things one letter apart, and the consumer table is
+consumed by code. Rename: the electrode is **`STOM_REF`** (a raw contact), the
+derived consumer signal is **`stomach_referenced`**. Detection still reads
+`STOM_REF` like any other raw contact (invariant 6 — motion appears on it too);
+it is only barred from being a *consumer* signal.
+
+**The software re-referencing derivation has no owner.** Task 04 derives
+`V1, V2, V3, T` for the nerve and stops there. The stomach derivation belongs
+beside it. But **which derivation is a measurement, not a declaration** —
+Andrea's instruction, and the right one: there is no tripole here, no geometry
+forcing the answer, so test it.
+
+##### The stomach electrodes are ordered, and that predicts the answer
+
+The three contacts run **closest to the pylorus → farthest**, and the gastric
+slow wave **propagates** along that axis (proximal to distal, a few mm/s). This
+makes the reference choice a trade-off rather than a ranking:
+
+- **Common mode is instantaneous** across all three, so any subtraction rejects
+  it.
+- **The slow wave is not** — it arrives at each contact with a phase lag, so
+  subtraction also *cancels part of the signal*, and it cancels most between
+  the contacts that are closest together in propagation time.
+
+Prediction to test: **an end electrode is a better reference than the middle
+one**, because the middle gives two short-baseline pairs and cancels most; an
+end gives one long-baseline pair that preserves the most slow wave. If the
+measurement disagrees with that, the disagreement is the interesting result.
+
+##### Test three families, not three electrodes
+
+Restricting the test to "which of the three as reference" assumes a
+common-reference montage. Two alternatives are standard for propagating gastric
+signals and must be in the comparison:
+
+```
+common reference   STOM_i - STOM_k        for each k   -> 2 signals   (Andrea's proposal)
+common average     STOM_i - mean(STOM)                 -> 3 signals   (max common-mode rejection)
+sequential bipolar STOM_1-STOM_2, STOM_2-STOM_3        -> 2 signals   (classic for propagation;
+                                                                       also yields direction and velocity)
+```
+
+##### The criterion is pre-registered, per consumer, and is NOT one number
+
+**"Best output" chosen after seeing the curves is curve-fitting**, and this
+project has already produced a channel that scored best by detecting 53% fewer
+beats. Fix the metrics first, report all of them per derivation, and let the
+trade-off be visible:
+
+| metric | what it protects |
+|---|---|
+| slow-wave SNR in `0-2` | signal preserved, not cancelled |
+| `2-50` SNR | the `mmc` consumer, which is a different band |
+| residual common mode | coherence of the derived signal with the common component shared across the **nerve** channels, which is motion |
+| cancellation loss | derived amplitude against the best single contact's amplitude |
+
+**`mmc` (2-50 Hz) and `slow_wave` (0-2 Hz) may prefer different derivations,
+and that is a legitimate outcome** — they are different consumers and the
+consumer table already allows per-consumer signals. Do not force one winner.
+
+Once chosen: **declared in the channel map, recorded in provenance, and never
+mixed** (invariant 12). This is a measurement task on **new-cohort** data, where
+`STOM_REF` is digitised — `gems_j_t01_ms3_bl_230315` has the three contacts. It
+**does not block T**, which runs on the hardware-referenced old cohort.
+
+#### `slow_c` is a stale row — struck
+
+Searched `processing_new` (136 `.m`), `GEMSBlanking`, `detector-pyqt`, the full
+git history of all three, both `.docx` reports, and the C-fibre hypothesis
+(`compound action`, `CAP`, `unmyelinated`, `c-fib*`, `slowConduction`): zero
+hits outside this document. Independently corroborated: of the eight derived
+output files beside each of 406 recordings, **none is `slow_c`-shaped**. It was
+never implemented because I invented it. **Remove it from A.4.** If a
+slow/C-fibre consumer is wanted later, `step5e_multiband_validate.m:47` already
+implements the mechanism (tripole → sub-spike band → own-sigma MAD) with band C
+at 100–500 Hz; promoting and narrowing it is a small change, and it would be a
+new consumer with its own tolerance, not this row revived.
 
 **Scope: the five implemented consumers.** `velocity` is task 18 and does not
 exist yet; its tolerance is already measured and recorded in A.5 (~1× raw, ~5×
