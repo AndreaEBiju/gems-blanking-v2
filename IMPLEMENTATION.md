@@ -526,31 +526,53 @@ plausible doing it. Detect the crossing per-kind with the direction declared,
 and report `clip`'s tolerance as an upper-rail figure with its own units and
 sign convention stated.
 
-#### `mmc`'s per-sample criterion cannot produce a threshold — report both
+#### `mmc`: the criterion was mis-specified, and the diagnosis of it was too
 
-The pre-registered `mmc` criterion is a per-sample set difference on the
-3×moving-MAD boolean. Over a 180 s span that is hundreds of thousands of
-independent borderline decisions, so **any** perturbation flips a few: the
-criterion fires at arbitrarily small amplitude by construction. The +3/−4 seen
-at 0.5σ is that, and it is hard invariant 10b in a third form — first across
-`(signal, band)` pairs, then across lags in task 02, now across samples.
+**Corrected 2026-09-23 by reading `extract_mmc.m:299`.** `mmc.burst.events` was
+never a dense per-sample threshold boolean: `ev_bool` sets **one sample true per
+burst peak**, with peaks grouped at the 0.5 s `burstRefractory`. It was already
+an event list.
 
-**This is not a criterion to quietly replace after seeing the data** — rule 3
-forbids exactly that. Do both:
+So the `+3/−4` at 0.5σ was **3 bursts added and 4 lost**, and its cause was
+`match_s = 0` — a burst peak moving by one sample scoring as one lost plus one
+added — **not** hundreds of thousands of borderline per-sample decisions. The
+invariant-10b reading was wrong. Recorded because it is the **third** time a
+component's behaviour has been asserted from a symptom rather than read from its
+source (task 01's `labeled_save.py`, the stomach-as-control argument in the
+tripole check, this). The pattern is always the same: the symptom fits a known
+failure mode, and the check that would refute it is cheaper than the reasoning
+that supports it.
 
-1. **Keep the per-sample criterion and report its result honestly**, including
-   "below the grid" if that is what it is. Extend the `mmc` amplitude grid
-   **downward** by five √2 steps (to ≈0.0625σ) so the number is located rather
-   than merely bounded. A consumer whose output changes at 0.06σ is a finding
-   about that consumer.
-2. **Add a burst-level criterion and make it the one task 14 routes on**: a
-   burst added, a burst lost, or a burst onset/offset displaced beyond a floor,
-   where a burst is a contiguous run of the boolean above a stated minimum
-   duration. That matches how the other four consumers are defined (events, not
-   samples) and matches what the science actually uses — MMC bursts, not
-   individual suprathreshold samples.
+**Consequence: the strict row is not a tolerance.** An exact-match comparison at
+sample resolution (41 µs) on a burst peak in a 2–50 Hz band whose impulse
+response is 486 ms is a timing criterion four orders of magnitude tighter than
+the signal can support. It fires at the bottom of any grid by construction, and
+reporting "mmc tolerance < 0.09σ" would be a finding about the comparison, not
+about the consumer.
 
-Report both curves, same runs, same pattern as `hrv`.
+Emit it with a status rather than a number, borrowing task 02's pattern:
+
+```
+mmc_exact   status = "criterion_degenerate"   no tolerance value
+mmc_burst   status = "measured"               the tolerance task 14 routes on
+```
+
+`mmc_burst` matches within `burstRefractory` and uses it as the displacement
+floor — **derived from the consumer** (the separation below which `extract_mmc`
+itself will not call two bursts distinct), not chosen. Keep the downward grid
+extension; it is already generated and it confirms the flatness cheaply.
+
+#### Sanity-check the burst rate against the slow wave before trusting `mmc`
+
+The baseline is **90 / 111 / 73 bursts in 180 s** — 30–37 per minute — against a
+slow wave measured at **4.7 cpm** on the same span. That is a factor of **7**.
+If gastric spike bursts are phase-locked to the slow wave, roughly one per cycle
+is expected and 7× suggests the burst detector is firing on something else.
+
+Check it with data already in hand: take the baseline `mmc` burst times and
+`slow_wave` peak times and test whether bursts concentrate at a consistent slow-
+wave phase. **If they do not, the `mmc` tolerance is a tolerance for a detector
+that is not detecting MMC**, and that matters more than its numeric value.
 
 #### Report the statistic as well as the fiducial, for `hrv`
 
