@@ -232,10 +232,16 @@ this design exists to remove.
 14  10   convert old labels to events (what survives)
 15  12   classifier, three modes      12A registry
 16  13   extent      14 routing      15 masks + QC
-17  08   MATLAB fixes                 ─ any time, independent
-18  17   video        18 velocity      03B stim split
-19  19 ◆ end-to-end acceptance
+17  08   MATLAB fixes                 ─ DONE 2026-09-23
+18  16A  application shell + UI tree  ─ added: was missing from this list
+    16B  training/eval dashboard      ─ added: was missing from this list
+19  17   video        18 velocity      03B stim split  ─ 03B DONE
+20  19 ◆ end-to-end acceptance
 ```
+
+*Corrected 2026-09-23: 16A and 16B were never scheduled here even though both
+are specified below, and together they are the largest remaining block. 19's
+acceptance runs through the shell, so it depends on them.*
 
 Steps 1–12 are the whole pre-gate commitment: a loader, a candidate generator and
 a labelling UI. **None of that is wasted if the gate fails** — the U-Net fallback
@@ -263,6 +269,30 @@ slow wave a peak displaces. Report a tolerance curve per consumer, not a scalar.
 **First evidence this matters:** a 200 µV common-mode artifact is only rejected
 ~2.5× by the tripole (measured), so it still lands at ~27σ on `T`. Intuition about
 what is "small" is unreliable here.
+
+#### T is a MATLAB task, in `processing_new`. Decided 2026-09-23.
+
+A tolerance is a property of **the consumer as it actually runs**, and five of
+the seven consumers are MATLAB: `spikes` (`step2_noise_sigma` +
+`batch_spike_detect`), `mmc` (`extract_mmc`), `slow_wave`
+(`slowWaveAnalysis_new`), `breathing` and `hrv` (`HR_BR_HRVAnalysis_new`).
+Reimplementing any of them in Python to make T callable from the Python harness
+would measure **the reimplementation's** tolerance, and two implementations of a
+consumer means two tolerances — one of which would silently be wrong. No bridge,
+no subprocess handoff: T is a script in `processing_new` that writes a small
+`consumer_tolerances.json`, and the Python side reads that file.
+
+This does not move any other boundary. **Python does detection and blanking;
+MATLAB does the science; the handoff is per-consumer masks in `.mat`** — exactly
+what detector-pyqt did and what tasks 08 and 15 already assume. Model training
+stays in Python.
+
+**Scope: the five implemented consumers.** `velocity` is task 18 and does not
+exist yet; its tolerance is already measured and recorded in A.5 (~1× raw, ~5×
+band-limited, ~1.4× broadband), so T records that value by reference rather than
+re-deriving it. **`slow_c` has no identified implementation** — find it or say so;
+a consumer in the table with no code behind it is either a missing analysis or a
+stale row, and both need resolving before task 13 consumes this table.
 
 ### Step 11 — labelling that doubles as the measurement
 
