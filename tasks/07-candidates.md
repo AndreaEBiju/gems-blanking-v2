@@ -52,9 +52,11 @@ do not guess. Anything longer is a sustained level shift, not an event.
 **The labels are not on this drive.** A full walk of all 3442 directories under
 `<gems_root>` on 2026-09-22 found **zero** `*_segment_indices.mat`. This is no
 longer "the archive is unreachable" — the archive is mounted and the files are
-not in it. Before concluding they are lost, search for the companion
-`*_segments.mat` that `browseMotionArtifacts` writes, and the sibling folders on
-the shared drive (`GEMS-Lyna`, `Louise`, `Arjun`).
+not in it. That search has now been extended and is exhausted: **zero** `*_segments.mat`
+and zero `*_segment_indices.mat` across **8721 directories** — GEMS-Andrea
+(3442), GEMS-Lyna (2012), Louise (99), Arjun (3168). The old cohort's labels are
+not on this shared drive at all. This is a question for Andrea, not a search
+problem; do not spend more time looking.
 
 Until they are found it is `None`, meaning **no cap was applied and
 that fact is recorded** — provenance key absent, per the conventions table,

@@ -72,12 +72,16 @@ seeking to the tail costs the same as reading the head, because Drive fetches
 ranges rather than materialising the file. Header-only and metadata-only passes
 are cheap and should be preferred everywhere they suffice.
 
-Directory enumeration is the slow part: **4.7 directories per second**, 3442
-directories, so a bare walk of the corpus is **12 minutes**. Two consequences,
+Directory enumeration is the slow part **on a cold cache**: 4.7 directories per
+second, 3442 directories, a **12-minute** walk. Measured again after that walk:
+**8 seconds**, ~90× faster, because Drive caches directory metadata locally once
+enumerated. So 12 minutes is a first-run-on-a-new-machine cost, not a recurring
+one, and an interactive re-scan is viable after the first. Two consequences,
 both binding:
 
-- **Task 03A's scan must be cached, not interactive.** A 12-minute walk cannot
-  sit in front of a user pressing "scan". Persist the index under
+- **Task 03A's scan must still be cached**, but for the cold case only. A
+  12-minute first walk cannot sit in front of a user pressing "scan"; an 8 s
+  warm one can. Persist the index under
   `cache/` (local, never inside `gems_root`), key entries by path plus mtime
   plus size, and re-walk only what changed. The UI shows the cached tree
   immediately and refreshes behind it.
