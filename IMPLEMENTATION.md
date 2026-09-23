@@ -819,13 +819,42 @@ def measure_cardiac_window(
 ```
 
 ### Algorithm
-1. For each channel and band, compute the band envelope (task 07's function).
+1. For each channel and band, compute the band envelope — **task 06's**
+   `band_envelope`, not task 07's (07 has no envelope function; this line was
+   wrong). Use the current six bands of A.3, with `padtype="constant"` and the
+   settling trim already in place. **The 2026-09-19 numbers below were taken at
+   the old band edges** (`300-5000`, `1-100`) with neither fix, so they are a
+   prior to compare against, not a result to reproduce.
 2. Extract ±`halfwidth_s` about every R-peak; average across beats.
 3. Baseline = the `baseline_pct` percentile of the profile's outer thirds.
 4. Window = the **contiguous** span around lag 0 exceeding
    `baseline + 3 × MAD(outer thirds)`. If no sample exceeds it, return `None`.
 5. Report recovered duty cycle: `1 − (window_duration × beat_rate)` vs the current
    uniform 30 ms.
+
+### The measured extent is an envelope extent, not a signal extent
+
+An envelope computed over `window_s` cannot resolve anything shorter than
+`window_s`: a perfect impulse at lag 0 produces a measured extent of about
+±`window_s/2`. The 2026-09-19 result shows this plainly — `300-5000` measured
+−15 to +14 ms with a 25 ms envelope window, which is the window and essentially
+nothing else. **Taken at face value it would justify blanking 30 ms of a band
+where the QRS carries 0.00–0.54% of its energy.**
+
+So report three numbers per `(channel, band)`, never one:
+
+```
+extent_env_s      the measured span                       (what step 4 returns)
+window_s          the band's envelope window              (the resolution floor)
+extent_signal_s   max(0, extent_env_s - window_s)         (the blanking input)
+```
+
+**`extent_signal_s` is what task 13 and the MATLAB `cardiacRemoveWinMs` consume.**
+An `extent_env_s` at or below `window_s` means *unresolved*, which for blanking
+purposes is `0` plus a note — not `window_s`. Flag any band where the two are
+within 20% of each other: that is the regime where the answer is "shorter than we
+can see", and reporting it as a measurement would bake a resolution limit into
+every recording as if it were physiology.
 
 ### Expected result — falsifies the plan if wrong
 Predicted from QRS energy (superseded by the measurement below — kept for the
