@@ -562,7 +562,54 @@ floor — **derived from the consumer** (the separation below which `extract_mmc
 itself will not call two bursts distinct), not chosen. Keep the downward grid
 extension; it is already generated and it confirms the flatness cheaply.
 
-#### Sanity-check the burst rate against the slow wave before trusting `mmc`
+#### MEASURED 2026-09-23: `mmc.burst` is not detecting MMC
+
+Rayleigh test of burst phase within the enclosing slow-wave cycle, same
+channel, from the baselines — no extra runs:
+
+| | bursts/cycle | median R | rows with p < 0.05 |
+|---|---|---|---|
+| 9 channel×span rows, 2 animals | **5.0–9.3** | **0.076** | **0 of 9** |
+
+Mean phases scatter across the cycle (0.03–0.98) with no consistency between
+channels or animals. Temporal structure was tested separately to rule out MMC
+phase III: inter-burst CV 0.53–1.16 (Poisson-like to slightly *regular*, not the
+CV ≫ 1 of long epochs separated by quiescence), and the largest inter-burst gap
+anywhere is 18.1 s across spans of 180–420 s — no quiescent period at all.
+
+**Stated limit of the test:** a rat MMC cycle is 90–120 minutes and these spans
+are 3–7 minutes, so nothing here can confirm or refute MMC on its own
+timescale. What it establishes is narrower and sufficient: the events are
+neither one-per-slow-wave-cycle, nor phase-locked, nor temporally structured.
+**A tolerance on them is a tolerance for a generic 2–50 Hz activity-episode
+detector, whatever the variable is called.**
+
+##### The decisive cheap follow-up: re-group with a longer refractory
+
+The most likely benign explanation is **over-fragmentation**, not
+mis-detection: `group_events` uses a 0.5 s `burstRefractory`, and a single
+real gastric spike burst lasting a few seconds can easily contain several
+suprathreshold episodes separated by more than 0.5 s — which would produce
+exactly 5–9 detections per cycle from one true burst.
+
+Test it in one line: **re-group the existing burst times at 2 s, 3 s and 5 s
+and see whether the group count converges on the slow-wave cycle count.** If it
+does, the detector is right and `burstRefractory` is too short; if it does not,
+the detector is responding to something that is not slow-wave-locked at all.
+Either answer is worth more than the tolerance.
+
+##### This belongs on task 08, not task T
+
+It is a defect in `processing_new`, found while measuring against it. **Add a
+task 08 row**: validate or rename the `mmc` consumer. If the re-grouping test
+says over-fragmentation, the fix is `burstRefractory`. If it says otherwise,
+the variable is misnamed — `mmc` in a results table implies migrating motor
+complex to any reader, and a name is a claim.
+
+**T proceeds regardless.** The caveat rides with the number in
+`consumer_tolerances.json`; it does not block the sweep.
+
+#### Superseded — the original sanity-check instruction
 
 The baseline is **90 / 111 / 73 bursts in 180 s** — 30–37 per minute — against a
 slow wave measured at **4.7 cpm** on the same span. That is a factor of **7**.
@@ -3293,6 +3340,7 @@ does not support the uniform claim.* Two rows are decisive, one is not:
 | `HR_BR_HRVAnalysis_new.m` | promote `RR_implausibleFraction` / `br_implausibleFraction` from warnings to masks — for a periodic always-present signal, an implausible rate *is* evidence of contamination. Done: RR outside [100, 500] ms is excluded and `rrRuns` treats the hole as a run boundary, so no successive difference crosses it; beats are **not** invented back, consistent with the gap-rescue decision in task 05. **Two asymmetries to resolve:** the breath path *drops a peak* where the cardiac path *drops an interval*, and it drops **the later peak of each implausible pair** — an ordering rule, not a principled one. Drop by **lower prominence** instead, and make the breath hole a run boundary too, so the two signals are censored the same way |
 | `slowWaveAnalysis_new.m:159-161` | pool peaks across clean runs instead of taking only the longest — two clean 28 s halves in a 60 s window currently return NaN |
 | `bulk_mixed_models.m` | coverage weights + covariate + minimum-coverage exclusion. `nRR_used`, `fr_validFrac`, `validDur_s` are all computed and none is used. Done as three separate things, correctly: **exclusion** (`minCoverage = 0.5`), **weight** (linear in coverage), and **covariate in both the full and reduced models**, so the interaction test is at matched coverage. Unverified end to end — `normRows` is built at runtime from the unreachable archive. **Task 19 must REFUSE when `hasCoverage` is false, not warn.** A confound check that silently runs without its confound covariate reports "no confound" for the wrong reason, which is worse than not running; this is hard invariant 19's rule applied to a covariate rather than a settling time |
+| `extract_mmc.m` — **the `mmc` consumer may not be detecting MMC** | Measured 2026-09-23 while deriving T: 5.0–9.3 burst events per slow-wave cycle, Rayleigh R median 0.076, **0 of 9 channel×span rows significant**, no temporal clustering (CV 0.53–1.16, largest gap 18.1 s). Most likely over-fragmentation — `group_events`' 0.5 s `burstRefractory` splitting one real spike burst into several. **Re-group the existing burst times at 2 / 3 / 5 s and see whether the count converges on the slow-wave cycle count.** If yes, fix `burstRefractory`; if no, the variable is misnamed and `mmc` in a results table is a claim the data does not support |
 | `browseMotionArtifacts.m:34` | `validateattributes(..., 'finite')` throws on NaN, so an already-blanked file cannot be re-browsed. Remove if the browser is kept |
 | ~~every `filtfilt` call at a low corner~~ | **Audited and withdrawn as a padtype problem — measured, no change needed.** The row predicted that MATLAB's mandatory odd extension would reproduce task 06's transient. It does not, and the reason is worth keeping: MATLAB pads `3·2·n_sections` = **6 samples**, which at 24.4 kHz is **0.246 ms**. Odd and constant padding differ by 11.8% of sd at 0.5 s from the edge, 1.1% at 2 s and **0.00% by 15 s**; peaks surviving the existing edge buffer, **13 either way**. scipy's damage came from odd-extending across a pad long enough for the signal to move; a quarter-millisecond pad of a 0.15 Hz signal cannot. **The settling itself is real and is already handled**: measured `impz` 8.17 s against a 15 s buffer, and the code's `order/cutoff` heuristic (13.33 s) over-estimates it, which is the safe direction. Generalising a scipy result to MATLAB without measuring was the error here |
 | `extract_mmc.m` — **`xf(~isfinite(xf)) = 0`** | **Hard invariant 1, violated, live.** If `fillmissing` leaves anything non-finite it becomes **zero**, and a zero is indistinguishable from signal to everything downstream. This is the exact defect task 01 was written for — which turned out to have been fixed upstream in `a95d1ff` before this project began — found here for real, in a different file. **Highest priority row in this task.** Fix to NaN and let the consumer decide; audit the rest of `processing_new` for the same construct |
