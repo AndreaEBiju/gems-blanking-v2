@@ -386,49 +386,46 @@ leaves residual common mode. Label the row **`T_hardware`** and record the
 caveat; treat it as provisional for the new cohort exactly as `mmc` and
 `slow_wave` are.
 
-**Checked 2026-09-23, and the evidence leans AGAINST A.6.** The methods document
-contradicts itself — its title says "tripolar cuff electrodes", its §2 says
-"**two single-contact cuffs** on separate branches … one recording channel per
-cuff … treated as two independent single-channel recordings". Measured
-discriminator (the heart is one source: a shared distant reference gives
-near-identical QRS on both channels; two independent local tripoles cancel it
-locally and leave differing residuals):
+**CONFIRMED 2026-09-23 by Andrea from the wiring record: tripolar cuffs with
+the outer contacts shorted together before the amplifier.** A.6 is right. The
+old-cohort `RVN` and `LVN` channels each **are** `T`, with `a = b = 0.5` forced
+by the wiring. Label the row **`T_hardware`**. Common-mode rejection is
+exercised and the spike tolerance measured here is a tripole tolerance.
+
+**The measurement could not have settled this, and one of the arguments used
+against A.6 was wrong — mine.** For the record, since the same mistake is easy
+to repeat:
 
 | | host 1 | host 2 |
 |---|---|---|
-| QRS **shape** correlation, nerve ch1↔ch2 | **+0.980** | **+0.973** |
-| same, stomach pair (**known** hardware-referenced) | +0.620 | +0.753 |
-| ENG-band sample correlation ch1↔ch2 | +0.806 | +0.846 |
+| QRS **shape** correlation, nerve ch1↔ch2 | +0.980 | +0.973 |
+| same, stomach pair | +0.620 | +0.753 |
 | QRS peak on nerve | 4.94σ / 2.87σ | |
 | QRS peak on stomach | 0.25–0.48σ | |
 
-**Read the stomach row as the control and this is close to settled.** The
-locally-referenced stomach pair correlates at 0.62 and carries the QRS at
-0.25–0.48σ; the nerve pair correlates at 0.98 and carries it at 3–5σ. A tripole's
-whole purpose is rejecting a far field, and these channels are not rejecting
-it — they are behaving like the *less* locally-referenced pair in the same file,
-not the more. The counter-argument (two nearby tripoles can share residual
-shape, since a far field's second spatial derivative varies slowly) is fair but
-does not survive 0.98 across two anatomically distinct branches.
+I argued the stomach pair was the control and the nerve pair was failing it.
+**The stomach is not a valid control**: it sits at a different distance and
+orientation to the heart, so it sees a field with more spatial variation. A
+tripole's residual is the second spatial derivative of the field along the
+cuff, and for a **distant** source that is a scaled copy of the same waveform
+at both cuffs — so 0.98 between two genuine tripoles is expected, not anomalous.
+Comparing two montages at different distances from the source and treating the
+difference as evidence about montage was the error. The correct verdict was the
+one reached first: **if the contacts are shorted before the ADC, the file is
+byte-identical to a single-ended recording and no analysis of it can
+discriminate.** Hardware questions need hardware records.
 
-**A.6's "hardware-shorted tripole" is therefore probably my error**, and the
-file cannot prove it either way: if outer contacts were shorted before the ADC
-the recording is byte-identical to a single-ended one, and `_blankmotion.mat`
-carries no montage field. **This needs the surgical or wiring record, not more
-analysis.**
+**Finding worth keeping: a confirmed tripole still passes the QRS at 3–5σ.**
+That is consistent with the ~2.5× common-mode rejection in A.5 and it
+strengthens the project's premise rather than weakening it — the tripole alone
+does not remove cardiac or motion common mode, which is why per-consumer
+blanking exists at all. Record it in the T output alongside the tolerances.
 
-**Ruling: proceed, and label the row `spikes_single_ended_unverified`.** The
-sweep procedure is identical either way; only the label and its transferability
-change, and blocking four other consumers on a hardware question would be the
-wrong trade. If it is single-ended, the measured tolerance is for a signal with
-**no** common-mode rejection, and the tripole's tolerance in µV is roughly
-**2.5× higher** for common-mode kinds (A.5's measured rejection) — record that
-mapping rather than applying it.
-
-If it is confirmed single-ended, A.6's stated reason for not gating on the old
-cohort also changes, and in the direction that strengthens it: single-ended
-channels have no common-mode rejection at all, so they are further from the new
-setup than "hardware tripole" implied.
+What still does **not** transfer to the new cohort: a hardware tripole sums
+before a single ADC; task 04's software tripole sums three separately digitised
+channels, so it carries more converter noise and any inter-channel gain or
+phase mismatch leaves residual common mode. Treat `T_hardware` tolerances as
+provisional for the new cohort, exactly as `mmc` and `slow_wave` are.
 
 **Host: an old-cohort `bl` recording, and say why in the output.** The five
 consumers run on the 5-channel `_blankmotion.mat` format today, not on the
