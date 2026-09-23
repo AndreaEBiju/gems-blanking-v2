@@ -305,6 +305,35 @@ The rule is **never reimplement the thing you are measuring**. Crossing a
 language boundary with files is not a violation of it; it is the same handoff
 tasks 08 and 15 already use.
 
+#### Use `conftest.inject_artifact`, not `synthesize.py`
+
+`synthesize.py`'s injectors randomise amplitude **and** duration internally from
+an `rng`, express amplitude in MAD units, and place the artifact at the end of
+the array; `inject_broadband` caps duration at 0.5 s, so the sweep's 5 s point
+is unreachable. They were built to generate a training corpus, where variety is
+the point. **T needs the opposite: a known amplitude at a known time.**
+
+`tests/conftest.py:inject_artifact(sig, fs, t0_s, dur_s, kind, amp_ratio, seed)`
+takes exactly the sweep's axes, implements all four kinds, and CLAUDE.md already
+makes `conftest` the owner of every generator. This is consistent with what
+task 09 already says — "prefer transplant for the gate; **keep the parametric
+kinds for the amplitude/duration sweep, where a known amplitude is the
+point**". Do not modify `synthesize.py`.
+
+#### The sweep grid is in σ, with µV reported alongside
+
+Per-channel robust σ on the host is 16–35 µV and **the data are in volts**
+(invariant 14 — declared, not inferred). A fixed µV amplitude is therefore a
+different multiple of σ on each channel, while every consumer thresholds in σ.
+**Grid the sweep in σ** so it is comparable across channels, animals and
+cohorts, and report µV as a derived column.
+
+The 50 mV ceiling is ~1400×σ and ~100× the largest sample in the recording
+(max |x| = 0.5 mV). Run it, and **mark where the curve leaves the physically
+observed range** rather than truncating — a tolerance that only exists above
+anything the electrode has ever seen is a finding about the consumer, not a
+number to use.
+
 #### Artifact kinds: the four that already exist
 
 `step`, `clip`, `drift`, `tribo` — `conftest.py`'s names, reconciling with
@@ -338,11 +367,36 @@ than as a resolved tolerance.
    a coarse grid is a grid artifact — this project has produced three wrong
    constants that way (the σ-reduction factor twice, the cardiac window once).
 
+##### The old-cohort nerve channel IS a tripole — a hardware one
+
+The old cohort's two nerve channels are not single-ended. A.6 records the
+cohort as **"the hardware-shorted tripole — 5 channels, one derived signal per
+nerve"**: the tripole is formed physically by shorting the outer contacts
+before the amplifier, so `RVN` and `LVN` each *are* `T`, with `a = b = 0.5`
+forced by the wiring rather than chosen in software. **Common-mode rejection is
+therefore exercised**, and a spike tolerance measured here is a tolerance for a
+tripole, not for a bare contact.
+
+What does **not** transfer is the same distinction as the stomach reference,
+one level up: a hardware tripole sums before a single ADC, the software tripole
+of task 04 sums three separately digitised channels, so the software version
+carries more converter noise and any inter-channel gain or phase mismatch
+leaves residual common mode. Label the row **`T_hardware`** and record the
+caveat; treat it as provisional for the new cohort exactly as `mmc` and
+`slow_wave` are.
+
+If the recording metadata contradicts A.6 on this — if those channels turn out
+to be genuinely single-ended — **that is a finding, and it invalidates the
+`spikes` row rather than merely caveating it.** Check before measuring.
+
 **Host: an old-cohort `bl` recording, and say why in the output.** The five
 consumers run on the 5-channel `_blankmotion.mat` format today, not on the
 9-channel new cohort, so the old cohort is where they can be exercised
-unmodified. `E1000_JEL_E1000_bl_1315` has `bad_fraction` 0.046 — the cleanest of
-the twelve, so clean spans are plentiful. Use a second host as a robustness
+unmodified. `E1000_JEL_E1000_bl_1315` was proposed on `bad_fraction` 0.046, **and that
+number is the wrong quantity** — it is the *model's* bad-window fraction on
+that LORO test fold, not the file's manually blanked fraction, which measures
+0.0012. Two different things read off the same word. Pick the host on the
+measured blanked fraction and on longest clean run, not on the LORO column. Use a second host as a robustness
 check. **Caveat to record:** tolerances derived on old-cohort noise statistics
 must be re-derived on new-cohort data once the loader path exists; invariant 12
 forbids comparing across them, so they are provisional until then.
@@ -382,6 +436,22 @@ Expect the spike curve to be **non-monotonic** and do not "fix" it:
 gate then discards, so beyond 150 µV the damage stops being spurious spikes and
 becomes σ inflation and masking alone. That is the consumer's own crude artifact
 rejection showing up in the measurement, and it belongs in the report.
+
+#### Injection targets, and the cross-consumer coupling
+
+Inject per-consumer into the channels that consumer actually reads (nerve for
+`spikes`, stomach for `mmc` / `slow_wave`, the HR channel for `breathing` /
+`hrv`), **plus a common-mode condition** that puts the same waveform on all
+five channels at once. The common-mode condition is the motion case and it is
+the only one that exercises the tripole's rejection — without it the sweep
+measures differential artifact only.
+
+**`mmc` is downstream of `hrv`.** `extract_mmc` needs the `_HRBR` output, so
+each sweep point runs `HR_BR_HRVAnalysis_new` first. The consequence is real
+and must be reported rather than engineered away: **an injection on a nerve
+channel can reach `mmc` indirectly**, by perturbing the R-peaks used for
+cardiac removal. A consumer's tolerance is therefore not a property of its own
+input alone, and the dependency belongs in the output.
 
 #### `stomach_ref` — defined 2026-09-23, and it means two different things per cohort
 
@@ -494,9 +564,8 @@ new consumer with its own tolerance, not this row revived.
 **Scope: the five implemented consumers.** `velocity` is task 18 and does not
 exist yet; its tolerance is already measured and recorded in A.5 (~1× raw, ~5×
 band-limited, ~1.4× broadband), so T records that value by reference rather than
-re-deriving it. **`slow_c` has no identified implementation** — find it or say so;
-a consumer in the table with no code behind it is either a missing analysis or a
-stale row, and both need resolving before task 13 consumes this table.
+re-deriving it. **`slow_c` is struck** — see the ruling below; this sentence
+previously said "find it or say so" and contradicted it.
 
 ### Step 11 — labelling that doubles as the measurement
 
