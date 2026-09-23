@@ -493,6 +493,53 @@ Two rules follow, both general:
    is far from ~1.4, or whose samples pile up near zero. A robust estimator is
    robust, not omniscient.
 
+#### One grid point is one realisation — replicate near the crossing
+
+`inject_artifact` takes a seed, and `tribo` in particular is stochastic. A
+threshold read off a single realisation per amplitude is a single-seed
+estimate presented as a constant, which is how this project produced three
+wrong numbers already. It is also sensitive to **where** the artifact landed:
+a 500 ms injection falling on a breath peak is not the same experiment as one
+falling between breaths.
+
+Two passes, which costs little:
+
+1. **Locate** — one seed across the full amplitude grid, per (kind, duration,
+   channel-set).
+2. **Replicate** — **5 seeds** at the five grid points bracketing the crossing,
+   with the injection position `t0` varied by seed as well as the waveform.
+   Report the threshold as **median and range across seeds**, never a bare
+   scalar, and treat a range spanning more than one √2 grid step as a finding
+   about the consumer rather than noise to average away.
+
+#### Report the statistic as well as the fiducial, for `hrv`
+
+A.4 declares `hrv`'s criterion as "beat train unchanged", and the
+pre-registered 1 ms displacement honours that. But 1 ms on one beat out of
+~1250 moves RMSSD by well under a tenth of a percent, so the fiducial
+criterion is far stricter than "material to the statistic the consumer
+exists to produce". Both are legitimate and they will give different
+tolerances.
+
+**Report both curves from the same runs** — the fiducial one as primary, since
+that is what A.4 declares, and a statistic-level one (RMSSD, SDNN, pNN5)
+alongside. Task 14's routing should be able to see the gap between "the beat
+train moved" and "the number a paper would report moved".
+
+#### Two smaller corrections to step B
+
+- **`slow_wave` needs a longer span than 180 s.** Thirteen to fifteen peaks per
+  channel at ~4.7 cpm is the thinnest statistics of the five and its curve will
+  have the widest error bars. Host 2 has a single **599 s** clean run — run the
+  `slow_wave` rows there, where the same span gives ~47 peaks per channel.
+- **`breathing`: report displacement, do not threshold on it.** Count-only is
+  the right *criterion*, but the stated reason — that half the 3988 ms impulse
+  response exceeds the breath interval — conflates settling time with timing
+  resolution. A 0.5–3 Hz band passes 1.58 Hz breathing perfectly well and can
+  time successive peaks; the long impulse response is an edge effect, not an
+  inability to resolve. So report the displacement distribution as data and let
+  it show whether a displacement criterion is recoverable later.
+
 #### Injection targets, and the cross-consumer coupling
 
 Inject per-consumer into the channels that consumer actually reads (nerve for
