@@ -132,6 +132,7 @@ No 0–2 or 2–50 Hz mask on nerve signals. No 300–5000 Hz mask on stomach si
 | 60 Hz notch ring into ENG band | 0.221 µV per mV excursion |
 | Bandpass gain at 60 Hz through `filtfilt` | −36.4 dB |
 | QRS energy above 300 Hz | 0.00–0.54% |
+| σ reduction, 300–5000 → 300–3000 | **12–14% measured**, not the 24% A.5b implies |
 | QRS energy below 3 Hz | 0.00% |
 | QRS energy in 100–300 Hz (8–12 ms QRS) | 32.1–65.2% |
 | Smooth motion energy below 300 Hz | 98.7–99.7% |
@@ -385,9 +386,49 @@ leaves residual common mode. Label the row **`T_hardware`** and record the
 caveat; treat it as provisional for the new cohort exactly as `mmc` and
 `slow_wave` are.
 
-If the recording metadata contradicts A.6 on this — if those channels turn out
-to be genuinely single-ended — **that is a finding, and it invalidates the
-`spikes` row rather than merely caveating it.** Check before measuring.
+**Checked 2026-09-23, and the evidence leans AGAINST A.6.** The methods document
+contradicts itself — its title says "tripolar cuff electrodes", its §2 says
+"**two single-contact cuffs** on separate branches … one recording channel per
+cuff … treated as two independent single-channel recordings". Measured
+discriminator (the heart is one source: a shared distant reference gives
+near-identical QRS on both channels; two independent local tripoles cancel it
+locally and leave differing residuals):
+
+| | host 1 | host 2 |
+|---|---|---|
+| QRS **shape** correlation, nerve ch1↔ch2 | **+0.980** | **+0.973** |
+| same, stomach pair (**known** hardware-referenced) | +0.620 | +0.753 |
+| ENG-band sample correlation ch1↔ch2 | +0.806 | +0.846 |
+| QRS peak on nerve | 4.94σ / 2.87σ | |
+| QRS peak on stomach | 0.25–0.48σ | |
+
+**Read the stomach row as the control and this is close to settled.** The
+locally-referenced stomach pair correlates at 0.62 and carries the QRS at
+0.25–0.48σ; the nerve pair correlates at 0.98 and carries it at 3–5σ. A tripole's
+whole purpose is rejecting a far field, and these channels are not rejecting
+it — they are behaving like the *less* locally-referenced pair in the same file,
+not the more. The counter-argument (two nearby tripoles can share residual
+shape, since a far field's second spatial derivative varies slowly) is fair but
+does not survive 0.98 across two anatomically distinct branches.
+
+**A.6's "hardware-shorted tripole" is therefore probably my error**, and the
+file cannot prove it either way: if outer contacts were shorted before the ADC
+the recording is byte-identical to a single-ended one, and `_blankmotion.mat`
+carries no montage field. **This needs the surgical or wiring record, not more
+analysis.**
+
+**Ruling: proceed, and label the row `spikes_single_ended_unverified`.** The
+sweep procedure is identical either way; only the label and its transferability
+change, and blocking four other consumers on a hardware question would be the
+wrong trade. If it is single-ended, the measured tolerance is for a signal with
+**no** common-mode rejection, and the tripole's tolerance in µV is roughly
+**2.5× higher** for common-mode kinds (A.5's measured rejection) — record that
+mapping rather than applying it.
+
+If it is confirmed single-ended, A.6's stated reason for not gating on the old
+cohort also changes, and in the direction that strengthens it: single-ended
+channels have no common-mode rejection at all, so they are further from the new
+setup than "hardware tripole" implied.
 
 **Host: an old-cohort `bl` recording, and say why in the output.** The five
 consumers run on the 5-channel `_blankmotion.mat` format today, not on the
@@ -436,6 +477,24 @@ Expect the spike curve to be **non-monotonic** and do not "fix" it:
 gate then discards, so beyond 150 µV the damage stops being spurious spikes and
 becomes σ inflation and masking alone. That is the consumer's own crude artifact
 rejection showing up in the measurement, and it belongs in the report.
+
+#### `bad_fraction == 0` is ambiguous — check `blankingApplied`
+
+The second host was nearly a trap: `M50E100_lol_CME1_bl_2124` reports
+`bad_fraction` 0.0000, and that meant **never reviewed**, not clean. Its
+MAD-σ is 0.119 µV against a std of 19.7 µV with **57% of samples below
+0.1 µV** — the robust σ is not a noise scale at all, so a σ-gridded sweep there
+would be meaningless and incomparable to any other host.
+
+Two rules follow, both general:
+
+1. **`blankingApplied` is in every `_blankmotion.mat`. Read it.** Zero segments
+   with `blankingApplied = true` means reviewed and clean; zero with it false or
+   absent means unreviewed. Never treat the second as the first — anywhere,
+   including when building a training corpus.
+2. **Sanity-check σ before gridding on it**: reject a channel whose `std / σ`
+   is far from ~1.4, or whose samples pile up near zero. A robust estimator is
+   robust, not omniscient.
 
 #### Injection targets, and the cross-consumer coupling
 
