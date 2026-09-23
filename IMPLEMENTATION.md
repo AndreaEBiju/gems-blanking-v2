@@ -577,9 +577,26 @@ phase III: inter-burst CV 0.53–1.16 (Poisson-like to slightly *regular*, not t
 CV ≫ 1 of long epochs separated by quiescence), and the largest inter-burst gap
 anywhere is 18.1 s across spans of 180–420 s — no quiescent period at all.
 
-**Stated limit of the test:** a rat MMC cycle is 90–120 minutes and these spans
-are 3–7 minutes, so nothing here can confirm or refute MMC on its own
-timescale. What it establishes is narrower and sufficient: the events are
+**The "90–120 minute" figure used here was wrong — that is human and dog.**
+A **rat gastric** MMC cycle is **17.5 ± 5.8 min**: phase I (quiescence)
+5.4 ± 1.1, phase II 7.1 ± 2.8, phase III (intense bursting) 3.2 ± 0.8,
+phase IV 1.8 ± 0.4 (Zheng *et al.*, rat antrum). Two consequences, both
+favourable:
+
+- **A 20-minute recovery recording covers roughly one full MMC cycle**, so MMC
+  is observable in the new cohort. The claim that nothing could be resolved on
+  this timescale was based on the wrong species' number.
+- The T spans are 3–7 min, i.e. **within a single phase**. "No quiescent period
+  in 180–420 s" is therefore expected and is not evidence about MMC either way.
+
+**More important: the old cohort was FED.** Animals had ad-lib food, and the fed
+pattern *replaces* the MMC with continuous irregular activity — no phase I
+quiescence, no phase III bursts. So the continuous low-level 2–50 Hz activity
+seen in `E1000_JEL_E1000_bl_1315` (no quiet baseline, no discrete episodes,
+envelope hovering at threshold) **is what a fed stomach should look like**, and
+`extract_mmc` was developed and tuned on recordings in which MMC does not
+exist. That is the cleanest explanation yet for why no grouping window produces
+a stable burst count on it. What it establishes is narrower and sufficient: the events are
 neither one-per-slow-wave-cycle, nor phase-locked, nor temporally structured.
 **A tolerance on them is a tolerance for a generic 2–50 Hz activity-episode
 detector, whatever the variable is called.**
@@ -597,6 +614,34 @@ and see whether the group count converges on the slow-wave cycle count.** If it
 does, the detector is right and `burstRefractory` is too short; if it does not,
 the detector is responding to something that is not slow-wave-locked at all.
 Either answer is worth more than the tolerance.
+
+##### Re-grouping: confirmed. Phase: a powered null, and it survives both caveats
+
+Groups per slow-wave cycle, re-grouping the existing peak times, median across
+9 channel×span rows: **0.5 s → 5.92**, 1 s → 4.88, 2 s → 2.15, **3 s → 0.94
+(range 0.81–1.41)**, 5 s → 0.36. **`burstRefractory = 0.5 s` fragments roughly
+6:1**, and 3 s converges on one burst per cycle across two animals and three
+spans.
+
+Phase locking is absent even so, and pooling makes it a **powered** null:
+n = 949 at the original grouping, R = **0.029**, against ~0.056 needed for
+p < 0.05. Two objections to that null, both answerable:
+
+- **"Fragmentation dilutes R."** It does, but not nearly enough. Fragments of
+  one locked burst occupy at most a few seconds of a ~12.8 s cycle; phases
+  spread uniformly over a fraction `w` of a cycle give
+  `R ≈ sin(πw)/(πw)`, which at `w = 0.25` is **0.90**. Fragmentation could
+  reduce a true R of 0.9 to 0.81, not to 0.029.
+- **"The phase reference is itself noisy."** `slowWaveAnalysis_new` warns that
+  **23–38% of slow-wave intervals exceed 8 cpm** on these very spans. Cycles
+  with a spurious peak contribute near-random phase, so `R_obs ≈ (1−f)·R_true`;
+  at `f = 0.3` that bounds `R_true ≲ 0.041`. **Strong locking is excluded.
+  Weak locking remains indistinguishable from none**, and that is the honest
+  limit.
+
+So the two findings are separable and both stand: the **rate** is wrong through
+over-fragmentation, and the events are **not strongly slow-wave locked** even
+when correctly grouped.
 
 ##### This belongs on task 08, not task T
 
@@ -3341,6 +3386,8 @@ does not support the uniform claim.* Two rows are decisive, one is not:
 | `slowWaveAnalysis_new.m:159-161` | pool peaks across clean runs instead of taking only the longest — two clean 28 s halves in a 60 s window currently return NaN |
 | `bulk_mixed_models.m` | coverage weights + covariate + minimum-coverage exclusion. `nRR_used`, `fr_validFrac`, `validDur_s` are all computed and none is used. Done as three separate things, correctly: **exclusion** (`minCoverage = 0.5`), **weight** (linear in coverage), and **covariate in both the full and reduced models**, so the interaction test is at matched coverage. Unverified end to end — `normRows` is built at runtime from the unreachable archive. **Task 19 must REFUSE when `hasCoverage` is false, not warn.** A confound check that silently runs without its confound covariate reports "no confound" for the wrong reason, which is worse than not running; this is hard invariant 19's rule applied to a covariate rather than a settling time |
 | `extract_mmc.m` — **the `mmc` consumer may not be detecting MMC** | Measured 2026-09-23 while deriving T: 5.0–9.3 burst events per slow-wave cycle, Rayleigh R median 0.076, **0 of 9 channel×span rows significant**, no temporal clustering (CV 0.53–1.16, largest gap 18.1 s). Most likely over-fragmentation — `group_events`' 0.5 s `burstRefractory` splitting one real spike burst into several. **Re-group the existing burst times at 2 / 3 / 5 s and see whether the count converges on the slow-wave cycle count.** If yes, fix `burstRefractory`; if no, the variable is misnamed and `mmc` in a results table is a claim the data does not support |
+| `slowWaveAnalysis_new.m` — **the slow-wave peak train is unreliable** | The function's own warning on the T host spans: **23–38% of slow-wave intervals exceed 8 cpm**, i.e. shorter than 7.5 s, against a rat gastric slow wave near 5 cpm. Spurious extra peaks. This matters twice: it is the phase reference that limits the `mmc` locking result above, **and** it is the `slow_wave` consumer's own fiducial, so its tolerance inherits the same noise. Reproducible (the determinism control passes), so differencing still works — but a consumer whose fiducial train is a third implausible needs fixing before its tolerance is quoted as physiology |
+| **NEW: derive MMC phase fractions per recording, and use them as a covariate** | The old cohort was **fed** (ad-lib food); the new cohort is **fasted 4–6 h with a ~1.5 kcal treat hourly**. The fed pattern replaces the MMC with continuous irregular activity, so the two cohorts are in different motility states and a model that averages over them is averaging two different experiments. Time since the last treat is not logged for data already collected. **Recover the state from the signal instead** — see the block below — and add `phase_frac_I/II/III` and `motility_state` to `bulk_mixed_models` as covariates, the same way coverage was added |
 | `browseMotionArtifacts.m:34` | `validateattributes(..., 'finite')` throws on NaN, so an already-blanked file cannot be re-browsed. Remove if the browser is kept |
 | ~~every `filtfilt` call at a low corner~~ | **Audited and withdrawn as a padtype problem — measured, no change needed.** The row predicted that MATLAB's mandatory odd extension would reproduce task 06's transient. It does not, and the reason is worth keeping: MATLAB pads `3·2·n_sections` = **6 samples**, which at 24.4 kHz is **0.246 ms**. Odd and constant padding differ by 11.8% of sd at 0.5 s from the edge, 1.1% at 2 s and **0.00% by 15 s**; peaks surviving the existing edge buffer, **13 either way**. scipy's damage came from odd-extending across a pad long enough for the signal to move; a quarter-millisecond pad of a 0.15 Hz signal cannot. **The settling itself is real and is already handled**: measured `impz` 8.17 s against a 15 s buffer, and the code's `order/cutoff` heuristic (13.33 s) over-estimates it, which is the safe direction. Generalising a scipy result to MATLAB without measuring was the error here |
 | `extract_mmc.m` — **`xf(~isfinite(xf)) = 0`** | **Hard invariant 1, violated, live.** If `fillmissing` leaves anything non-finite it becomes **zero**, and a zero is indistinguishable from signal to everything downstream. This is the exact defect task 01 was written for — which turned out to have been fixed upstream in `a95d1ff` before this project began — found here for real, in a different file. **Highest priority row in this task.** Fix to NaN and let the consumer decide; audit the rest of `processing_new` for the same construct |
@@ -3351,6 +3398,56 @@ does not support the uniform claim.* Two rows are decisive, one is not:
 **Reuse rather than reinvent:** `dfaGapAware.m` (pooled runs), `step5f_fano_slope.m`
 (epochs + rate-matched surrogates carrying identical censoring — extend the same
 pattern to CV2 and LV), `step5e_multiband_validate.m` (peri-R histogram validation).
+
+### Deriving MMC phase fractions from the stomach EMG
+
+**Method.** 2–50 Hz envelope → 30 s epochs → three states from event rate and
+envelope amplitude: **quiescent** (phase I), **intermittent** (phase II),
+**intense** (phase III). Phase IV is ~1.8 min and will not separate reliably;
+fold it into the II–III boundary and say so.
+
+**Use a 3-state HMM on the epoch series, and note that this does not contradict
+PIPELINE §10.4.** That section rejects an HMM for smoothing *candidate*
+decisions, on the structural grounds that the classifier emits one decision per
+event and there is no per-frame probability trace to smooth. Here there **is** a
+per-frame trace — the envelope — and the states genuinely persist for minutes,
+which is the situation an HMM is for. Different problem, opposite conclusion,
+both correct.
+
+**Set thresholds from the pooled distribution across recordings, not per
+recording.** Per-recording normalisation would force every recording to contain
+all three states by construction, which is exactly the outcome a fed recording
+must be able to contradict.
+
+**Independent validation, and it is not circular:** if the classifier is right,
+the interval between successive phase III onsets should come out near the
+literature value of **17.5 ± 5.8 min** for rat antrum, and the fractions near
+**I 31%, II 41%, III 18%, IV 10%**. Neither number is used in fitting, so
+agreement is evidence. A fed recording should show **no** phase III and no
+quiescence — that is the positive control the old cohort provides for free.
+
+**Three caveats that decide how the baseline-vs-recovery comparison is read:**
+
+1. **One recording is about one cycle.** Baseline is ~10 min and recovery
+   ~20 min against a 17.5 min cycle, so a single recording's phase fractions
+   carry sampling error of roughly the phase-duration SDs (I ±1.1, III ±0.8
+   min) — 20–25% relative. **Pool within condition**; do not read a single
+   recording's fractions as a measurement.
+2. **Baseline systematically precedes recovery by ~12 min, which is 0.7 of a
+   cycle.** So recovery samples a *later cycle phase* than baseline **by
+   construction**, with no stim involved. This averages out only if the cycle
+   phase at recording start is random across sessions — which it plausibly is,
+   since treat timing was not controlled, but it is an assumption and should be
+   tested by checking whether baseline phase fractions are flat across
+   sessions.
+3. **Unequal durations → weight.** A 20 min recovery estimates its fractions
+   more precisely than a 10 min baseline; weight by duration, as with coverage.
+
+**Also check whether condition correlates with recording order.** Three ~22 min
+recordings fit in one hourly treat interval, so if conditions run in a fixed
+order within a session, time-since-treat correlates with condition and the
+confound is systematic rather than random. One look at the session logs settles
+it.
 
 ### Tests
 MATLAB-side: for each fix, a before/after on one recording with the delta reported.
