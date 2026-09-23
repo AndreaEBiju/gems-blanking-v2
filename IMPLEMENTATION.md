@@ -718,6 +718,18 @@ and no shared-write conflicts.
 >
 > What remained, and is now done: the measurement, enforcement so it cannot
 > regress, and an audit for legacy files.
+>
+> **The legacy audit is now concrete and cheap.** It was blocked on not knowing
+> where pre-`a95d1ff` outputs lived; task 07's label hunt answered it. Every
+> `*_blankmotion.mat` holds `yOut` **and** `removedSegmentIdx`, so the audit is
+> a self-contained test on one file: read `yOut` at the indices
+> `removedSegmentIdx` names, and see whether those samples are `0` or `NaN`.
+> No reference file, no guesswork, one indexed read per recording. A file whose
+> masked samples are exactly `0` was written by the old writer and every
+> statistic derived from it carries the ringing.
+>
+> Run it over the old cohort in the same pass that computes task 07's
+> `duration_cap_s` — both read the same files and the same variable.
 
 ### Purpose
 `_blankmotion.mat` currently writes `yOut` with masked ranges **zeroed**.
@@ -911,6 +923,90 @@ status: "measured" | "no_window" | "unresolvable" | "not_applicable"
 method could not see. `not_applicable` means peri-R blanking is not the right
 operation for this band at this heart rate. **Only `measured` may produce a
 blanking extent**; the other three produce zero blanking and a recorded reason.
+
+### GATE VERDICT — measured 2026-09-23, `gems_j_t01_ms3_bl_230315`, 3543 beats, RR 165.6 ms
+
+**Passed, and the win is real but smaller and less uniform than this task
+claimed.** Current MATLAB blanks ±15 ms on all channels: 30 ms at RR 165.6 ms is
+**18.1% duty**.
+
+| band | status | extent | duty now | vs the uniform 30 ms |
+|---|---|---|---|---|
+| 300-3000 | measured ×9 | −8.8 .. +5.2 ms | **8.4%** | **−9.7 points — more than half the cardiac blanking in the ENG band is unnecessary** |
+| 100-300 | measured ×9 | −32.0 .. +26.1 ms | **35%** | **+17 points — the current blank is too NARROW here** |
+| 10-150 | unresolvable ×9 | — | 0 | impz 141 ms > the 133 ms profile |
+| 2-50 | not_applicable ×9 | — | 0 | contains the 6 Hz fundamental |
+| 0.5-3, 0-2 | unresolvable ×18 | — | 0 | impz 4.0 s / 1.1 s |
+
+Threshold-crossing rise, the spike consumer's own measure: **1.41–1.57×** at lag 0
+on the six channels that resolve cleanly.
+
+**The asymmetry is the finding.** A single uniform window is simultaneously too
+wide for the ENG band and too narrow for `100-300`. "Per-band windows recover
+data" is true only where it is true; stated flatly it would have been half
+wrong.
+
+**`100-300` at 35% duty is a task 13/14 problem, not a win.** Its own impulse
+response is 34.4 ms, so each blank expands by roughly that much at each edge
+once settling is honoured: 58 + 69 = **127 ms out of every 165.6 ms, ~76%**.
+Blanking is very likely the wrong instrument for `100-300` at this heart rate
+for the same reason it is wrong for `2-50` — a notch at the beat rate and
+harmonics, or an accepted modelled confound, should be evaluated against it
+before 127 ms per beat is thrown away. **Do not treat the `100-300` extent as an
+instruction to blank until task 13 has compared the two.**
+
+### The measured extent is convolved with the trigger's own timing error
+
+Coherent averaging removes the envelope floor but introduces a different one:
+the average is the true waveform convolved with the distribution of R-peak
+timing errors. Jitter **widens** the measured extent, so unlike the envelope
+floor this biases upward — toward over-blanking. Report a fourth number,
+`trigger_jitter_s`, and state the extent as `extent_signal_s ⊕ jitter` rather
+than as a bare width. A measurement whose jitter is comparable to its extent is
+`unresolvable`, not `measured`.
+
+This matters here specifically: **no channel in this recording passes task 05's
+provisional vetoes**, so the trigger train is imperfect by the project's own
+standard. The result still stands — false and missed triggers both *reduce*
+`peak_over_null`, and 72–87 in `100-300` cannot be produced by a bad train — but
+the extents should be read as upper bounds until a clean recording confirms
+them.
+
+### The coherent mean must be robust, and the trigger channel must be vetted
+
+`LVN3` carries a ~400× transient (`max|x|` 2.148 against 0.005–0.02 elsewhere)
+with a normal MAD-σ, and a plain mean is not robust to it — its coherent average
+and null are both ~100× the other channels'. Use a **10% trimmed mean across
+beats**, and report the plain mean alongside it so the difference stays visible.
+
+`LVN3` was also selected as the trigger. Beat-count consensus is the right
+selector and is a clear improvement on lowest `implausible_frac` — which chose
+`ANT1`, a channel that scored well *because* it missed 53% of the beats, the
+purest form of a good metric earned for a bad reason. But consensus alone does
+not exclude a channel that is electrically broken. **Add a transient veto to
+trigger selection**: `max|x| / MAD-σ` far outside the cohort disqualifies a
+channel from being the trigger regardless of its beat count.
+
+### `unresolvable` beats `no_window` — the objection is upheld
+
+This task told you to expect `no_window` for `0-2` and `0.5-3` on spectral
+grounds. **That was wrong, and the correction is upheld.** Both bands ring for
+1.1–4.0 s inside a 133 ms profile, so the method cannot see there, and
+`no_window` would be claiming a negative that was never measured. The spectral
+argument is still true and belongs in the `reason` string, where it is a note
+rather than a result. Operationally the two are identical — only `measured`
+produces a blanking extent — so the only thing at stake is honesty about what
+was established, which is the whole reason the enum exists.
+
+### Real-data tests need an explicit opt-in
+
+`test_rpeaks.py` and `test_stim_split.py` still skip as "not reachable" with a
+configured root, because the hermetic autouse fixture isolates the per-user
+config and they can never see it. That is the fixture working as designed — the
+hermetic rule stays. Add an explicit opt-in instead: a test marked
+`@pytest.mark.real_data` runs only when `GEMS_REAL_DATA=1`, and that marker is
+the only thing permitted to read the real per-user config. Default CI stays
+hermetic; a local run against the drive is one environment variable.
 
 ### The ENG band gets a third measure, matched to its consumer
 
@@ -1912,6 +2008,16 @@ Do not run detection on `T` alone (invariant 6).
 <!-- TASK:05 slug=rpeaks deps=03 gate=no -->
 ## Task 05 — R-peaks, gap rescue, best-channel ranking
 
+> **Measured 2026-09-23 on `gems_j_t01_ms3_bl_230315`: no channel passes the
+> provisional vetoes.** All nine exceed `PROVISIONAL_MAX_IMPLAUSIBLE_FRAC = 0.10`
+> except `ANT1`, which fails `PROVISIONAL_MAX_RESCUE_RATE` at 0.44 — and `ANT1`
+> scores well on the first veto **because it missed 53% of the beats**. A veto
+> that a channel passes by detecting less is not a veto; rank on beat-count
+> consensus, not on lowest `implausible_frac`, and add the transient veto
+> described in task 02. Task 09's gate numbers must account for a runaway
+> recording disqualifying every channel rather than assuming at least one
+> survives.
+
 **Module:** `physio/rpeaks.py`
 **Depends on:** 03
 **Gate:** no
@@ -2484,11 +2590,34 @@ do not guess. Anything longer is a sustained level shift, not an event.
 **The labels are not on this drive.** A full walk of all 3442 directories under
 `<gems_root>` on 2026-09-22 found **zero** `*_segment_indices.mat`. This is no
 longer "the archive is unreachable" — the archive is mounted and the files are
-not in it. That search has now been extended and is exhausted: **zero** `*_segments.mat`
-and zero `*_segment_indices.mat` across **8721 directories** — GEMS-Andrea
-(3442), GEMS-Lyna (2012), Louise (99), Arjun (3168). The old cohort's labels are
-not on this shared drive at all. This is a question for Andrea, not a search
-problem; do not spend more time looking.
+not in it. **Both of those are the wrong filename.** Reading `browseMotionArtifacts.m`:
+it is called as `browseMotionArtifacts(y, fs, 10, mode, fullfile(folderPath,
+condition))` and writes **three** files beside the recording —
+
+```
+<condition>_segments.mat           removedSegments
+<condition>_segment_indices.mat    removedSegmentIdx
+<condition>_blankmotion.mat        yOut, fs, t, removedSegments,
+                                   removedSegmentIdx, blankingApplied, hrChanIdx
+```
+
+(with `_stim_` / `_recovery_` infixed in `stim_rec` mode). **The third file
+contains the labels as well**, it is what `batch_process.m` consumes downstream,
+and Andrea confirms it is the one that matters — the two sidecars may never have
+been kept. **Search for `*_blankmotion.mat`, and read
+`removedSegmentIdx` out of it.**
+
+It also carries `hrChanIdx`, which closes the separate open question about a
+manual heart-rate channel for the old cohort.
+
+The extended search that found nothing (**zero** across 8721 directories:
+GEMS-Andrea 3442, GEMS-Lyna 2012, Louise 99, Arjun 3168) therefore proves less
+than it appeared to. Andrea confirms the old cohort lives on **a different Drive
+or account**, not on the team drive — consistent with its naming convention
+(`E10_FRE_E10_stim_rec_0030_...`) matching nothing in the new corpus.
+
+`duration_cap_s` is therefore computed from `removedSegmentIdx` **inside the
+`*_blankmotion.mat` files**, not from a sidecar.
 
 Until they are found it is `None`, meaning **no cap was applied and
 that fact is recorded** — provenance key absent, per the conventions table,
