@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Final, Literal
 
 import numpy as np
@@ -63,19 +63,24 @@ __all__ = [
     "SECONDARY_EPOCH_FRACTION",
     "VIB_NAME_PATTERN",
     "Epoch",
+    "ProtocolBook",
+    "ProtocolNotCoveredError",
     "ProtocolSpec",
     "SplitReport",
     "SplitStatus",
     "audit_stim_splits",
     "audit_summary",
     "blanking_fraction",
+    "default_protocol_book",
     "find_stim_window",
     "load_protocol",
+    "load_protocol_book",
     "matlab_boundary",
     "protocol_path",
     "split_stim_recovery",
     "vib_envelope",
     "write_protocol",
+    "write_protocol_book",
 ]
 
 log = logging.getLogger(__name__)
@@ -203,16 +208,23 @@ mistake that is invisible afterwards.
 """
 
 DEFAULT_PROTOCOL_YAML: Final = """\
-# Stimulation protocol, shared through the Drive so every lab member splits
-# identically. Per cohort; override per recording only with a recorded reason.
+# Stimulation protocols, shared through the Drive so every lab member splits
+# identically.
 #
-# The stim duration is a PRIOR, and the whole method depends on it: detection is a
-# matched-width search, so a wrong duration moves every boundary. Change it
-# deliberately, and reprocess rather than mixing.
+# The stim duration is a PRIOR and the whole method depends on it: detection is a
+# matched-width search, so a wrong duration moves every boundary. Each entry names
+# the scan_roots it governs, and a stim_recovery file that NO entry covers is a
+# refusal rather than a default - the balloon trials are a different experiment and
+# must not inherit the 120 s prior. Splitting one against a protocol that does not
+# describe it would produce a confident, wrong boundary, which is worse than
+# stopping.
 
-stim_duration_s: 120.0      # 2 min stim, fixed by protocol
-recovery_duration_s: 1200.0 # 20 min recovery, the independent second check
-stim_tolerance_s: 12.0      # start/stop routinely consumes several seconds
+protocols:
+  - name: chronic_2min_20min
+    applies_to: ["August-September Chronic Recordings"]
+    stim_duration_s: 120
+    recovery_duration_s: 1200
+    stim_tolerance_s: 12
 """
 
 
@@ -236,6 +248,8 @@ class ProtocolSpec:
     stim_duration_s: float
     recovery_duration_s: float
     stim_tolerance_s: float
+    name: str = "unnamed"
+    applies_to: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Check every duration is positive and finite."""
@@ -250,13 +264,66 @@ class ProtocolSpec:
         """Shortest ON run outside the window that counts as a second epoch."""
         return SECONDARY_EPOCH_FRACTION * self.stim_duration_s
 
-    def to_json(self) -> dict[str, float]:
+    def to_json(self) -> dict[str, Any]:
         """Return the spec for provenance. Every field is present and finite."""
-        return {
+        record: dict[str, Any] = {
             "stim_duration_s": self.stim_duration_s,
             "recovery_duration_s": self.recovery_duration_s,
             "stim_tolerance_s": self.stim_tolerance_s,
+            "protocol_name": self.name,
         }
+        if self.applies_to:
+            record["applies_to"] = list(self.applies_to)
+        return record
+
+
+class ProtocolNotCoveredError(ValueError):
+    """No protocol entry governs this recording, so its stim duration is unknown."""
+
+
+@dataclass(frozen=True, slots=True)
+class ProtocolBook:
+    """Every protocol on the drive, and which scan root each one governs.
+
+    A book rather than a single spec because the drive holds more than one kind of
+    experiment. The balloon trials are not 2 min / 20 min, and inheriting the chronic
+    prior would move every boundary in them by an unknown amount while reporting a
+    clean status.
+    """
+
+    protocols: tuple[ProtocolSpec, ...]
+
+    def for_scan_root(self, scan_root: str) -> ProtocolSpec:
+        """Return the protocol governing ``scan_root``.
+
+        Raises
+        ------
+        ProtocolNotCovered
+            If no entry lists it. **A refusal, not a default** - the same rule as a
+            missing ``vib`` channel. A confident wrong boundary is worse than
+            stopping.
+        """
+        for spec in self.protocols:
+            if scan_root in spec.applies_to:
+                return spec
+        covered = sorted({root for spec in self.protocols for root in spec.applies_to})
+        msg = (
+            f"no protocol covers {scan_root!r}. Covered: {covered}. This is a refusal, "
+            "not a default: a stim_recovery file split against a protocol that does "
+            "not describe it gets a confident, wrong boundary. Add an entry to "
+            f"{PROTOCOL_FILENAME} naming this scan root, with its own measured "
+            "durations."
+        )
+        raise ProtocolNotCoveredError(msg)
+
+    def for_path(self, relative: str) -> ProtocolSpec:
+        """Return the protocol governing a recording, by its gems_root-relative path."""
+        posix = PurePosixPath(relative).as_posix()
+        for spec in self.protocols:
+            for root in spec.applies_to:
+                if posix == root or posix.startswith(root + "/"):
+                    return spec
+        return self.for_scan_root(posix.split("/", 1)[0])
 
 
 @dataclass(frozen=True, slots=True)
@@ -477,8 +544,94 @@ def protocol_path(gems_root: Path) -> Path:
     return Path(gems_root) / PROTOCOL_FILENAME
 
 
+def load_protocol_book(path: Path) -> ProtocolBook:
+    """Load every protocol from ``protocol.yaml``.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the file is absent. Not defaulted, for the reason in
+        :func:`load_protocol`.
+    ValueError
+        If the document is malformed or an entry is incomplete.
+    """
+    path = Path(path)
+    if not path.is_file():
+        msg = (
+            f"no protocol at {path}. Write one with "
+            "write_protocol_book(default_protocol_book(), path) and commit it to the "
+            "shared drive so everyone splits identically."
+        )
+        raise FileNotFoundError(msg)
+    try:
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        msg = f"{path} could not be parsed: {exc}"
+        raise ValueError(msg) from exc
+
+    if not isinstance(document, dict) or "protocols" not in document:
+        msg = f"{path}: a 'protocols' list is required and is absent"
+        raise ValueError(msg)
+    entries = document["protocols"]
+    if not isinstance(entries, list) or not entries:
+        msg = f"{path}: 'protocols' must be a non-empty list"
+        raise ValueError(msg)
+
+    specs: list[ProtocolSpec] = []
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            msg = f"{path}: protocol {index} is not a mapping"
+            raise ValueError(msg)
+        spec = _protocol_from_document(entry, f"{path} protocol {index}")
+        applies = entry.get("applies_to") or []
+        if not isinstance(applies, list) or not all(isinstance(a, str) for a in applies):
+            msg = f"{path}: protocol {index} applies_to must be a list of strings"
+            raise ValueError(msg)
+        specs.append(
+            replace(spec, name=str(entry.get("name", f"protocol_{index}")),
+                    applies_to=tuple(applies))
+        )
+    return ProtocolBook(protocols=tuple(specs))
+
+
+def default_protocol_book() -> ProtocolBook:
+    """Return the protocol book decided 2026-09-22: the chronic recordings only."""
+    document = yaml.safe_load(DEFAULT_PROTOCOL_YAML)
+    entry = document["protocols"][0]
+    spec = _protocol_from_document(entry, "<default>")
+    return ProtocolBook(
+        protocols=(
+            replace(spec, name=entry["name"], applies_to=tuple(entry["applies_to"])),
+        )
+    )
+
+
+def write_protocol_book(book: ProtocolBook, path: Path) -> Path:
+    r"""Write a protocol book atomically as UTF-8 with ``\n`` endings."""
+    body = DEFAULT_PROTOCOL_YAML.split("protocols:")[0] + yaml.safe_dump(
+        {
+            "protocols": [
+                {
+                    "name": spec.name,
+                    "applies_to": list(spec.applies_to),
+                    "stim_duration_s": spec.stim_duration_s,
+                    "recovery_duration_s": spec.recovery_duration_s,
+                    "stim_tolerance_s": spec.stim_tolerance_s,
+                }
+                for spec in book.protocols
+            ]
+        },
+        sort_keys=False,
+        allow_unicode=True,
+        default_flow_style=False,
+    )
+    path = Path(path)
+    atomic_write_text(path, body)
+    return path
+
+
 def load_protocol(path: Path) -> ProtocolSpec:
-    """Load and validate ``protocol.yaml``.
+    """Load a single-protocol ``protocol.yaml``. Superseded by the book form.
 
     Raises
     ------
@@ -508,8 +661,14 @@ def load_protocol(path: Path) -> ProtocolSpec:
 
 
 def default_protocol() -> ProtocolSpec:
-    """Return the starting protocol: 120 s stim, 1200 s recovery, 12 s tolerance."""
-    return _protocol_from_document(yaml.safe_load(DEFAULT_PROTOCOL_YAML), "<default>")
+    """Return the chronic protocol: 120 s stim, 1200 s recovery, 12 s tolerance.
+
+    The single-spec view of :func:, for callers that already
+    know which protocol governs the file in hand. Anything reading from disk should
+    take the book and ask it, so an uncovered file refuses instead of inheriting a
+    prior that does not describe it.
+    """
+    return default_protocol_book().protocols[0]
 
 
 def write_protocol(protocol: ProtocolSpec, path: Path) -> Path:
@@ -542,7 +701,11 @@ def _protocol_from_document(document: object, source: str) -> ProtocolSpec:
         except (TypeError, ValueError) as exc:
             msg = f"{source}: {name} must be a number, got {raw!r}"
             raise ValueError(msg) from exc
-    return ProtocolSpec(**values)
+    return ProtocolSpec(
+        stim_duration_s=values["stim_duration_s"],
+        recovery_duration_s=values["recovery_duration_s"],
+        stim_tolerance_s=values["stim_tolerance_s"],
+    )
 
 
 # ---------------------------------------------------------------------------

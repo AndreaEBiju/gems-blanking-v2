@@ -70,6 +70,25 @@ the protocol config, per cohort, overridable per recording and recorded in
 provenance. **Do not hardcode them** — protocols change, and a silently wrong 120
 would be worse than no prior at all.
 
+**Scope, decided 2026-09-22: the chronic recordings only.** `protocol.yaml` sits
+at `<gems_root>/protocol.yaml` and each protocol entry names the `scan_roots` it
+governs:
+
+```yaml
+protocols:
+  - name: chronic_2min_20min
+    applies_to: ["August-September Chronic Recordings"]
+    stim_duration_s: 120
+    recovery_duration_s: 1200
+    stim_tolerance_s: 12
+```
+
+The balloon trials are a different experiment and **must not inherit the 120 s
+prior**. A `stim_recovery` file that no protocol entry covers is a **refusal**,
+not a default — same rule as a missing `vib` channel. Silently splitting a
+balloon trial against a protocol that does not describe it would produce a
+confident, wrong boundary, which is worse than stopping.
+
 The tolerance is 12 s, not a tight few seconds: recording start/stop routinely
 consumes several seconds at the edges, so a narrow band would flag normal captures.
 The known **recovery** duration is a second, independent check — a file whose

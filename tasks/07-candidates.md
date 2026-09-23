@@ -49,7 +49,14 @@ where video motion exceeds its own threshold:
 existing 43 recordings**. Compute it once from `*_segment_indices.mat` and pin it;
 do not guess. Anything longer is a sustained level shift, not an event.
 
-Until the archive is reachable it is `None`, meaning **no cap was applied and
+**The labels are not on this drive.** A full walk of all 3442 directories under
+`<gems_root>` on 2026-09-22 found **zero** `*_segment_indices.mat`. This is no
+longer "the archive is unreachable" — the archive is mounted and the files are
+not in it. Before concluding they are lost, search for the companion
+`*_segments.mat` that `browseMotionArtifacts` writes, and the sibling folders on
+the shared drive (`GEMS-Lyna`, `Louise`, `Arjun`).
+
+Until they are found it is `None`, meaning **no cap was applied and
 that fact is recorded** — provenance key absent, per the conventions table,
 never null and never a stand-in infinity. An empty `over_cap` under `None` means
 no cap ran; it must not be read as "nothing exceeded the cap".

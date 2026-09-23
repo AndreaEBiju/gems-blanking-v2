@@ -17,6 +17,86 @@ Google Drive (synced)       →  data + labels + models + registry
 config: gems_root = <path>  →  the one thing each user sets locally
 ```
 
+### The root, decided 2026-09-22
+
+**`<gems_root>` = the `GEMS-Andrea` folder on the shared drive.** Measured
+spellings, which differ and must never be reconstructed from each other:
+
+```
+Windows  G:\Shared drives\BIONICs Lab  Enteric Interfaces Team\GEMS-Andrea
+macOS    /Users/<user>/Library/CloudStorage/GoogleDrive-<acct>/Shared drives/BIONICs Lab: Enteric Interfaces Team/GEMS-Andrea
+```
+
+Google Drive substitutes **U+0020 SPACE** for the illegal colon on Windows,
+giving **two consecutive spaces**. Not U+2236, not U+F03A, not an underscore —
+four plausible guesses, all wrong, which is the argument *for* rule 2 rather
+than against it: the difference is confined to the root, the root is found by
+marker, and a stored path such as
+`data/J/t01_bl_230315/gems_j_t01_ms3_bl_230315_sig.mat` round-trips
+`rel → abs → rel` byte-identically on both machines.
+
+### Root is not scan scope — keep them separate
+
+`GEMS-Andrea` contains `processing_new`, `TDTMatlabSDK`, `nerve-processing` and
+`IACUC Inspection 092026`: code and admin, not data. **The root is a path
+anchor; it is not a licence to walk everything under it.** Config carries an
+explicit list:
+
+```yaml
+gems_root: <the path above>          # the anchor for every stored path
+scan_roots:                          # the ONLY places recordings are looked for
+  - "August-September Chronic Recordings"
+  - "081526BalloonTrial"
+  # ... listed explicitly, POSIX-relative to gems_root
+```
+
+A recording outside every `scan_root` is not in the corpus. Adding a folder is
+an edit to this list, never an automatic consequence of someone dropping files
+on the drive. This also keeps the `SHARED_DRIVE_ITEM_CAP` accounting honest,
+since the code trees stop counting toward it.
+
+### Measured cost of the drive, and what it forbids
+
+Streaming (not mirrored), one 983 MB `_sig.mat`:
+
+| operation | time |
+|---|---|
+| `stat` | 0 ms |
+| first 10 MB, cold | 1.12 s |
+| **last** 10 MB, cold (seek) | 1.06 s |
+| full 983 MB | 77.6 s (12.7 MB/s) |
+| either end, after a full read | ~0.02 s |
+
+**Random access into a streamed placeholder is not the hazard it looked like** —
+seeking to the tail costs the same as reading the head, because Drive fetches
+ranges rather than materialising the file. Header-only and metadata-only passes
+are cheap and should be preferred everywhere they suffice.
+
+Directory enumeration is the slow part: **4.7 directories per second**, 3442
+directories, so a bare walk of the corpus is **12 minutes**. Two consequences,
+both binding:
+
+- **Task 03A's scan must be cached, not interactive.** A 12-minute walk cannot
+  sit in front of a user pressing "scan". Persist the index under
+  `cache/` (local, never inside `gems_root`), key entries by path plus mtime
+  plus size, and re-walk only what changed. The UI shows the cached tree
+  immediately and refreshes behind it.
+- **A full-sample pass over the corpus is an overnight job**, not a step in a
+  task. 967 `_sig.mat` files at ~78 s each is on the order of **21 hours**, and
+  it also pulls the whole corpus onto local disk, which streaming mode exists to
+  avoid. Any task whose acceptance says "run on every recording" — 03B above all
+  — must say whether it needs samples or only headers, and be runnable in
+  resumable batches.
+
+### The corpus is 967 recordings, not 43
+
+Several tasks below say "the 43 old recordings". That number is the **old
+labelled cohort**, and it is now the minority: the drive holds **967 `_sig.mat`
+files across 3442 directories**, each with a `_vib.mat` beside it. Where a task
+says 43 it means the old labelled cohort specifically; where it means the corpus
+it says corpus. **No `*_segment_indices.mat` exists anywhere under the root**, so
+the old cohort's labels are not on this drive — see task 07's `duration_cap_s`.
+
 ### Why this needs care
 Google Drive is a **sync layer, not a database**. It has no atomic rename, no
 locking across clients, and when two users write the same path it silently
