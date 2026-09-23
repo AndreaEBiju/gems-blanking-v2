@@ -728,8 +728,21 @@ and no shared-write conflicts.
 > masked samples are exactly `0` was written by the old writer and every
 > statistic derived from it carries the ringing.
 >
-> Run it over the old cohort in the same pass that computes task 07's
-> `duration_cap_s` — both read the same files and the same variable.
+> **Measured 2026-09-23: clean, and a full sweep is not needed.** Six files
+> spanning v5 and v7.3, raw and notched, including a partially-blanked case
+> (6 segments, 20% masked): masked samples **100% NaN**, unmasked **0% NaN**,
+> exact-zero fraction 0.00%, longest exact-zero run 0 samples. The outside-mask
+> column is the one that makes this non-vacuous — all-NaN would have scored
+> 100% inside too.
+>
+> **More importantly the population is wrong for this audit.** These 406 files
+> are written by `browseMotionArtifacts.m:516`
+> (`yBlanked(idxRanges(k,1):idxRanges(k,2),:) = NaN`), which has always written
+> NaN. The zeroing defect was in **GEMSBlanking's Python `labeled_save.py`**
+> before `a95d1ff`, which is a different writer producing different files. So
+> the remaining audit target is any output of *that* tool from before
+> `a95d1ff` — not these. Do not spend 272 GB of streaming confirming a
+> property already established from the writer's source.
 
 ### Purpose
 `_blankmotion.mat` currently writes `yOut` with masked ranges **zeroed**.
@@ -2619,6 +2632,64 @@ or account**, not on the team drive — consistent with its naming convention
 `duration_cap_s` is therefore computed from `removedSegmentIdx` **inside the
 `*_blankmotion.mat` files**, not from a sidecar.
 
+**Found 2026-09-23, and not by walking:**
+`processing_new/investigate_implausible_alpha.m:38` hardcodes the path.
+
+```
+G:\Shared drives\BIONICs Lab Workspace\Project Folders\GEMS\Survivals
+```
+
+A second shared drive the account already had. **406 `*_blankmotion.mat`,
+272.7 GB**, animals Lollipop 128 / Jelly 120 / Oreo 78 / Frenchtoast 54 /
+Nutella 9 / Mochi 9 / Twix 1, 7 unparsed. Stem form is
+`<cond>_<animal>_<site>_<bl|stim_rec>_<nnnn>[_notched_v0.2.2][_stim|_recovery]_blankmotion.mat`
+— **the animal is the second token, the first is the condition.** Reading the
+code for the path rather than enumerating the drive is the lesson worth keeping:
+the walk found one stray `.fig`; the source found the cohort.
+
+### The `_stim_` files are protocol exclusions, not motion labels — EXCLUDE THEM
+
+152 of the 406 are `_stim_`, and they are blanked **91–99.6% in a single segment
+spanning `[0, 119.5] s`**. That is not artifact labelling. That is someone
+excluding the stim epoch by hand — exactly what task 03B now does
+deterministically, done manually and years earlier.
+
+**Ingesting them as artifact labels would teach task 12 that two minutes of
+every stim recording is one artifact.** It would also destroy `duration_cap_s`,
+whose entire purpose is the 99th percentile of *event* durations: 152 segments
+of 119.5 s would set the cap above any real event and the cap would never fire.
+
+Rule: **a segment whose duration exceeds `0.9 × epoch_duration` is a protocol
+exclusion, not an event.** Count it as `excluded_epoch`, never as
+`masked_motion` (task 03B's accounting rule, arriving from the other
+direction), and drop it before computing `duration_cap_s` or building any
+training corpus. Only the **125 `bl` and 122 `recovery`** files carry partial
+coverage (20–82%) and only those are labels.
+
+### Loading these files — four things measured, all of which bite
+
+1. **`removedSegmentIdx` is N×2 `[start stop]`, 1-based inclusive.** Confirmed
+   from `timeToIndices` at `browseMotionArtifacts.m:502`, not inferred from
+   shape. This is hard invariant 15's boundary and it is documented in their
+   source, so convert once, at the boundary, with a test.
+2. **v7.3 files store that array transposed as (2, N).** The cohort mixes v5 and
+   v7.3, and `reshape(-1, 2)` on the v7.3 layout pairs `start[k]` with
+   `start[k+1]`, producing overlapping ranges and reading **86–93% NaN instead
+   of 100%** — a plausible-looking wrong answer that reads as partial
+   corruption rather than as a bug. Branch on format, transpose rather than
+   reshape, and make the regression test a v7.3 file with a known mask
+   fraction.
+3. **`removedSegments` and `removedSegmentIdx` can disagree** — one file had
+   `removedSegments` as an empty `uint8 (0,0)` beside a valid `Idx` pair.
+   **Trust `removedSegmentIdx`.**
+4. **Animal tokens collide on more than case**: `JEL`/`jel`/`Jel`/`jelly`,
+   `LOL`/`lol`/`Lol`/`loll`/`loll2`/`loli`, `FRE`/`fre`/`ft`. Case-insensitive
+   matching (rules 7 and 8) handles the first kind and **not** the second —
+   `loll2` and `loli` are not case variants of anything. This needs an explicit
+   **animal alias table, inferred and then user-confirmed**, the same pattern as
+   03A's condition-name inference. Do not let a silent normaliser decide that
+   `ft` is Frenchtoast.
+
 Until they are found it is `None`, meaning **no cap was applied and
 that fact is recorded** — provenance key absent, per the conventions table,
 never null and never a stand-in infinity. An empty `over_cap` under `None` means
@@ -2915,7 +2986,99 @@ rest of the architecture is worthless without it.
 <!-- /TASK -->
 
 <!-- TASK:10 slug=label-conversion deps=07,09 gate=no -->
-## Task 10 — Convert 43 recordings to event judgments
+## Task 10 — Convert the prior labelled corpus to event judgments
+
+> ### The "43 recordings" figure is wrong. The previous model was trained on **12**.
+>
+> Source: `My Drive/data from ML PC 8 13 26/detector-pyqt`, the working copy from
+> the ML machine — `detector-core/loro_out/loro_summary.json`, 12 LORO folds.
+> Every number below is from that file, not from reconstruction.
+>
+> **Not every `*_blankmotion.mat` is a human label.** Some are the previous
+> model's *inference output*. Training on those would be circular — the new
+> detector learning the old detector's decisions, including its errors, with no
+> way to tell from the file. The old manifest already models this correctly:
+> `detector/manifest.py:55` defines `LABEL_SOURCES = {"human", "model",
+> "mixed"}` per recording. **Carry `label_source` into our registry as a
+> required field, and never train on `model` without an explicit opt-in that is
+> recorded in provenance.** A recording with no `label_source` is `unknown` and
+> is excluded, not assumed human.
+>
+> **The 12, with the previous model's own LORO results:**
+>
+> | recording | real pos | recall | bad frac |
+> |---|---|---|---|
+> | `E1000_FRE_E1000_stim_rec_1406` | 496 | 0.992 | 0.294 |
+> | `E1000_JEL_E1000_bl_1315` | **4** | 0.500 | 0.046 |
+> | `E100_lol_E100_stim_rec_1122` | 1981 | **0.406** | 0.234 |
+> | `M100E10_LOL_CME2_stim_rec_2253` | 1239 | 0.852 | 0.431 |
+> | `M100_JEL_MS2_bl_1945` | **18** | **0.056** | 0.001 |
+> | `M100_LOL_MS2_stim_rec_2031` | 1665 | 0.811 | 0.325 |
+> | `M10E10_ORE_CME_stim_rec_1908` | 1104 | 0.971 | 0.617 |
+> | `mec100_jel_MS2_stim_rec_1346` | 482 | 0.925 | 0.250 |
+> | `mec100_lol_MS2_stim_rec_1426` | 325 | 1.000 | **0.984** |
+> | `mecfreq_fre_MS2_stim_rec_0035` | 308 | 0.620 | 0.216 |
+> | `mecfreq_jel_MS2_bl_2302` | **15** | 0.933 | 0.178 |
+> | `mecfreq_loll_MS2_stim_rec_2340` | 3524 | 0.692 | 0.429 |
+>
+> Pooled: **`recall_real` 0.734**, `recall_syn` **1.000**, mean bad fraction
+> 0.334, gates passed 2 / 7 / 10 of 12.
+>
+> **Four things to take from this table.**
+>
+> 1. **0.734 is the number to beat.** Task 09's gate has had no empirical target;
+>    it has one now, measured by the same LORO protocol on the same data.
+> 2. **`recall_syn = 1.000` against `recall_real = 0.734` is the synthetic-transfer
+>    gap, measured.** A detector that finds every injected artifact and 73% of
+>    real ones is being scored on the wrong thing. Task 09's gate must be carried
+>    by real labels; synthetic recall is a smoke test, not evidence.
+> 3. **Three folds are not measurements.** 4, 15 and 18 real positives — a recall
+>    of 0.056 on 18 positives is one beat either way. Exclude folds below a stated
+>    positive count from the pooled figure and report them separately, or the
+>    headline is an average over three coin flips.
+> 4. **`bad_fraction = 0.984` with `recall = 1.000`** is perfect recall on a
+>    recording that is 98% positive. Report prevalence beside recall everywhere,
+>    always.
+>
+> **The animals are four, not seven: FRE ×2, JEL ×4, LOL ×5, ORE ×1.** This is a
+> hard constraint on the three training modes (task 12): **a per-animal model for
+> ORE cannot exist** at n=1, and FRE at n=2 has no held-out fold worth reporting.
+> The per-animal versus pooled comparison must state which animals it could
+> actually fit, and the learning-curve control matters more here than the
+> normalisation argument ever did.
+>
+> **The previous formulation was positive-unlabelled. Ours is not, and must not
+> become so by imitation.** `phase_01` §1.6 sets
+> `trust_level ∈ {"real_positive", "unlabeled_clean"}` and `phase_03` weights
+> the second at `w_neg = 0.3`. That was the right hedge **for that design**: it
+> labelled *spans* and then swept a stride across the entire recording, so every
+> window outside a marked span really was unlabelled, and calling it clean would
+> have been a lie.
+>
+> **This design does not have that problem.** Task 10 replays candidate
+> generation and a human adjudicates *candidates*; a candidate that was examined
+> and not marked is a **human-confirmed negative**, not an unlabelled one. The
+> classifier is ordinary binary and there is no `w_neg` to sweep. Importing PU
+> here would be inheriting the shape of someone else's constraint.
+>
+> The unlabelled region is real but lives elsewhere: **frames the generator
+> never proposed**. That is a recall question, owned by task 09's gate and its
+> exhaustively-labelled ten minutes, not a loss weight. Separating those two
+> concerns is precisely what lets the classifier stay binary.
+>
+> **Two consequences that do need stating.**
+>
+> 1. **An unadjudicated candidate is excluded, never a negative.** Task 07 is
+>    explicit that humans label a *sample* of candidates. Candidates outside that
+>    sample carry no label and must be dropped from training — the training set
+>    is smaller, not dirtier. A silent `fillna(0)` anywhere near the label column
+>    would reintroduce PU's problem without PU's hedge.
+> 2. **How the sample is drawn is a modelling decision and must be recorded.**
+>    Uncertainty sampling produces a training set enriched for hard cases, which
+>    is efficient for learning and biased for *evaluation*. **The held-out
+>    evaluation sample must be drawn at random**, separately from whatever
+>    strategy selects training candidates, and the two draws recorded distinctly
+>    in provenance.
 
 **Module:** `model/labels.py`
 **Depends on:** 07, 09
