@@ -151,6 +151,32 @@ violating one, stop and say so rather than working around it.
     reconcile is evidence, and it is often the *only* evidence a silent
     data-loss bug produces.
 
+24. **A value fixed by the cohort is declared once, not copied into every
+    record.** Writing a constant into 967 per-recording files is 967
+    opportunities to type `uV`, and the first file that disagrees with the
+    other 966 is indistinguishable from a real finding. Cohort-level constants
+    — `units`, electrode `config`, `channel_order_source` — live in
+    `protocol.yaml`; `meta.json` carries only what actually varies between
+    recordings. The test for which is which: *could two recordings in this
+    cohort legitimately differ here?* If no, it is not a per-recording field.
+    Corollary: do not pair a value with a boolean saying whether the value is
+    known. `rostral_end: None` already means unknown; a separate
+    `rostral_end_known: false` is a second source of truth that can disagree
+    with the first, and eventually will. One field, `None` for unknown, and the
+    schema requires the key to be present so absence is never ambiguous.
+
+25. **When a new validity check breaks an existing test, the fixture is the
+    prime suspect, not the check.** A test that passes only because the data it
+    feeds the code is physically impossible was testing the mechanism against a
+    world that cannot happen. The fix is to make the fixture possible and keep
+    the check global — never to exempt the test, because the exemption is
+    permanent and the next person reads it as "this check does not apply here".
+    *Found in the `meta.json` work:* `assert_plausible_units` immediately failed
+    `test_the_declared_units_are_applied[mV]` and `[V]`, both of which asserted
+    that the loader accepts a recording with a several-volt noise floor. Scaling
+    the fixtures preserved exactly what those tests were for — that the declared
+    scale factor is applied — and removed a claim nobody meant to make.
+
 ---
 
 ## Cross-platform rules (macOS + Windows; Linux best-effort)

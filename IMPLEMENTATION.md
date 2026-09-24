@@ -4340,6 +4340,79 @@ plausibility check at load: a declared unit that puts robust σ outside roughly
 and the implied σ. That catches a 10⁶ error without inferring anything — the
 declaration still decides, it just has to survive contact with the data.
 
+#### Adjudication of the `meta.json` implementation, 2026-09-24
+
+The implementation was built before this section reached the Windows clone, from
+the chat message rather than the spec. It landed on the same design anyway. What
+follows ratifies it and records the four places it must change.
+
+**Ratified as built.**
+
+- `read_channel_labels()` **returning `None` for the old five-channel cohort is a
+  real answer, not a failure.** Those files carry no `chanlabels`; `None` means
+  "the file does not state its order", which is true, and the old cohort's order
+  comes from the cohort declaration instead. A function that raised there would
+  be reporting a defect in data that is merely older.
+- `channels_from_labels()` **taking file order and raising on an unrecognised
+  stem.** Raising is right: an unrecognised stem means either a new electrode
+  type or a corrupt file, and both need a human. Guessing from position is how
+  the `LVN1`/`RVN1` inversion would have survived.
+- `assert_labels_match()` **wired into `load_recording`, case-insensitive.**
+  Case is a formatting difference, not a geometry difference.
+- `assert_plausible_units()` **on the median robust σ across contacts, band
+  1–500 µV.** The median, not the mean — one saturated contact must not move the
+  verdict. The band is only 500× wide, and the errors it exists to catch are
+  10³ and 10⁶, so it has margin on both sides without being tight enough to fire
+  on a genuinely quiet or genuinely noisy recording.
+- **Scaling the two fixtures rather than exempting the check.** See invariant 25.
+  `test_the_declared_units_are_applied[mV]` and `[V]` were asserting that the
+  loader accepts a recording with a multi-volt noise floor; that was never what
+  they were for.
+- `write_new_cohort_meta.py` **dry-run by default.**
+
+**Four required changes.**
+
+1. **`units` moves to `protocol.yaml` and `units_provisional` is deleted.** Units
+   are volts, confirmed, cohort-wide and unchanging — there is nothing
+   provisional left to flag. A field whose only value is `true` in every file is
+   not information, it is a note-to-self that outlives the doubt that produced
+   it. (Invariant 24.)
+2. **`config` and `channel_order_source` move to `protocol.yaml` too.** Same
+   argument, same test: *could two recordings in this cohort legitimately
+   differ here?* They cannot. Every new-cohort file has three independent ADCs
+   per cuff, so `config: "independent"` is a property of the cohort; every
+   new-cohort file carries `chanlabels`, so `channel_order_source: "file
+   chanlabels"` is too. `config` is genuinely cohort-distinguishing — the old
+   cohort is hardware-shorted tripolar — which is exactly why it belongs in the
+   per-cohort file rather than in 967 copies.
+3. **`rostral_end_known` is deleted; `rostral_end: None` carries it.** The schema
+   requires the key to be present, so `None` unambiguously means unknown and the
+   boolean is a second source of truth that can disagree with the first.
+   (Invariant 24, corollary.)
+4. **The dry run prints distinct value-tuples with counts, not 967 lines.** The
+   whole point of a dry run over a near-uniform corpus is to surface the file
+   that is *not* like the others; a count of 1 beside one tuple does that in a
+   glance, and 967 near-identical lines hide it. Reconcile the count of files
+   written against the count of recordings enumerated and state both — invariant
+   23 exists because a number that did not add up was the only evidence of a
+   silent failure.
+
+**One test to add:** a recording whose numbers are µV-scale but whose declaration
+says `V` must raise from `assert_plausible_units`, with the message naming both
+the declared unit and the implied σ. A check nothing exercises is a check that
+silently stops working. The two scaled fixtures prove the check tolerates correct
+data; nothing yet proves it rejects wrong data.
+
+**Post-run:** record the observed median robust σ across the new cohort in
+`protocol.yaml` as a comment. If it clusters tightly the 1–500 µV band can be
+tightened later on evidence rather than on my guess.
+
+#### Cheap checks, both clean
+
+- **Compression is gzip-4 throughout.** Task 10 is unblocked — no re-write pass.
+- **`Documents/GEMSBlanking` is clean at `599d1fe`.** No uncommitted local
+  divergence behind the import.
+
 ### BUILD CHANGE 2 FIRST — it is the only part on the critical path
 
 Change 2 (blind recall audit) unblocks step L, which unblocks the 09 gate.
