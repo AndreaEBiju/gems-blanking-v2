@@ -4297,6 +4297,49 @@ sample count. Retention reported per band per channel.
 Shift+drag to widen). Promote it from a secondary panel to the main interaction,
 replacing free interval marking.
 
+### BLOCKER FOUND 2026-09-24: no `meta.json` exists for new-cohort data
+
+Audit mode works end to end on `gems_j_t01_ms3_bl_230315_sig.mat` — loads in 4 s,
+54 pairs reduced to 6 traces, BLIND clean, reveal populated, diagnosis correct
+over 300 windows — but **the loader refuses to open it without geometry, and no
+`meta.json` exists for any new-cohort recording.** The refusal is correct
+behaviour, not a bug. It means **labelling cannot start until that file is
+written**, which makes `meta.json` generation the critical path to the 09 gate,
+ahead of anything else in task 16.
+
+It belongs to 00A/03's store, not to 16.
+
+#### Two silent errors the stand-in fixture made, and the rule that prevents both
+
+1. **Channel order.** The fixture built cuffs `("L", "R")` and labelled column 0
+   `LVN1`. The file's own `chanlabels` are `RVN1-3, LVN1-3, ANT1-3` — **R
+   first**. Every left/right comparison would have been inverted, silently.
+2. **Units.** The fixture declared `units="uV"`. Robust σ is 8.3×10⁻⁶ in file
+   units, which as µV would be 8.3 **pV**. The file is in **volts**. A 10⁶ error,
+   silently.
+
+**The rule: channel order is read from the file's `chanlabels`, never declared
+separately.** The labels are in the file and are authoritative; a `meta.json`
+that restates them is a second source of truth that can disagree, and this one
+did. `meta.json` declares only what the file does *not* state — units, geometry
+(pitch, aperture), animal and session identity — and the loader **asserts its
+declared order against `chanlabels`** and raises on mismatch.
+
+**Units are VOLTS, confirmed by Andrea 2026-09-24, and they do not vary across
+cohorts.** So `units` is **not a per-recording field**. A constant that never
+changes, written into 967 files, is 967 opportunities to type `uV`; declared
+once it is one. Put it in `protocol.yaml` beside the other cohort-level
+constants, and let `meta.json` carry only what genuinely varies per recording.
+A per-recording override may exist for the day a rig changes, but it must be
+absent by default rather than restated.
+
+**Units stay declared (invariant 14) but an implausible declaration must fail
+loudly.** Declaration prevents inference; it does not prevent a typo. Add a
+plausibility check at load: a declared unit that puts robust σ outside roughly
+1–500 µV for a nerve or stomach contact raises, naming both the declared unit
+and the implied σ. That catches a 10⁶ error without inferring anything — the
+declaration still decides, it just has to survive contact with the data.
+
 ### BUILD CHANGE 2 FIRST — it is the only part on the critical path
 
 Change 2 (blind recall audit) unblocks step L, which unblocks the 09 gate.
