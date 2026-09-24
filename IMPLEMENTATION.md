@@ -4297,6 +4297,46 @@ sample count. Retention reported per band per channel.
 Shift+drag to widen). Promote it from a secondary panel to the main interaction,
 replacing free interval marking.
 
+### BUILD CHANGE 2 FIRST — it is the only part on the critical path
+
+Change 2 (blind recall audit) unblocks step L, which unblocks the 09 gate.
+Change 1 (candidate adjudication) is not needed until **task 10**, which is
+*post*-gate. So ship Change 2 on its own, let the labelling start, and build
+Change 1 after. Doing them together delays the labelling for work nothing is
+waiting on.
+
+### The z-trace panel: 6 traces, not 54
+
+Nine signals × six bands is 54 traces and no human reads that. The diagnostic
+question is narrow — *was z high anywhere at this moment?* — so show **one trace
+per band, the maximum across all signals**, with the `z_enter` threshold drawn on
+each. Six traces answer blind-spot-versus-threshold directly. Which signal
+carried the maximum is a click-to-expand detail, not the default view.
+
+The maximum is taken across **all** signals including raw contacts, per hard
+invariant 6 — detection reads the contacts, so the audit must show what detection
+saw.
+
+### The blind-mode sampling rule
+
+**Contiguous spans, not scattered minutes.** Recall is
+`(artifacts the human found that no candidate covers) / (all artifacts the human
+found)`, which is only computable over a *complete* span. Scattered ten-second
+snippets destroy the context a human needs and make the denominator meaningless.
+
+```
+~10 minutes total, as 5 contiguous 2-minute spans
+uniform-random start within each recording
+stratified across 2-3 new animals and across conditions
+seed recorded in provenance
+excludes stim epochs (03B) and unassessable edges (task 06 settling)
+```
+
+**Explicitly NOT candidate-dense sampling.** Choosing where to look using the
+thing under test reintroduces the anchoring the blind mode exists to prevent — at
+the level of span selection rather than of marking. The objection that raised
+this had it exactly right.
+
 ### Change 2 — NEW recall-audit mode
 
 **Blind first, reveal second.** The human marks artifacts on the raw signal with

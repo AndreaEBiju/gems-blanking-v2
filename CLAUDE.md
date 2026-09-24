@@ -99,6 +99,14 @@ violating one, stop and say so rather than working around it.
     direction that silently loses coverage rather than the direction that
     complains.
 
+20. **A negative from a delegated search is not evidence.** A subagent sweep
+    reported zero `blankmotion` hits in a repository that contained
+    `detector/migrate_blankmotion.py` — the literal substring, in a tracked
+    file. Two conclusions were drawn from that sweep and both were wrong.
+    **Verify a negative directly before acting on it**, especially one that
+    removes something from the plan; a false positive announces itself, a false
+    negative is silent.
+
 ---
 
 ## Cross-platform rules (macOS + Windows; Linux best-effort)
