@@ -3402,6 +3402,7 @@ does not support the uniform claim.* Two rows are decisive, one is not:
 | `browseMotionArtifacts.m:34` | `validateattributes(..., 'finite')` throws on NaN, so an already-blanked file cannot be re-browsed. Remove if the browser is kept |
 | ~~every `filtfilt` call at a low corner~~ | **Audited and withdrawn as a padtype problem — measured, no change needed.** The row predicted that MATLAB's mandatory odd extension would reproduce task 06's transient. It does not, and the reason is worth keeping: MATLAB pads `3·2·n_sections` = **6 samples**, which at 24.4 kHz is **0.246 ms**. Odd and constant padding differ by 11.8% of sd at 0.5 s from the edge, 1.1% at 2 s and **0.00% by 15 s**; peaks surviving the existing edge buffer, **13 either way**. scipy's damage came from odd-extending across a pad long enough for the signal to move; a quarter-millisecond pad of a 0.15 Hz signal cannot. **The settling itself is real and is already handled**: measured `impz` 8.17 s against a 15 s buffer, and the code's `order/cutoff` heuristic (13.33 s) over-estimates it, which is the safe direction. Generalising a scipy result to MATLAB without measuring was the error here |
 | `extract_mmc.m` — **`xf(~isfinite(xf)) = 0`** | **Hard invariant 1, violated, live.** If `fillmissing` leaves anything non-finite it becomes **zero**, and a zero is indistinguishable from signal to everything downstream. This is the exact defect task 01 was written for — which turned out to have been fixed upstream in `a95d1ff` before this project began — found here for real, in a different file. **Highest priority row in this task.** Fix to NaN and let the consumer decide; audit the rest of `processing_new` for the same construct |
+| **`extract_mmc.m` — `burstRefractory` confirmed at 0.5–1 s on fasted data** | Measured on `gems_j_t01_ms3_sr_231323` recovery (19.8 min, fasted): with a fixed threshold at 2× the quiescent floor, episodes are **1.4 s median (IQR 0.8–2.6)** separated by a **4.0 s median gap**, at **0.73 per slow-wave cycle** (4.30 cpm). Burst duration matches the literature; the refractory must sit well below the 4 s gap, so **0.5–1 s is correct and 3 s would merge adjacent episodes**. The baseline recording gave 1.2 per cycle by the same method — both near the one-burst-per-slow-wave relationship, without tuning toward it |
 | **`extract_mmc.m` — the 30 s MOVING MAD is the bug, not `burstRefractory`** | **Measured 2026-09-23 on `gems_j_t01_ms3_bl_230315` (new cohort, fasted), ANT1−ANT3.** The gastric activity episodes last 2–6 s and recur every few seconds to tens of seconds, so a **30 s moving window contains the episode in its own baseline** and the threshold rises with the signal it is meant to detect. Measured, same recording, same envelope: **3× moving MAD over 30 s finds 3 episodes totalling 5 s — 1% of the record. A fixed session reference at 2× the quiescent floor finds 40 episodes, median 2.6 s, 23% duty.** This is the `step2_noise_sigma` defect a third time: an adaptive baseline that adapts to the thing being measured. **Fix the threshold, not the grouping.** With a fixed reference the episodes are already well separated (median inter-episode gap 5.0 s), so `burstRefractory` should stay **small — 0.5–1 s** and the earlier 3 s proposal is withdrawn: at a median gap of 5 s, 3 s would merge roughly a quarter of adjacent pairs |
 | `extract_mmc.m` — `detect_crossings` 30 s moving MAD | An independent instance of the `step2_noise_sigma` row above: a moving noise estimate whose threshold rises with activity. Same failure, same direction, same fix — a fixed session reference |
 | `extract_mmc.m` — blank restore is sample-exact | The blank-before-filter-restore pattern is otherwise done correctly (`bl` → `fillmissing` → `filtfilt` → `y(bl) = NaN`), but **only the blanked samples are restored**. With a 0.486 s impulse response, roughly half a second either side of every blank is filter output computed partly from interpolated data, and it is kept. **This is task 13's question arriving in MATLAB**: the restore must extend by the consumer's settling time, not by the blank. Audit every blank-restore in `processing_new` for the same pattern — it is a shape, not a one-off |
@@ -3412,6 +3413,34 @@ does not support the uniform claim.* Two rows are decisive, one is not:
 pattern to CV2 and LV), `step5e_multiband_validate.m` (peri-R histogram validation).
 
 ### Deriving MMC phase fractions from the stomach EMG
+
+**MEASURED 2026-09-23 on `gems_j_t01_ms3_sr_231323` (new cohort, fasted,
+19.8 min recovery): there is no phase I, so a 3-state classifier has no
+quiescent state to find.** Longest run below 1.5× the quiescent floor is **47 s**
+against an expected phase I of **5.4 min**, and the 30 s epoch levels span only
+8.6–21.8 µV (2.5×). In a 19.8 min window against a 17.5 min cycle, a 5.4 min
+phase I should have been captured with near certainty. This animal is in
+continuous phase-II-like activity.
+
+**So report continuous covariates first, and the state classification only if
+quiescence appears:**
+
+```
+duty_at_2x_floor        fraction of the epoch above 2x the quiescent floor
+longest_quiescent_run_s the statistic that actually discriminates here
+epoch_level_range       max/min of the 30 s epoch medians
+```
+
+These are robust whether or not the animal is cycling, and they are what the
+model covariate should be. Forcing a three-state fit on a recording with one
+state produces three numbers that describe the fitter, not the stomach.
+
+**Why there is no phase I is an open question and it matters to the experimental
+design**: 4–6 h fasting with a ~1.5 kcal treat hourly may not be enough to
+establish interdigestive cycling, or the stim may reset it, or the treat may
+keep the animal in the fed pattern throughout. Worth resolving before the
+covariate is used, because "no phase I in any recording" and "no phase I in this
+recording" have different consequences.
 
 **Method.** 2–50 Hz envelope → 30 s epochs → three states from event rate and
 envelope amplitude: **quiescent** (phase I), **intermittent** (phase II),
