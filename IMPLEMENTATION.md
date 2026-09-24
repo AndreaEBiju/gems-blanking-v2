@@ -4407,6 +4407,81 @@ data; nothing yet proves it rejects wrong data.
 `protocol.yaml` as a comment. If it clusters tightly the 1–500 µV band can be
 tightened later on evidence rather than on my guess.
 
+#### STOP: 27 store-path collisions, found 2026-09-24
+
+The generator's own dry run printed this and it was not acted on:
+
+```
+recordings enumerated (*_sig.mat): 859
+ready to write:                    837
+distinct store paths:              810
+COLLISIONS (stem repeats by date):  27
+```
+
+**837 files written into 810 distinct paths means 27 `meta.json` were
+overwritten by a second recording's.** Each surviving file now describes one
+recording while sitting in the store path of another, and `meta.json` carries
+`animal`, `session` and `channels` — so 27 recordings are one load away from
+being labelled with a different recording's identity and channel order. This is
+the *same* failure the whole `meta.json` exercise exists to prevent: the
+`LVN1`/`RVN1` inversion, except distributed across 27 files instead of a
+fixture, and not detectable from the signal.
+
+**Required, before any further writing:**
+
+1. **The generator refuses to write when a store path is not unique.** Not a
+   warning line in a summary — a raise, naming every colliding group. A path
+   that two recordings both claim is not a path, it is a bug in the key.
+2. **Enumerate the 27 and diagnose the key.** Stem-plus-date is evidently not
+   unique. Print each colliding group with the full source paths, file sizes and
+   mtimes. The two likely causes are a genuine same-day repeat session (in which
+   case the key needs the acquisition time or the block index) and the same
+   recording reachable by two Drive paths (in which case one is a conflict copy
+   and the store is fine but the enumeration is double-counting). These need
+   opposite fixes, so do not pick one — read the groups.
+3. **Re-derive the key from something the acquisition system guarantees unique.**
+   The TDT block directory name is the candidate; it already encodes date and
+   time. A key assembled by us from parts we chose is a key we have to prove
+   unique, and we just found out it is not.
+4. **Then re-run and reconcile to zero.** `enumerated = written + skipped +
+   collided`, every term printed, every skip reasoned.
+
+**And three counts in this report do not reconcile.** 859 enumerated against 837
+ready leaves 22 unexplained; the prose then says 837 rewritten and, later, 841
+written this run. A four-file discrepancy inside one report about writing files
+is exactly the signal invariant 23 is about — the 5-second bug announced itself
+as 1195 against 1710 and nothing else. Do not rationalise the gap; find it.
+
+#### The median σ: do not run a sweep for it
+
+The offer was a stratified sample of ~30 recordings to characterise the cohort's
+robust σ. **Declined.** It costs hours of Drive bandwidth, which is the scarce
+resource this week and is already contended by T and by labelling, and it buys a
+tighter plausibility band — a band whose job is to catch errors of 10³ and 10⁶,
+which the current 1–500 µV already does with margin on both sides.
+
+**Record it as a by-product instead.** `assert_plausible_units` already computes
+the median robust σ on every load. Log that value, with the recording id, to
+provenance. The distribution then accumulates for free as labelling and
+processing proceed, and by the time there is enough of it to justify tightening
+the band, it will have been collected by passes that had to happen anyway. A
+sweep run to obtain a number an existing pass already computes is a second pass
+over the same bytes. (Invariant 26.)
+
+#### The corpus is growing under the build
+
+852 at the first scan, 859 now. Andrea is still collecting, and she will be for
+weeks, so every count in every report ages the moment it is printed. Two
+consequences, both required:
+
+- **Every count is printed with the enumeration timestamp that produced it.** A
+  bare "859 recordings" in a report is not reproducible and cannot be reconciled
+  against a later one.
+- **The generator is idempotent and incremental.** Re-running it writes only
+  what is missing, leaves existing files untouched, and reports new / existing /
+  collided separately. A one-shot migration script is wrong for a corpus that is
+  still growing; this will be run many times.
+
 #### Cheap checks, both clean
 
 - **Compression is gzip-4 throughout.** Task 10 is unblocked — no re-write pass.

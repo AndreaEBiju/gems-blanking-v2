@@ -177,6 +177,27 @@ violating one, stop and say so rather than working around it.
     the fixtures preserved exactly what those tests were for — that the declared
     scale factor is applied — and removed a claim nobody meant to make.
 
+26. **Do not run a pass to collect a number an existing pass already computes.**
+    The right move is to record it where it is already being calculated and let
+    the distribution accumulate for free. *Found when a stratified 30-recording
+    sweep was proposed to characterise the cohort's robust σ:*
+    `assert_plausible_units` computes that σ on every single load, so the sweep
+    would have re-read hundreds of gigabytes over the Drive to learn what
+    labelling was about to produce as a by-product. Ask what the number is
+    *for* before scheduling the work: a band that exists to catch 10³ and 10⁶
+    errors does not need a tighter bound urgently enough to spend the scarce
+    resource on it.
+
+27. **A key you assembled from parts you chose is a key you must prove unique.**
+    Uniqueness is a property to be asserted at write time, not assumed at design
+    time, and the assertion is a raise, not a warning line in a summary — a
+    summary is read once by someone who already believes the run worked. *Found
+    in the `meta.json` generation:* 837 files were written into 810 distinct
+    store paths, so 27 recordings silently overwrote another recording's
+    identity and channel order, and the collision count was printed in the dry
+    run without stopping anything. Prefer a key the acquisition system already
+    guarantees (the TDT block directory) over one built from a stem and a date.
+
 ---
 
 ## Cross-platform rules (macOS + Windows; Linux best-effort)
