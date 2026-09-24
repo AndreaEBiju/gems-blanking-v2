@@ -118,6 +118,39 @@ violating one, stop and say so rather than working around it.
     This is rule 16's territory — what breaks is the machine you are not sitting
     at.
 
+    **And check what the fix exposes.** `pip install -e` on a *flat-layout*
+    repository puts its whole root on `sys.path`, not just its declared
+    packages. Doing this for `detector` put a second top-level `tests` package
+    on the path, and **Python prefers a regular package found later over a
+    namespace package found earlier**, so every `from tests.conftest import ...`
+    in this repo silently resolved to the other project's tests. Give your own
+    `tests/` an `__init__.py`, and prefer `editable_mode=strict` where setuptools
+    honours it.
+
+22. **A value that crosses the MATLAB/Python boundary has a declared canonical
+    form and a round-trip test — especially when it is used as a key.**
+    MATLAB's `jsonencode` writes `5.0` as `5`; Python's `f"{5.0}"` writes
+    `5.0`. A dictionary key built by formatting a float on one side and
+    matching it on the other therefore missed for the 5 s duration and **only**
+    the 5 s duration — `0.05` and `0.5` render identically on both sides. The
+    entire long-duration axis produced zero points, silently, in a result set
+    that otherwise looked complete. It is the axis that matters most: the only
+    one approaching the slow consumers' impulse responses.
+
+    This is the **fourth** cross-boundary format defect in this project —
+    1-based inclusive vs 0-based half-open indices, the v7.3 `(2, N)`
+    transpose, `hash()` salting, and now numeric formatting. Route every such
+    value through **one shared canonicalising function**, never through two
+    formatters that happen to agree on the cases you tried.
+
+23. **Cost-model the work before running it, and treat an arithmetic
+    disagreement as a defect signal.** The 5-second bug was not caught by a
+    test; it was caught because a masked manifest came out at 1195 points
+    against a costed 1710, and an unexplained gap in a plan that had just been
+    cost-modelled is where a quiet failure hides. A count that does not
+    reconcile is evidence, and it is often the *only* evidence a silent
+    data-loss bug produces.
+
 ---
 
 ## Cross-platform rules (macOS + Windows; Linux best-effort)
