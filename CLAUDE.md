@@ -107,6 +107,17 @@ violating one, stop and say so rather than working around it.
     removes something from the plan; a false positive announces itself, a false
     negative is silent.
 
+21. **A library resolved by `sys.path` order is not a dependency, it is an
+    accident.** Task 16 found `gems_blanking_v2` importing `detector` from
+    `Documents/GEMSBlanking` while the PyQt app imported the same package from
+    its `detector-core` submodule — two working trees of one repo, selected by
+    discovery order, both needing the identical fix. That works until the two
+    diverge, and then the failure is invisible and machine-dependent. **Pin it:
+    one checkout, declared as a dependency** (an editable install, or the
+    submodule for both), never whichever copy the path happens to reach first.
+    This is rule 16's territory — what breaks is the machine you are not sitting
+    at.
+
 ---
 
 ## Cross-platform rules (macOS + Windows; Linux best-effort)
