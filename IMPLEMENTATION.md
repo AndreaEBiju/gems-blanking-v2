@@ -3435,6 +3435,47 @@ These are robust whether or not the animal is cycling, and they are what the
 model covariate should be. Forcing a three-state fit on a recording with one
 state produces three numbers that describe the fitter, not the stomach.
 
+##### Let the data choose the number of states, and settle it on a SESSION timeline
+
+**Do not force three states.** Fit 1-, 2- and 3-state models per recording and
+select by **BIC**. "How many states does this recording support" then becomes an
+output rather than an assumption, and a recording with no quiescence reports one
+state instead of inventing three.
+
+**A 20-minute recording cannot show a 17.5-minute rhythm** — one cycle is not
+periodicity. The recordings within a session are consecutive and timestamped
+(`09162026` spans 16:18 to 01:15, about nine hours), so **stitch each session's
+30 s epoch activity into one series in timestamp order, gaps included, against
+clock time.** Cycling then becomes visible rather than inferred.
+
+**The two competing explanations predict different periods, which is what makes
+this decisive without any independent measure of motility:**
+
+| explanation | expected period over a 6 h session |
+|---|---|
+| the animal is cycling (MMC) | **~17.5 min** — ~20 cycles |
+| the hourly treat is resetting it | **~60 min** — ~6 cycles |
+| neither: continuous phase II | no periodicity; drop the phase model, keep the continuous covariates |
+
+An autocorrelation or periodogram of the session timeline separates twenty
+cycles from six trivially.
+
+**Three figures, in descending order of what they settle** — specified here
+before the numbers exist, for the same reason the tolerance criteria were
+pre-registered:
+
+1. **Session timeline**, one panel per session, treat times marked if they can be
+   reconstructed even to the nearest ten minutes. This is the one that answers
+   the question.
+2. **Histogram of `longest_quiescent_run_s`** across all recordings, with 5.4 min
+   marked. Every recording capping below a minute is conclusive across animals;
+   a few reaching minutes means those animals cycle and the rest need
+   explaining.
+3. **Pooled distribution of 30 s epoch levels**, per-recording normalised.
+   Distinct phases make it multimodal, one state makes it unimodal. Caveat to
+   state: normalising by each recording's own floor assumes the floor *is*
+   quiescence, so report raw µV alongside.
+
 **Why there is no phase I is an open question and it matters to the experimental
 design**: 4–6 h fasting with a ~1.5 kcal treat hourly may not be enough to
 establish interdigestive cycling, or the stim may reset it, or the treat may
