@@ -233,6 +233,29 @@ violating one, stop and say so rather than working around it.
     read away. Before deriving a field from a path, check whether the instrument
     already recorded it.
 
+31. **Store the zone, never a fixed offset, and say which date you mean.** A
+    UTC timestamp plus an IANA zone survives a DST change; a UTC timestamp plus
+    a remembered −4 becomes wrong in November and keeps producing plausible
+    times. And when local and UTC dates differ, a "day" is ambiguous until
+    named: `gems_j_t01_ms3_bl_230315` is 23:03 EDT on the 15th and 03:03 UTC on
+    the 16th, so grouping the corpus by UTC date silently files every evening
+    recording under the next day — a real scheduling difference and a timezone
+    bug look identical in the output. Every grouping by day states which date
+    it uses, at the point where it groups.
+
+32. **A special case that patches up a flag is evidence the flags do not model
+    the call graph.** Do not delete it and do not keep it — replace the model.
+    When one call yields several outputs, declare the call→outputs map once and
+    derive the gate (`run iff mask ∩ outputs ≠ ∅`) and the recording
+    (`record exactly mask ∩ outputs`) from it. Hand-written booleans over
+    several outputs of one call go wrong in both directions: the `hrv` /
+    `breathing` gate silently computed nothing for 105 points, and the
+    `mmc` / `mmc_burst` gate worked *only* because a string special-case forced
+    a flag true — load-bearing code that reads exactly like dead tidy-up, whose
+    removal would have emptied every `mmc_burst` point in the sweep. Two
+    instances found by one grep is a pattern, and the map is what prevents the
+    third.
+
 ---
 
 ## Cross-platform rules (macOS + Windows; Linux best-effort)

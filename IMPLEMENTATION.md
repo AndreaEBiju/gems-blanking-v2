@@ -4600,6 +4600,94 @@ the block directory name is `<tank>_<stem>` with a tank stamp shared by every
 block, so it is **stem-equivalent for uniqueness**. Re-keying to it would have
 bought precisely nothing.
 
+#### RE-KEY NOW, on `acquired_at` — and why this one is right where mine was wrong
+
+`acquired_at` exists for all 837, from the `.tsq`. That changes the key decision,
+and the reason is the whole point of invariant 30.
+
+**My withdrawn re-key would have used the folder date, which *differs* between
+the two copies — it would have split 27 duplicates into 27 spurious store
+entries.** A key on `acquired_at` is *identical* across a duplicate pair, because
+the instrument wrote it once and the copy carries it. So the same idea, sourced
+from the instrument instead of the filesystem, collapses the duplicates
+correctly **and** separates two genuine recordings of the same animal and
+condition started at the same clock second on different days. Opposite outcomes
+from the same-shaped change, decided entirely by where the value came from.
+
+**Do it now, before labelling starts.** This is the cheapest this will ever be:
+
+- nothing references a store path yet — no labels exist, and
+  `duplicates.json` / `new_cohort_meta_plan.json` both regenerate;
+- the generator is already idempotent and verified to reconcile to zero, so the
+  re-key is one run of a thing that works;
+- after labelling begins, changing the key means migrating labels, and the
+  dateless key becomes permanent by inertia.
+
+The alternative is keeping the guard forever and accepting that it will raise at
+some arbitrary future moment — which is safe, but the moment it picks will be in
+the middle of labelling, which is the critical path.
+
+**Before running it:** enumerate every reference to a store path anywhere in the
+repo and in the Drive store, and state the list. The claim "nothing references
+it yet" is the kind of negative that invariant 20 exists about — establish it,
+do not assume it. The dedup guard stays exactly as it is afterwards; it is
+cheap, and a key being better is not a reason to remove the thing that catches
+the case where it is not.
+
+#### Store the zone, not just UTC — November will break a hardcoded offset
+
+UTC with the zone named was the right call, and the example is the argument:
+`gems_j_t01_ms3_bl_230315` is 23:03 **EDT on the 15th**, which is 03:03 **UTC on
+the 16th**. The stem's trailing digits are **local** time; `acquired_at` is UTC;
+the dates disagree by one for every recording after 20:00 EDT.
+
+Two things follow.
+
+1. **Store the IANA zone (`America/New_York`) alongside the UTC timestamp**, not
+   a fixed offset. The corpus is Aug–Sep now, but recovery recordings will run
+   past the November DST change, and a hardcoded −4 silently becomes wrong for
+   every recording after it — while continuing to produce plausible times. With
+   the zone stored, local date is derivable forever; with an offset, it is
+   derivable until it isn't.
+2. **Any grouping by "day" uses the LOCAL date.** Session grouping, baseline /
+   recovery pairing, the per-recording motility state from task 08, and the
+   LORO splits all mean the day Andrea ran the animal, not the UTC day.
+   Grouping on the UTC date pushes every evening recording into the next day's
+   group — a quarter of the corpus landing in the wrong session, produced
+   silently, and indistinguishable in the output from a real scheduling
+   difference. State the convention at the point where the grouping is computed.
+
+#### The `mmc_burst` twin: declare the call-to-fiducials map
+
+The grep found the second instance and it was worse than the first.
+`extract_mmc` produces both `mmc` and `mmc_burst`, gated on `want.mmc` alone,
+and worked **only** because a string special-case in the mask loop forced
+`want.mmc` true whenever `mmc_burst` was masked in. Since `mmc` is
+`criterion_degenerate`, real masks contain `mmc_burst` and **never** `mmc` — so
+that special-case was load-bearing for every mmc_burst point in the sweep, and
+deleting it as dead tidy-up would have produced nothing for all of them.
+
+**A special case that patches up a flag is evidence the flags do not model the
+call graph.** Two instances found in one grep is a pattern, and the structural
+fix prevents the third: **declare the call→fiducials map once**, and derive both
+the gate and the recording from it —
+
+```
+HR_BR_HRVAnalysis_new -> {hrv, breathing}
+extract_mmc           -> {mmc, mmc_burst}
+```
+
+A call runs iff `mask ∩ outputs(call) ≠ ∅`, and records exactly
+`mask ∩ outputs(call)`. Hand-written boolean gates are then impossible to get
+wrong, and a fiducial added to an existing call later cannot be forgotten —
+which is the failure mode that produced both of these.
+
+**One regression check before moving on.** The refactor is structural and the
+old special-case meant mmc_burst results were *correct*, so the 1710 rows should
+stand — but "should" is not "do". Re-run five mmc_burst points under the new
+code and compare against the stored rows. If they match, say so and keep the
+sweep. If they do not, the refactor changed behaviour and the pass is suspect.
+
 #### The median σ: do not run a sweep for it
 
 The offer was a stratified sample of ~30 recordings to characterise the cohort's
