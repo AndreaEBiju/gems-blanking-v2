@@ -4546,31 +4546,59 @@ question.** Identical byte size is a reason for suspicion, not reassurance. This
 is recorded at the top of `verify_duplicates.py` because the wrong method is the
 one that comes to mind first.
 
-#### STILL OPEN: is a day of recordings missing from the Drive?
+#### CLOSED 2026-09-25: b1, and no recording is missing
 
-The dedup guard makes the *store* correct. It does not explain why the same
-block name sits under two date folders, and one explanation is not benign:
+| check | result |
+|---|---|
+| shared stems under both dates | 27 |
+| identical TDT block name (acquisition timestamp) | 27/27 |
+| identical `.tsq` and `.tev` sizes | 27/27 |
+| blocks only under `09042026` | 36 |
+| …converted to `_sig.mat` | 36/36 |
+| …present in the store with `meta.json` | 36/36 |
 
-- **(b1) `09042026` is a copy of `09032026`** — a duplicated folder, a sync
-  artefact, a manual backup. Bookkeeping only; the store is right and nothing is
-  lost.
-- **(b2) the converter read `09032026` twice** and wrote one output under each
-  date. Then the real `09042026` recordings were never converted, are absent
-  from the store, and **27 recordings Andrea believes she has are not there.**
+**The raw TDT blocks themselves are duplicated.** The converter did not read
+`09032026` twice; it read two copies of one block. `09032026` holds 27 blocks
+and is *wholly contained* in `09042026`'s 63. Nothing is missing, nothing is
+corrupt, and this is Andrea's Drive to tidy, not the build's.
 
-Both produce exactly what was observed, and the dedup rule absorbs both without
-comment — which is the danger of a dedup rule. Distinguishing them is cheap and
-does not require decoding anything:
+**Do not delete anything.** The duplicate folder costs space and nothing else,
+and the enumeration handles it. Deleting raw acquisition data to tidy a
+bookkeeping artefact is a bad trade in the wrong direction.
 
-```
-list the raw TDT blocks under both date folders
-compare block names, .tsq/.tev sizes and the blocks' own internal start times
-```
+#### The block name carries no date, and the folder date is now known-unreliable
 
-If `09042026` holds blocks whose internal start times say 09/04, (b2) is true
-and there is missing data. If the two folders hold the same blocks byte for
-byte, (b1) is true and this is Andrea's to tidy. **Run this before labelling
-touches those animals**, and report which it is.
+Every block under both folders carries the same prefix,
+`ME_STIM_Andrea-260824-155430` — the **tank** creation stamp (2026-08-24), not a
+per-block one. So the block directory is `<tank>_<stem>`, the stem's trailing
+digits are a **time of day** (`gems_h_pre01_160301` → 16:03:01), and **nothing
+in the name says which day.** The only thing that did say was the containing
+folder, and we have just proved a folder date can be wrong: 27 blocks sit under
+a date that is not theirs.
+
+Two consequences.
+
+**1. Acquisition datetime comes from the `.tsq` header, not from the folder.**
+The block's own start timestamp is in there — it is what the b1/b2 check just
+read — so the authoritative value is available for the cost of a header read.
+Add `acquired_at` to `meta.json` from the `.tsq`, and **audit the existing 837
+for any `session` value derived from a folder name.** A field taken from the
+filesystem when the instrument recorded it itself is a second source of truth,
+and this one is already known to disagree. (Invariant 30.)
+
+**2. The stem key is safe only because the guard raises.** Name-plus-time-of-day
+with no date means two genuine recordings — same animal, same condition label,
+same second on different days — would collide, and across a corpus still growing
+past 886 that is a question of when, not whether. The dedup guard catches it:
+such a pair fails the identical-signal test and raises. **That guard must never
+be downgraded to a warning or a skip.** It is not a migration convenience for
+the 27; it is the thing that makes a dateless key tolerable, and `acquired_at`
+from the `.tsq` is what will eventually let the key stop being dateless.
+
+And a third reason the re-key was wrong, better than the two already recorded:
+the block directory name is `<tank>_<stem>` with a tank stamp shared by every
+block, so it is **stem-equivalent for uniqueness**. Re-keying to it would have
+bought precisely nothing.
 
 #### The median σ: do not run a sweep for it
 

@@ -221,6 +221,18 @@ violating one, stop and say so rather than working around it.
     "is this the same data". Identical file size across two files that should be
     independent is a reason for suspicion, not reassurance.
 
+30. **Prefer the instrument's own record over the filesystem's.** A date, an
+    identity or an ordering that the acquisition system wrote into the data is
+    authoritative; the same thing read off a folder name or a path is a second
+    source of truth maintained by hand, and hands slip. *Found on the 27
+    duplicates:* the TDT block name is `<tank>_<stem>` where the tank stamp is
+    shared by every block and the stem's trailing digits are a time of day —
+    **nothing in the name gives the date**, so the date came from the containing
+    folder, and 27 blocks were sitting under a folder date that was not theirs.
+    The real start timestamp was in the `.tsq` header the whole time, one header
+    read away. Before deriving a field from a path, check whether the instrument
+    already recorded it.
+
 ---
 
 ## Cross-platform rules (macOS + Windows; Linux best-effort)
