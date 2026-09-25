@@ -198,6 +198,29 @@ violating one, stop and say so rather than working around it.
     run without stopping anything. Prefer a key the acquisition system already
     guarantees (the TDT block directory) over one built from a stem and a date.
 
+28. **Two values that have always been equal are a load-bearing assumption, and
+    the day you make them independent every place that used one as a proxy for
+    the other becomes a bug without being edited.** Nothing raises, nothing
+    fails a test, and the code that broke was not touched in the change that
+    broke it. *Found in T:* `hrv` and `breathing` come from one
+    `HR_BR_HRVAnalysis_new` call, and the sweep gated it on `want.hrv` alone —
+    harmless while masking did not exist and the two were always equal, silently
+    wrong the moment per-consumer masking made them independent. 105 bracket
+    points computed nothing and the run reported success. When a change makes
+    two things separable, grep for every use of either one before shipping it,
+    and prefer a fix that makes the disagreement structurally impossible over
+    one that corrects the single instance found.
+
+29. **The fast comparison samples the metadata.** Before concluding two files
+    differ, know what part of them you actually compared. *Found on the 27
+    duplicate recordings:* a head-and-tail hash of `_sig.mat` samples exactly
+    the two regions that hold `createdAt` and `srcBlock`, so two conversions of
+    one TDT block read as two different recordings with total confidence; a
+    mid-file range then failed differently, because a three-byte metadata string
+    difference shifts every subsequent offset. Only the decoded array answers
+    "is this the same data". Identical file size across two files that should be
+    independent is a reason for suspicion, not reassurance.
+
 ---
 
 ## Cross-platform rules (macOS + Windows; Linux best-effort)

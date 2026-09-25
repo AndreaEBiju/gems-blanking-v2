@@ -677,6 +677,69 @@ Check it with data already in hand: take the baseline `mmc` burst times and
 wave phase. **If they do not, the `mmc` tolerance is a tolerance for a detector
 that is not detecting MMC**, and that matters more than its numeric value.
 
+#### The 105 empty bracket points, found 2026-09-25
+
+The replicate sweep reported 1710 rows and zero failures. The per-point consumer
+counts did not agree with that:
+
+```
+consumers run per point: {0: 105, 1: 795, 2: 675, 3: 85, 4: 45, 5: 5}
+```
+
+All 105 zero-consumer points carried the mask `('breathing',)`. `hrv` and
+`breathing` come out of a single `HR_BR_HRVAnalysis_new` call, and the sweep
+gated that call on `want.hrv` alone — so every breathing-only point computed
+nothing, and those are precisely the points that existed to fill breathing's
+bracket. 6% of the pass produced nothing while the run reported success.
+
+**The cause is the shape worth remembering.** Before per-consumer masking,
+`want.hrv` and `want.breathing` were *always equal*, so reading one as a proxy
+for the other was harmless and correct. Masking made them independent, and every
+place that had quietly relied on their equality became a bug at that moment
+without being edited. (Invariant 28.)
+
+The fix is the right kind: the call now runs if either is wanted and records only
+the fiducials actually requested, so the recorded set cannot disagree with the
+mask again. That converts a property somebody has to check into one that cannot
+be violated.
+
+**Name the count for what it counts.** `n_consumers_run` reaching 4 and 5 for a
+three-consumer mask is explained — one `mmc` call yields `mmc` and `mmc_burst`,
+one HR_BR call yields `hrv` and `breathing` — but an explanation that has to be
+repeated is a naming defect, and this is invariant 18 again: two different
+things (consumers invoked, fiducials recorded) sharing one name. Rename it
+`n_fiducials_recorded`, and assert separately that **the set of consumers
+invoked equals the mask exactly**. A set comparison, not a count — a count can
+agree by coincidence, and this bug is what a count agreeing by coincidence looks
+like.
+
+#### The cost model is biased 2×, and that is now a measurement
+
+**23,875 s (6.6 h) on 8 workers against a 3.3 h projection.** Same direction and
+roughly the same factor as the previous estimate. Two consecutive 2× misses in
+the same direction is not variance, it is a calibration error, and by invariant
+23 an arithmetic disagreement is a defect signal whether or not anything visibly
+broke.
+
+**Until the serial control lands, multiply every projection from this model by
+2 and state that the factor is empirical.** A projection quoted without it is
+known to be wrong.
+
+The serial control decides where the factor lives, and the two answers imply
+different actions:
+
+- Summed per-point `wall_s` is 28.17 h, measured *under* 8-way contention, so it
+  is not a single-core figure. Against 6.6 h × 8 = 52.8 h of worker time, that
+  is **53% utilisation** — low for work this close to embarrassingly parallel.
+- If the serial per-point cost matches the model, the 2× is contention and the
+  remedy is fewer workers, not more: this pass reads large files off the Drive,
+  and 8 workers contending for one I/O path can be slower than 4 that do not.
+- If the serial per-point cost is itself ~2× the model, the per-point estimate
+  is wrong and the worker count is innocent.
+
+Report both numbers — serial per-point mean and the implied parallel efficiency
+— and set the worker count from them rather than from 8 being a round number.
+
 #### Report the statistic as well as the fiducial, for `hrv`
 
 A.4 declares `hrv`'s criterion as "beat train unchanged", and the
@@ -4451,6 +4514,63 @@ ready leaves 22 unexplained; the prose then says 837 rewritten and, later, 841
 written this run. A four-file discrepancy inside one report about writing files
 is exactly the signal invariant 23 is about — the 5-second bug announced itself
 as 1195 against 1710 and nothing else. Do not rationalise the gap; find it.
+
+#### RESOLVED 2026-09-25: the 27 are cause (b), and the re-key was the wrong instruction
+
+The groups were read before the key was touched, and the answer reverses the
+first report. **All 27 signal arrays are bit-identical**; only `createdAt` and
+`srcBlock` differ, and the two `srcBlock` values are the same block name under
+`09032026` and `09042026`. Eight million by nine float32 samples of biological
+noise cannot agree bit-for-bit across two acquisitions. This is one recording
+reachable by two Drive paths. **No `meta.json` was overwritten by a *different*
+recording's** — each pair wrote identical content — so the store was never
+corrupt, only double-counted.
+
+**My step 3 was wrong and should not have been written.** I told it to re-key
+off the TDT block *before* the groups had been read, having just objected in the
+same message to acting on an unread diagnosis. The re-key would have made the
+key finer, which for duplicates is the wrong direction: it would have produced
+27 duplicate store entries instead of collapsing them, and left the actual
+duplication untouched. The refusal, with the evidence attached, was correct, and
+declining a spec instruction on evidence is the behaviour this document wants.
+**Ratified: no re-key.** The guard is refusal-plus-verified-dedup.
+
+**The comparison method is the durable finding.** `_sig.mat` keeps `createdAt`
+in the header and `srcBlock` in trailing variables — exactly the regions a
+head-and-tail hash samples — so the intuitive fast check reports "two different
+recordings" with total confidence on two conversions of one block. The second
+attempt, a fixed mid-file range, failed differently: two groups differ by three
+bytes of metadata string, which shifts every later offset, so the same byte range
+lands in different places. **Only the decoded `signal` array answers the
+question.** Identical byte size is a reason for suspicion, not reassurance. This
+is recorded at the top of `verify_duplicates.py` because the wrong method is the
+one that comes to mind first.
+
+#### STILL OPEN: is a day of recordings missing from the Drive?
+
+The dedup guard makes the *store* correct. It does not explain why the same
+block name sits under two date folders, and one explanation is not benign:
+
+- **(b1) `09042026` is a copy of `09032026`** — a duplicated folder, a sync
+  artefact, a manual backup. Bookkeeping only; the store is right and nothing is
+  lost.
+- **(b2) the converter read `09032026` twice** and wrote one output under each
+  date. Then the real `09042026` recordings were never converted, are absent
+  from the store, and **27 recordings Andrea believes she has are not there.**
+
+Both produce exactly what was observed, and the dedup rule absorbs both without
+comment — which is the danger of a dedup rule. Distinguishing them is cheap and
+does not require decoding anything:
+
+```
+list the raw TDT blocks under both date folders
+compare block names, .tsq/.tev sizes and the blocks' own internal start times
+```
+
+If `09042026` holds blocks whose internal start times say 09/04, (b2) is true
+and there is missing data. If the two folders hold the same blocks byte for
+byte, (b1) is true and this is Andrea's to tidy. **Run this before labelling
+touches those animals**, and report which it is.
 
 #### The median σ: do not run a sweep for it
 
