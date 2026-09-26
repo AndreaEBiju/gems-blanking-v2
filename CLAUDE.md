@@ -267,6 +267,28 @@ violating one, stop and say so rather than working around it.
     The empty output directories made the re-key possible; the single funnel
     made it easy.
 
+34. **An aggregate over a heterogeneous population measures none of its
+    members.** Before reducing a measurement to one number, ask which axis
+    carries the variance — and if that is not known, finding out is the first
+    measurement, not an optimisation of a later one. *Found in T's serial
+    control:* the sample was stratified across the **duration** axis, as the
+    spec asked, and returned a tidy aggregate ratio of 1.28 whose prescribed
+    action was wrong for every consumer taken individually. `slow_wave` was
+    contended 7×, three other consumers were contended 1×, and the duration
+    stratification drew zero `slow_wave` points. The spec was at fault, not the
+    execution: a decision rule that collapses to a single threshold assumes a
+    homogeneity nobody had checked.
+
+35. **Before scheduling around a cost, ask whether the cost is real.** A factor
+    of 100 in the algorithm makes a factor of 2 in the scheduler irrelevant, and
+    tuning the scheduler first bakes the waste into the plan where it stops
+    being visible. *Found in T:* `slowWaveAnalysis_new` low-passes for a 0.05 Hz
+    gastric rhythm in data sampled at 24414 Hz. Decimating before filtering is
+    ~120× less arithmetic than a worker-count sweep was going to save 2× on.
+    Sampling rate is carried forward out of habit long after the band of
+    interest has narrowed — check the ratio of sample rate to signal bandwidth
+    before optimising anything downstream of it.
+
 ---
 
 ## Cross-platform rules (macOS + Windows; Linux best-effort)

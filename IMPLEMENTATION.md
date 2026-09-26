@@ -4718,6 +4718,90 @@ against the 53% already measured. The blanket empirical 2× stays on every
 projection until this lands, and is replaced by the recalibrated model rather
 than removed.
 
+#### The serial control landed, the decision rule was wrong, and the remedy is upstream of the worker count
+
+**The rule I wrote was defective and the spec is the thing to blame.** It asked
+for stratification across the **duration** axis and then reduced the answer to a
+single ratio. Duration was not the axis carrying the variance — consumer was —
+and the duration-stratified sample drew zero `slow_wave` points and returned a
+tidy aggregate **1.28**, landing in a band whose prescribed action ("recalibrate
+and test 4 workers") was wrong for every consumer individually. The measurement
+was executed correctly against a specification that measured the wrong thing.
+
+| consumer | serial | parallel | ratio |
+|---|---|---|---|
+| `hrv` / `breathing` | 6.0 s | 6.2–7.1 s | 1.02–1.21 |
+| `T_hardware` | 12.0 s | 12.8–14.9 s | 1.06–1.23 |
+| `mmc_burst` | 8.5 s | 11.4–13.4 s | 1.29–1.57 |
+| **`slow_wave` (180 s)** | **15.9 s** | **98.9 s** | **6.23** |
+| **`slow_wave` (420 s)** | **32.2 s** | **237.2 s** | **7.36** |
+
+**And the per-point model was never the problem.** `slow_wave = 15.2 s` in the
+model against 15.9 s measured serially is a good coefficient. The blanket 2× was
+one consumer behaving differently under parallelism, averaged across a
+population where nothing else does.
+
+#### Do NOT run the 2/4/8 sweep yet — three cheap measurements come first
+
+A worker sweep costs hours and is downstream of a question that costs minutes.
+A 6–7× per-point inflation at 8 workers on a **32-core** machine has three
+distinct explanations with three opposite remedies, and the sweep cannot tell
+them apart:
+
+1. **MATLAB is implicitly multithreading and the machine is genuinely
+   saturated.** `filtfilt` and the BLAS calls underneath it use every core by
+   default. If one `slow_wave` run takes 15.9 s across ~32 threads, that is
+   ~500 core-seconds of real work; eight of them is ~4000 core-seconds, which on
+   32 cores is ~125 s per point. **The observed 98.9 s is consistent with
+   this.** If so, the 6.6 h is near the machine's capacity, 8 workers is already
+   right, nothing is being wasted, and the fix is not scheduling at all.
+2. **Oversubscription.** 8 processes × 32 threads = 256 threads thrashing 32
+   cores, where the same work would finish faster with each worker pinned to one
+   thread. Remedy: `maxNumCompThreads(1)` per worker — and then possibly *more*
+   workers, not fewer.
+3. **I/O bound.** Cores idle, one Drive path saturated. Remedy: fewer workers,
+   or stage segments to local disk first.
+
+Measure, in this order, during an 8-worker `slow_wave`-heavy burst:
+
+```
+maxNumCompThreads inside a worker        -> is it 32 or 1?
+total CPU utilisation across 32 cores    -> saturated or idle?
+disk read throughput                     -> pegged or quiet?
+```
+
+Saturated + multithreaded is (1). Idle cores with high context-switching is (2).
+Idle cores with a pegged disk is (3). **Report all three numbers**, then act.
+The 2/4/8 sweep is only worth running under (2) or (3).
+
+#### The likely real win is algorithmic, not scheduling
+
+`slowWaveAnalysis_new` low-passes for a gastric slow wave at **~3 cpm = 0.05 Hz**
+in data sampled at **24414 Hz**. Even the burst content of interest is well
+under 50 Hz. Filtering at the full rate to extract a 0.05 Hz rhythm does on the
+order of a hundred times more arithmetic than the signal requires.
+
+**Check whether it decimates before filtering.** Anti-alias decimate to ~200 Hz
+first — a factor of ~120 in filter work — then run the existing low-pass on the
+decimated series. If `slow_wave` drops from 15.9 s to a fraction of a second,
+the contention question dissolves rather than being scheduled around, and it
+takes `slow_wave` off the critical path for every future pass as well.
+
+Do this check before the worker sweep too. An algorithmic factor of 100 makes a
+scheduling factor of 2 irrelevant, and the order matters: tuning the worker
+count around a filter that should not cost this much bakes the waste into the
+plan. If it already decimates, say so and the question is closed.
+
+#### Recalibration, once the above is known
+
+Do not recalibrate the model to the *parallel* per-point times. Those are a
+property of a worker count, not of the work, and freezing them into the model
+makes every future projection wrong the moment the worker count changes. Model
+**serial per-point cost** — which is already close to right — and apply a
+separate, named contention factor per consumer, since the measurement just
+showed contention is per-consumer and not global. The blanket 2× is retired by
+that, not by an aggregate replacement.
+
 #### The median σ: do not run a sweep for it
 
 The offer was a stratified sample of ~30 recordings to characterise the cohort's
