@@ -5375,7 +5375,44 @@ the adapter's job is to hand them what they saw then, not a better signal:
   0.5, the software tripole is not what the hardware would have produced, and
   that belongs in the `T_hardware` row's provisional caveat.
 
-#### The blind audit is not launchable — this is now the critical path
+#### UPDATE 2026-09-26: the blind audit is launchable
+
+**Tools → Blind recall audit…** opens a separate window. Recordings offered: only
+those with a store entry, a reachable source file and no exclusion (844 now);
+an excluded one is refused even if requested directly. Each open draws one
+120 s span from a recorded seed, after removing stimulation and 20 s edge
+guards. Shift+drag marks; out-of-span marks are refused. **Commit writes marks
+and a plan record to `labels/<animal>/blind_audit/<session>/` before any
+candidate or z-trace is computed.** Six mutations caught; exercised end to end
+on one `sr` and one `bl` recording (open 14–34 s, reveal 20–40 s). The bridge now
+imports `gems_blanking_v2` as a declared dependency (invariant 21), and
+`meta.json` records `source_path` relative to the store root.
+
+**Before the formal audit counts:** the five-span plan (5 contiguous 2-min spans,
+~10 min total, stratified across 2–3 new animals and conditions, seed recorded)
+exists in the planner but is not wired to the window. **Wire it**, so each open
+advances through the plan and the window shows progress (span k of 5). Spans
+Andrea marks before that are a UI trial, not audit data, unless they happen to
+be drawn by the plan — keep them, marked as trial.
+
+#### Stim epoch location depends on modality — task 03B has the same defect
+
+On `sr` files the channel that carries stimulation depends on modality: `ms`
+shows it on **ADC2 only**, `es` on **`vib` / `adc1` only**, combined conditions on
+all three. A split reading `vib` alone found a spurious "stim epoch" at
+1,163–1,283 s on an `ms` file whose `vib` is flat throughout. The audit now
+excludes the protocol window at the start of every `sr` file (**0–132 s**),
+which matched all 10 sampled files and agrees with Andrea's description (2 min
+stim, then 20 min recovery).
+
+**Task 03B must choose its channel by modality**, parsed from the corrected folder
+name, and **cross-check the detected epoch against the protocol window**: stim
+should begin within a few seconds of file start and last ~120 s. A detected
+epoch outside that is flagged, never silently used — a detector reading the
+wrong channel returns a confident, wrong answer rather than no answer, which is
+exactly what happened here.
+
+#### The blind audit is not launchable — this is now the critical path (superseded, see update above)
 
 Session, controller, dock and planner exist but are not wired into the app, there
 is no way to start audit mode, marks go wherever the caller says rather than into
