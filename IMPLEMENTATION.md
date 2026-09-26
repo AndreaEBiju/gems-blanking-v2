@@ -4802,6 +4802,107 @@ separate, named contention factor per consumer, since the measurement just
 showed contention is per-consumer and not global. The blanket 2× is retired by
 that, not by an aggregate replacement.
 
+#### The fourth case: under-subscription, and the machine is three-quarters idle
+
+None of my three hypotheses was right, and the reason is that I never questioned
+the **baseline's** thread budget. MATLAB gives each pool worker **one** thread;
+the serial control ran in the client with **24**. The 6–7× "contention" was the
+multithreading speedup the workers never had. Thread-matched, every
+parallel/serial ratio is **0.91–1.24**. There is no contention to relieve and
+the 2/4/8 sweep was correctly not run. (Invariant 36.)
+
+**The finding nobody has acted on is in the same table: 26% CPU, ~8 cores busy,
+24 idle, run queue 0, disk 99% idle.** Eight single-threaded workers on a
+32-core machine leave three quarters of it unused, and the fix is to add
+workers, not threads. The measured numbers decide this:
+
+- MATLAB's intra-call threading gives `slow_wave` **5.95×** on 24 threads
+  (89.9 s → 15.1 s) — **25% efficiency**.
+- Running independent points in separate processes gives ratios of 0.91–1.24 —
+  **~100% efficiency**.
+
+So a core spent on a process is worth about four spent inside one call. **Raise
+the worker count toward the core count**, single-threaded, rather than giving
+workers more threads. Set it by memory, not by guesswork: measure a worker's
+peak RSS, then `workers = min(cores − 4, floor(0.8 × available_RAM / RSS))`, and
+report both numbers. Leave the headroom — the machine also has to stay usable
+for labelling.
+
+#### Decimation: NO for T. The arithmetic says it is not needed.
+
+Decimating changes `slowWaveAnalysis_new`, and Step 9's premise is that **a
+tolerance is a property of the consumer as it is**. Measuring a decimated
+consumer yields a tolerance for a pipeline Andrea is not running. That alone
+would make it a bad trade — and the cost table says the trade buys nothing:
+
+| configuration | extension (1510 points) |
+|---|---|
+| as measured, 8 workers | 5.0 h |
+| duplicate `smoothdata` removed (−47% of `slow_wave`) | ~3.0 h |
+| …and workers raised 8 → 24 | **~1.0 h** |
+| decimated, 8 workers (the proposal) | 0.9 h |
+
+**The two changes that do not touch the consumer get to the same place as the
+one that does.** Take those and leave the consumer alone.
+
+**Do take the duplicate `smoothdata` removal** — line 186 recomputing line 146
+is not a change to the consumer, it is the removal of a recomputation, and it is
+~47% of `slow_wave`'s single-threaded cost. Two conditions: **verify
+bit-identity empirically** on at least three real segments across conditions
+before editing anything (an argument that two calls must be identical is not a
+measurement that they are — this document has a long record of that distinction
+mattering), and **Andrea decides**, because `processing_new` is her pipeline.
+
+**Decimation itself is a good idea in the wrong place.** Low-passing at 24414 Hz
+for a 0.05 Hz rhythm is genuinely wasteful and would pay back on every future
+run of her pipeline, not just on T. **File it as a task 08 row** to be validated
+on its merits: decimated versus full-rate slow-wave output on several
+recordings, agreement within a stated tolerance, then adopt. It does not belong
+inside T, where it would silently redefine the thing being measured.
+
+#### The censoring result is a design finding, not a bracket that needs widening
+
+This is the most important thing in the report and the recommendation
+under-weights it. Across *every* kind — including the deterministic `step`,
+`clip` and `drift` — **71–75% of seed-rows are censored**, curves are monotone,
+nulls are zero, a replicate seed agrees with the locate seed only **58%** of the
+time, and **62 of 155 rows are censored on both sides**, meaning the placement
+spread exceeds the 2× the bracket spans.
+
+**Where the artifact lands dominates the tolerance by more than the quantity
+being estimated.** That is not a bracketing problem. A ±2-step extension chases
+the tails of a distribution whose width is the actual result, and on these
+numbers it will still leave many rows censored — 1510 points spent to learn
+that.
+
+**Before the extension, run a seed-depth diagnostic.** Take three or four
+(consumer, kind) cells — include one deterministic kind and `tribo` — and run
+**20 seeds** instead of 5 across the *existing* amplitude grid. A few dozen
+points, and it answers the question the extension cannot: what is the shape and
+width of the placement distribution? Then spend on the axis that carries the
+variance, which is invariant 34 applied to the thing invariant 34 was learned
+on. If placement dominates as the evidence suggests, seeds buy more than steps,
+and 5 seeds was never enough to characterise a spread this wide.
+
+**And the tolerance itself has to change shape.** If sensitivity varies by more
+than 2× with placement, a scalar tolerance is not a property of the consumer —
+it is a property of one arbitrary placement. `consumer_tolerances.json` should
+carry a **conservative quantile across placements** (the most-sensitive end,
+stated as such) **plus the observed spread**, so the 09 gate errs toward
+rejecting blanking that would fail at an unlucky placement rather than passing
+on a lucky one. The spread is a result in its own right and Andrea should see
+it: it says her consumers' sensitivity depends on where an artifact falls about
+as much as on how large it is.
+
+#### Invariant 35's example was wrong — the mechanism is the smoothing window
+
+Correction accepted, and it makes the lesson stronger. The cost is not in
+`filtfilt` (0.39 s). It is `smoothdata` with a 5 s Gaussian window = 122,070
+samples, run twice, whose cost grows as **span × window**, and both scale with
+fs — so the waste goes as **fs², not fs**. Decimating 100× is ~10⁴ less
+arithmetic, not 10². The invariant's text is updated; the example named the
+wrong mechanism and the corrected one is a better argument for the same rule.
+
 #### The median σ: do not run a sweep for it
 
 The offer was a stratified sample of ~30 recordings to characterise the cohort's

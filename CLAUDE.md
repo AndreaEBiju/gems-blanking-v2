@@ -279,15 +279,38 @@ violating one, stop and say so rather than working around it.
     execution: a decision rule that collapses to a single threshold assumes a
     homogeneity nobody had checked.
 
-35. **Before scheduling around a cost, ask whether the cost is real.** A factor
-    of 100 in the algorithm makes a factor of 2 in the scheduler irrelevant, and
-    tuning the scheduler first bakes the waste into the plan where it stops
-    being visible. *Found in T:* `slowWaveAnalysis_new` low-passes for a 0.05 Hz
-    gastric rhythm in data sampled at 24414 Hz. Decimating before filtering is
-    ~120× less arithmetic than a worker-count sweep was going to save 2× on.
-    Sampling rate is carried forward out of habit long after the band of
-    interest has narrowed — check the ratio of sample rate to signal bandwidth
-    before optimising anything downstream of it.
+35. **Before scheduling around a cost, ask whether the cost is real — and
+    profile before naming its mechanism.** A factor of 100 in the algorithm
+    makes a factor of 2 in the scheduler irrelevant, and tuning the scheduler
+    first bakes the waste into the plan where it stops being visible. *Found in
+    T:* `slowWaveAnalysis_new` processes a 0.05 Hz gastric rhythm in data
+    sampled at 24414 Hz. **The first version of this invariant blamed the
+    filter and was wrong** — `filtfilt` costs 0.39 s. The cost is `smoothdata`
+    with a 5 s Gaussian window (122,070 samples), run twice, whose cost grows as
+    span × window, and both scale with fs: the waste goes as **fs², not fs**, so
+    decimating 100× is ~10⁴ less arithmetic. Sampling rate is carried forward
+    out of habit long after the band of interest has narrowed — check the ratio
+    of sample rate to signal bandwidth before optimising anything downstream of
+    it, and profile before asserting where the time goes.
+
+36. **A serial control must run with the same thread budget as the parallel
+    workers.** Otherwise the ratio measures the baseline's advantages, not the
+    parallel run's costs. *Found in T:* MATLAB gives each pool worker one
+    thread while the client gets 24, so a serial control run in the client
+    reported 6–7× "contention" for `slow_wave` that was entirely the
+    multithreading the workers never had. Thread-matched, every ratio was
+    0.91–1.24 and there was nothing to fix. Before comparing two runs, list what
+    differs between them besides the variable under test.
+
+37. **When intra-task parallelism is sublinear and the tasks are independent,
+    spend cores on tasks, not threads.** Measure both efficiencies before
+    choosing; do not assume the library's threading is the good kind. *Found in
+    T:* MATLAB's intra-call threading gave `slow_wave` 5.95× on 24 threads —
+    25% efficiency — while independent points in separate processes ran at
+    ~100%. A core spent on a process was worth about four spent inside one call,
+    and eight single-threaded workers were leaving 24 of 32 cores idle at 26%
+    utilisation. Set the worker count from measured per-worker RSS against
+    available memory, with headroom, not from a round number.
 
 ---
 
