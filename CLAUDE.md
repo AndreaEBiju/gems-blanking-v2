@@ -341,6 +341,19 @@ violating one, stop and say so rather than working around it.
     narrowest scope that works (an in-session cluster object, not the user's
     persistent profile).
 
+40. **A positional argument list across a changed signature fails silently
+    whenever the count still fits.** MATLAB passes arguments by position; drop
+    a middle parameter and every later argument lands in its neighbour's slot,
+    with no error if the function can still accept that many. *Found in
+    `run_continuous.m`:* after `HR_BR_HRVAnalysis_new` dropped its mode
+    argument, the caller's arguments shifted one position and produced HR/BR/HRV
+    outputs that Andrea had already used; the sibling slow-wave calls, whose
+    count no longer fitted, errored instead — the loud failure was the lucky
+    one. When a signature changes, grep every caller in the same change. For
+    functions with more than a few parameters, prefer name-value arguments
+    (`inputParser` / `arguments` blocks), which fail loudly on a misspelt or
+    removed name.
+
 ---
 
 ## Cross-platform rules (macOS + Windows; Linux best-effort)

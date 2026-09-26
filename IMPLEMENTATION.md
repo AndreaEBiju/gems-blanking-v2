@@ -5186,7 +5186,25 @@ that adding processes costs something. Record the per-worker-count factor in the
 cost model rather than a single number, and re-measure if the count changes
 again.
 
-#### Phase test: null after correction, directions all as predicted
+#### CORRECTION 2026-09-26: the phase effects are large, the sample is small
+
+With the numbers in hand my "read as null" was wrong in its wording. Per cell:
+`slow_wave` r = 0.59 (p = 0.027), `mmc_burst` |ρ| = 0.52 (p = 0.021),
+`T_hardware` |ρ| = 0.40 (p = 0.079), `hrv` r = 0.24 (p = 0.61). Correlations of
+0.4–0.6 are **large** effects; they miss Holm correction because n = 20 on one
+host, not because they are small. Fisher's combination of the four gives
+p ≈ 0.007 — valid only if the cells' placements were drawn independently, which
+must be checked before quoting it (shared seeds would correlate them).
+
+**So phase plausibly matters for three of four consumers, and (c) must be
+designed to settle it** rather than assume either answer: **stratify (c)'s
+random placements across phase bins** of each consumer's event. That yields an
+unbiased quantile (weight the bins by their true occupancy) *and* a powered
+phase test from the same points, with the same pre-declared directions. Pure
+random placement answers only the first question; pure phase-aimed placement
+only the second.
+
+#### Phase test: null after correction, directions all as predicted (superseded wording)
 
 No cell survives Holm correction; the bunching check is closest at p = 0.057
 (`T_hardware`). All four pre-declared directions came out as predicted — under a
@@ -5247,6 +5265,86 @@ whether the five consumers can run on a new-cohort recording (the `_new`
 versions exist; `extract_mmc` already ran on `gems_j`), and what the adapter
 from the 9-channel store to their inputs needs. Pick hosts from the eligible,
 non-excluded set by measured blanked fraction and longest clean run, as before.
+
+#### Rulings from the third pairing / breathing / run_continuous pass (Andrea, 2026-09-26)
+
+**1. Breathing: timing matters, so adopt the displacement criterion.** Andrea
+uses breath timing downstream, not only rate, so a breath displaced by one R-R
+interval (~140 ms) is damage. `breathing_changed` counts a breath as changed if
+it is added, lost, **or displaced by more than 0.07 s**. The threshold is not
+arbitrary: breaths are sampled at heartbeat locations, so detected breath times
+are quantised to R-R (~140–165 ms), and half an R-R interval separates "same
+beat" from "moved a beat". It tightens 11 of 48 breathing rows. The residual
+non-monotonicity (22 → 25 rows) is intrinsic — a winner-take-all detector
+sampled at R-peaks is non-monotone in amplitude by construction — and is
+handled by the lowest-failing-amplitude rule, not by the criterion. It is a
+change to a pre-registered criterion, made on Andrea's statement of what the
+output is used for; record it as such, with the date.
+
+**2. Completeness is also a duration rule.** Andrea: a baseline shorter than
+~10 min, or a stim/recovery file shorter than ~2 + 20 min, is **incomplete**.
+Declare it in `protocol.yaml` (`min_baseline_min: 10`, `min_sr_min: 22`,
+cohort constants). Apply it to every recording from its measured duration.
+
+- It **adds** to the folder flags, never removes one: an `_INCOMPLETE` folder
+  that happens to meet the duration stays excluded.
+- A short recording is excluded **with its partner**, as before.
+- "Around" means borderline cases exist. List every recording within 10% of
+  its threshold (9–10 min baselines, ~20–22 min sr files) for Andrea instead of
+  deciding them silently.
+- **Dry run first.** If the rule would exclude more than ~10% of the corpus,
+  stop and report before applying; a rule that removes a large share of the
+  data deserves her look at the list first.
+- This settles the two `gems_d` restarts: judge the later `t01` sessions by
+  duration like everything else.
+
+**3. `run_continuous.m` HR/BR/HRV results have been used, and some are wrong.**
+The calls to `HR_BR_HRVAnalysis_new` passed arguments shifted one position,
+without an error, after the function dropped its mode argument. Required:
+
+- Establish what the shift did: which parameter received the mode string, which
+  received what, and whether that produced errors, defaults or plausible wrong
+  numbers.
+- Find when the signature changed (git history of `processing_new`, plus the
+  uncommitted working copy). **Outputs produced by `run_continuous.m` after that
+  date are suspect; outputs from before it are not.**
+- Find every such output file (saved variable names, file names, timestamps),
+  list them for Andrea, and list what consumes them downstream
+  (`bulk_mixed_models.m` and the like). **Do not overwrite or regenerate
+  anything until she has seen the list** — regeneration replaces files she has
+  already built analyses on.
+- The slow-wave calls would have *errored* (12 arguments into 11), so no
+  `run_continuous.m` slow-wave output exists from that period; say so if the
+  search confirms it.
+
+#### The new-cohort adapter must reproduce the old input convention
+
+The consumers were validated on the old cohort's `_blankmotion.mat` inputs, so
+the adapter's job is to hand them what they saw then, not a better signal:
+
+- **No common-average reference on the stomach channels.** A CAR over `ANT1–3`
+  removes what the three contacts share, and the slow wave is largely shared, so
+  it attenuates exactly what `slow_wave` measures. Pass `ANT1–3` referenced as
+  the old cohort's were; check that reference in the old files rather than
+  assuming it.
+- **Match the tripole's polarity to the old hardware tripole**, verified from the
+  sign of real spike waveforms, not from the formula. Spike detection is often
+  single-polarity; an inverted tripole could halve detected spikes and look like
+  a physiological difference.
+- **Report the left cuff's fitted tripole weights.** If they are far from 0.5 /
+  0.5, the software tripole is not what the hardware would have produced, and
+  that belongs in the `T_hardware` row's provisional caveat.
+
+#### The blind audit is not launchable — this is now the critical path
+
+Session, controller, dock and planner exist but are not wired into the app, there
+is no way to start audit mode, marks go wherever the caller says rather than into
+the store, and the bridge still finds `gems_blanking_v2` by `sys.path` insertion
+(invariant 21). Andrea cannot start labelling, and labelling is the human
+critical path to the 09 gate. **After the current runs finish, this comes before
+more T work.** Done means Andrea can open the app, pick an eligible new-cohort
+recording, and do a blind span with marks written to the store under the
+session key — excluded recordings never offered.
 
 #### Confirm `rostral_end` landed
 
