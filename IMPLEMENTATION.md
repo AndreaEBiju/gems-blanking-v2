@@ -4852,6 +4852,10 @@ bit-identity empirically** on at least three real segments across conditions
 before editing anything (an argument that two calls must be identical is not a
 measurement that they are — this document has a long record of that distinction
 mattering), and **Andrea decides**, because `processing_new` is her pipeline.
+**Andrea approved the removal, 2026-09-26: "make it once only."** The
+bit-identity verification is still required before the edit lands — her approval
+is of the intent, and the three-segment check is what establishes the edit
+matches it. Record the check's result beside the change.
 
 **Decimation itself is a good idea in the wrong place.** Low-passing at 24414 Hz
 for a 0.05 Hz rhythm is genuinely wasteful and would pay back on every future
