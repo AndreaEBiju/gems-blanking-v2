@@ -5412,6 +5412,34 @@ epoch outside that is flagged, never silently used — a detector reading the
 wrong channel returns a confident, wrong answer rather than no answer, which is
 exactly what happened here.
 
+#### Rulings after the five-span wiring (Andrea, 2026-09-26)
+
+- **Re-admit the four `sr` files** (A/t01/ms2, B/t01/es3, I/t01/3_3, I/t01/ms1).
+  Each has an aborted short baseline *and* a full ~10 min baseline; the full one
+  is the pair, so the `sr` has a good partner. The aborted starts stay excluded.
+  This **supersedes** the earlier "14.7 min pair is real" answer, which was given
+  without knowing a full baseline sat 10.1 min before that `sr` — my question
+  was missing information, not her ruling inconsistent. Apply: excluded 61 → 57.
+- **`cme<n>` (animal K) is combined mechanical + electrical.** Read all three
+  monitor channels, as for the other combined conditions.
+- **`main_mod.m`, the three held fixes — all approved:**
+  1. slow wave in the single-recording branch uses the **stomach channels only**
+     (3:5), matching everywhere else;
+  2. **include `sr` folders** in the folder filter and the condition match, so
+     stim/recovery files are preprocessed and artifact-cleaned;
+  3. the hard-coded loop ranges become a **parameter defaulting to all files**,
+     and **existing outputs are never overwritten unless explicitly asked**
+     (skip-if-exists by default, an `overwrite` flag to force).
+- **03B edge detection.** Four combined-modality files are wrongly flagged because
+  a small noise-floor step reads as continued stimulation. Refused loudly, so
+  nothing is corrupted, but fix the edge rule: define the stim-off edge against
+  the post-stim noise floor measured on the recovery segment, not the pre-stim
+  one, and require the ON level to be a clear multiple of it. Re-run the 259
+  and confirm the four pass without any of the 255 changing.
+- **`vib` is numerically identical to `adc1`.** Treat it as one channel, not two
+  independent confirmations: agreement between identical copies proves nothing.
+  For `es`, the check is therefore single-channel — say so in the split report.
+
 #### The blind audit is not launchable — this is now the critical path (superseded, see update above)
 
 Session, controller, dock and planner exist but are not wired into the app, there
