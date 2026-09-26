@@ -5015,6 +5015,37 @@ recording whose partner is **ambiguous** (more than one candidate) or
 **missing** (none). An exclusion list is only as good as the pairing that
 produced it.
 
+**Pairing resolved by acquisition time — Andrea, 2026-09-26.** Baseline is
+recorded **~10 min before** stim/recovery. So acquisition-time adjacency is the
+pairing rule, and it is a **verification for every pair, not only a tiebreaker**:
+
+- Declare it as a cohort constant in `protocol.yaml` (invariant 24):
+  `pair_gap_min: 10`, baseline first, tolerance **±3 min**. The 11 ambiguous
+  sessions all resolve at 10.1–10.2 min, well inside it.
+- **A name-matched pair outside the window is not a pair.** Andrea: a 105.3 min
+  gap is "likely wrong". Treat it as unpaired and list it for her. The 14.7 min
+  pair also falls outside ±3 and is listed the same way, not accepted.
+- The lesson for pairing: two recordings sharing name tokens are a *candidate*
+  pair; the acquisition times are what confirm it. The same shape as invariant
+  30 — the name is a human annotation, the timestamp is measured.
+
+**Pairing, second round — Andrea, 2026-09-26.**
+
+- **The 14.7 min pair is real** (`gems_a_t01_ms2_bl_162459_incomplete` ↔
+  `…sr_163939`). The ±3 min tolerance was my guess and it was too tight. Replace
+  the symmetric tolerance with explicit bounds: **baseline precedes stim/recovery
+  by 5–20 min** (`pair_gap_min_lo: 5`, `pair_gap_min_hi: 20`). The 105.3 min
+  pair stays unpaired. The ambiguity check is what makes a wider window safe:
+  two candidates inside it still refuse. Report every pair the widened window
+  adds beyond the 14.7 min one.
+- **`stim_recovery` and `sr` are the same condition** — older files use the long
+  name, newer ones the short. Each holds **2 min stim + 20 min recovery in one
+  file**. So the scan's condition inference and the pairing's name-token match
+  must treat the two tokens as equivalent. **Re-check the 3 "no name match"
+  baselines with that equivalence** — a partner named `stim_recovery` would
+  have been invisible to a matcher looking for `sr`, and that is a likelier
+  cause of "missing" than a recording that was never made.
+
 **Check whether any T host is among the excluded.** If one is, its tolerance
 rows were measured on a recording Andrea considers bad, and they must be
 re-measured on an eligible host or marked.
@@ -5037,6 +5068,14 @@ check first: read the 12th (mode) argument at all three call sites (lines 127,
 does unconditionally, drop it. **If they pass different modes**, the function
 lost behaviour the caller relied on, and dropping the argument collapses three
 behaviours into one silently — report that to Andrea instead of editing.
+**Result:** they did differ — lines 141 and 153 pass `'single'`; line 127 passes
+`'stim_rec'` with a struct holding both epochs, relying on a mode removed before
+the repo's first commit. **Andrea, 2026-09-26:** `stim_rec` is just the old name
+for an `sr` file, which holds 2 min stim then 20 min recovery. Nothing was
+shared across the epochs. So line 127 becomes **two `'single'` calls, one per
+epoch**, from the struct it already builds; drop the mode argument at 141 and
+153; and correct the function header (lines 24–26), which still documents the
+removed mode.
 
 #### Workers: memory binds at ~10, and MATLAB had been capping at 8 all along
 
@@ -5146,6 +5185,68 @@ spans a round's points need.
 that adding processes costs something. Record the per-worker-count factor in the
 cost model rather than a single number, and re-measure if the count changes
 again.
+
+#### Phase test: null after correction, directions all as predicted
+
+No cell survives Holm correction; the bunching check is closest at p = 0.057
+(`T_hardware`). All four pre-declared directions came out as predicted — under a
+sign test that alone is p = 1/16 ≈ 0.06. Read it as **no evidence of a large
+phase effect on one host with 20 placements**, not as evidence of no effect.
+
+Consequences:
+
+- **Treat the spread as placement variance for now.** The tolerance stays a
+  conservative quantile plus spread; do not model it as a function of phase.
+- **(c) is now the honest spend** once task 14 says which rows the gate reads.
+- **Re-run the phase test on (c)'s data at no extra cost.** (c) produces ~20
+  placements per gate row across hosts — several times this test's sample — so
+  a real modest effect would show there if it exists. Pre-declare the same
+  directions.
+
+#### The (a) extension landed — four rulings
+
+589 points, none failed, 0.92× the model. Of 275 sensitive-side censored seeds,
+141 are now measured, 118 are still extendable, and 19 sit at the grid's absolute
+limit (real "at least this sensitive" results).
+
+1. **`breathing` is non-monotone in 19% of seed curves.** A larger artifact
+   sometimes *un*-breaks it, which is physically backwards and points at the
+   criterion rather than the consumer. **Check what `breathing_changed`
+   compares.** If it compares a count or a rate, an artifact that adds one
+   spurious breath and deletes one real breath nets to "unchanged", and the
+   criterion flips as amplitude rises. That is the `match_s = 0` shape from
+   `mmc` again. If so, compare **matched fiducials** within a stated time
+   tolerance, as `mmc` now does, and re-run the breathing rows. A criterion that
+   can miss damage is anti-conservative, which is the wrong direction for a
+   tolerance.
+2. **For any non-monotone seed, the sensitive end is the lowest amplitude
+   observed to break it**, not a bisection crossing. State it so.
+3. **The 109 locate-only rows get `gate_eligible: false` as a field**, not a
+   sentence. One centred placement on a quantity that moves 4–16× with placement
+   is not a tolerance. A rule the gate must remember is a rule the gate will
+   eventually forget (invariant 27's reasoning); a field it reads cannot be
+   forgotten. Rows become eligible only when replicated.
+4. **The 118 extendable seeds wait for task 14**, like (c): refining bounds on
+   rows the gate may never read is spend without a reader.
+
+**`parfor` chunking cost 46% (4,254 s against an ideal 2,910 s).** Worth fixing
+before (c). `parforOptions(pool, 'RangePartitionMethod', 'fixed',
+'SubrangeSize', 1)` makes each iteration its own chunk, so the longest-first
+ordering survives; `parfeval` with a queue is the alternative. Measure it on a
+small manifest before relying on it.
+
+#### Where (c) runs: new-cohort hosts, if the consumers can run there
+
+Every tolerance so far is measured on **old-cohort** hosts, and this section
+already records that old-cohort tolerances are **provisional** until re-derived
+on new-cohort data — different noise statistics, hardware vs software tripole,
+fed vs fasted. The loader path that caveat was waiting for now exists. So (c)'s
+placements should be spent on **new-cohort hosts**: 20 placements on an old-cohort
+host buy precision on a number already marked provisional. Before (c), establish
+whether the five consumers can run on a new-cohort recording (the `_new`
+versions exist; `extract_mmc` already ran on `gems_j`), and what the adapter
+from the 9-channel store to their inputs needs. Pick hosts from the eligible,
+non-excluded set by measured blanked fraction and longest clean run, as before.
 
 #### Confirm `rostral_end` landed
 
