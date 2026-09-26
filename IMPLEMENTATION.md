@@ -3702,6 +3702,45 @@ across all four artifact kinds. Report a recall surface, not a scalar.
 Sample a few minutes from each of ≥6 recordings, have them scrolled in full (task
 16's audit mode), and count artifacts a human finds that no candidate covers.
 
+### PRE-DECLARED 2026-09-26, before any audit marks exist: how the gate is scored
+
+Written down now so that nothing about the scoring is chosen after seeing
+Andrea's marks.
+
+**Unit and coverage.** One artifact = one interval Andrea commits in a blind span.
+An artifact is **covered** if at least one candidate overlaps it by any amount —
+the two-stage design needs a candidate to be *proposed* inside the artifact;
+task 13's extent sets the boundaries. Report, as secondary numbers only, the
+fraction of each artifact's duration that candidates cover, and the recall at
+≥50% overlap.
+
+**Statistic.** `recall = covered / found`, with an exact (Clopper–Pearson) 95%
+interval. Artifacts within one span are not independent, so also report a
+span-level bootstrap interval; if the two disagree, the wider one is the one
+quoted.
+
+**What 10 minutes can and cannot show — plan the audit as sequential.** Proving
+recall ≥ 98% needs the lower bound above 98%: with **zero** misses that takes
+~150 artifacts (0.05^(1/n) ≥ 0.98 → n ≥ 149). Five 2-min spans will likely
+yield tens, not ~150. So the first round **can refute** the gate — a single
+miss in ~30 artifacts puts the point estimate below 98% — but it **cannot
+confirm** it. Therefore:
+
+1. After round 1 (the 5-span plan), score it.
+2. **Any miss:** diagnose each one from the z-traces — *generator blind spot*
+   (z low → new band or feature) versus *threshold* (z high but under
+   `z_enter`) — fix task 07, and only then continue. Labelling more against a
+   generator already known to miss wastes Andrea's time.
+3. **Zero misses:** draw another round with a fresh recorded seed, same
+   stratification, and continue until the lower bound clears 98% or the labelling
+   budget Andrea sets runs out. Report the bound reached either way.
+4. Report per round: artifacts found, covered, missed, the interval, and
+   artifacts found per minute (so the number of rounds needed can be projected
+   rather than guessed).
+
+This supersedes Method B's "≥6 recordings" for the first round: the 5-span plan
+across 2–3 animals is round 1; later rounds add recordings.
+
 ### Threshold sweep
 Sweep `z_enter` over 2.0–4.0. For each value report recall, candidate count,
 fraction of frames flagged, and true-positive fraction on the 43 labelled
