@@ -5298,7 +5298,21 @@ cohort constants). Apply it to every recording from its measured duration.
 - This settles the two `gems_d` restarts: judge the later `t01` sessions by
   duration like everything else.
 
-**3. `run_continuous.m` HR/BR/HRV results have been used, and some are wrong.**
+**3. CORRECTED 2026-09-26 — the "some are wrong" claim is not borne out on the
+Drive.** It was my inference from Andrea saying she had used results; she has
+since said she is **not sure which script** produced them. Measured:
+`run_continuous.m` never completed an iteration on either drive (no
+`_HR_BR_HRV_results.mat` or `_slowWave_results.mat` anywhere); the shifted HR
+call **errors** when blanked segments exist (nearly always) and runs silently
+only when none do; none of the 386 `*_HRBR.mat` files carries the shifted
+fingerprint. So the suspect set on the Drive is **empty so far**. Remaining:
+attribute each of the 386 files to the script and function version that wrote
+it (saved fields, parameter set, file format), list the attribution for Andrea,
+and flag any file whose writer cannot be determined. Results stored off the
+Drive cannot be checked until Andrea connects that folder. The original
+requirement, kept for reference:
+
+**3 (original). `run_continuous.m` HR/BR/HRV results have been used, and some are wrong.**
 The calls to `HR_BR_HRVAnalysis_new` passed arguments shifted one position,
 without an error, after the function dropped its mode argument. Required:
 
@@ -5316,6 +5330,32 @@ without an error, after the function dropped its mode argument. Required:
 - The slow-wave calls would have *errored* (12 arguments into 11), so no
   `run_continuous.m` slow-wave output exists from that period; say so if the
   search confirms it.
+
+**4. `main_mod.m`: fix it (Andrea, 2026-09-26), not retire it.** Apply the same
+fix as `run_continuous.m` to its shifted HR/BR calls (lines 232, 242, 252) and
+its 12-argument slow-wave calls, and run `checkcode`. For the older defects:
+fix the clear-cut ones — crashes, wrong variable names, dead branches — and
+**list any fix that would change analysis results** for Andrea before applying
+it. It stays uncommitted like the rest of `processing_new`.
+
+**5. Multiple baselines in a session: the ~10 min one is the baseline** (Andrea).
+The duration rule already excludes the short aborted starts; pair the ~10 min
+baseline with its stim/recovery by time as usual. Do not rename trial tokens
+(the `gems_d` `t03` → `t01` restarts keep their folder names).
+
+**Parfor correction.** The extension's 46% overhead was **not** chunking:
+`'auto'` and `'fixed1'` are both within 1–3% of ideal at 60 and 240 points and
+on the extension's heavy head. The likeliest cause is contention from
+concurrent test and generator runs on the same machine. Each point now records
+its worker and finish time, so a recurrence will show its cause. Keep `'auto'`
+unless a measurement says otherwise; **do not run heavy local work alongside a
+timed sweep.**
+
+**New-cohort host selection needs ≥180 s clean runs.** `gems_j_t01_ms3_bl_230315`
+runs all five consumers deterministically, but its longest clean run is 136 s.
+`T_hardware` found 127 spikes on the right cuff and only 16 on the left, which
+fits the polarity and left-cuff-weight concern below; settle that before any
+new-cohort tolerance is believed.
 
 #### The new-cohort adapter must reproduce the old input convention
 
