@@ -4688,6 +4688,36 @@ stand — but "should" is not "do". Re-run five mmc_burst points under the new
 code and compare against the stored rows. If they match, say so and keep the
 sweep. If they do not, the refactor changed behaviour and the pass is suspect.
 
+#### The serial control: paired, stratified, and with the decision rule fixed in advance
+
+The control exists to answer one question — *is the 2× miss contention or a bad
+per-point model?* — and it only answers it if it is designed so that the two
+answers look different. Three requirements:
+
+1. **Paired, not fresh.** Re-run **the same point indices** whose `wall_s` is
+   already stored from the 8-worker pass. A serial run of different points
+   compares two distributions and answers nothing; the same points compare two
+   conditions.
+2. **Stratified across the duration axis**, ~10 points, because per-point cost
+   scales with duration and a mean over a lopsided sample is a mean over the
+   wrong thing.
+3. **On a quiet machine.** If labelling or anything else is running on that box,
+   the control is measuring a third condition. State what else was running.
+
+Then `ratio = parallel_per_point_wall / serial_per_point_wall`, and the action is
+**decided now**, so the number does not get re-argued once it has a value:
+
+| ratio | reading | action |
+|---|---|---|
+| ≥ 1.5 | contention dominates — each point is inflated by sharing one I/O path | sweep workers at 2 / 4 / 8 on one fixed small set, take the knee; do **not** assume more is faster |
+| ≤ 1.2 | no meaningful contention — the per-point estimate is simply wrong | recalibrate the cost model's coefficients from the measured serial times and retire the blanket 2× |
+| 1.2–1.5 | both, in some mix | recalibrate **and** test 4 workers |
+
+Report the serial per-point mean, the ratio, and the implied parallel efficiency
+against the 53% already measured. The blanket empirical 2× stays on every
+projection until this lands, and is replaced by the recalibrated model rather
+than removed.
+
 #### The median σ: do not run a sweep for it
 
 The offer was a stratified sample of ~30 recordings to characterise the cohort's

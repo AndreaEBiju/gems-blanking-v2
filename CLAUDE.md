@@ -256,6 +256,17 @@ violating one, stop and say so rather than working around it.
     instances found by one grep is a pattern, and the map is what prevents the
     third.
 
+33. **One construction site per derived value.** This is the rule that decides
+    whether a design decision can be revisited later or is frozen the day it
+    ships. A store path built in one function can be re-keyed by editing one
+    function; the same path assembled inline at forty call sites cannot be
+    re-keyed at all, and the decision quietly becomes permanent without anyone
+    choosing that. *Recorded as a save, not a failure:* the `acquired_at` re-key
+    was cheap because every store path funnelled through a single `meta_path()`,
+    and the enumeration that proved it found five callers rather than a sprawl.
+    The empty output directories made the re-key possible; the single funnel
+    made it easy.
+
 ---
 
 ## Cross-platform rules (macOS + Windows; Linux best-effort)
