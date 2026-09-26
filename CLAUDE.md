@@ -354,6 +354,22 @@ violating one, stop and say so rather than working around it.
     (`inputParser` / `arguments` blocks), which fail loudly on a misspelt or
     removed name.
 
+41. **A detector must establish that its input carries signal before it reports
+    a location.** `argmax` over a flat score still returns an index, and
+    "earliest crossing" on a constant still returns a time, so a detector fed
+    nothing answers confidently instead of refusing. *Found in 03B:* a
+    stim/recovery file whose three monitor channels were exactly zero was
+    reported as a clean pass at 0–120 s by both the old and the new edge code —
+    a boundary made up from nothing, and indistinguishable from a real one
+    because it happened to match the protocol window. Check variance (or a
+    clear ON/floor ratio) first; refuse a constant input by name.
+
+    Corollary for fixtures (see 25): a synthetic signal must match the measured
+    statistics of the real one on the property under test. The first edge fix
+    passed its own tests because the fixture's noise was ~22% rough against the
+    rig's 1–6%, so the fixture could not reproduce the failure it was written
+    for.
+
 ---
 
 ## Cross-platform rules (macOS + Windows; Linux best-effort)

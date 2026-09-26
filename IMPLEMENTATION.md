@@ -5440,6 +5440,28 @@ exactly what happened here.
   independent confirmations: agreement between identical copies proves nothing.
   For `es`, the check is therefore single-channel — say so in the split report.
 
+#### After the re-admission pass (2026-09-26)
+
+- **`gems_i_t03_es2_sr_223947`: all three monitor channels exactly zero.**
+  Andrea is not sure stimulation happened. **Exclude it and its baseline
+  partner**, reason `no_stim_monitor`. Refusing a constant monitor in 03B was
+  right: the old and new code both reported a fabricated 0–120 s "pass" from an
+  argmax over a flat score (invariant 41). This changes the audit pool (527 →
+  expected 525), so apply it **before** any audit plan is created. If a plan was
+  already created, check whether it draws either recording; if it does, discard
+  that plan (it has no committed spans yet) and have Andrea create a new one.
+- **03B onset rule extended to the post-/pre-stim floor as well — ratified.** It
+  goes beyond the ruling's letter for the right reason: the same floor step
+  preceded stim on two files.
+- **`main_mod.m` stage 1 on new-cohort folders must refuse** until it takes its
+  stream names and channel indices from the file's `chanlabels` (the single
+  source, per the channel-order rule) rather than the old cohort's
+  `[1:2,17:19]`. Fix (b) admitted `sr` folders, and a wrongly indexed
+  `_notched.mat` would be silent. Refuse loudly now; build the per-cohort map
+  when Andrea next needs stage 1 on new data.
+- **Adapter checks run when Andrea is not labelling.** They read full recordings
+  over the Drive. She will say when she stops for the day.
+
 #### The blind audit is not launchable — this is now the critical path (superseded, see update above)
 
 Session, controller, dock and planner exist but are not wired into the app, there
