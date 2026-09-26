@@ -1774,6 +1774,46 @@ different one, that is the silent-wrong-root failure. Explicit and
 pattern in `detector_core`, where it was fixed.)
 
 ### `rostral_end` handling
+
+**RESOLVED 2026-09-26 — Andrea: "it's always channel 1 rostral."** Contact 1 of
+every nerve cuff faces the head, in every animal. That is a surgical convention,
+so it is a **cohort constant** and belongs in `protocol.yaml`, not in `meta.json`
+(invariant 24):
+
+```yaml
+rostral_end: 1          # contact_index facing rostrally, every nerve cuff
+                        # source: Andrea, 2026-09-26 — surgical convention
+```
+
+- **Delete `rostral_end` from `meta.json`.** It is `null` in all 837 files; a
+  per-recording field that is null everywhere and now known everywhere is a
+  constant written 837 times.
+- **Applies to the nerve cuffs only** (`RVN`, `LVN`). `ANT1–3` are stomach
+  electrodes; the conduction-velocity step does not run on them.
+- **Old cohort: moot.** Its hardware quasi-tripole shorts the end contacts, so
+  each nerve gives one derived channel and there is no inter-contact lag to take
+  a velocity from. Velocity is new-cohort only.
+- **This is a declaration, not a guess.** The rule below forbids *inferring*
+  orientation from channel order or names; a stated surgical convention entered
+  once, with its source, is exactly the declaration that rule asks for.
+
+**Sign convention, stated once:** a spike reaching contact 1 before contact 3 is
+travelling **caudally, away from the brain → efferent**. Reaching 3 before 1 is
+travelling **rostrally → afferent**. `direction_valid` becomes `True` for
+new-cohort nerve channels.
+
+**One consistency check, as a flag and not a substitute.** The abdominal vagus is
+predominantly afferent by fibre count (~80%), so across a recording
+afferent-signed events should usually dominate. Report the afferent fraction per
+animal once velocities exist. An animal where efferent-signed events clearly
+dominate is a candidate for a cuff placed the other way round that one time —
+**flag it to Andrea; never flip it automatically.** Fibre counts are not spike
+counts, so this is a prompt to check the surgery record, not evidence on its
+own.
+
+The original handling, which still applies to any recording outside the
+convention:
+
 It cannot be reconstructed once the animal is gone. If absent:
 - emit **unsigned** velocities
 - attach `direction_valid = False` to every velocity record
@@ -3470,6 +3510,9 @@ does not support the uniform claim.* Two rows are decisive, one is not:
 | `extract_mmc.m` — `detect_crossings` 30 s moving MAD | An independent instance of the `step2_noise_sigma` row above: a moving noise estimate whose threshold rises with activity. Same failure, same direction, same fix — a fixed session reference |
 | `extract_mmc.m` — blank restore is sample-exact | The blank-before-filter-restore pattern is otherwise done correctly (`bl` → `fillmissing` → `filtfilt` → `y(bl) = NaN`), but **only the blanked samples are restored**. With a 0.486 s impulse response, roughly half a second either side of every blank is filter output computed partly from interpolated data, and it is kept. **This is task 13's question arriving in MATLAB**: the restore must extend by the consumer's settling time, not by the blank. Audit every blank-restore in `processing_new` for the same pattern — it is a shape, not a one-off |
 | `extract_mmc.m` 2–50 Hz bandpass | **The finding the padtype audit actually produced.** Measured `impz` **0.486 s** and **no edge buffer anywhere**, feeding the MMC statistic. Every other low-corner site is covered: `HR_BR` 1–100 Hz 0.159 s against 0.75 s (4.7×), slow wave 8.17 s against 15 s (1.8×), `step1_bandpass` 0.0051 s against 5 ms (marginal — raise to 10 ms). Read the MMC chain's cardiac-interpolation logic before touching it; the buffer interacts with it |
+| `slowWaveAnalysis_new.m` — duplicate `smoothdata` removed | **Approved by Andrea 2026-09-26; verified bit-identical** on baseline (599 s, 3 blanked spans), stim (120 s) and recovery (1205 s, 155 blanked spans, 4.2% NaN) at 1 and 24 threads — all 17 output fields and all peak locations. Line 186 recomputed line 146 per channel. Saves 23–54% per call single-threaded. Output unchanged, so T's `slow_wave` tolerances are unaffected. |
+| `slowWaveAnalysis_new.m` — decimate before filtering (**proposal, validate before adopting**) | Filters and smooths a ~0.05 Hz rhythm at the full 24414 Hz. The cost is the 5 s Gaussian `smoothdata` window (122,070 samples), which scales with span × window — **fs²** — so decimating 100× is ~10⁴ less work and 100× less saved data. **This changes the consumer**, so: compare decimated vs full-rate output (slow-wave peak times, rates, dominant frequency) on several recordings across conditions; adopt only if agreement is within a tolerance stated in advance; then re-run T's `slow_wave` rows on the adopted version (minutes, once decimated). Never adopt inside T. |
+| `run_continuous.m:127,141,153` — 12 arguments to an 11-argument function | Calls `slowWaveAnalysis_new` with a 12th mode-string argument; the function takes 11 and has no `varargin`, so the call errors on reach. One side is stale. **Andrea decides which**; do not fix by guessing. |
 
 **Reuse rather than reinvent:** `dfaGapAware.m` (pooled runs), `step5f_fano_slope.m`
 (epochs + rate-matched surrogates carrying identical censoring — extend the same
@@ -4906,6 +4949,210 @@ samples, run twice, whose cost grows as **span × window**, and both scale with
 fs — so the waste goes as **fs², not fs**. Decimating 100× is ~10⁴ less
 arithmetic, not 10². The invariant's text is updated; the example named the
 wrong mechanism and the corrected one is a better argument for the same rule.
+
+#### Re-key applied 2026-09-26, and what the block names turned out to be
+
+**Applied and idempotent.** 921 enumerated = 870 written + 27 deduplicated + 24
+skipped, residual 0; 835 old stem-keyed directories retired after verification,
+2 kept for held recordings; second `--apply` wrote 0. Every key derivation —
+`recording.py`, `scan.py` ×2, the generator — now routes through one
+`session_key()`, and the key format lives beside `SESSION_STAMP` in
+`tdt_block.py` with a test tying them together (invariant 33). Two latent bugs
+died with the old key: `_notched` files never found their `_sig` metadata, and
+`scan.py`'s `core_of` and the loader's `path.stem` produced different keys for
+old-cohort files.
+
+**37 block folders were renamed after acquisition**, so the folder name and the
+block name the instrument wrote disagree (`App_ms10_1_bl_001835` on disk,
+`t01_ms1_bl_001835` inside the block). The renames are human annotations —
+quality flags, condition changes — and **two of them name a different animal
+from the instrument.** The key now uses the instrument's block name, which is
+stable however often a folder is renamed; renames are recorded in the plan, not
+refused; the two animal mismatches are **held** until Andrea says which is right.
+
+**Refinement to invariant 30, forced by this.** A block name is *typed by a
+person* into the instrument before recording; it is not measured. So the
+instrument is authoritative for what it **measures** — start time, sample rate,
+the channel labels wired into the rig — and a name typed into it is merely the
+*earliest* human annotation, which a later rename may be correcting. For
+**identity** (the key) the instrument name is right because it never moves. For
+**meaning** (condition, animal, quality) the two annotations are candidates and
+a disagreement goes to Andrea, because a rename made to mark a condition change
+is exactly the kind of correction the original typed name cannot know about.
+
+- **Preserve every rename's text as metadata** (`folder_name` beside
+  `block_name`). A quality flag Andrea typed into a folder name is a label, and
+  discarding it because the key does not need it destroys it.
+- **Condition authority is an open question for Andrea**: where the folder and
+  the block disagree about condition, which one is the correction? Until
+  answered, recordings whose two names disagree about *condition* are handled
+  like the animal mismatches — held from anything that groups by condition —
+  rather than silently taking either.
+
+#### Andrea's rulings on the renames, 2026-09-26
+
+1. **The two `gems_b_t01_2_1_*` blocks are animal A.** The folder rename was the
+   correction. Release them from hold as animal A.
+2. **Condition renames: the folder is right** (`ms2`→`ms3`, `1_2`→`1_1`).
+3. **Exclude every `_BAD` and `_INCOMPLETE` recording, and its paired baseline or
+   stim/recovery file if one exists.** Out of labelling, training, T hosts and
+   any corpus. Excluded, not deleted: the flag and the reason are recorded in
+   the store, and nothing is removed from the Drive.
+
+**So the general rule is settled:** the instrument's block name is the
+**identity** (the key, which never moves); the **folder name is authoritative
+for meaning** — animal, condition, quality — because Andrea renames folders to
+correct them. Apply the folder's meaning automatically, and keep logging every
+block/folder disagreement in the plan so a future rename is visible rather than
+silently absorbed.
+
+**Pairing needs a rule, stated and tested, not improvised.** A pair is the
+baseline and the stim/recovery recording from the same session: same animal,
+same trial token, same condition token, differing only in the `bl` / `sr` infix
+(e.g. `gems_j_t01_ms3_bl_230315` and `gems_j_t01_ms3_sr_231323`). Derive it from
+the **corrected** folder names (ruling 2). Report, do not guess, every excluded
+recording whose partner is **ambiguous** (more than one candidate) or
+**missing** (none). An exclusion list is only as good as the pairing that
+produced it.
+
+**Check whether any T host is among the excluded.** If one is, its tolerance
+rows were measured on a recording Andrea considers bad, and they must be
+re-measured on an eligible host or marked.
+
+#### The `smoothdata` duplicate: verified, now apply it
+
+Bit-identical on all three segments (baseline 599 s with 3 blanked spans, stim
+120 s, recovery 1205 s with 155 blanked spans and 4.2% NaN) at 1 and 24 threads:
+all 17 output fields and all peak locations. Single-threaded saving 23–54% per
+call. **Both of Andrea's conditions are met — her approval and the check — so
+apply the patch to her working copy.** Leaving a verified, approved patch
+unapplied is not caution, it is a second decision nobody asked for. Keep the
+patch file and put the check's result in a comment at the edit.
+
+**Found alongside: `run_continuous.m` calls `slowWaveAnalysis_new` with 12
+arguments; the function takes 11 with no `varargin`.** That call errors on
+reach. **Andrea, 2026-09-26: the function is newer — update the caller.** One
+check first: read the 12th (mode) argument at all three call sites (lines 127,
+141, 153). If all three pass the same mode and it matches what the function now
+does unconditionally, drop it. **If they pass different modes**, the function
+lost behaviour the caller relied on, and dropping the argument collapses three
+behaviours into one silently — report that to Andrea instead of editing.
+
+#### Workers: memory binds at ~10, and MATLAB had been capping at 8 all along
+
+Peak RSS is **4.2–4.7 GB per worker** on 54.7 GB available, so memory — not
+cores — caps this machine at ~10. My ~24-worker projection ignored memory and
+was wrong; invariant 37's text (set it from RSS) was right and my table
+contradicted it. At 10 workers the extension projects to ~2.4 h, not ~1.0 h.
+
+And the reason every T run so far used exactly 8: **MATLAB's `Processes`
+profile caps `NumWorkers` at 8 by default.** Raising it on an in-session cluster
+object rather than editing the persistent profile was right — that profile is
+Andrea's and governs all her other MATLAB work.
+
+**If throughput ever matters more, the lever is memory per worker, not cores.**
+A 420 s segment of 9 channels in double is ~740 MB, so 4.7 GB is ~6 copies
+resident. Loading only the channels a call needs (slow_wave reads the stomach
+contacts, 3 of 9), or single precision where the consumer tolerates it, would
+roughly double or triple the worker count. Not now — noted for when a pass is
+long enough to justify it.
+
+#### Seed-depth diagnostic: two conditions on reading it
+
+Bisecting each seed's crossing on the existing grid (~5 evaluations plus 2
+monotonicity checks, reusing seeds 1–5) is a better design than the 20-seed full
+grid I asked for, at a fifth of the cost.
+
+1. **Bisection is only valid on a monotone curve**, and `breathing` is
+   non-monotone in 12% of cases. On a non-monotone seed, bisection finds *a*
+   crossing, not the lowest one — and the tolerance is the **sensitive-end**
+   quantile, so a missed lower crossing is **anti-conservative**. Any seed that
+   fails its monotonicity check is reported as non-monotone and its bisection
+   result is **not** used as a crossing; treat it as unresolved, or grid it.
+2. **All four cells are on one host (`host1_JEL`).** That is fine for learning
+   the shape of the placement distribution; it is not the distribution for the
+   cohort. State it in the result, and do not size the full extension from one
+   recording's spread without saying that is what was done.
+
+The redesigned `final()` — each seed an interval, conservative sensitive-end
+quantile plus spread — is the right shape. Only 7 rows resolve a spread wider
+than one √2 step, which is what a 3-point bracket can show; the width is hidden
+in the 110 rows reporting a bound at the sensitive end, and the diagnostic is
+what will measure it.
+
+#### Seed-depth results: placement moves the threshold 4–16×
+
+434 points in 47 min (costed ~500 / ~40 — the cost model now holds). No seed
+failed its monotonicity confirmation, so every bisection result stands.
+
+| cell | kind | resolved | spread across placements |
+|---|---|---|---|
+| step 0.5 s, slow_wave | deterministic | 20 / 20 | 16× (0.35–5.7σ) |
+| step 0.05 s, T_hardware | deterministic | 14 / 20; 6 below the 0.5σ floor | ≥4× |
+| clip 0.5 s, mmc_burst | deterministic | 18 / 20 | 8× |
+| tribo 0.5 s, hrv | stochastic | 20 / 20 | 8× |
+
+Deterministic kinds spread as widely as tribo, so the variance is in **where**
+the artifact lands, not in its randomness. The order-statistics point is right
+and must travel with every number: the minimum of 5 placements estimates roughly
+the **17th** percentile and reaches the true 10th only 41% of the time
+(1 − 0.9⁵); 22 placements are needed for 90%.
+
+#### Test the phase hypothesis BEFORE buying more placements — it is free
+
+The proposed explanation — that the threshold depends on where the artifact
+falls relative to physiological events (R-peaks for `hrv`, slow-wave peaks for
+`slow_wave`, bursts for `mmc_burst`, spikes for `T_hardware`) — is the most
+important open question in T, and the data to test it already exists. Test it
+before choosing between (a), (b) and (c), because it changes what (b) and (c)
+should be:
+
+- **If phase explains the spread**, the tolerance is a *function* of phase, the
+  sensitive end is the worst phase, and it is measurable directly with a few
+  placements aimed at that phase. 20 *random* placements per row would be
+  buying precision on the wrong axis — invariant 34, for the third time.
+- **If it does not**, the spread is irreducible placement variance and (c) is
+  the honest spend.
+
+**Check the bunching against the grid first.** Bisection on a discrete grid can
+only return grid values, so "8 of 14 at exactly 2.0σ" means 8 of 14 thresholds
+fell in the grid interval ending at 2.0σ. Whether that is a real concentration
+depends on the interval widths; compare against what a smooth distribution
+would put in each bin before reading it as structure.
+
+The test: for each placement, the artifact's position relative to the nearest
+relevant physiological event (as a phase, or as a distance in the event's own
+time units), against its threshold. Report per cell, with the correlation and a
+permutation null.
+
+#### Decision on spend
+
+- **(a) now** — extend only the seeds censored on the sensitive side (550 points,
+  ~39 min on 10 workers), after extending the low amplitude grid for nerve rows
+  so the 6 `T_hardware` placements below 0.5σ can resolve. Every resulting
+  number labelled **"≈17th percentile, 5 placements"**.
+- **The phase test in parallel** — no new evaluations.
+- **(b) is declined.** 15–25 h to buy precision on every row, most of which the
+  gate never reads, and possibly on the wrong axis.
+- **(c) waits for both the phase test and task 14.** Task 14 (routing) decides
+  which consumer rows the 09 gate reads; the phase test decides whether those
+  rows need random placements or phase-aimed ones.
+
+**One cheap efficiency:** each round spent ~200 s reloading all three host spans
+from the Drive, including the 420 s span these cells never used. Load only the
+spans a round's points need.
+
+**`slow_wave` contention rose 1.10 → 1.26 from 8 to 10 workers.** First evidence
+that adding processes costs something. Record the per-worker-count factor in the
+cost model rather than a single number, and re-measure if the count changes
+again.
+
+#### Confirm `rostral_end` landed
+
+The report does not mention it. It was to ride along with the re-key: `rostral_end:
+1` in `protocol.yaml`, deleted from `meta.json`, `direction_valid` false for the
+old cohort regardless. If the pull predated that commit, it is one more
+idempotent run.
 
 #### The median σ: do not run a sweep for it
 

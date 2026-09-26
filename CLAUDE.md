@@ -232,6 +232,17 @@ violating one, stop and say so rather than working around it.
     The real start timestamp was in the `.tsq` header the whole time, one header
     read away. Before deriving a field from a path, check whether the instrument
     already recorded it.
+    **Refinement:** the instrument is authoritative for what it *measures* —
+    time, sample rate, wired channel labels. A name a person *typed into* the
+    instrument is only the earliest human annotation, and a later rename may be
+    correcting it. Use the typed name for **identity**, because it never moves;
+    for **meaning** (condition, animal, quality) treat the typed name and any
+    later rename as two candidates, keep both, and send a disagreement to
+    Andrea. *Found in the re-key:* 37 block folders were renamed after
+    acquisition to record quality and condition changes, and two renames name a
+    different animal from the block. **Andrea's answer (2026-09-26): renames are
+    corrections, so the folder name is authoritative for meaning.** The rule
+    above is how that was found out; the answer is what applies here.
 
 31. **Store the zone, never a fixed offset, and say which date you mean.** A
     UTC timestamp plus an IANA zone survives a DST change; a UTC timestamp plus
@@ -311,6 +322,24 @@ violating one, stop and say so rather than working around it.
     and eight single-threaded workers were leaving 24 of 32 cores idle at 26%
     utilisation. Set the worker count from measured per-worker RSS against
     available memory, with headroom, not from a round number.
+
+38. **Stopping a task is not the same as stopping its processes.** Verify by PID
+    that the process tree is gone before starting a replacement. *Found in the
+    seed-depth run on Windows:* a `TaskStop` left the old loop's child tree
+    alive, and it went on planning a duplicate round, writing NUL-padded lines
+    into the shared log and 157 stray files into the output directory while the
+    new loop ran. Two writers to one log is the signature; check for it
+    whenever a log turns to garbage.
+
+39. **A number nobody chose is still a decision — find where it came from.**
+    Defaults, caps and inherited constants make choices silently, and a value
+    that looks deliberate because it is round is often just a library's
+    default. *Found in T:* every run used exactly 8 workers, which read as a
+    choice and was treated as one in the cost model; it was MATLAB's default
+    `NumWorkers` cap on the `Processes` profile. When a parameter matters,
+    trace it to its origin before reasoning about it, and change it in the
+    narrowest scope that works (an in-session cluster object, not the user's
+    persistent profile).
 
 ---
 
