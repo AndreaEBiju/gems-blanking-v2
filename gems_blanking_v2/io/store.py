@@ -634,6 +634,25 @@ class GemsStore:
         """One blind-audit plan, written once before its first span is shown."""
         return self.root / "labels" / "blind_audit_plans" / f"{validate_component(plan_id)}.json"
 
+    def audit_score_path(self, plan_id: str) -> Path:
+        """Return where one audit round's task 09 score (``detect.recall``) is written."""
+        return (self.root / "labels" / "blind_audit_scores"
+                / f"{validate_component(plan_id)}_score.json")
+
+    def audit_tuning_path(self, plan_id: str, stamp: str) -> Path:
+        """Return where a TUNING re-score of a round is written - never the gate score."""
+        return (self.root / "labels" / "blind_audit_scores"
+                / f"{validate_component(plan_id)}_tuning_{validate_component(stamp)}.json")
+
+    def audit_resolution_path(self, plan_id: str) -> Path:
+        """Human-recorded resolutions of a round's misses (the task 07 fix for each).
+
+        Separate from the score, which is computed and may be recomputed; this file
+        is written by a person and is never regenerated.
+        """
+        return (self.root / "labels" / "blind_audit_scores"
+                / f"{validate_component(plan_id)}_resolutions.json")
+
     def corpus_path(self, corpus_id: str) -> Path:
         """Immutable named corpus spec."""
         return self.root / "corpora" / f"{validate_component(corpus_id)}.json"

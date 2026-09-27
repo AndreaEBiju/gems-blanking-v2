@@ -28,6 +28,7 @@ Design notes that matter for correctness:
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict
 
@@ -1306,3 +1307,38 @@ def write_tdt_block(
     (directory / f"{tank}_{block}.tsq").write_bytes(header + first)
     return directory
 
+
+# ---------------------------------------------------------------------------
+# blind-audit z-traces (task 09 scoring)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BandZSynth:
+    """One band's per-frame z as the audit reveal produces it (``detect.recall.BandZ``)."""
+
+    band: str
+    z_max: F64
+    winner: tuple[str, ...]
+    grid_s: float
+
+
+def make_band_z(
+    band: str, dur_s: float, *, bumps: tuple[tuple[float, float, float, str], ...] = (),
+    base: float = 0.5, grid_s: float = 0.010, nan_before_s: float = 0.0,
+    signal: str = "R_V2",
+) -> BandZSynth:
+    """Build a flat ``base`` z with rectangular bumps ``(start_s, stop_s, z, winner)``.
+
+    Frame ``i`` covers ``[i * grid_s, (i + 1) * grid_s)``; frames before
+    ``nan_before_s`` are ``nan`` (not assessable), as the reveal pads them.
+    """
+    n = int(math.floor(dur_s / grid_s))
+    z = np.full(n, base, dtype=np.float64)
+    winner = [signal] * n
+    for start, stop, level, who in bumps:
+        i0, i1 = int(round(start / grid_s)), int(round(stop / grid_s))
+        z[i0:i1] = level
+        winner[i0:i1] = [who] * (i1 - i0)
+    z[: int(round(nan_before_s / grid_s))] = np.nan
+    return BandZSynth(band, z, tuple(winner), grid_s)

@@ -1,0 +1,395 @@
+"""Task 09 gate scoring, as pre-declared 2026-09-26 - on synthetic marks and candidates."""
+
+from __future__ import annotations
+
+import json
+import math
+from pathlib import Path
+
+import numpy as np
+import pytest
+from gems_blanking_v2.detect.recall import (
+    TUNING_LABEL,
+    Z_ENTER,
+    Z_EXIT,
+    RevealMismatchError,
+    SpanInput,
+    artifacts_needed,
+    candidate_digest,
+    check_next_round,
+    clopper_pearson,
+    covered_fraction,
+    diagnose_miss,
+    is_covered,
+    load_round,
+    next_round_gate,
+    one_sided_lower,
+    pooled_gate,
+    score_round,
+    score_stored_round,
+    span_bootstrap,
+)
+from gems_blanking_v2.io.store import GemsStore
+
+from tests.conftest import make_band_z
+
+FS = 24414.0
+ONE_SAMPLE = 1.0 / FS
+
+
+# --- coverage -----------------------------------------------------------------
+
+
+def test_an_artifact_touched_by_a_single_candidate_sample_is_covered() -> None:
+    art = (10.0, 11.0)
+    assert is_covered(art, [[10.5, 10.5 + ONE_SAMPLE]])
+    assert is_covered(art, [[11.0 - ONE_SAMPLE, 12.0]])  # one sample over the far edge
+    assert is_covered(art, [[9.0, 10.0 + ONE_SAMPLE]])  # one sample over the near edge
+
+
+def test_an_adjacent_candidate_that_does_not_overlap_does_not_cover() -> None:
+    art = (10.0, 11.0)
+    assert not is_covered(art, [[11.0, 11.5]])  # starts exactly where it ends
+    assert not is_covered(art, [[9.0, 10.0]])  # ends exactly where it starts
+    assert not is_covered(art, np.zeros((0, 2)))
+
+
+def test_the_covered_fraction_counts_overlapping_candidates_once() -> None:
+    art = (0.0, 10.0)
+    assert covered_fraction(art, [[1.0, 4.0], [3.0, 6.0], [20.0, 30.0]]) == pytest.approx(0.5)
+    assert covered_fraction(art, [[-5.0, 50.0]]) == pytest.approx(1.0)
+    assert covered_fraction(art, [[10.0, 12.0]]) == 0.0
+
+
+# --- the statistics -----------------------------------------------------------
+
+
+def test_the_spec_projection_is_the_one_sided_bound() -> None:
+    """0.05**(1/n) >= 0.98 -> n >= 149, as pre-declared; two-sided 95% would need 183."""
+    assert one_sided_lower(149, 149) == pytest.approx(0.05 ** (1 / 149))
+    assert artifacts_needed(0) == 149
+    assert artifacts_needed(0, confidence=0.975) == 183
+    assert clopper_pearson(149, 149)[0] == pytest.approx(0.025 ** (1 / 149))
+
+
+def test_one_miss_moves_the_target_well_past_149() -> None:
+    assert artifacts_needed(1) > 149
+    assert one_sided_lower(29, 30) < 0.98
+
+
+def test_the_bootstrap_resamples_spans_not_artifacts() -> None:
+    """Two spans of 10: one all covered, one all missed.
+
+    Resampling ARTIFACTS would give a tight interval around 0.5; resampling SPANS
+    can draw either span twice, so the interval spans 0 to 1.
+    """
+    lo, hi, one, empty = span_bootstrap([(10, 10), (0, 10)])
+    assert lo == 0.0 and hi == 1.0 and one == 0.0 and empty == 0
+
+
+def test_the_bootstrap_is_seeded_and_drops_draws_with_no_artifacts() -> None:
+    per = [(3, 3), (0, 0), (4, 5)]
+    assert span_bootstrap(per) == span_bootstrap(per)
+    *_, empty = span_bootstrap(per)
+    assert empty > 0
+    with pytest.raises(ValueError, match="undefined"):
+        span_bootstrap([(0, 0), (0, 0)])
+
+
+# --- diagnosis ----------------------------------------------------------------
+
+
+def _traces(level: float, where: tuple[float, float] = (10.2, 10.4)) -> list:
+    # 200 s: the traces must cover the recording timeline the artifacts sit on.
+    return [make_band_z("300-3000", 200.0, bumps=((*where, level, "L_T"),)),
+            make_band_z("2-50", 200.0, base=0.3)]
+
+
+@pytest.mark.parametrize(
+    ("level", "verdict"),
+    [(Z_EXIT - 0.2, "generator_blind_spot"), (Z_EXIT, "threshold"),
+     (Z_ENTER - 0.01, "threshold"), (Z_ENTER + 1.0, "gated")],
+)
+def test_a_miss_is_classified_by_the_generators_own_thresholds(
+    level: float, verdict: str
+) -> None:
+    d = diagnose_miss((10.0, 11.0), _traces(level))
+    assert d.verdict == verdict
+    assert d.max_band == "300-3000" and d.max_signal == "L_T"
+    assert d.max_z == pytest.approx(level)
+    assert set(d.max_z_by_band) == {"300-3000", "2-50"}
+
+
+def test_z_outside_the_artifact_does_not_count() -> None:
+    d = diagnose_miss((10.0, 11.0), _traces(9.0, where=(11.0, 11.5)))
+    assert d.verdict == "generator_blind_spot"
+
+
+def test_a_miss_without_evidence_is_undiagnosed_not_guessed() -> None:
+    assert diagnose_miss((1.0, 2.0), None).verdict == "undiagnosed"
+    nan_only = [make_band_z("300-3000", 20.0, nan_before_s=5.0)]
+    assert diagnose_miss((1.0, 2.0), nan_only).verdict == "undiagnosed"
+
+
+# --- the round ----------------------------------------------------------------
+
+
+def _span(i: int, arts: list, cands: list, traces: list | None = None) -> SpanInput:
+    return SpanInput(f"plan_x_s{i}", f"rec{i}", "J", "baseline", 100.0 * i,
+                     100.0 * i + 120.0, np.asarray(arts, dtype=float).reshape(-1, 2),
+                     np.asarray(cands, dtype=float).reshape(-1, 2), traces)
+
+
+def test_a_clean_round_reports_the_projection_and_says_draw_again() -> None:
+    spans = [_span(i, [[100 * i + 10.0 * j, 100 * i + 10.0 * j + 1] for j in range(6)],
+                   [[100 * i + 10.0 * j + 0.5, 100 * i + 10.0 * j + 0.6] for j in range(6)])
+             for i in range(5)]
+    score = score_round("plan_x", spans, seed=7)
+    s = score.statistics()
+    assert (s["found"], s["covered"], s["missed"]) == (30, 30, 0)
+    assert s["artifacts_per_minute"] == pytest.approx(3.0)
+    assert not s["gate_cleared"]
+    assert s["more_artifacts_needed"] == 119 and s["more_rounds_projected"] == 4
+    assert s["secondary_recall_at_half_overlap"] == 0.0  # each candidate covers 10%
+    assert s["quoted_interval"] == "clopper_pearson"  # bootstrap is [1, 1] here
+    assert score.next_step().startswith("zero misses")
+    json.dumps(score.to_json(), allow_nan=False)
+
+
+def test_a_round_with_a_miss_says_stop_and_diagnoses_it() -> None:
+    traces = _traces(2.2, where=(20.1, 20.3))
+    spans = [_span(0, [[5.0, 6.0], [20.0, 21.0]], [[5.5, 5.6]], traces),
+             _span(1, [[105.0, 106.0]], [])]
+    score = score_round("plan_x", spans)
+    s = score.statistics()
+    assert (s["found"], s["covered"], s["missed"]) == (3, 1, 2)
+    diag = {m.miss_id: m.diagnosis.verdict for m in score.misses}  # type: ignore[union-attr]
+    assert diag == {"plan_x_s0#1": "threshold", "plan_x_s1#0": "undiagnosed"}
+    assert score.next_step().startswith("STOP")
+    text = json.dumps(score.to_json(), allow_nan=False)  # an undiagnosed miss has no NaN
+    assert "NaN" not in text
+    assert "MISS plan_x_s0#1" in score.report()
+
+
+# --- the sequential rule ------------------------------------------------------
+
+
+def _doc(verdicts: list[str | None]) -> dict:
+    arts = [{"id": f"s1#{i}", "covered": v is None,
+             **({"diagnosis": {"verdict": v}} if v else {})} for i, v in enumerate(verdicts)]
+    return {"artifacts": arts}
+
+
+def test_the_next_round_is_refused_until_every_miss_is_diagnosed_and_fixed() -> None:
+    assert next_round_gate(None, None) == (False, "the last round has not been scored")
+    ok, why = next_round_gate(_doc([None, "undiagnosed"]), None)
+    assert not ok and "undiagnosed" in why
+    ok, why = next_round_gate(_doc([None, "threshold"]), None)
+    assert not ok and "no recorded task 07 fix" in why
+    ok, why = next_round_gate(_doc([None, "threshold"]), {"s1#1": {"task07_fix": "   "}})
+    assert not ok
+    ok, why = next_round_gate(_doc([None, "threshold"]),
+                              {"s1#1": {"task07_fix": "commit abc123: z_enter 3.0 -> 2.5"}})
+    assert not ok and "fixed_at" in why  # a fix must say when, or eligibility is unknowable
+    ok, _ = next_round_gate(_doc([None, "threshold"]),
+                            {"s1#1": {"task07_fix": "commit abc123: z_enter 3.0 -> 2.5",
+                                      "fixed_at": "2026-09-28T10:00:00+00:00"}})
+    assert ok
+    ok, why = next_round_gate(_doc([None, None]), None)
+    assert ok and "fresh recorded seed" in why
+
+
+# --- a round in the store -----------------------------------------------------
+
+
+def _write_round(store: GemsStore, plan_id: str, marks: list[list[list[float]]],
+                 commit: int | None = None, committed_at: str | list[str] | None = None,
+                 revealed: list | None = None) -> None:
+    spans = [{"recording_id": f"blk{k}_20260916T030321Z", "animal": "J",
+              "condition": "baseline", "start_s": 200.0, "stop_s": 320.0}
+             for k in range(len(marks))]
+    p = store.audit_plan_path(plan_id)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"plan_id": plan_id, "seed": 99, "spans": spans}), encoding="utf-8")
+    for k, (sp, mk) in enumerate(zip(spans, marks, strict=True)):
+        if commit is not None and k >= commit:
+            continue
+        d = store.audit_dir(sp["animal"], sp["recording_id"])
+        d.mkdir(parents=True, exist_ok=True)
+        sid = f"{plan_id}_s{k + 1}"
+        (d / f"{sid}_blind_marks.json").write_text(json.dumps(
+            {"span_id": sid, "marks": [{"start_s": a, "stop_s": b} for a, b in mk],
+             **({"committed_at": committed_at if isinstance(committed_at, str)
+                 else committed_at[k]} if committed_at else {})}),
+            encoding="utf-8")
+        record: dict = {"span_s": [200.0, 320.0], "assessable_regions_s": [[20.0, 580.0]]}
+        if revealed is not None:  # what a window with digests writes at reveal
+            record["reveal"] = {"candidates_sha256": candidate_digest(revealed[k]),
+                                "n_candidates": len(revealed[k])}
+        (d / f"{sid}_plan.json").write_text(json.dumps(record), encoding="utf-8")
+
+
+def test_a_round_is_scored_whole_or_not_at_all(tmp_path: Path) -> None:
+    store = GemsStore.initialise(tmp_path / "gems")
+    _write_round(store, "plan_20260926T000000Z_00000063", [[[210, 211]], [[250, 252]]], commit=1)
+    with pytest.raises(FileNotFoundError, match="span 2"):
+        load_round(store, "plan_20260926T000000Z_00000063")
+    ok, why = check_next_round(store)
+    assert not ok and "still open" in why
+
+
+def test_the_store_round_gates_the_next_round_through_its_resolutions(tmp_path: Path) -> None:
+    store = GemsStore.initialise(tmp_path / "gems")
+    assert check_next_round(store) == (True, "no earlier round: draw round 1")
+    pid = "plan_20260926T000000Z_00000063"
+    _write_round(store, pid, [[[210, 211], [230, 231]], [[250, 252]]])
+    assert check_next_round(store)[0] is False  # complete but unscored
+
+    def reveal(span: dict) -> tuple:
+        assert span["record"]["assessable_regions_s"] == [[20.0, 580.0]]
+        traces = [make_band_z("100-300", 600.0, bumps=((230.2, 230.4, 5.0, "R_V1"),))]
+        return np.array([[210.5, 210.6], [251.0, 251.1]]), traces
+
+    score = score_stored_round(store, pid, reveal)
+    assert (score.found, score.covered) == (3, 2)
+    on_disk = json.loads(store.audit_score_path(pid).read_text(encoding="utf-8"))
+    assert on_disk["statistics"]["missed"] == 1
+    assert on_disk["artifacts"][1]["diagnosis"]["verdict"] == "gated"
+    ok, why = check_next_round(store)
+    assert not ok and "task 07 fix" in why
+    store.audit_resolution_path(pid).write_text(json.dumps(
+        {f"{pid}_s1#1": {"task07_fix": "combine rule fixed in commit abc123",
+                         "fixed_at": "2026-09-28T10:00:00+00:00"}}), encoding="utf-8")
+    assert check_next_round(store)[0] is True
+
+
+def test_no_statistic_is_computed_on_an_empty_round() -> None:
+    score = score_round("plan_x", [_span(0, [], [])])
+    s = score.statistics()
+    assert s["found"] == 0 and "recall" not in s
+    assert "undefined" in score.next_step()
+    assert not math.isnan(s["artifacts_per_minute"])
+
+
+# --- a score records exactly what it scored (ratified 2026-09-27) --------------
+
+PID = "plan_20260926T000000Z_00000063"
+CANDS = [np.array([[210.5, 210.6], [230.2, 230.3]]), np.array([[251.0, 251.1]])]
+
+
+def _reveal_with(cands: list) -> object:
+    def reveal(span: dict) -> tuple:
+        return cands[int(span["span_id"].rsplit("_s", 1)[1]) - 1], None
+    return reveal
+
+
+def test_the_digest_is_canonical() -> None:
+    a = np.array([[1.0, 1.5], [0.2, 0.3]])
+    assert candidate_digest(a) == candidate_digest(a[::-1])  # order-free
+    assert candidate_digest(a) == candidate_digest(a + 3e-7)  # float noise below 1 us
+    assert candidate_digest(a) != candidate_digest(a + np.array([[0.0, 0.01], [0.0, 0.0]]))
+    assert candidate_digest(np.zeros((0, 2))) == candidate_digest([])
+
+
+def test_a_tampered_candidate_list_is_refused(tmp_path: Path) -> None:
+    store = GemsStore.initialise(tmp_path / "gems")
+    _write_round(store, PID, [[[210, 211], [230, 231]], [[250, 252]]], revealed=CANDS)
+    tampered = [CANDS[0][:1], CANDS[1]]  # one revealed candidate missing on recompute
+    with pytest.raises(RevealMismatchError, match="do not match"):
+        score_stored_round(store, PID, _reveal_with(tampered))
+    assert not store.audit_score_path(PID).exists()  # nothing written
+    score = score_stored_round(store, PID, _reveal_with(CANDS))  # the true list scores
+    assert score.warnings == []
+    assert score.provenance["reveal_digests"] == {f"{PID}_s1": "verified",
+                                                  f"{PID}_s2": "verified"}
+
+
+def test_a_span_without_a_digest_scores_with_a_warning(tmp_path: Path) -> None:
+    store = GemsStore.initialise(tmp_path / "gems")
+    _write_round(store, PID, [[[210, 211], [230, 231]], [[250, 252]]])  # pre-digest app
+    score = score_stored_round(store, PID, _reveal_with(CANDS))
+    assert len(score.warnings) == 2
+    assert all("without candidate digests" in w for w in score.warnings)
+    assert "WARNING" in score.report()
+    assert json.loads(store.audit_score_path(PID).read_text(encoding="utf-8"))["warnings"]
+
+
+def test_the_score_records_the_generator_it_used(tmp_path: Path) -> None:
+    store = GemsStore.initialise(tmp_path / "gems")
+    _write_round(store, PID, [[[210, 211]], [[250, 252]]], revealed=CANDS)
+    score_stored_round(store, PID, _reveal_with(CANDS))
+    doc = json.loads(store.audit_score_path(PID).read_text(encoding="utf-8"))
+    gen = doc["provenance"]["generator"]
+    assert gen["parameters"]["z_enter"] == Z_ENTER and gen["parameters"]["z_exit"] == Z_EXIT
+    assert len(gen["source_sha256"]) == 64 and gen["gate"]["gate_recall"] == 0.98
+
+
+# --- only rounds labelled after the last fix count ----------------------------
+
+
+def test_a_round_labelled_before_a_recorded_fix_leaves_the_pooled_bound(
+    tmp_path: Path,
+) -> None:
+    store = GemsStore.initialise(tmp_path / "gems")
+    a, b = "plan_20260927T100000Z_0000000a", "plan_20260929T100000Z_0000000b"
+    _write_round(store, a, [[[210, 211], [230, 231]], [[250, 252]]],
+                 committed_at="2026-09-27T10:05:00+00:00", revealed=CANDS)
+    score_stored_round(store, a, _reveal_with(CANDS))
+    assert pooled_gate(store)["pooled_rounds"] == [a]  # no fix yet: it counts
+    store.audit_resolution_path(a).write_text(json.dumps({f"{a}_s1#0": {
+        "task07_fix": "commit abc", "fixed_at": "2026-09-28T09:00:00+00:00"}}),
+        encoding="utf-8")
+    after = pooled_gate(store)
+    assert after["pooled_rounds"] == [] and after["found"] == 0
+    assert after["excluded_rounds"][0]["plan_id"] == a
+    assert "before the last fix" in after["excluded_rounds"][0]["reason"]
+    _write_round(store, b, [[[210, 211], [230, 231]], [[250, 252]]],
+                 committed_at="2026-09-29T10:05:00+00:00", revealed=CANDS)
+    score = score_stored_round(store, b, _reveal_with(CANDS))
+    assert score.pooled is not None and score.pooled["pooled_rounds"] == [b]
+    assert score.pooled["found"] == 3  # round b alone, not a + b
+    assert "left out " + a in score.report()
+
+
+def test_a_tuning_re_score_is_labelled_kept_apart_and_never_pooled(tmp_path: Path) -> None:
+    store = GemsStore.initialise(tmp_path / "gems")
+    _write_round(store, PID, [[[210, 211], [230, 231]], [[250, 252]]],
+                 committed_at="2026-09-27T10:05:00+00:00", revealed=CANDS)
+    gate = score_stored_round(store, PID, _reveal_with(CANDS))
+    fixed = [np.array([[210.5, 210.6], [230.2, 230.3]]),
+             np.array([[251.0, 251.1], [300.0, 301.0]])]
+    tune = score_stored_round(store, PID, _reveal_with(fixed), mode="tuning")  # not refused
+    assert tune.mode == "tuning" and TUNING_LABEL.upper() in tune.report()
+    tuned = list(store.audit_score_path(PID).parent.glob(f"{PID}_tuning_*.json"))
+    assert len(tuned) == 1
+    assert json.loads(tuned[0].read_text(encoding="utf-8"))["evidence"] == TUNING_LABEL
+    on_disk = json.loads(store.audit_score_path(PID).read_text(encoding="utf-8"))
+    assert on_disk["statistics"] == gate.to_json()["statistics"]  # gate score untouched
+    assert pooled_gate(store)["pooled_rounds"] == [PID]  # the tuning file is not a round
+
+
+def test_a_gate_score_is_not_replaced_under_a_different_generator(tmp_path: Path) -> None:
+    store = GemsStore.initialise(tmp_path / "gems")
+    _write_round(store, PID, [[[210, 211]], [[250, 252]]], revealed=CANDS)
+    score_stored_round(store, PID, _reveal_with(CANDS))
+    path = store.audit_score_path(PID)
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["provenance"]["generator"]["source_sha256"] = "0" * 64  # scored by older code
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    with pytest.raises(RevealMismatchError, match="different generator"):
+        score_stored_round(store, PID, _reveal_with(CANDS))
+
+
+def test_a_round_started_before_a_fix_is_not_eligible_even_if_finished_after(
+    tmp_path: Path,
+) -> None:
+    """Labelled = its FIRST committed span: a round straddling a fix is tuning data."""
+    store = GemsStore.initialise(tmp_path / "gems")
+    store.audit_resolution_path("plan_0").parent.mkdir(parents=True, exist_ok=True)
+    store.audit_resolution_path("plan_0").write_text(json.dumps({"x#0": {
+        "task07_fix": "commit abc", "fixed_at": "2026-09-28T09:00:00+00:00"}}),
+        encoding="utf-8")
+    _write_round(store, PID, [[[210, 211]], [[250, 252]]], revealed=CANDS,
+                 committed_at=["2026-09-28T08:00:00+00:00", "2026-09-28T10:00:00+00:00"])
+    score = score_stored_round(store, PID, _reveal_with(CANDS))
+    assert score.pooled is not None and score.pooled["pooled_rounds"] == []
