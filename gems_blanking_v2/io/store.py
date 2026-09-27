@@ -617,6 +617,23 @@ class GemsStore:
         name = f"events_{safe_component(user)}_{stamp or utc_stamp()}.parquet"
         return self.root / "labels" / validate_component(animal) / name
 
+    def audit_dir(self, animal: str, session: str) -> Path:
+        """Directory holding one session's blind recall-audit marks.
+
+        ``labels/<animal>/blind_audit/<session>/``, keyed by the session key so
+        a mark can never be attached to the wrong recording, and beside the
+        per-user label files rather than inside ``data/``: marks are human
+        judgements, and ``data/`` holds only what describes the recording.
+        """
+        return (
+            self.root / "labels" / validate_component(animal) / "blind_audit"
+            / validate_component(session)
+        )
+
+    def audit_plan_path(self, plan_id: str) -> Path:
+        """One blind-audit plan, written once before its first span is shown."""
+        return self.root / "labels" / "blind_audit_plans" / f"{validate_component(plan_id)}.json"
+
     def corpus_path(self, corpus_id: str) -> Path:
         """Immutable named corpus spec."""
         return self.root / "corpora" / f"{validate_component(corpus_id)}.json"
