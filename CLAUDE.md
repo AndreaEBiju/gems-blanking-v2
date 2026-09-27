@@ -370,6 +370,17 @@ violating one, stop and say so rather than working around it.
     rig's 1–6%, so the fixture could not reproduce the failure it was written
     for.
 
+42. **Verify the thing you ship, not a neighbour of it.** A verification that
+    reads a cache, or borrows state from outside the commit under test, is
+    checking something other than what will be delivered. *Found twice in one
+    commit pass:* ruff's cache had been reporting "clean" on an import-order
+    error for several reports, and the detector-pyqt commits were verified by
+    copying submodule files from a working copy whose pointer was newer than the
+    one the commits record — so the tests passed against a detector-core a fresh
+    clone would never get. Run linters without their cache when the result will
+    be quoted, and verify a commit from a clean checkout of exactly that commit,
+    submodules included.
+
 ---
 
 ## Cross-platform rules (macOS + Windows; Linux best-effort)
@@ -567,7 +578,7 @@ machines. Clobbering is the hazard, so ownership is explicit:
 | File | Owner | Rule |
 |---|---|---|
 | `IMPLEMENTATION.md`, `CLAUDE.md`, `PIPELINE.md`, `PROMPTS.md` | the spec author | Claude Code does **not** edit these. Propose changes in the task report; they come back in the next drop. |
-| `tasks/` | generated | never hand-edited by anyone; regenerate with `split_tasks.py` |
+| `tasks/` | generated **on the spec machine** | never hand-edited by anyone. Regenerated with `split_tasks.py` in the **same commit** as every `IMPLEMENTATION.md` change, on the machine that edits the spec. The build machine never commits `tasks/` changes: two machines regenerating one generated directory from different spec versions is a merge conflict waiting to happen. If `tasks/` looks stale on the build machine, report it; do not regenerate and commit it there. |
 | `split_tasks.py`, all code, all tests, CI config | the repo | the spec author does **not** ship copies of these |
 
 A doc drop therefore replaces exactly four files and can never overwrite code.
