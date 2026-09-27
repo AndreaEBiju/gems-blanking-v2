@@ -3738,6 +3738,38 @@ confirm** it. Therefore:
    artifacts found per minute (so the number of rounds needed can be projected
    rather than guessed).
 
+**Ratified 2026-09-27, after the scorer was built (before any marks exist):**
+
+- **The gate uses the one-sided 95% lower bound**, the more conservative of
+  Clopper–Pearson and the span bootstrap. The claim is "recall ≥ 98%", a
+  one-sided claim, and 149 artifacts at zero misses is the one-sided figure. My
+  text above said "95% interval" and projected with the one-sided bound; that
+  was inconsistent, and the one-sided bound is the one that governs. Two-sided
+  intervals are shown alongside, as description.
+- **A new round needs every miss diagnosed *and* its task-07 fix recorded.**
+- **Diagnosis classes use the generator's own thresholds**: blind spot (z <
+  `z_exit` in every band), threshold (`z_exit` ≤ z < `z_enter`), **gated** (z
+  reached `z_enter` but a later generator rule rejected it), undiagnosed (no
+  trace covers the artifact).
+
+**Rounds labelled before a generator fix cannot count toward the gate after it.**
+Once a miss has been used to change task 07, the marks that revealed it are
+tuning data for the generator. Re-scoring them with the fixed generator is
+useful — it shows whether the fix recovers the misses without new labelling —
+but the gate's lower bound is computed **only from rounds labelled after the
+last fix**. Otherwise the gate measures the generator on the very artifacts it
+was adjusted to catch. The score file records which rounds are eligible.
+
+**A score records exactly what it scored.** The window does not save the
+candidates it revealed, so the scorer recomputes them. Two guards:
+- the score file records the generator's parameters (`z_enter`, `z_exit`, gate
+  settings) and the package commit (or a hash of the working-tree source when
+  uncommitted);
+- from now on, the window writes a digest of the revealed candidate list into
+  each span record at reveal, and the scorer refuses to score a span whose
+  recomputed candidates do not match it. Spans revealed by an app started
+  before this change have no digest; score them with a warning saying so.
+
 This supersedes Method B's "≥6 recordings" for the first round: the 5-span plan
 across 2–3 animals is round 1; later rounds add recordings.
 
