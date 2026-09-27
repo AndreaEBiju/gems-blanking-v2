@@ -19,10 +19,14 @@ import numpy.typing as npt
 import pytest
 from gems_blanking_v2.io.stim_split import (
     AUDIT_COLUMNS,
+    EDGE_FLOOR_MULTIPLE,
     EDGE_HOLD_S,
     EDGE_REFINE_PAD_S,
     ENVELOPE_RMS_S,
+    MODALITY_MONITORS,
+    ON_FLOOR_MIN_RATIO,
     PROTOCOL_FILENAME,
+    PROTOCOL_ONSET_MAX_S,
     Epoch,
     ProtocolSpec,
     audit_stim_splits,
@@ -31,7 +35,10 @@ from gems_blanking_v2.io.stim_split import (
     default_protocol,
     find_stim_window,
     load_protocol,
+    modality_from_folder,
     protocol_path,
+    read_stim_monitors,
+    split_by_modality,
     split_stim_recovery,
     vib_envelope,
     write_protocol,
@@ -41,7 +48,7 @@ from gems_blanking_v2.io.stim_split import _status as rp_status
 from gems_blanking_v2.types import ChannelInfo, Recording
 from scipy.signal import butter, sosfiltfilt
 
-from tests.conftest import make_eng, make_vib
+from tests.conftest import make_eng, make_idle_monitor, make_vib
 
 F64 = npt.NDArray[np.float64]
 
@@ -1465,3 +1472,311 @@ def test_the_acceptance_run_against_the_archive(real_recording: Path | None) -> 
 
     table = audit_stim_splits(loaded, load_protocol(protocol_file))
     assert list(table.columns) == list(AUDIT_COLUMNS)
+
+
+# ---------------------------------------------------------------------------
+# rostral_end - a cohort constant (Andrea, 2026-09-26)
+# ---------------------------------------------------------------------------
+
+
+def test_the_cohort_protocol_declares_contact_1_rostral(tmp_path: Path) -> None:
+    from gems_blanking_v2.io.stim_split import (  # noqa: PLC0415
+        default_protocol_book,
+        load_protocol_book,
+        write_protocol_book,
+    )
+
+    book = default_protocol_book()
+    assert book.protocols[0].rostral_end == 1
+    path = write_protocol_book(book, tmp_path / PROTOCOL_FILENAME)
+    assert load_protocol_book(path) == book
+    assert book.protocols[0].to_json()["rostral_end"] == 1
+
+
+@pytest.mark.parametrize("bad", [0, -1, True])
+def test_rostral_end_must_be_a_contact_index(bad: int) -> None:
+    with pytest.raises(ValueError, match="contact index"):
+        ProtocolSpec(120.0, 1200.0, 12.0, rostral_end=bad)
+
+
+# ---------------------------------------------------------------------------
+# the monitor channel, chosen by modality (new cohort)
+# ---------------------------------------------------------------------------
+
+NEW_FILE_S = 1330.0
+"""A new-cohort sr file: 2 min stim from ~1 s, then 20 min recovery."""
+
+FS_ADC2 = 610.0
+"""adc2's own rate on the real rig - not adc1's, so the two cannot be conflated."""
+
+
+def _monitors(on: tuple[str, ...], *, start_s: float = 0.8) -> dict[str, tuple[F64, float]]:
+    """``{adc1, adc2, vib}``; the channels in ``on`` carry a 120 s stim from ``start_s``.
+
+    ``vib`` is a copy of ``adc1``, as on the real rig.
+    """
+    out: dict[str, tuple[F64, float]] = {}
+    for k, (name, fs) in enumerate((("adc1", FS_VIB), ("adc2", FS_ADC2))):
+        if name in on:
+            sig = make_vib(fs, NEW_FILE_S, start_s, STIM_S, seed=10 + k).signal
+        else:
+            sig = make_idle_monitor(fs, NEW_FILE_S, seed=20 + k)
+        out[name] = (sig, fs)
+    out["vib"] = (out["adc1"][0].copy(), FS_VIB)
+    return out
+
+
+@pytest.mark.parametrize(
+    ("folder", "expected"),
+    [
+        ("gems_j_t01_ms1_sr_165543", "ms"),
+        ("GEMS_J_T01_MS3_SR_201624", "ms"),
+        ("gems_d_t03_es3_sr_191016", "es"),
+        ("gems_i_t02_es3_INCOMPLETE_sr_170422", "es"),
+        ("gems_i_t01_es1_BAD_bl_162155", "es"),
+        ("gems_j_t02_3_2_sr_214038", "combined"),
+        ("gems_a_t01_1_3_stim_recovery_172707", "combined"),
+        ("gems_k_t01_cme4_sr_225052", "combined"),
+    ],
+)
+def test_the_modality_is_parsed_from_the_folder_name(folder: str, expected: str) -> None:
+    assert modality_from_folder(folder) == expected
+
+
+@pytest.mark.parametrize("folder", ["gems_a_pre01_153526", "gems_j_t01_sr_165543"])
+def test_a_folder_naming_no_modality_is_refused(folder: str) -> None:
+    with pytest.raises(ValueError, match="no stimulation modality"):
+        modality_from_folder(folder)
+
+
+def test_the_modality_table_is_what_was_measured() -> None:
+    """Vib is a copy of adc1, so it is never listed as an independent monitor."""
+    assert MODALITY_MONITORS == {"ms": ("adc2",), "es": ("adc1",),
+                                 "combined": ("adc1", "adc2")}
+
+
+def test_an_es_split_says_it_rests_on_one_channel(protocol: ProtocolSpec) -> None:
+    rec = _recording(np.zeros(1), dur_s=NEW_FILE_S, with_vib_channel=False)
+    _, _, report = split_by_modality(rec, folder_name="gems_d_t03_es3_sr_191016",
+                                     monitors=_monitors(("adc1",)), protocol=protocol)
+    assert report.status == "pass"
+    assert report.corroboration is not None
+    assert report.corroboration.startswith("single-channel: adc1 alone")
+    assert "bit-identical copy" in report.corroboration
+    assert [m[0] for m in report.monitors] == ["adc1"]
+    assert report.to_provenance()["corroboration"] == report.corroboration
+
+
+def test_a_vib_that_is_not_a_copy_of_adc1_is_flagged(protocol: ProtocolSpec) -> None:
+    rec = _recording(np.zeros(1), dur_s=NEW_FILE_S, with_vib_channel=False)
+    monitors = _monitors(("adc1",))
+    monitors["vib"] = (monitors["vib"][0] * 1.0001, FS_VIB)
+    _, _, report = split_by_modality(rec, folder_name="gems_d_t03_es3_sr_191016",
+                                     monitors=monitors, protocol=protocol)
+    assert report.status == "review" and "vib is not identical to adc1" in report.reason
+
+
+@pytest.mark.parametrize(
+    ("folder", "on"),
+    [
+        ("gems_j_t01_ms1_sr_165543", ("adc2",)),
+        ("gems_d_t03_es3_sr_191016", ("adc1", "vib")),
+        ("gems_j_t02_3_2_sr_214038", ("adc1", "adc2", "vib")),
+    ],
+)
+def test_each_modality_splits_on_its_own_channel(
+    folder: str, on: tuple[str, ...], protocol: ProtocolSpec
+) -> None:
+    rec = _recording(np.zeros(1), dur_s=NEW_FILE_S, with_vib_channel=False)
+    _, recovery, report = split_by_modality(rec, folder_name=folder,
+                                            monitors=_monitors(on), protocol=protocol)
+    assert report.status == "pass", report.reason
+    assert report.vib_channel == MODALITY_MONITORS[report.modality][0]
+    assert [m[0] for m in report.monitors] == list(MODALITY_MONITORS[report.modality])
+    assert report.protocol_window_ok is True
+    assert abs(report.onset_s - 0.8) < 0.5 and abs(report.detected_duration_s - STIM_S) < 1.0
+    assert recovery.t0_offset_s == pytest.approx(report.offset_s, abs=1.0 / FS_SIG)
+
+
+def test_the_vib_only_split_of_an_ms_file_is_the_confident_wrong_answer(
+    protocol: ProtocolSpec,
+) -> None:
+    """The defect as found: on an ms file vib is idle, and splitting it does not fail."""
+    rec = _recording(np.zeros(1), dur_s=NEW_FILE_S, with_vib_channel=False)
+    vib, fs = _monitors(("adc2",))["vib"]
+    _, _, report = split_stim_recovery(rec, protocol=protocol, vib=vib, fs_vib=fs)
+    assert report.onset_s > PROTOCOL_ONSET_MAX_S  # a window, somewhere in the noise
+
+
+def test_a_modality_whose_channel_is_idle_is_flagged_not_used(protocol: ProtocolSpec) -> None:
+    """Named es, but the stim is on adc2 (a misnamed folder).
+
+    adc1 then gives a window in the noise, which the protocol window rejects.
+    """
+    rec = _recording(np.zeros(1), dur_s=NEW_FILE_S, with_vib_channel=False)
+    _, _, report = split_by_modality(rec, folder_name="gems_d_t03_es3_sr_191016",
+                                     monitors=_monitors(("adc2",)), protocol=protocol)
+    assert report.status == "review"
+    assert report.protocol_window_ok is False
+    assert report.reason.startswith("flagged, not used: stim onset")
+
+
+def test_a_stim_late_in_the_file_is_flagged_even_on_the_right_channel(
+    protocol: ProtocolSpec,
+) -> None:
+    rec = _recording(np.zeros(1), dur_s=NEW_FILE_S, with_vib_channel=False)
+    _, _, report = split_by_modality(rec, folder_name="gems_j_t01_ms1_sr_165543",
+                                     monitors=_monitors(("adc2",), start_s=300.0),
+                                     protocol=protocol)
+    assert abs(report.onset_s - 300.0) < 0.5  # found correctly...
+    assert report.status == "review" and report.protocol_window_ok is False  # ...not used
+
+
+def test_combined_channels_that_disagree_are_flagged(protocol: ProtocolSpec) -> None:
+    """Combined, but adc2 idle: adc1 is in the window, adc2 puts the stim elsewhere."""
+    rec = _recording(np.zeros(1), dur_s=NEW_FILE_S, with_vib_channel=False)
+    _, _, report = split_by_modality(rec, folder_name="gems_j_t02_3_2_sr_214038",
+                                     monitors=_monitors(("adc1", "vib")), protocol=protocol)
+    assert report.protocol_window_ok is True
+    assert report.status == "review"
+    assert "adc2 puts the stim at" in report.reason
+
+
+def test_a_missing_monitor_is_refused(protocol: ProtocolSpec) -> None:
+    rec = _recording(np.zeros(1), dur_s=NEW_FILE_S, with_vib_channel=False)
+    monitors = _monitors(("adc2",))
+    del monitors["adc2"]
+    with pytest.raises(ValueError, match=r"missing \['adc2'\]"):
+        split_by_modality(rec, folder_name="gems_j_t01_ms1_sr_165543",
+                          monitors=monitors, protocol=protocol)
+
+
+def test_the_modality_provenance_serialises_without_nan(protocol: ProtocolSpec) -> None:
+    import json  # noqa: PLC0415
+
+    rec = _recording(np.zeros(1), dur_s=NEW_FILE_S, with_vib_channel=False)
+    monitors = _monitors(("adc1", "adc2"))
+    monitors["adc2"] = (np.zeros(10), FS_ADC2)  # too short to split: that split raises
+    _, _, report = split_by_modality(rec, folder_name="gems_j_t02_3_2_sr_214038",
+                                     monitors=monitors, protocol=protocol)
+    assert report.status == "review" and "adc2 should carry" in report.reason
+    assert report.corroboration is not None
+    assert report.corroboration.startswith("1 of 2 independent channels")
+    record = report.to_provenance()
+    text = json.dumps(record, allow_nan=False)
+    assert record["modality"] == "combined"
+    assert record["monitors"][1] == {"channel": "adc2"}
+    assert "NaN" not in text
+
+
+def test_the_block_monitor_file_is_read_at_each_channels_own_rate(tmp_path: Path) -> None:
+    from scipy.io import savemat  # noqa: PLC0415
+
+    m = _monitors(("adc2",))
+    savemat(tmp_path / "gems_j_t01_ms1_sr_165543_vib.mat",
+            {"adc1": m["adc1"][0], "fs_adc": FS_VIB, "adc2": m["adc2"][0],
+             "fs_adc2": FS_ADC2, "vib": m["vib"][0], "fs_vib": FS_VIB,
+             "adc2Store": "ADC2"})
+    got = read_stim_monitors(tmp_path)
+    assert set(got) == {"adc1", "adc2", "vib"}
+    assert got["adc2"][1] == FS_ADC2 and got["adc1"][1] == FS_VIB
+    np.testing.assert_array_equal(got["adc2"][0], m["adc2"][0])
+    (tmp_path / "second_vib.mat").write_bytes(b"")
+    with pytest.raises(FileNotFoundError, match="exactly one"):
+        read_stim_monitors(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# the stim-off edge is judged against the post-stim floor (ruling 2026-09-26)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("step", "shape"),
+    [
+        ((120.8, 220.0, 1.45), "3-4 min step from stim offset (d_t02_1_2: 1.45x)"),
+        ((NEW_FILE_S - 180.0, 180.0, 1.36), "step over the last 3 min (h_t02_1_3: 1.36x)"),
+    ],
+)
+def test_a_noise_floor_step_is_not_read_as_continued_stimulation(
+    step: tuple[float, float, float], shape: str, protocol: ProtocolSpec
+) -> None:
+    """Step sizes and the hum-dominated floor as measured (see make_vib).
+
+    With that floor the old whole-OFF threshold sits at ~1.23x, under both steps.
+    """
+    vib = make_vib(FS_VIB, NEW_FILE_S, 0.8, STIM_S, floor_step=step, hum=0.02, noise=0.004,
+                   seed=3)
+    rec = _recording(np.zeros(1), dur_s=NEW_FILE_S, with_vib_channel=False)
+    _, _, report = split_stim_recovery(rec, protocol=protocol, vib=vib.signal, fs_vib=FS_VIB)
+    assert report.status == "pass", f"{shape}: {report.reason}"
+    assert abs(report.offset_s - float(vib.stim_stop_s)) < 0.5
+    assert not report.clipped_end and report.epoch_count == 1
+
+
+def test_an_on_level_that_is_not_a_clear_multiple_of_the_floor_is_refused(
+    protocol: ProtocolSpec,
+) -> None:
+    """An idle monitor still yields a best window; its ON level is ~1x the floor."""
+    rec = _recording(np.zeros(1), dur_s=NEW_FILE_S, with_vib_channel=False)
+    idle = make_idle_monitor(FS_VIB, NEW_FILE_S, seed=4)
+    _, _, report = split_stim_recovery(rec, protocol=protocol, vib=idle, fs_vib=FS_VIB)
+    assert report.status == "review"
+    assert report.on_floor_ratio < ON_FLOOR_MIN_RATIO
+    assert "not a clear multiple" in report.reason
+
+
+def test_the_floor_and_the_on_ratio_are_in_the_provenance(protocol: ProtocolSpec) -> None:
+    vib = make_vib(FS_VIB, NEW_FILE_S, 0.8, STIM_S, seed=5)
+    rec = _recording(np.zeros(1), dur_s=NEW_FILE_S, with_vib_channel=False)
+    _, _, report = split_stim_recovery(rec, protocol=protocol, vib=vib.signal, fs_vib=FS_VIB)
+    record = report.to_provenance()
+    assert record["recovery_floor"] > 0 and record["on_floor_ratio"] >= ON_FLOOR_MIN_RATIO
+    assert record["off_threshold"] >= EDGE_FLOOR_MULTIPLE * record["recovery_floor"]
+
+
+def test_a_step_that_starts_before_the_stim_does_not_clip_the_onset(
+    protocol: ProtocolSpec,
+) -> None:
+    """d_t02_1_2 / j_t05_3_1: the 1.4-1.7x step also covers the pre-stim second.
+
+    An onset judged on floor + 8 sigma walked back to sample 0 and called it clipped.
+    """
+    vib = make_vib(FS_VIB, NEW_FILE_S, 0.8, STIM_S, floor_step=(0.0, 360.0, 1.45), hum=0.02,
+                   noise=0.004, seed=6)
+    rec = _recording(np.zeros(1), dur_s=NEW_FILE_S, with_vib_channel=False)
+    _, _, report = split_stim_recovery(rec, protocol=protocol, vib=vib.signal, fs_vib=FS_VIB)
+    assert report.status == "pass", report.reason
+    assert not report.clipped_start
+    assert abs(report.onset_s - 0.8) < 0.1 and abs(report.offset_s - 120.8) < 0.5
+
+
+@pytest.mark.parametrize("value", [0.0, 3.3])
+def test_a_constant_monitor_is_refused_not_given_a_window(
+    value: float, protocol: ProtocolSpec
+) -> None:
+    """gems_i_t03_es2_sr_223947: every monitor exactly zero.
+
+    A flat envelope's argmax is sample 0, which used to 'pass' at exactly 0.0-120.0 s.
+    """
+    rec = _recording(np.zeros(1), dur_s=NEW_FILE_S, with_vib_channel=False)
+    flat = np.full(int(NEW_FILE_S * FS_VIB), value)
+    monitors = {"adc1": (flat, FS_VIB), "adc2": (flat[: int(NEW_FILE_S * FS_ADC2)], FS_ADC2),
+                "vib": (flat.copy(), FS_VIB)}
+    with pytest.raises(ValueError, match="constant"):
+        split_by_modality(rec, folder_name="gems_i_t03_es2_sr_223947", monitors=monitors,
+                          protocol=protocol)
+
+
+def test_a_zero_window_over_a_zero_floor_is_no_stim_not_an_infinite_ratio() -> None:
+    """A zero ON level over a zero floor reads as ratio 0.
+
+    Only reachable when something outside window and recovery is nonzero - a wholly
+    constant channel is refused earlier.
+    """
+    from gems_blanking_v2.io.stim_split import _post_stim_floor  # noqa: PLC0415
+
+    env = np.zeros(20_000)
+    env[:500] = 1.0  # activity before the window only
+    _, floor, ratio = _post_stim_floor(env, 1_000, 5_000, FS_VIB, threshold=0.5)
+    assert floor == 0.0 and ratio == 0.0

@@ -36,9 +36,11 @@ since every recovery analysis is expressed as time since stim offset.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Final, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
 import numpy.typing as npt
@@ -55,14 +57,21 @@ if TYPE_CHECKING:
 __all__ = [
     "AUDIT_COLUMNS",
     "DEFAULT_PROTOCOL_YAML",
+    "EDGE_FLOOR_MULTIPLE",
     "EDGE_REFINE_PAD_S",
     "ENVELOPE_RMS_S",
     "ENVELOPE_SMOOTH_S",
+    "MODALITY_MONITORS",
+    "MONITOR_AGREEMENT_S",
+    "MONITOR_COPIES",
     "OFF_ANCHOR_SIGMA",
+    "ON_FLOOR_MIN_RATIO",
     "PROTOCOL_FILENAME",
+    "PROTOCOL_ONSET_MAX_S",
     "SECONDARY_EPOCH_FRACTION",
     "VIB_NAME_PATTERN",
     "Epoch",
+    "Modality",
     "ProtocolBook",
     "ProtocolNotCoveredError",
     "ProtocolSpec",
@@ -76,7 +85,10 @@ __all__ = [
     "load_protocol",
     "load_protocol_book",
     "matlab_boundary",
+    "modality_from_folder",
     "protocol_path",
+    "read_stim_monitors",
+    "split_by_modality",
     "split_stim_recovery",
     "vib_envelope",
     "write_protocol",
@@ -218,6 +230,17 @@ DEFAULT_PROTOCOL_YAML: Final = """\
 # must not inherit the 120 s prior. Splitting one against a protocol that does not
 # describe it would produce a confident, wrong boundary, which is worse than
 # stopping.
+#
+# Cohort constants below are declared once here, never per recording (invariant
+# 24). rostral_end: the contact_index facing the head on every nerve cuff - source
+# Andrea, 2026-09-26, "it's always channel 1 rostral" (a surgical convention).
+# timezone: an IANA zone, never a fixed offset (invariant 31).
+# pair_gap_min_lo / pair_gap_min_hi: baseline is recorded 5-20 min before
+# stim/recovery (Andrea, 2026-09-26; widened from 10 +/- 3 when a real pair was
+# found at 14.7 min). Name tokens propose a pair; the .tsq start times confirm it.
+# min_baseline_min / min_sr_min: a recording shorter than this is incomplete
+# (Andrea, 2026-09-26), measured from its own sample count; it adds to the
+# folder flags, never removes one.
 
 protocols:
   - name: chronic_2min_20min
@@ -225,6 +248,17 @@ protocols:
     stim_duration_s: 120
     recovery_duration_s: 1200
     stim_tolerance_s: 12
+    # Cohort constants (invariant 24): declared once, never copied per recording.
+    units: V                        # confirmed cohort-wide; sigma 32-39 uV
+    config: independent             # three ADCs per cuff; the OLD cohort is hw_tripole
+    channel_order_source: file chanlabels
+    timezone: America/New_York      # IANA zone, never an offset (invariant 31)
+    rostral_end: 1                  # contact facing the head, every nerve cuff;
+                                    # Andrea 2026-09-26, surgical convention
+    pair_gap_min_lo: 5              # baseline starts 5-20 min before stim/recovery
+    pair_gap_min_hi: 20
+    min_baseline_min: 10            # shorter baseline = incomplete (Andrea 2026-09-26)
+    min_sr_min: 22                  # stim/recovery: 2 min stim + 20 min recovery
 """
 
 
@@ -243,6 +277,42 @@ class ProtocolSpec:
         Half-width of the accepted band around ``stim_duration_s``. 12 s rather than
         a tight few seconds because recording start and stop routinely consume
         several seconds at the edges, and a narrow band would flag normal captures.
+    units
+        The amplitude unit every recording in this cohort is stored in. Declared
+        once here, not copied into every ``meta.json`` (invariant 24): it cannot
+        legitimately differ between two recordings of one cohort, and 830 copies
+        of a constant are 830 chances for one to drift.
+    config
+        ``"independent"`` for three separate ADCs per cuff, ``"hw_tripole"`` for
+        the old cohort's outer contacts shorted before the amplifier. Genuinely
+        cohort-distinguishing, which is the argument FOR the per-cohort file.
+    channel_order_source
+        Where column order comes from. ``"file chanlabels"`` where the recording
+        states it; the old cohort has none and declares its order here instead.
+    timezone
+        IANA zone of the lab clock, e.g. ``"America/New_York"``. A zone, never a
+        fixed offset: the corpus spans the November DST change, and a hardcoded
+        -4 keeps producing plausible local times after it stops being true. Any
+        grouping by day uses the LOCAL date this yields (invariant 31).
+    rostral_end
+        ``contact_index`` facing rostrally on every nerve cuff, or ``None`` when
+        not declared. A surgical convention (Andrea, 2026-09-26: "it's always
+        channel 1 rostral") and therefore a cohort constant, not a per-recording
+        field. DECLARED, never inferred from channel order or names. Ignored for
+        ``hw_tripole``: the shorted end contacts leave no inter-contact lag.
+    pair_gap_min_lo, pair_gap_min_hi
+        Baseline is recorded first and stim/recovery starts between these many
+        minutes later (Andrea, 2026-09-26: 5-20 min; a symmetric 10 +/- 3 was a
+        guess, too tight for a real 14.7 min pair). Shared name tokens make a
+        CANDIDATE pair; the ``.tsq`` start times must fall in this window,
+        baseline first, to CONFIRM it. The ambiguity check is what makes a wide
+        window safe: two candidates inside it still refuse. ``None`` means
+        undeclared, and pairing then refuses rather than trusting names alone.
+    min_baseline_min, min_sr_min
+        Completeness by duration (Andrea, 2026-09-26): a baseline shorter than
+        ``min_baseline_min`` or a stim/recovery file shorter than ``min_sr_min``
+        (2 min stim + 20 min recovery) is incomplete, measured from the file's own
+        sample count. It ADDS to the folder flags and never removes one.
     """
 
     stim_duration_s: float
@@ -250,9 +320,37 @@ class ProtocolSpec:
     stim_tolerance_s: float
     name: str = "unnamed"
     applies_to: tuple[str, ...] = ()
+    units: str = "V"
+    config: str = "independent"
+    channel_order_source: str = "file chanlabels"
+    timezone: str = "America/New_York"
+    rostral_end: int | None = None
+    pair_gap_min_lo: float | None = None
+    pair_gap_min_hi: float | None = None
+    min_baseline_min: float | None = None
+    min_sr_min: float | None = None
 
     def __post_init__(self) -> None:
-        """Check every duration is positive and finite."""
+        """Check every duration is positive and finite, and the zone is real."""
+        if self.rostral_end is not None and (
+            isinstance(self.rostral_end, bool) or int(self.rostral_end) < 1
+        ):
+            msg = f"rostral_end must be a contact index >= 1, got {self.rostral_end!r}"
+            raise ValueError(msg)
+        for name in ("pair_gap_min_lo", "pair_gap_min_hi", "min_baseline_min", "min_sr_min"):
+            v = getattr(self, name)
+            if v is not None and not (np.isfinite(float(v)) and float(v) > 0):
+                msg = f"{name} must be positive and finite, got {v!r}"
+                raise ValueError(msg)
+        lo, hi = self.pair_gap_min_lo, self.pair_gap_min_hi
+        if (lo is None) != (hi is None) or (lo is not None and hi is not None and lo >= hi):
+            msg = f"pair window must be declared as lo < hi together, got {lo!r}..{hi!r}"
+            raise ValueError(msg)
+        try:
+            ZoneInfo(self.timezone)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            msg = f"timezone {self.timezone!r} is not an IANA zone name"
+            raise ValueError(msg) from exc
         for name in ("stim_duration_s", "recovery_duration_s", "stim_tolerance_s"):
             value = float(getattr(self, name))
             if not np.isfinite(value) or value <= 0.0:
@@ -271,7 +369,16 @@ class ProtocolSpec:
             "recovery_duration_s": self.recovery_duration_s,
             "stim_tolerance_s": self.stim_tolerance_s,
             "protocol_name": self.name,
+            "units": self.units,
+            "config": self.config,
+            "channel_order_source": self.channel_order_source,
+            "timezone": self.timezone,
         }
+        if self.rostral_end is not None:
+            record["rostral_end"] = self.rostral_end
+        for name in ("pair_gap_min_lo", "pair_gap_min_hi", "min_baseline_min", "min_sr_min"):
+            if getattr(self, name) is not None:
+                record[name] = getattr(self, name)
         if self.applies_to:
             record["applies_to"] = list(self.applies_to)
         return record
@@ -471,6 +578,16 @@ class SplitReport:
         is what makes it worth having: a ``clipped_start`` file has a censored stim
         duration but an *uncensored* recovery duration, so this is the only validation
         that still works on it.
+    modality
+        ``"ms"``, ``"es"`` or ``"combined"`` when the monitor channel was chosen by
+        :func:`split_by_modality`; ``None`` on the single-channel path.
+    monitors
+        ``(channel, onset_s, offset_s)`` for every monitor the modality names, the
+        chosen one first. A channel whose split raised carries NaN for both.
+    protocol_window_ok
+        Whether the chosen channel's epoch sits in the protocol window (onset within
+        :data:`PROTOCOL_ONSET_MAX_S` of file start, ~``stim_duration_s`` long);
+        ``None`` when not checked.
     method
         ``"matched"`` or ``"manual"``.
     protocol
@@ -498,6 +615,13 @@ class SplitReport:
     head_extension_s: float = 0.0
     tail_extension_s: float = 0.0
     recovery_duration_flag: bool = False
+    modality: str | None = None
+    monitors: tuple[tuple[str, float, float], ...] = ()
+    protocol_window_ok: bool | None = None
+    off_threshold: float = float("nan")
+    recovery_floor: float = float("nan")
+    on_floor_ratio: float = float("nan")
+    corroboration: str | None = None
 
     def to_provenance(self) -> dict[str, Any]:
         """Return a JSON-ready provenance record.
@@ -525,12 +649,26 @@ class SplitReport:
             "exclusion_category": "excluded_epoch",
             "settling_measured": False,
         }
-        for name in ("threshold_crosscheck_s", "vib_channel", "fs_vib"):
+        for name in ("threshold_crosscheck_s", "vib_channel", "fs_vib", "modality",
+                     "protocol_window_ok"):
             value = getattr(self, name)
             if value is not None:
                 record[name] = value
+        if self.monitors:
+            # A monitor whose split raised has no onset: its keys are absent, never
+            # NaN (the serialised-missing convention).
+            record["monitors"] = [
+                {"channel": c} | ({"onset_s": a, "offset_s": b} if np.isfinite(a) else {})
+                for c, a, b in self.monitors
+            ]
         if np.isfinite(self.recovery_duration_s):
             record["recovery_duration_s"] = self.recovery_duration_s
+        for name in ("off_threshold", "recovery_floor", "on_floor_ratio"):
+            value = float(getattr(self, name))
+            if np.isfinite(value):
+                record[name] = value
+        if self.corroboration is not None:
+            record["corroboration"] = self.corroboration
         return record
 
 
@@ -588,10 +726,33 @@ def load_protocol_book(path: Path) -> ProtocolBook:
             msg = f"{path}: protocol {index} applies_to must be a list of strings"
             raise ValueError(msg)
         specs.append(
-            replace(spec, name=str(entry.get("name", f"protocol_{index}")),
-                    applies_to=tuple(applies))
+            _with_cohort_constants(spec, entry, name=str(entry.get("name", f"protocol_{index}")),
+                                   applies_to=tuple(applies))
         )
     return ProtocolBook(protocols=tuple(specs))
+
+
+def _with_cohort_constants(
+    spec: ProtocolSpec, entry: dict[str, Any], *, name: str, applies_to: tuple[str, ...]
+) -> ProtocolSpec:
+    """Apply one entry's name, scope and cohort constants - the one place that does."""
+    return replace(
+        spec, name=name, applies_to=applies_to,
+        units=str(entry.get("units", "V")),
+        config=str(entry.get("config", "independent")),
+        channel_order_source=str(entry.get("channel_order_source", "file chanlabels")),
+        timezone=str(entry.get("timezone", "America/New_York")),
+        rostral_end=None if entry.get("rostral_end") is None else int(entry["rostral_end"]),
+        pair_gap_min_lo=_opt_float(entry.get("pair_gap_min_lo")),
+        pair_gap_min_hi=_opt_float(entry.get("pair_gap_min_hi")),
+        min_baseline_min=_opt_float(entry.get("min_baseline_min")),
+        min_sr_min=_opt_float(entry.get("min_sr_min")),
+    )
+
+
+def _opt_float(value: float | str | None) -> float | None:
+    """Absent and null read identically, as ``None``."""
+    return None if value is None else float(value)
 
 
 def default_protocol_book() -> ProtocolBook:
@@ -601,7 +762,8 @@ def default_protocol_book() -> ProtocolBook:
     spec = _protocol_from_document(entry, "<default>")
     return ProtocolBook(
         protocols=(
-            replace(spec, name=entry["name"], applies_to=tuple(entry["applies_to"])),
+            _with_cohort_constants(spec, entry, name=entry["name"],
+                                   applies_to=tuple(entry["applies_to"])),
         )
     )
 
@@ -617,6 +779,14 @@ def write_protocol_book(book: ProtocolBook, path: Path) -> Path:
                     "stim_duration_s": spec.stim_duration_s,
                     "recovery_duration_s": spec.recovery_duration_s,
                     "stim_tolerance_s": spec.stim_tolerance_s,
+                    "units": spec.units,
+                    "config": spec.config,
+                    "channel_order_source": spec.channel_order_source,
+                    "timezone": spec.timezone,
+                    **({"rostral_end": spec.rostral_end} if spec.rostral_end is not None else {}),
+                    **{k: getattr(spec, k) for k in ("pair_gap_min_lo", "pair_gap_min_hi",
+                                                     "min_baseline_min", "min_sr_min")
+                       if getattr(spec, k) is not None},
                 }
                 for spec in book.protocols
             ]
@@ -713,6 +883,28 @@ def _protocol_from_document(document: object, source: str) -> ProtocolSpec:
 # ---------------------------------------------------------------------------
 
 
+EDGE_FLOOR_MULTIPLE: Final = 3.0
+"""A monitor sample is ON only above this multiple of the POST-stim noise floor.
+
+Ruling 2026-09-26: the stim-off edge is judged against the floor measured on the
+recovery segment, not the whole OFF population. On the new cohort the floor
+itself steps by 1.3-1.7x - for 3-4 min right after the stim, or over the last
+minutes (4 of 259 sr files) - and ``off_level + 8 sigma`` alone sits inside that
+step, so the edge walk ran to 272-330 s or called the file "stopped during
+stimulation". 3x clears the largest step seen by ~1.8x and is still two orders
+of magnitude under the weakest stim (310x on adc2).
+"""
+
+ON_FLOOR_MIN_RATIO: Final = 10.0
+"""The matched window's median envelope must be at least this multiple of the
+post-stim floor, or there is no clear stimulation on this channel.
+
+Measured: stimulated channels 310-1100x, idle channels (the wrong monitor for the
+modality) 0.7-1.0x. A best window can always be found in noise; this is what
+stops a confident answer on a channel that never saw the stimulator.
+"""
+
+
 def _moving_mean(x: F64, window: int) -> F64:
     """Return the centred moving mean of ``x`` over ``window`` samples.
 
@@ -762,6 +954,15 @@ def vib_envelope(vib: F64, fs_vib: float) -> F64:
         x = x.copy()
         idx = np.arange(x.size, dtype=np.float64)
         x[~finite] = np.interp(idx[~finite], idx[finite], x[finite])
+    if float(np.ptp(x)) == 0.0:
+        # All three monitors of gems_i_t03_es2_sr_223947 are exactly zero for the
+        # whole file. A flat envelope still has an argmax - sample 0 - so without
+        # this the split reported a "pass" at exactly 0.0-120.0 s: a fabricated
+        # boundary the protocol-window check cannot catch (invariant 8).
+        msg = (f"the monitor channel is constant ({float(x[0]):g}) for the whole "
+               "record: it carries no stimulation information, and a window found "
+               "in it would be fabricated")
+        raise ValueError(msg)
 
     smoothed = _moving_mean(x, max(int(round(ENVELOPE_SMOOTH_S * fs_vib)), 5))
     return np.asarray(
@@ -795,7 +996,8 @@ def _off_anchored_threshold(env: F64, onset: int, width: int) -> float:
 
 
 def _measure_extent(
-    env: F64, onset: int, width: int, hold: int, threshold: float
+    env: F64, onset: int, width: int, hold: int, threshold: float,
+    off_threshold: float | None = None,
 ) -> tuple[int, int]:
     """Return the ``[start, stop)`` extent of the stim epoch the matched window found.
 
@@ -808,16 +1010,23 @@ def _measure_extent(
     clamped to the window can report nothing outside ``W +/- pad``, so the duration
     check of Fix 2 would be structurally incapable of failing and a 95 s stim would
     come back as 120.0 s and pass.
+
+    ``off_threshold`` judges the stim-OFF edge (the last crossing and the forward
+    walk) against the post-stim floor; ``threshold`` judges the onset. Omitted, one
+    threshold serves both.
     """
+    off_threshold = threshold if off_threshold is None else off_threshold
     stop_window = min(onset + width, env.size)
     inside = np.flatnonzero(env[onset:stop_window] > threshold)
-    if inside.size == 0:
+    inside_off = np.flatnonzero(env[onset:stop_window] > off_threshold)
+    if inside.size == 0 or inside_off.size == 0:
         return onset, stop_window
 
     start = onset + int(inside[0])
-    stop = onset + int(inside[-1]) + 1
+    stop = onset + int(inside_off[-1]) + 1
 
     on = env > threshold
+    on_off = env > off_threshold
     while start > 0:
         lo = max(start - hold, 0)
         reachable = np.flatnonzero(on[lo:start])
@@ -826,7 +1035,7 @@ def _measure_extent(
         start = lo + int(reachable[0])
     while stop < env.size:
         hi = min(stop + hold, env.size)
-        reachable = np.flatnonzero(on[stop:hi])
+        reachable = np.flatnonzero(on_off[stop:hi])
         if reachable.size == 0:
             break
         stop = stop + int(reachable[-1]) + 1
@@ -860,6 +1069,9 @@ class _Window:
     head_extension_s: float = 0.0
     tail_extension_s: float = 0.0
     extras: list[tuple[float, float]] = field(default_factory=list)
+    off_threshold: float = float("nan")
+    recovery_floor: float = float("nan")
+    on_floor_ratio: float = float("nan")
 
 
 def find_stim_window(env: F64, fs_vib: float, protocol: ProtocolSpec) -> _Window:
@@ -908,12 +1120,21 @@ def find_stim_window(env: F64, fs_vib: float, protocol: ProtocolSpec) -> _Window
     contrast = float(score[onset])
 
     threshold = _off_anchored_threshold(env, onset, width)
+    off_threshold, floor, on_ratio = _post_stim_floor(env, onset, width, fs_vib, threshold)
+    # ON means a clear multiple of the floor on BOTH edges. The ruling named the
+    # stim-off edge, but on d_t02_1_2 and j_t05_3_1 the 1.4-1.7x floor step also
+    # runs BEFORE the stim, and an onset judged on floor + 8 sigma (1.27x there)
+    # walked back to sample 0 and called a complete capture clipped.
+    threshold = max(threshold, EDGE_FLOOR_MULTIPLE * floor)
     hold = max(int(round(EDGE_HOLD_S * fs_vib)), 1)
-    refined_onset, refined_offset = _measure_extent(env, onset, width, hold, threshold)
+    refined_onset, refined_offset = _measure_extent(env, onset, width, hold, threshold,
+                                                    off_threshold)
     if refined_offset <= refined_onset:
         refined_onset, refined_offset = onset, min(onset + width, env.size)
 
-    on = env > threshold
+    # Epochs are counted against the same floor-anchored level, or a floor step
+    # after the stim would be counted as a second stimulation.
+    on = env > max(threshold, off_threshold)
     crosscheck = _on_runs(on)
     crosscheck_onset = None
     if crosscheck:
@@ -937,7 +1158,38 @@ def find_stim_window(env: F64, fs_vib: float, protocol: ProtocolSpec) -> _Window
         head_extension_s=max(onset - refined_onset, 0) / fs_vib,
         tail_extension_s=max(refined_offset - min(onset + width, env.size), 0) / fs_vib,
         extras=extras,
+        off_threshold=off_threshold,
+        recovery_floor=floor,
+        on_floor_ratio=on_ratio,
     )
+
+
+def _post_stim_floor(
+    env: F64, onset: int, width: int, fs_vib: float, threshold: float
+) -> tuple[float, float, float]:
+    """Return ``(off_threshold, recovery_floor, on_floor_ratio)`` for a located window.
+
+    The floor is the median envelope of the RECOVERY segment - everything after the
+    matched window plus the refinement pad - and the stim-off threshold is
+    ``max(floor + 8 sigma, EDGE_FLOOR_MULTIPLE * floor)`` on that segment (ruling
+    2026-09-26). With no recovery segment (a stim running to the end of the file)
+    the onset threshold is returned unchanged and the ratio is taken against the
+    whole OFF population, so ``clipped_end`` is still decided.
+    """
+    pad = int(round(EDGE_REFINE_PAD_S * fs_vib))
+    post = env[min(onset + width + pad, env.size):]
+    base = post if post.size else np.delete(env, np.s_[onset:onset + width])
+    floor = float(np.median(base)) if base.size else 0.0
+    on_level = float(np.median(env[onset:onset + width]))
+    # A floor of exactly zero (a gated channel) makes any ON level a clear multiple
+    # of it - but a zero ON level over a zero floor is no stim at all.
+    zero_floor_ratio = float("inf") if on_level > 0.0 else 0.0
+    ratio = on_level / floor if floor > 0.0 else zero_floor_ratio
+    if not post.size:
+        return threshold, floor, ratio
+    sigma = 1.4826 * float(np.median(np.abs(post - floor)))
+    anchored = floor + OFF_ANCHOR_SIGMA * sigma if sigma > 0.0 else threshold
+    return max(anchored, EDGE_FLOOR_MULTIPLE * floor), floor, ratio
 
 
 # ---------------------------------------------------------------------------
@@ -1013,7 +1265,7 @@ def _recovery_flag(recovery_s: float, protocol: ProtocolSpec) -> bool:
     return abs(recovery_s - protocol.recovery_duration_s) > protocol.stim_tolerance_s
 
 
-def _status(
+def _status(  # noqa: PLR0911 - a first-match decision table, one return per row
     detected_s: float,
     protocol: ProtocolSpec,
     *,
@@ -1021,6 +1273,7 @@ def _status(
     clipped_end: bool,
     epoch_count: int,
     walk_extended: bool = False,
+    on_floor_ratio: float = float("inf"),
 ) -> tuple[SplitStatus, str]:
     """Resolve the status, first match wins, in the order the task specifies.
 
@@ -1047,6 +1300,12 @@ def _status(
     rides on that boundary. Clipping censors the duration; an overrunning walk
     questions the number itself.
     """
+    if on_floor_ratio < ON_FLOOR_MIN_RATIO:
+        return "review", (
+            f"the window's ON level is {on_floor_ratio:.1f}x the post-stim noise floor, "
+            f"not a clear multiple of it (>= {ON_FLOOR_MIN_RATIO:.0f}x): no clear "
+            "stimulation on this channel, so its edges mean nothing"
+        )
     if clipped_end:
         return "fail", (
             "the vib channel is still ON at the last sample, so the recording stopped "
@@ -1163,7 +1422,9 @@ def split_stim_recovery(
     detected_s = offset_s - onset_s
 
     clipped_start = bool(env[0] > window.threshold)
-    clipped_end = bool(env[-1] > window.threshold)
+    # Still ON at the last sample is judged against the post-stim floor: a floor
+    # step over the last minutes is not stimulation.
+    clipped_end = bool(env[-1] > window.off_threshold)
     walk_extended = (
         max(window.head_extension_s, window.tail_extension_s) > protocol.stim_tolerance_s
     )
@@ -1174,6 +1435,7 @@ def split_stim_recovery(
         clipped_end=clipped_end,
         epoch_count=window.epoch_count,
         walk_extended=walk_extended,
+        on_floor_ratio=window.on_floor_ratio,
     )
     recovery_s = max(duration_s - offset_s, 0.0)
 
@@ -1199,6 +1461,9 @@ def split_stim_recovery(
         head_extension_s=window.head_extension_s,
         tail_extension_s=window.tail_extension_s,
         recovery_duration_flag=_recovery_flag(recovery_s, protocol),
+        off_threshold=window.off_threshold,
+        recovery_floor=window.recovery_floor,
+        on_floor_ratio=window.on_floor_ratio,
     )
 
     if status == "fail":
@@ -1332,6 +1597,241 @@ costs pre-stim baseline; offset error contaminates the recovery reference; only 
 second damages the science, and a single unsigned "boundary difference" hides which
 one moved and in which direction.
 """
+
+
+# ---------------------------------------------------------------------------
+# the monitor channel, chosen by modality (new cohort)
+# ---------------------------------------------------------------------------
+
+Modality = Literal["ms", "es", "combined"]
+
+MODALITY_MONITORS: Final[dict[str, tuple[str, ...]]] = {
+    "ms": ("adc2",),
+    "es": ("adc1",),
+    "combined": ("adc1", "adc2"),
+}
+"""Which INDEPENDENT ``*_vib.mat`` channels carry the stimulation, per modality;
+the first is the one used.
+
+Measured 2026-09-26 on 16 stratified new-cohort ``sr`` files (4 per modality):
+``ms`` shows the stim on **adc2 only** (envelope contrast 310-400x; adc1 ~1x),
+``es`` on **adc1 only** (600-650x; adc2 ~0.85x), combined and ``cme`` on both.
+On the wrong channel the matched search does not fail: it returns a confident
+120 s window deep in the file (1118-1238 s on an ``es`` file's adc2), which is
+why every channel the modality names is split and they must agree.
+
+``vib`` is not listed: it is a bit-identical copy of ``adc1`` (:data:`MONITOR_COPIES`),
+and agreement between identical copies proves nothing (ruling 2026-09-26). So
+the ``es`` check is single-channel, and the report says so.
+"""
+
+MONITOR_COPIES: Final[dict[str, str]] = {"vib": "adc1"}
+"""``{copy: original}``. ``vib`` equalled ``adc1`` sample for sample, at the same
+rate, in every new-cohort ``sr`` file checked. It is verified on every split,
+never assumed: a file where they differ is flagged, because then ``vib`` is a
+channel of unknown role rather than a copy.
+"""
+
+_MODALITY_RULES: Final[tuple[tuple[re.Pattern[str], Modality], ...]] = (
+    (re.compile(r"_ms\d+(?=_|$)", re.IGNORECASE), "ms"),
+    (re.compile(r"_es\d+(?=_|$)", re.IGNORECASE), "es"),
+    # Animal K's cme<n>: combined mechanical + electrical (Andrea, 2026-09-26),
+    # as the old cohort's M<a>E<b>_..._CME<n> names say; measured so too (all
+    # three channels ON on every one of its 11 sr files).
+    (re.compile(r"_cme\d+(?=_|$)", re.IGNORECASE), "combined"),
+    # Combined conditions are two numbers after the trial token: _t01_3_2_.
+    (re.compile(r"_t\d+_\d+_\d+(?=_|$)", re.IGNORECASE), "combined"),
+)
+
+PROTOCOL_ONSET_MAX_S: Final = 5.0
+"""Latest plausible stim onset, seconds after file start.
+
+"Stim should begin within a few seconds of file start" (spec, 03B). Measured
+onsets were 0.6-1.1 s on all 16 sampled files; 5 s is a 4.5x margin on the
+largest and still rejects every wrong-channel window seen (the earliest began at
+129 s).
+"""
+
+MONITOR_AGREEMENT_S: Final = 2.0
+"""Largest onset/offset difference, seconds, between monitors that should agree.
+
+Channels carrying the same stim agreed to 0.1 s on every sampled file; the
+wrong-channel windows were 100+ s away. 2 s sits an order of magnitude from both.
+"""
+
+_MONITOR_RATE_FIELD: Final = {"adc1": "fs_adc", "adc2": "fs_adc2", "vib": "fs_vib"}
+MONITOR_FILE_GLOB: Final = "*_vib.mat"
+
+
+def modality_from_folder(folder_name: str) -> Modality:
+    """Return the stimulation modality named in a (corrected) block folder name.
+
+    Raises
+    ------
+    ValueError
+        If no rule matches, or more than one does. The monitor channel follows from
+        the modality and a wrong channel yields a confident wrong epoch, so an
+        unrecognised name is refused rather than defaulted.
+    """
+    found = {mod for pattern, mod in _MODALITY_RULES if pattern.search(folder_name)}
+    if len(found) == 1:
+        return found.pop()
+    if not found:
+        msg = (f"{folder_name!r} names no stimulation modality (ms<n>, es<n>, cme<n> "
+               "or a combined <e>_<m> condition); the monitor channel depends on it")
+        raise ValueError(msg)
+    msg = f"{folder_name!r} matches more than one modality: {sorted(found)}"
+    raise ValueError(msg)
+
+
+def read_stim_monitors(block_dir: Path) -> dict[str, tuple[F64, float]]:
+    """Read the block's ``*_vib.mat`` as ``{channel: (samples, fs_hz)}``.
+
+    Each monitor has its own rate (adc2 ~610 Hz, adc1 and vib ~1017 Hz), so they are
+    returned as separate arrays rather than stacked. Amplitudes are arbitrary units:
+    the split is a contrast on each channel's own envelope.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the block holds no ``*_vib.mat``, or more than one.
+    """
+    from scipy.io import loadmat  # noqa: PLC0415 - only this reader needs it
+
+    found = sorted(block_dir.glob(MONITOR_FILE_GLOB))
+    if len(found) != 1:
+        msg = (f"{block_dir}: expected exactly one {MONITOR_FILE_GLOB}, found "
+               f"{[f.name for f in found]}")
+        raise FileNotFoundError(msg)
+    doc = loadmat(found[0])
+    out: dict[str, tuple[F64, float]] = {}
+    for name, rate_field in _MONITOR_RATE_FIELD.items():
+        if name in doc and rate_field in doc:
+            out[name] = (np.asarray(doc[name], dtype=np.float64).ravel(),
+                         float(np.asarray(doc[rate_field]).squeeze()))
+    return out
+
+
+def _protocol_window_problem(report: SplitReport, protocol: ProtocolSpec) -> str | None:
+    """Say why a split's epoch is outside the protocol window, or return ``None``.
+
+    Onset within :data:`PROTOCOL_ONSET_MAX_S` of file start, and duration within
+    ``stim_tolerance_s`` of ``stim_duration_s``. A ``clipped_start`` duration is
+    censored, so only its offset is bounded, by ``stim_duration_s + tolerance``.
+    """
+    tol = protocol.stim_tolerance_s
+    if report.onset_s > PROTOCOL_ONSET_MAX_S:
+        return (f"stim onset {report.onset_s:.1f} s is more than "
+                f"{PROTOCOL_ONSET_MAX_S:.0f} s after file start")
+    if report.clipped_start:
+        if report.offset_s > protocol.stim_duration_s + tol:
+            return (f"clipped stim ends at {report.offset_s:.1f} s, past the "
+                    f"{protocol.stim_duration_s + tol:.0f} s the protocol allows")
+        return None
+    if abs(report.detected_duration_s - protocol.stim_duration_s) > tol:
+        return (f"stim lasts {report.detected_duration_s:.1f} s against the protocol's "
+                f"{protocol.stim_duration_s:.0f} +/- {tol:.0f} s")
+    return None
+
+
+def split_by_modality(
+    rec: Recording,
+    *,
+    folder_name: str,
+    monitors: dict[str, tuple[F64, float]],
+    protocol: ProtocolSpec,
+) -> tuple[Epoch | None, Epoch, SplitReport]:
+    """Split a new-cohort ``sr`` recording on the monitor its modality names.
+
+    Every channel :data:`MODALITY_MONITORS` names for the folder's modality is
+    split, and the first is the one used. The result is escalated to ``review``
+    (flagged, never silently used) when those channels disagree by more than
+    :data:`MONITOR_AGREEMENT_S`, when the epoch lies outside the protocol window, or
+    when a declared copy (:data:`MONITOR_COPIES`) is not identical to its original.
+    ``report.corroboration`` states how many independent channels the split rests
+    on - one, for ``ms`` and ``es``.
+
+    Parameters
+    ----------
+    rec
+        The recording to split.
+    folder_name
+        The **corrected** block folder name (``meta.json``'s ``folder_name``), which
+        is authoritative for meaning; the modality is parsed from it.
+    monitors
+        :func:`read_stim_monitors` output for the block.
+    protocol
+        Durations from the shared config.
+
+    Raises
+    ------
+    ValueError
+        If the modality cannot be parsed, a named monitor is missing from
+        ``monitors``, or the chosen monitor's split itself fails.
+    """
+    modality = modality_from_folder(folder_name)
+    names = MODALITY_MONITORS[modality]
+    missing = [n for n in names if n not in monitors]
+    if missing:
+        msg = (f"{folder_name}: modality {modality!r} needs monitor(s) {list(names)}; "
+               f"missing {missing}")
+        raise ValueError(msg)
+
+    def one(name: str) -> tuple[Epoch | None, Epoch, SplitReport]:
+        data, fs = monitors[name]
+        return split_stim_recovery(rec, protocol=protocol, vib=data, fs_vib=fs,
+                                   vib_channel=name)
+
+    stim, recovery, report = one(names[0])
+    rows = [(names[0], report.onset_s, report.offset_s)]
+    problems: list[str] = []
+    for name in names[1:]:
+        try:
+            other = one(name)[2]
+        except ValueError as exc:
+            rows.append((name, float("nan"), float("nan")))
+            problems.append(f"{name} should carry this {modality} stim but its split "
+                            f"failed ({exc})")
+            continue
+        rows.append((name, other.onset_s, other.offset_s))
+        gap = max(abs(other.onset_s - report.onset_s),
+                  abs(other.offset_s - report.offset_s))
+        if gap > MONITOR_AGREEMENT_S:
+            problems.append(
+                f"{name} puts the stim at {other.onset_s:.1f}-{other.offset_s:.1f} s, "
+                f"{gap:.1f} s from {names[0]}'s "
+                f"{report.onset_s:.1f}-{report.offset_s:.1f} s")
+    for copy, original in MONITOR_COPIES.items():
+        if copy in monitors and original in monitors:
+            (a, fa), (b, fb) = monitors[copy], monitors[original]
+            if fa != fb or not np.array_equal(a, b):
+                problems.append(f"{copy} is not identical to {original}, so it is not the "
+                                "copy it has always been - a channel of unknown role")
+    independent = len(names) - sum(1 for r in rows[1:] if not np.isfinite(r[1]))
+    if len(names) == 1:
+        copies = [c for c, o in MONITOR_COPIES.items() if o == names[0] and c in monitors]
+        corroboration = (f"single-channel: {names[0]} alone"
+                         + (f" ({', '.join(copies)} is a bit-identical copy, not an "
+                            "independent confirmation)" if copies else ""))
+    else:
+        corroboration = (f"{independent} of {len(names)} independent channels "
+                         f"({', '.join(names)}) split; agreement required within "
+                         f"{MONITOR_AGREEMENT_S:g} s")
+    window = _protocol_window_problem(report, protocol)
+    if window is not None:
+        problems.insert(0, window)
+
+    status: SplitStatus = report.status
+    reason = report.reason
+    if problems:
+        status = "review"
+        reason = ("flagged, not used: " + "; ".join(problems)
+                  + f" (the split on {names[0]} said: {report.reason})")
+        log.warning("%s: %s", folder_name, reason)
+    report = replace(report, status=status, reason=reason, modality=modality,
+                     monitors=tuple(rows), protocol_window_ok=window is None,
+                     corroboration=corroboration)
+    return stim, recovery, report
 
 
 def matlab_boundary(recovery_path: Path, fs: float) -> tuple[float, float] | None:

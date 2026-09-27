@@ -1071,6 +1071,10 @@ rule.
 """
 
 
+VIB_HUM_HZ: Final = 60.0
+"""Mains frequency of the steady component in the monitor's OFF floor, Hz."""
+
+
 def make_vib(
     fs: float,
     dur_s: float,
@@ -1082,6 +1086,8 @@ def make_vib(
     noise: float = VIB_OFF_NOISE,
     dropout: tuple[float, float] | None = None,
     contaminant: tuple[float, float, float] | None = None,
+    floor_step: tuple[float, float, float] | None = None,
+    hum: float = 0.0,
     seed: int = 0,
 ) -> VibSynth:
     """Build a stimulation-monitor channel: a gated carrier on a noise floor.
@@ -1128,6 +1134,20 @@ def make_vib(
         run: a quieter burst lasting more than the stim duration wins on length while
         losing on amplitude, so the old rule locks onto it and the matched-width
         search does not.
+    floor_step
+        ``(start_s, duration_s, factor)``: the OFF noise is ``factor`` times larger
+        over that span. The real rig does this - 1.3-1.7x steps, either for 3-4 min
+        right after the stim or over the last few minutes (4 of 259 new-cohort sr
+        files) - and an edge rule anchored on the whole OFF population reads the
+        step as continued stimulation.
+    hum
+        Amplitude of a steady :data:`VIB_HUM_HZ` component in the OFF floor, as a
+        fraction of ``amp``. The real monitors' floor is dominated by such a steady
+        component: their envelope spreads only 1-6% of its median (measured on 5
+        sr files), where white noise alone spreads ~22%. That spread sets the old
+        ``floor + 8 sigma`` threshold - 1.1-1.5x the floor on the rig, ~2.8x on
+        white noise - so a floor-step fixture without hum cannot reproduce the
+        real failure. ``hum=0.02, noise=0.004`` gives 2.8% and 1.23x.
     seed
         Seed for the noise.
 
@@ -1159,13 +1179,33 @@ def make_vib(
         burst_start, burst_dur, fraction = contaminant
         burst = (t_s >= burst_start) & (t_s < burst_start + burst_dur)
         sig = sig + fraction * amp * burst * np.sin(2.0 * np.pi * carrier_hz * t_s)
-    sig = sig + rng.normal(0.0, noise * amp, size=n)
+    scale = np.ones(n)
+    if floor_step is not None:
+        step_start, step_dur, factor = floor_step
+        scale[(t_s >= step_start) & (t_s < step_start + step_dur)] = factor
+    floor = rng.normal(0.0, noise * amp, size=n)
+    if hum:
+        floor = floor + hum * amp * np.sin(2.0 * np.pi * VIB_HUM_HZ * t_s)
+    sig = sig + scale * floor
 
     return VibSynth(
         np.asarray(sig, dtype=np.float64),
         np.asarray(max(stim_start_s, 0.0), dtype=np.float64),
         np.asarray(min(stim_start_s + stim_duration_s, n / fs), dtype=np.float64),
     )
+
+
+def make_idle_monitor(fs: float, dur_s: float, *, seed: int = 0) -> F64:
+    """Build a monitor channel that never sees the stimulator: the noise floor alone.
+
+    What ``adc2`` looks like on an ``es`` file and ``adc1`` / ``vib`` on an ``ms``
+    file (envelope contrast ~0.85-1.0x measured). The matched search does not refuse
+    it: it returns a confident window somewhere in the noise, which is the failure
+    the modality cross-check exists to catch.
+    """
+    rng = np.random.default_rng(seed)
+    return np.asarray(rng.normal(0.0, VIB_OFF_NOISE * VIB_ON_AMP, size=_n_samples(fs, dur_s)),
+                      dtype=np.float64)
 
 
 @pytest.fixture(autouse=True)
@@ -1236,3 +1276,4 @@ def real_recording() -> Path | None:
         if hits:
             return hits[0]
     return None
+
