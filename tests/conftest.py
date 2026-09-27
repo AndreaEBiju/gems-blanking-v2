@@ -1277,3 +1277,32 @@ def real_recording() -> Path | None:
             return hits[0]
     return None
 
+
+# ---------------------------------------------------------------------------
+# TDT acquisition blocks
+# ---------------------------------------------------------------------------
+
+TSQ_TANK: Final = "ME_STIM_Andrea-260824-155430"
+"""The tank stamp this cohort's blocks carry. Shared by every block, so it names
+the session of recording, not the block."""
+
+
+def write_tdt_block(
+    parent: Path, block: str, start_epoch_s: float, *, tank: str = TSQ_TANK
+) -> Path:
+    """Create a block directory with a minimal ``.tsq`` and return the directory.
+
+    Real recordings sit in a TDT block directory beside ``<tank>_<block>.tsq``;
+    a fixture with a bare file in ``tmp_path`` is a recording that has no
+    acquisition record, which is a real but different case. Record 0 is the
+    header; record 1 carries the start timestamp, as TDT writes it.
+    """
+    import struct  # noqa: PLC0415
+
+    directory = parent / block
+    directory.mkdir(parents=True, exist_ok=True)
+    header = struct.pack("<iiiHHdqif", 40, 0, 0, 0, 0, 0.0, 0, 0, 0.0)
+    first = struct.pack("<iiiHHdqif", 40, 0x201, 0, 0, 0, float(start_epoch_s), 0, 0, 0.0)
+    (directory / f"{tank}_{block}.tsq").write_bytes(header + first)
+    return directory
+

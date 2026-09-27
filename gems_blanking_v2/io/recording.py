@@ -24,14 +24,33 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
 
-from gems_blanking_v2.io.channel_map import META_NAME, ChannelMap, resolve_channel_map
+from gems_blanking_v2.io.chanlabels import (
+    assert_labels_match,
+    assert_plausible_units,
+    read_channel_labels,
+)
+from gems_blanking_v2.io.channel_map import (
+    ChannelMap,
+    Units,
+    meta_path,
+    resolve_channel_map,
+    with_rostral_end,
+)
 from gems_blanking_v2.io.detector_core import import_detector_module
+from gems_blanking_v2.io.quality import read_exclusion
+from gems_blanking_v2.io.stim_split import (
+    PROTOCOL_FILENAME,
+    ProtocolNotCoveredError,
+    ProtocolSpec,
+    load_protocol_book,
+)
 from gems_blanking_v2.io.store import GemsStore
+from gems_blanking_v2.io.tdt_block import session_key
 from gems_blanking_v2.types import Recording
 
 __all__ = ["LoadedRecording", "load_recording", "spans_from_matlab_intervals"]
@@ -73,7 +92,7 @@ def _condition_provenance(
     """
     if store is None:
         return {}
-    path = store.session_dir(animal, session) / META_NAME
+    path = meta_path(store, animal, session)
     if not path.is_file():
         return {}
     try:
@@ -119,6 +138,29 @@ class LoadedRecording:
     provenance: dict[str, Any] = field(default_factory=dict)
 
 
+def _cohort_spec(path: Path, store: GemsStore | None) -> ProtocolSpec | None:
+    """Return the cohort's protocol from ``protocol.yaml``, or ``None``.
+
+    Units and ``rostral_end`` are cohort constants (invariant 24), so they live in
+    the protocol and not in 800 copies of ``meta.json``. Resolved from the scan
+    root the recording sits under, which is the same lookup ``split_stim_recovery``
+    uses for the stim prior - one protocol, consulted the same way by everything.
+
+    ``None`` only when there is no store to read a protocol from (the test path)
+    or the recording sits outside every scan root. Not a place to guess: the
+    caller passes an explicit map carrying its own units, or the plausibility
+    check refuses the ``"uV"`` fallback, and direction stays unsigned.
+    """
+    if store is None:
+        return None
+    try:
+        book = load_protocol_book(store.root / PROTOCOL_FILENAME)
+        rel = path.resolve().relative_to(Path(store.root).resolve()).as_posix()
+        return book.for_path(rel)
+    except (FileNotFoundError, ValueError, ProtocolNotCoveredError):
+        return None
+
+
 def load_recording(
     path: Path,
     animal: str,
@@ -145,8 +187,12 @@ def load_recording(
         ``meta.json`` in ``store`` and, failing that, from the profile mirror with a
         warning. Without any of those this raises rather than inventing a table.
     session
-        Session identifier. Defaults to the file stem, which is what the loader
-        already calls ``recording_id``, and which also selects the ``meta.json``.
+        Store key. Defaults to :func:`~gems_blanking_v2.io.tdt_block.session_key`,
+        the acquisition block plus its ``.tsq`` start time - the one construction
+        site, shared with the generator and the scan. A file with no acquisition
+        record has NO store key: its stem is kept as a provenance label only and
+        the store is not consulted for its geometry, because a stem is exactly the
+        dateless key the store stopped using.
     store
         The Drive store holding ``data/<animal>/<session>/meta.json``, the
         authoritative geometry.
@@ -171,23 +217,44 @@ def load_recording(
     path = Path(path)
     recording_io = import_detector_module("recording_io", detector_core_root)
     native = recording_io.load_recording(path)
-    session_id = session if session is not None else str(native.recording_id)
+    spec = _cohort_spec(path, store)
+    key = session if session is not None else session_key(path)
+    session_id = key if key is not None else str(native.recording_id)
+    keyed_store = store if key is not None else None
 
     mapping = resolve_channel_map(
         animal,
         explicit=channel_map,
         session=session_id,
-        store=store,
+        store=keyed_store,
         profiles_root=profiles_root,
+        units=cast("Units", spec.units) if spec is not None else "uV",
     )
     if mapping is None:
+        where = (
+            f"record it in data/{animal}/{session_id}/meta.json, or pass channel_map="
+            if key is not None else
+            "there is no .tsq beside the file, so it has no store key; pass session= "
+            "or channel_map="
+        )
         msg = (
-            f"no geometry for animal {animal!r} session {session_id!r}: record it in "
-            f"data/{animal}/{session_id}/meta.json, or pass channel_map=. The file has "
-            "no channel table, so geometry cannot be inferred from it and must not be "
-            "guessed."
+            f"no geometry for animal {animal!r} session {session_id!r}: {where}. The "
+            "file has no channel table, so geometry cannot be inferred from it and "
+            "must not be guessed."
         )
         raise ValueError(msg)
+
+    # The file's own labels are authoritative for ORDER. meta.json declares only
+    # what the file does not state, so a disagreement here means the map
+    # describes a different recording - or the same one with its cuffs
+    # transposed, which inverts every left/right result silently.
+    # rostral_end is declared once in protocol.yaml; the map from meta.json never
+    # carries it. with_rostral_end fills nerve contacts only, leaves an explicit
+    # map's own value alone, and is a no-op for hw_tripole (unsignable).
+    mapping = with_rostral_end(mapping, spec.rostral_end if spec is not None else None)
+
+    labels = read_channel_labels(path)
+    assert_labels_match(mapping.channels, labels, f"{path.name}")
 
     n_channels = int(native.y.shape[1])
     if mapping.n_channels != n_channels:
@@ -203,6 +270,13 @@ def load_recording(
         raise ValueError(msg)
 
     # float32 -> float64 first, then scale, so the multiply happens at full width.
+    # Units stay DECLARED (invariant 14) - this infers nothing. It only refuses a
+    # declaration that cannot be true, which is what makes a 10^6 typo loud
+    # instead of a plausible-looking signal six steps downstream.
+    median_sigma_uv = assert_plausible_units(
+        np.asarray(native.y, dtype=np.float64), mapping.units, mapping.scale_uv,
+        f"{path.name} (animal {animal!r})",
+    )
     data: F64 = np.asarray(native.y, dtype=np.float64) * mapping.scale_uv
 
     recording = Recording(
@@ -226,12 +300,28 @@ def load_recording(
         "source_format": dict(getattr(native, "provenance", {}) or {}).get("format"),
         "rec_type": getattr(native, "rec_type", None),
         "recording_id": str(native.recording_id),
+        "session": session_id,
+        "session_source": (
+            "explicit" if session is not None
+            else "tsq" if key is not None
+            else "file_stem_label_not_a_store_key"
+        ),
         "declared_units": mapping.units,
         "scale_to_uv": mapping.scale_uv,
+        # Invariant 26: the plausibility check computes this on every load, so
+        # recording it here accumulates the cohort's sigma distribution for free
+        # as labelling proceeds. A sweep to obtain it would re-read the bytes a
+        # pass that had to happen has already read.
+        "median_robust_sigma_uv": median_sigma_uv,
         "native_dtype": str(np.asarray(native.y).dtype),
         "config": mapping.config,
         "geometry_source": "explicit" if channel_map is not None else "stored",
-        **_condition_provenance(store, animal, session_id),
+        **_condition_provenance(keyed_store, animal, session_id),
+        # Andrea's exclusion (2026-09-26) travels with the data. Loading is not
+        # refused - QC and review still need to open it - but every consumer
+        # that builds a corpus or a label set reads this and must drop it.
+        **({"excluded": ex} if keyed_store is not None
+           and (ex := read_exclusion(keyed_store, animal, session_id)) else {}),
         "direction_valid": mapping.direction_valid,
     }
 

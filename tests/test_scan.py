@@ -26,7 +26,9 @@ from gems_blanking_v2.io.scan import (
     sort_for_review,
 )
 from gems_blanking_v2.io.store import GemsStore, sha256_file
+from gems_blanking_v2.io.tdt_block import session_key
 
+from tests.conftest import write_tdt_block
 from tests.test_channel_map import new_cohort_map
 from tests.test_conditions import second_token_initial
 
@@ -53,11 +55,21 @@ def store(tmp_path: Path) -> GemsStore:
     return GemsStore.initialise(tmp_path / "gems")
 
 
+BLOCK_START_S = 1_789_527_801.0
+"""2026-09-16T03:03:21Z. One instant for every fixture block: the block name is
+what distinguishes them, and a shared start is what a copied block looks like."""
+
+
 def write_recording(path: Path, content: bytes = b"samples") -> Path:
-    """Create a stand-in recording file. Only its name and bytes matter here."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(content)
-    return path
+    """Create a stand-in recording inside its own TDT block, and return its path.
+
+    A real recording sits beside its block's ``.tsq``; that is where its store key
+    comes from. Only the name, the bytes and the block matter here.
+    """
+    block = write_tdt_block(path.parent, path.stem, BLOCK_START_S)
+    out = block / path.name
+    out.write_bytes(content)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +135,7 @@ def test_a_matched_recording_carries_its_rule_and_animal(tmp_path: Path, rules: 
     assert result.condition == Condition("stim_recovery", 10.0, None, "t01")
     assert result.matched_rule == "stim_rec_new"
     assert result.animal == "D"
-    assert result.session == "gems_d_t01_es1_sr_204720"
+    assert result.session == "gems_d_t01_es1_sr_204720_20260916T030321Z"
     assert result.corpus_eligible
 
 
@@ -455,9 +467,9 @@ def test_a_correction_preserves_the_geometry_block(
     """Task 03 writes geometry into the same document; a correction must not drop it."""
     root = tmp_path / "data"
     path = write_recording(root / "E1000_JEL_E1000_bl_1315.mat")
-    save_geometry(
-        new_cohort_map("J"), "E1000_JEL_E1000_bl_1315", store, mirror_to_profile=False
-    )
+    key = session_key(path)
+    assert key is not None
+    save_geometry(new_cohort_map("J"), key, store, mirror_to_profile=False)
     results = scan(root, rules)
 
     (written,) = apply_corrections(
@@ -470,7 +482,12 @@ def test_a_correction_preserves_the_geometry_block(
     document = json.loads(written.read_text(encoding="utf-8"))
 
     assert len(document["channels"]) == 9
-    assert document["units"] == "uV"
+    # units is no longer a meta.json key: it is a cohort constant declared in
+    # protocol.yaml (invariant 24). What this test is for is that a condition
+    # correction does not clobber the geometry block, so it asserts the geometry
+    # survived rather than a field that moved out from under it.
+    assert "units" not in document
+    assert document["channels"][0]["label"]
     assert document["condition"] == {"epoch": "stim_recovery"}
 
 
@@ -525,7 +542,7 @@ def test_a_correction_can_set_the_animal_when_the_name_carries_none(
         store,
         rules,
     )
-    assert store.relpath(written) == "data/J/nounderscore/meta.json"
+    assert store.relpath(written) == "data/J/nounderscore_20260916T030321Z/meta.json"
     assert json.loads(written.read_text(encoding="utf-8"))["animal"] == "J"
 
 
@@ -566,7 +583,9 @@ def test_a_correction_will_not_overwrite_an_unreadable_meta_json(
     """It holds geometry and history; clobbering it would destroy both."""
     root = tmp_path / "data"
     path = write_recording(root / "E1000_JEL_E1000_bl_1315.mat")
-    meta = meta_path(store, "J", "E1000_JEL_E1000_bl_1315")
+    key = session_key(path)
+    assert key is not None
+    meta = meta_path(store, "J", key)
     meta.parent.mkdir(parents=True, exist_ok=True)
     meta.write_text("{not json", encoding="utf-8", newline="\n")
 
@@ -599,3 +618,50 @@ def test_the_written_meta_json_is_utf8_with_lf(
     assert b"\r\n" not in raw
     assert raw.decode("utf-8")
     assert not list(written.parent.glob("*.tmp"))
+
+
+def test_a_file_with_no_acquisition_record_cannot_be_corrected(
+    tmp_path: Path, rules: Rules, store: GemsStore
+) -> None:
+    """No .tsq, no store key: the correction has nowhere to go and says so."""
+    root = tmp_path / "data"
+    root.mkdir()
+    path = root / "gems_d_t01_es1_sr_204720.mat"
+    path.write_bytes(b"samples")
+    (result,) = scan(root, rules)
+    assert result.session is None
+    with pytest.raises(ValueError, match="no store key"):
+        apply_corrections([result], [Correction(path=path, condition=result.condition)],
+                          "andrea", store, rules)
+
+
+def test_an_excluded_recording_cannot_enter_a_corpus(
+    tmp_path: Path, rules: Rules, store: GemsStore
+) -> None:
+    """Andrea's exclusion is read from meta.json and blocks corpus entry."""
+    root = tmp_path / "data"
+    path = write_recording(root / "gems_d_t01_es1_sr_204720.mat")
+    key = session_key(path)
+    assert key is not None
+    meta = save_geometry(new_cohort_map("D"), key, store, mirror_to_profile=False)
+    (result,) = scan(root, rules, store=store)
+    assert result.corpus_eligible and result.excluded is None
+
+    document = json.loads(meta.read_text(encoding="utf-8"))
+    document["excluded"] = {"reason": "partner_of_flagged", "partner_of": "x"}
+    meta.write_text(json.dumps(document), encoding="utf-8", newline="\n")
+    (result,) = scan(root, rules, store=store)
+    assert result.excluded == "partner_of_flagged"
+    assert not result.corpus_eligible
+
+
+@pytest.mark.parametrize("name", ["gems_d_t01_es1_stim_recovery_204720.mat",
+                                  "E1000_JEL_E1000_stim_rec_1325.mat"])
+def test_every_spelling_of_stim_recovery_is_the_same_condition(
+    tmp_path: Path, rules: Rules, name: str
+) -> None:
+    """Andrea, 2026-09-26: stim_recovery, stim_rec and sr are one condition."""
+    root = tmp_path / "data"
+    write_recording(root / name)
+    (result,) = scan(root, rules)
+    assert result.condition.epoch == "stim_recovery"

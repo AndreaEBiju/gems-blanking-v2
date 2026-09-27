@@ -13,9 +13,12 @@ file as authoritative would let a UI session destroy ``rostral_end``.
 Two things are never inferred:
 
 ``rostral_end``
-    It cannot be reconstructed once the animal is gone. Absent means absent: the
-    consequence is unsigned velocities and ``direction_valid=False``, not a guess
-    from channel order or from a name.
+    It cannot be reconstructed once the animal is gone, so it is DECLARED - once,
+    as a cohort constant in ``protocol.yaml`` (Andrea, 2026-09-26: contact 1 is
+    rostral on every nerve cuff). ``meta.json`` never carries it: a field null in
+    every file and then known for every file is a constant written 837 times
+    (invariant 24). Undeclared means unsigned velocities and
+    ``direction_valid=False``, never a guess from channel order or a name.
 ``units``
     Nothing in the loader converts them and the files are not self-describing;
     ``processing_new/convertUnits.m`` treats the unit as declared. Guessing wrong
@@ -27,7 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, Literal
@@ -52,6 +55,7 @@ __all__ = [
     "save_geometry",
     "save_profile",
     "scale_to_uv",
+    "with_rostral_end",
 ]
 
 log = logging.getLogger(__name__)
@@ -207,7 +211,10 @@ class ChannelMap:
         must carry this flag.
         """
         cuffs = self.cuffs
-        if not cuffs:
+        if not cuffs or self.config == "hw_tripole":
+            # hw_tripole shorts the end contacts before the amplifier: one derived
+            # channel per nerve, no inter-contact lag, nothing to sign. False
+            # whatever is declared.
             return False
         return all(
             any(c.rostral_end is not None for c in self.contacts(cuff)) for cuff in cuffs
@@ -246,8 +253,14 @@ provenance. Every write is therefore read-modify-write, preserving keys it does
 not recognise, for the same reason the profile write is.
 """
 
-GEOMETRY_KEYS: Final = ("channels", "units", "geometry_updated_at")
-"""The keys this module owns inside ``meta.json``. Everything else is left alone."""
+GEOMETRY_KEYS: Final = ("channels", "geometry_updated_at")
+"""The keys this module owns inside ``meta.json``. Everything else is left alone.
+
+``units`` is deliberately NOT here. It is fixed by the cohort, so it is declared
+once in ``protocol.yaml`` rather than copied into every session's file
+(invariant 24) - 800 copies of a constant are 800 chances for one to drift, and
+the one that drifts is a 10^6 error that still looks like a signal.
+"""
 
 
 def meta_path(store: GemsStore, animal: str, session: str) -> Path:
@@ -287,7 +300,20 @@ def save_geometry(
     -------
     pathlib.Path
         The ``meta.json`` written.
+
+    Raises
+    ------
+    ValueError
+        If any channel carries ``rostral_end``. It is a cohort constant in
+        ``protocol.yaml``; writing it here would be a second declaration, and
+        dropping it silently would lose a value that might differ from the
+        protocol's. Build the map with ``rostral_end=None``.
     """
+    carrying = [c.name for c in channel_map.channels if c.rostral_end is not None]
+    if carrying:
+        msg = (f"channels {carrying} carry rostral_end; it is declared once in "
+               "protocol.yaml and meta.json does not store it")
+        raise ValueError(msg)
     path = meta_path(store, channel_map.animal, session)
     document: dict[str, Any] = {}
     if path.is_file():
@@ -299,7 +325,10 @@ def save_geometry(
 
     document["animal"] = channel_map.animal
     document["session"] = session
-    document["units"] = channel_map.units
+    # units is NOT written: it is a cohort constant declared in protocol.yaml
+    # (invariant 24). An older file may still carry one, and load_geometry
+    # refuses it when it disagrees rather than silently preferring either.
+    document.pop("units", None)
     document["channels"] = [_channel_to_meta_dict(c) for c in channel_map.channels]
     document["geometry_updated_at"] = _utc_now()
 
@@ -314,8 +343,15 @@ def save_geometry(
     return path
 
 
-def load_geometry(animal: str, session: str, store: GemsStore) -> ChannelMap | None:
+def load_geometry(
+    animal: str, session: str, store: GemsStore, *, units: Units
+) -> ChannelMap | None:
     """Return the session's geometry from ``meta.json``, or None if absent.
+
+    ``units`` is supplied by the caller from ``protocol.yaml`` - it is a cohort
+    constant and ``meta.json`` no longer carries it. Required rather than
+    defaulted, because a default would be a second declaration competing with
+    the protocol's.
 
     Raises
     ------
@@ -337,14 +373,34 @@ def load_geometry(animal: str, session: str, store: GemsStore) -> ChannelMap | N
         msg = f"{path} has no channels; geometry has not been recorded for this session"
         raise ValueError(msg)
 
+    if any(ch.get("rostral_end") is not None for ch in raw_channels):
+        # Absent and null are read identically; a VALUE is a stale second
+        # declaration competing with protocol.yaml's, so refuse like stale units.
+        msg = (f"{path} carries rostral_end; it is a cohort constant in "
+               "protocol.yaml. Regenerate this meta.json.")
+        raise ValueError(msg)
     has_contact = any(ch.get("contact_index") is not None for ch in raw_channels)
     fallback = infer_config(len(raw_channels), has_contact)
     channels = sorted(
         (_channel_from_profile_dict(ch, fallback) for ch in raw_channels),
         key=lambda c: c.index,
     )
-    units = _validated_units(document.get("units") or "uV", str(path))
-    return ChannelMap(animal=str(document.get("animal") or animal), channels=channels, units=units)
+    if "units" in document:
+        # A stale file from before units moved to protocol.yaml. Refuse rather
+        # than pick one: two declarations that disagree is exactly the failure
+        # invariant 24 removes, and silently preferring either hides it.
+        stale = document["units"]
+        if _validated_units(stale, str(path)) != units:
+            msg = (
+                f"{path} declares units {stale!r} but protocol.yaml declares "
+                f"{units!r}. Units are a cohort constant and belong only in the "
+                "protocol; regenerate this meta.json."
+            )
+            raise ValueError(msg)
+    return ChannelMap(
+        animal=str(document.get("animal") or animal), channels=channels,
+        units=_validated_units(units, "protocol.yaml"),
+    )
 
 
 def resolve_channel_map(
@@ -354,6 +410,7 @@ def resolve_channel_map(
     session: str | None = None,
     store: GemsStore | None = None,
     profiles_root: Path | None = None,
+    units: Units = "uV",
 ) -> ChannelMap | None:
     """Return the geometry to use, in precedence order, or None if there is none.
 
@@ -365,7 +422,7 @@ def resolve_channel_map(
     if explicit is not None:
         return explicit
     if store is not None and session is not None:
-        from_meta = load_geometry(animal, session, store)
+        from_meta = load_geometry(animal, session, store, units=units)
         if from_meta is not None:
             return from_meta
     mirror = load_profile(animal, profiles_root)
@@ -394,9 +451,24 @@ def _channel_to_meta_dict(channel: ChannelInfo) -> dict[str, Any]:
         out["cuff_id"] = channel.cuff_id
     if channel.contact_index is not None:
         out["contact_index"] = channel.contact_index
-    if channel.rostral_end is not None:
-        out["rostral_end"] = channel.rostral_end
     return out
+
+
+def with_rostral_end(channel_map: ChannelMap, rostral_end: int | None) -> ChannelMap:
+    """Return the map with the protocol's ``rostral_end`` on every nerve contact.
+
+    Fills only contacts that have none, so an explicit map passed by a caller
+    keeps whatever it says. A no-op for ``hw_tripole``, whose direction is
+    unsignable regardless, and when the protocol declares nothing.
+    """
+    if rostral_end is None or channel_map.config == "hw_tripole":
+        return channel_map
+    channels = [
+        replace(c, rostral_end=rostral_end)
+        if c.role == "nerve" and c.rostral_end is None else c
+        for c in channel_map.channels
+    ]
+    return replace(channel_map, channels=channels)
 
 
 def _utc_now() -> str:

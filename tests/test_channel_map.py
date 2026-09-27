@@ -26,6 +26,7 @@ from gems_blanking_v2.io.channel_map import (
     save_geometry,
     save_profile,
     scale_to_uv,
+    with_rostral_end,
 )
 from gems_blanking_v2.io.store import GemsStore
 from gems_blanking_v2.types import ChannelInfo
@@ -36,10 +37,14 @@ def nerve_channel(
     cuff: str,
     contact: int,
     *,
-    rostral_end: int | None = 1,
+    rostral_end: int | None = None,
     config: str = "independent",
 ) -> ChannelInfo:
-    """One cuff contact."""
+    """Return one cuff contact.
+
+    ``rostral_end`` defaults to None: it is declared in protocol.yaml and applied
+    at load, never stored per recording.
+    """
     return ChannelInfo(
         index=index,
         name=f"{cuff}VN{contact}",
@@ -64,11 +69,14 @@ def stomach_channel(index: int, n: int, config: str = "independent") -> ChannelI
     )
 
 
-def new_cohort_map(animal: str = "J", *, rostral_end: int | None = 1) -> ChannelMap:
+def new_cohort_map(
+    animal: str = "J", *, rostral_end: int | None = None,
+    cuffs: tuple[str, str] = ("L", "R"),
+) -> ChannelMap:
     """Return the nine-channel new cohort: two cuffs of three, three stomach."""
     channels: list[ChannelInfo] = []
     index = 0
-    for cuff in ("L", "R"):
+    for cuff in cuffs:
         for contact in (1, 2, 3):
             channels.append(nerve_channel(index, cuff, contact, rostral_end=rostral_end))
             index += 1
@@ -251,7 +259,7 @@ def test_geometry_round_trips_through_meta_json(store: GemsStore) -> None:
     assert path == meta_path(store, "J", "t01")
     assert store.relpath(path) == "data/J/t01/meta.json"
 
-    loaded = load_geometry("J", "t01", store)
+    loaded = load_geometry("J", "t01", store, units="uV")
     assert loaded is not None
     assert loaded.channels == original.channels
     assert loaded.units == original.units
@@ -259,16 +267,20 @@ def test_geometry_round_trips_through_meta_json(store: GemsStore) -> None:
 
 
 def test_meta_json_is_per_session_not_per_animal(store: GemsStore) -> None:
-    """Two sessions of one animal can differ - a cuff may be re-implanted."""
-    save_geometry(new_cohort_map("J", rostral_end=1), "t01", store, mirror_to_profile=False)
-    save_geometry(new_cohort_map("J", rostral_end=None), "t02", store, mirror_to_profile=False)
+    """Two sessions of one animal can differ - a cuff may be re-wired between them.
 
-    first = load_geometry("J", "t01", store)
-    second = load_geometry("J", "t02", store)
+    The marker is the channel table's cuff order, a genuinely per-recording fact;
+    rostral_end used to serve here and no longer can - it is a cohort constant.
+    """
+    save_geometry(new_cohort_map("J"), "t01", store, mirror_to_profile=False)
+    save_geometry(new_cohort_map("J", cuffs=("R", "L")), "t02", store, mirror_to_profile=False)
+
+    first = load_geometry("J", "t01", store, units="uV")
+    second = load_geometry("J", "t02", store, units="uV")
     assert first is not None
     assert second is not None
-    assert first.direction_valid
-    assert not second.direction_valid
+    assert first.channels[0].name == "LVN1"
+    assert second.channels[0].name == "RVN1"
 
 
 def test_writing_geometry_preserves_another_writers_keys(store: GemsStore) -> None:
@@ -326,7 +338,7 @@ def test_a_corrupt_meta_json_is_not_silently_overwritten(store: GemsStore) -> No
     with pytest.raises(ValueError, match="refusing to overwrite"):
         save_geometry(new_cohort_map("J"), "t01", store, mirror_to_profile=False)
     with pytest.raises(ValueError, match="could not be read"):
-        load_geometry("J", "t01", store)
+        load_geometry("J", "t01", store, units="uV")
 
 
 def test_meta_json_without_geometry_raises(store: GemsStore) -> None:
@@ -335,11 +347,11 @@ def test_meta_json_without_geometry_raises(store: GemsStore) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"animal": "J", "condition": "bl"}), encoding="utf-8", newline="\n")
     with pytest.raises(ValueError, match="has no channels"):
-        load_geometry("J", "t01", store)
+        load_geometry("J", "t01", store, units="uV")
 
 
 def test_a_missing_meta_json_is_none(store: GemsStore) -> None:
-    assert load_geometry("J", "t01", store) is None
+    assert load_geometry("J", "t01", store, units="uV") is None
 
 
 # ---------------------------------------------------------------------------
@@ -355,12 +367,12 @@ def test_meta_json_wins_over_the_profile_mirror(store: GemsStore, tmp_path: Path
     silently destroy geometry that cannot be recovered once the animal is gone.
     """
     profiles = tmp_path / "profiles"
-    save_profile(new_cohort_map("J", rostral_end=None), profiles)  # a stale mirror
-    save_geometry(new_cohort_map("J", rostral_end=1), "t01", store, mirror_to_profile=False)
+    save_profile(new_cohort_map("J", cuffs=("R", "L")), profiles)  # a stale mirror
+    save_geometry(new_cohort_map("J"), "t01", store, mirror_to_profile=False)
 
     resolved = resolve_channel_map("J", session="t01", store=store, profiles_root=profiles)
     assert resolved is not None
-    assert resolved.direction_valid, "meta.json must win over the profile"
+    assert resolved.channels[0].name == "LVN1", "meta.json must win over the profile"
 
 
 def test_an_explicit_map_wins_over_everything(store: GemsStore, tmp_path: Path) -> None:
@@ -435,7 +447,7 @@ def test_an_animal_name_that_cannot_be_a_filename_is_rejected() -> None:
 
 
 def test_a_profile_round_trips(tmp_path: Path) -> None:
-    original = new_cohort_map(animal="J")
+    original = new_cohort_map(animal="J", rostral_end=1)  # the mirror may carry it
     save_profile(original, tmp_path)
     loaded = load_profile("J", tmp_path)
 
@@ -618,3 +630,46 @@ def test_extra_keys_can_be_attached_without_disturbing_the_schema(tmp_path: Path
     document = json.loads(profile_path("J", tmp_path).read_text(encoding="utf-8"))
     assert document["gems_blanking_v2_version"] == "0.1.0"
     assert document["schema_version"] == "1.0"
+
+
+# ---------------------------------------------------------------------------
+# rostral_end is a cohort constant (Andrea, 2026-09-26)
+# ---------------------------------------------------------------------------
+
+
+def test_meta_json_refuses_to_store_rostral_end(store: GemsStore) -> None:
+    """A second declaration beside protocol.yaml's - refused, not silently dropped."""
+    with pytest.raises(ValueError, match=r"protocol\.yaml"):
+        save_geometry(new_cohort_map("J", rostral_end=1), "t01", store, mirror_to_profile=False)
+
+
+def test_a_stale_meta_json_carrying_rostral_end_is_refused(store: GemsStore) -> None:
+    path = save_geometry(new_cohort_map("J"), "t01", store, mirror_to_profile=False)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["channels"][0]["rostral_end"] = 3
+    path.write_text(json.dumps(document), encoding="utf-8", newline="\n")
+    with pytest.raises(ValueError, match="rostral_end"):
+        load_geometry("J", "t01", store, units="uV")
+
+
+def test_the_protocol_value_fills_nerve_contacts_only() -> None:
+    filled = with_rostral_end(new_cohort_map("J"), 1)
+    assert filled.direction_valid
+    assert all(c.rostral_end == 1 for c in filled.channels if c.role == "nerve")
+    assert all(c.rostral_end is None for c in filled.channels if c.role == "stomach")
+
+
+def test_an_explicit_value_is_not_overwritten_by_the_protocol() -> None:
+    explicit = new_cohort_map("J", rostral_end=3)
+    assert all(c.rostral_end == 3 for c in with_rostral_end(explicit, 1).channels
+               if c.role == "nerve")
+
+
+def test_hw_tripole_direction_is_never_valid_whatever_is_declared() -> None:
+    """The old cohort shorts the end contacts: no inter-contact lag to sign."""
+    old = ChannelMap(animal="F", channels=[
+        nerve_channel(0, "L", 1, rostral_end=1, config="hw_tripole"),
+        nerve_channel(1, "L", 2, rostral_end=1, config="hw_tripole"),
+    ], units="uV")
+    assert not old.direction_valid
+    assert with_rostral_end(old, 1) is old

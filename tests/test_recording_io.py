@@ -14,7 +14,10 @@ save-output is refused.
 
 from __future__ import annotations
 
+import importlib.metadata as md
+import json
 import logging
+import sys
 from pathlib import Path
 
 import h5py
@@ -24,21 +27,29 @@ import pytest
 from gems_blanking_v2.io.channel_map import (
     ChannelMap,
     load_profile,
+    meta_path,
     save_geometry,
     save_profile,
 )
 from gems_blanking_v2.io.detector_core import (
     DETECTOR_CORE_ENV,
+    SUBMODULE_PATH,
+    _search_roots,
     detector_core_available,
     find_detector_core,
     import_detector_module,
 )
 from gems_blanking_v2.io.nan_interop import assert_no_zero_runs, masked_count
 from gems_blanking_v2.io.recording import load_recording, spans_from_matlab_intervals
+from gems_blanking_v2.io.stim_split import (
+    PROTOCOL_FILENAME,
+    default_protocol_book,
+    write_protocol_book,
+)
 from gems_blanking_v2.io.store import GemsStore
 from scipy.io import savemat
 
-from tests.conftest import make_multichannel
+from tests.conftest import make_multichannel, write_tdt_block
 from tests.test_channel_map import new_cohort_map, old_cohort_map
 
 F64 = npt.NDArray[np.float64]
@@ -132,6 +143,10 @@ def test_importing_from_a_missing_checkout_raises_before_touching_sys_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv(DETECTOR_CORE_ENV, str(tmp_path / "nope"))
+    # Hermetic: an earlier test that loaded a recording leaves the module cached,
+    # and a cached module is returned before any root is consulted - so without
+    # this the test's outcome depended on which test files ran before it.
+    monkeypatch.delitem(sys.modules, "detector.recording_io", raising=False)
     with pytest.raises(FileNotFoundError):
         import_detector_module("recording_io", tmp_path / "nope")
 
@@ -222,7 +237,12 @@ def test_fs_comes_from_the_file_and_is_never_hardcoded(tmp_path: Path) -> None:
 @needs_detector_core
 @pytest.mark.parametrize(("units", "factor"), [("uV", 1.0), ("mV", 1e3), ("V", 1e6)])
 def test_the_declared_units_are_applied(tmp_path: Path, units: str, factor: float) -> None:
-    y = synthetic_samples()
+    # The samples are scaled so the DECLARED unit is physically plausible, because
+    # the loader now refuses a declaration that cannot be true. A fixture in
+    # microvolt-sized numbers declaring volts would imply a sigma of ~10 V, which
+    # is the 10^6 typo the check exists to catch - so the test would have been
+    # asserting that the loader accepts an impossible recording.
+    y = synthetic_samples() / factor
     path = write_flat_h5(tmp_path / "units.h5", y)
     mapping = ChannelMap(animal="J", channels=new_cohort_map("J").channels, units=units)  # type: ignore[arg-type]
 
@@ -252,7 +272,11 @@ def test_both_cohorts_load_and_report_their_config(tmp_path: Path) -> None:
 
 @needs_detector_core
 def test_the_geometry_comes_from_meta_json_in_the_store(tmp_path: Path) -> None:
-    """The single source of truth: ``data/<animal>/<session>/meta.json``."""
+    """The single source of truth: ``data/<animal>/<session>/meta.json``.
+
+    Geometry alone never signs direction: rostral_end is declared in
+    protocol.yaml, and this recording sits under no protocol.
+    """
     store = GemsStore.initialise(tmp_path / "gems")
     save_geometry(new_cohort_map("J"), "t01", store, mirror_to_profile=False)
     path = write_flat_h5(tmp_path / "gems_j_t01_bl.h5", synthetic_samples())
@@ -260,8 +284,28 @@ def test_the_geometry_comes_from_meta_json_in_the_store(tmp_path: Path) -> None:
     loaded = load_recording(path, animal="J", session="t01", store=store)
 
     assert loaded.channel_map.n_channels == 9
-    assert loaded.direction_valid
+    assert not loaded.direction_valid
     assert loaded.provenance["geometry_source"] == "stored"
+
+
+@needs_detector_core
+def test_direction_comes_from_the_protocol_not_from_meta_json(tmp_path: Path) -> None:
+    """Andrea, 2026-09-26: contact 1 is rostral on every nerve cuff - declared once."""
+    store = GemsStore.initialise(tmp_path / "gems")
+    write_protocol_book(default_protocol_book(), store.root / PROTOCOL_FILENAME)
+    save_geometry(new_cohort_map("J"), "t01", store, mirror_to_profile=False)
+    cohort = store.root / "August-September Chronic Recordings"
+    cohort.mkdir()
+    # The cohort protocol declares volts, so the samples are volt-scale.
+    path = write_flat_h5(cohort / "gems_j_t01_bl.h5", synthetic_samples() / 1e6)
+
+    loaded = load_recording(path, animal="J", session="t01", store=store)
+
+    assert loaded.direction_valid
+    nerves = [c for c in loaded.recording.channels if c.role == "nerve"]
+    assert {c.rostral_end for c in nerves} == {1}
+    document = json.loads(meta_path(store, "J", "t01").read_text(encoding="utf-8"))
+    assert all("rostral_end" not in ch for ch in document["channels"])
 
 
 @needs_detector_core
@@ -269,14 +313,14 @@ def test_meta_json_beats_a_stale_profile_mirror(tmp_path: Path) -> None:
     """A UI session that rebuilt the profile must not override our geometry."""
     store = GemsStore.initialise(tmp_path / "gems")
     profiles = tmp_path / "profiles"
-    save_profile(new_cohort_map("J", rostral_end=None), profiles)
-    save_geometry(new_cohort_map("J", rostral_end=1), "t01", store, mirror_to_profile=False)
+    save_profile(new_cohort_map("J", cuffs=("R", "L")), profiles)
+    save_geometry(new_cohort_map("J"), "t01", store, mirror_to_profile=False)
     path = write_flat_h5(tmp_path / "gems_j_t01_bl.h5", synthetic_samples())
 
     loaded = load_recording(
         path, animal="J", session="t01", store=store, profiles_root=profiles
     )
-    assert loaded.direction_valid
+    assert loaded.recording.channels[0].name == "LVN1"
 
 
 @needs_detector_core
@@ -293,11 +337,24 @@ def test_the_channel_map_can_come_from_the_saved_profile(tmp_path: Path) -> None
 @needs_detector_core
 def test_without_a_channel_map_it_refuses_rather_than_inventing_one(tmp_path: Path) -> None:
     """The file has no channel table, so there is nothing to infer from."""
-    path = write_flat_h5(tmp_path / "x.h5", synthetic_samples())
+    block = write_tdt_block(tmp_path, "gems_j_t01_bl_120000", 1_789_000_000.0)
+    path = write_flat_h5(block / "gems_j_t01_bl_120000_sig.h5", synthetic_samples())
     with pytest.raises(ValueError, match="no geometry for animal") as exc:
         load_recording(path, animal="J", profiles_root=tmp_path / "empty")
     # The message names the file the geometry belongs in, not just the failure.
-    assert "meta.json" in str(exc.value)
+    assert "data/J/gems_j_t01_bl_120000_20260910T002640Z/meta.json" in str(exc.value)
+
+
+@needs_detector_core
+def test_a_file_with_no_acquisition_record_has_no_store_key(tmp_path: Path) -> None:
+    """No .tsq, no key: the stem labels provenance and never selects a meta.json."""
+    store = GemsStore(tmp_path / "store")
+    save_geometry(new_cohort_map("J"), "x", store, mirror_to_profile=False)
+    path = write_flat_h5(tmp_path / "x.h5", synthetic_samples())
+    with pytest.raises(ValueError, match="no store key"):
+        load_recording(path, animal="J", store=store, profiles_root=tmp_path / "empty")
+    loaded = load_recording(path, animal="J", channel_map=new_cohort_map("J"))
+    assert loaded.provenance["session_source"] == "file_stem_label_not_a_store_key"
 
 
 @needs_detector_core
@@ -367,7 +424,9 @@ def test_the_profile_survives_a_round_trip_through_their_own_profile_class(
     profiles = import_detector_module("preprocessing.profiles")
     monkeypatch.setattr(profiles.Profile, "profiles_dir", staticmethod(lambda: tmp_path))
 
-    mapping = ChannelMap(animal="J", channels=new_cohort_map("J").channels, units="mV")
+    # Their profile is a UI mirror and may carry rostral_end; meta.json may not.
+    mapping = ChannelMap(animal="J", channels=new_cohort_map("J", rostral_end=1).channels,
+                         units="mV")
     save_profile(mapping, tmp_path)
 
     theirs = profiles.Profile.load("J")
@@ -394,3 +453,92 @@ def test_nan_masked_samples_survive_the_load(tmp_path: Path) -> None:
 
     assert masked_count(loaded.recording.data) == 500 * y.shape[1]
     assert_no_zero_runs(loaded.recording.data, what="loaded data", fs=FS)
+
+
+# ---------------------------------------------------------------------------
+# invariant 21 - one checkout, not two
+# ---------------------------------------------------------------------------
+
+
+def test_exactly_one_implicit_search_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two search roots is two checkouts, chosen by whatever is on disk.
+
+    This repository used to resolve ``detector`` from a sibling ``GEMSBlanking``
+    directory while ``detector-pyqt`` resolved it from its ``detector-core``
+    submodule. They agreed only because the same edit had been applied by hand to
+    both. The failure mode is two components disagreeing about what a recording
+    contains, on one machine and not another - so the count is asserted, not the
+    contents.
+    """
+    roots = _search_roots()
+
+    assert len(roots) == 1, f"expected one search root, got {[str(r) for r in roots]}"
+    assert roots[0].parts[-2:] == SUBMODULE_PATH.parts
+
+
+def test_the_submodule_is_the_pinned_location() -> None:
+    """Pin detector-core to the submodule, never a loose sibling checkout.
+
+    The submodule has a recorded commit, so the two repositories cannot drift
+    without that pointer moving. A loose sibling checkout has no such anchor.
+    """
+    assert Path("detector-pyqt") / "detector-core" == SUBMODULE_PATH
+
+
+def test_detector_is_an_installed_package_not_a_path_hack() -> None:
+    """Invariant 21, enforced at the only level that cannot drift.
+
+    ``detector-core`` is an editable install of one checkout, so importing it
+    needs no sys.path entry. If this fails the environment has fallen back to
+    path resolution and two checkouts could compete again.
+    """
+    dist = md.distribution("detector-core")
+
+    assert dist is not None
+    pins = [r for r in (dist.requires or []) if r.startswith("numpy")]
+    assert pins == ["numpy<3,>=1.26"], (
+        f"numpy pin changed to {pins}; it was relaxed to <3 on a measured full "
+        "suite run (404 passed, 0 numpy failures) and narrowing it again would "
+        "force consumers back to sys.path hacking"
+    )
+
+
+def test_a_microvolt_scale_file_declared_as_volts_is_refused(tmp_path: Path) -> None:
+    """The check must reject wrong data, not merely tolerate right data.
+
+    The two scaled fixtures above prove it passes a correct declaration. This is
+    the other half: microvolt-scale samples declared as volts imply a noise floor
+    of tens of volts, which is the 10^6 typo invariant 14 exists to catch. Run
+    through ``load_recording`` rather than against the function directly, because
+    the unit tests already cover the function and what is unproven is that the
+    loader actually calls it.
+    """
+    y = synthetic_samples() * 30.0  # ~30 uV-scale numbers
+    path = write_flat_h5(tmp_path / "mislabelled.h5", y)
+    mapping = ChannelMap(
+        animal="J", channels=new_cohort_map("J").channels, units="V",
+    )
+
+    with pytest.raises(ValueError) as exc:
+        load_recording(path, animal="J", channel_map=mapping)
+
+    msg = str(exc.value)
+    assert "'V'" in msg, "the message must name the DECLARED unit"
+    assert "uV" in msg, "the message must give the implied sigma in uV"
+    assert "outside the plausible" in msg
+
+
+@needs_detector_core
+def test_an_excluded_recording_loads_but_carries_its_exclusion(tmp_path: Path) -> None:
+    """Not refused - review still opens it - but every corpus builder sees the flag."""
+    store = GemsStore.initialise(tmp_path / "gems")
+    block = write_tdt_block(tmp_path, "gems_j_t01_bl_120000", 1_789_000_000.0)
+    path = write_flat_h5(block / "gems_j_t01_bl_120000_sig.h5", synthetic_samples())
+    key = "gems_j_t01_bl_120000_20260910T002640Z"
+    meta = save_geometry(new_cohort_map("J"), key, store, mirror_to_profile=False)
+    document = json.loads(meta.read_text(encoding="utf-8"))
+    document["excluded"] = {"reason": "quality_flag", "flags": ["BAD"]}
+    meta.write_text(json.dumps(document), encoding="utf-8", newline="\n")
+
+    loaded = load_recording(path, animal="J", store=store)
+    assert loaded.provenance["excluded"] == {"reason": "quality_flag", "flags": ["BAD"]}

@@ -132,6 +132,14 @@ epochs: [baseline, stim_recovery, unknown]
 # is recorded. `_stim_rec` (old cohort) must be tried before `_sr` (new cohort),
 # which is why priority is explicit rather than left to file order.
 epoch_rules:
+  # Andrea, 2026-09-26: "stim_recovery" and "sr" are ONE condition - older files
+  # use the long name, newer ones the short; each holds 2 min stim then 20 min
+  # recovery in a single file. The _stim_rec rule does NOT match the fully spelled
+  # `_stim_recovery` ("rec" is followed by "o"), so it gets its own rule, first.
+  - id: stim_recovery_long
+    pattern: '_stim_recovery(\\b|_)'
+    epoch: stim_recovery
+    priority: 5
   - id: stim_rec_old
     pattern: '_stim_rec(\\b|_)'
     epoch: stim_recovery

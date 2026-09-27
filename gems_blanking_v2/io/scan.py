@@ -31,7 +31,9 @@ from typing import Any, Literal
 
 from gems_blanking_v2.io.channel_map import meta_path
 from gems_blanking_v2.io.conditions import Classification, Condition, Rules
+from gems_blanking_v2.io.quality import read_exclusion
 from gems_blanking_v2.io.store import GemsStore, sha256_file
+from gems_blanking_v2.io.tdt_block import session_key
 
 __all__ = [
     "RECORDING_EXTENSIONS",
@@ -74,7 +76,8 @@ class ScanResult:
     animal
         Proposed animal letter, or ``None`` when the name does not carry one.
     session
-        Proposed session identifier: the stripped stem.
+        Store key from :func:`~gems_blanking_v2.io.tdt_block.session_key`, or
+        ``None`` when the file has no acquisition record beside it.
     condition
         The proposed four-field record. Its ``epoch`` is ``"unknown"`` when no rule
         matched; it is never defaulted to a real level.
@@ -109,6 +112,9 @@ class ScanResult:
     token_conflict: tuple[str, ...] = ()
     duplicate_of: Path | None = None
     condition_source: Literal["rule", "human"] = "rule"
+    excluded: str | None = None
+    """The exclusion reason recorded in ``meta.json``, or None. Set from the store,
+    never re-derived here: the generator applied Andrea's ruling once."""
 
     @property
     def needs_a_human(self) -> bool:
@@ -120,9 +126,11 @@ class ScanResult:
         """Whether this recording may enter a corpus.
 
         ``unknown`` and ``ambiguous`` may not. Blocking is the point: a recording
-        nobody has classified must not quietly become a control.
+        nobody has classified must not quietly become a control. Nor may one
+        Andrea excluded (``_BAD`` / ``_INCOMPLETE`` or its pair).
         """
-        return not self.needs_a_human and self.status != "duplicate"
+        return (not self.needs_a_human and self.status != "duplicate"
+                and self.excluded is None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,7 +282,10 @@ def scan(
         stem = path.stem
         classification: Classification = rules.classify(stem)
         animal = rules.animal(stem)
-        session = rules.core_of(stem)
+        # The store key comes from the acquisition record, through the one
+        # function that builds it (invariant 33). core_of(stem) disagreed with the
+        # loader's path.stem for every old-cohort file, and neither carried a date.
+        session = session_key(path)
 
         result = ScanResult(
             path=path,
@@ -301,7 +312,10 @@ def scan(
             results.append(replace(result, status="known"))
             continue
 
-        if store is not None and animal is not None:
+        if store is not None and animal is not None and session is not None:
+            record = read_exclusion(store, animal, session)
+            if record is not None:
+                result = replace(result, excluded=str(record.get("reason", "excluded")))
             stored = read_human_condition(store, animal, session)
             if stored is not None and stored[1] == "human":
                 result = replace(
@@ -389,7 +403,14 @@ def apply_corrections(
                 "correction - the directory it is written to is keyed on it."
             )
             raise ValueError(msg)
-        session = result.session or correction.path.stem
+        session = result.session
+        if session is None:
+            msg = (
+                f"{correction.path.name}: no acquisition record (.tsq) beside it, so it "
+                "has no store key and there is no meta.json to write the correction "
+                "into. Its stem is not a key - it carries no date."
+            )
+            raise ValueError(msg)
 
         path = meta_path(store, animal, session)
         document: dict[str, Any] = {}
