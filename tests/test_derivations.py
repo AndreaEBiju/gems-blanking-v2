@@ -27,8 +27,8 @@ from gems_blanking_v2.derive.derivations import (
 from gems_blanking_v2.io.nan_interop import assert_no_zero_runs
 from gems_blanking_v2.types import ChannelInfo, Recording
 
-from conftest import make_common_mode, make_eng, make_multichannel
-from conftest import robust_sigma as generator_sigma
+from tests.conftest import make_common_mode, make_eng, make_multichannel
+from tests.conftest import robust_sigma as generator_sigma
 
 F64 = npt.NDArray[np.float64]
 FS = 24414.0625

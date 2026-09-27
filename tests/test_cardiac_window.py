@@ -15,6 +15,7 @@ from gems_blanking_v2.physio.cardiac_window import (
     cardiac_window_report,
     measure_cardiac_window,
 )
+
 from tests.conftest import make_ecg
 
 FS = 12000.0

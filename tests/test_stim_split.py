@@ -41,7 +41,7 @@ from gems_blanking_v2.io.stim_split import _status as rp_status
 from gems_blanking_v2.types import ChannelInfo, Recording
 from scipy.signal import butter, sosfiltfilt
 
-from conftest import make_eng, make_vib
+from tests.conftest import make_eng, make_vib
 
 F64 = npt.NDArray[np.float64]
 

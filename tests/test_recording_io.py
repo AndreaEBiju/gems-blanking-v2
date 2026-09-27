@@ -38,8 +38,8 @@ from gems_blanking_v2.io.recording import load_recording, spans_from_matlab_inte
 from gems_blanking_v2.io.store import GemsStore
 from scipy.io import savemat
 
-from conftest import make_multichannel
-from test_channel_map import new_cohort_map, old_cohort_map
+from tests.conftest import make_multichannel
+from tests.test_channel_map import new_cohort_map, old_cohort_map
 
 F64 = npt.NDArray[np.float64]
 

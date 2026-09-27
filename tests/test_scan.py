@@ -27,8 +27,8 @@ from gems_blanking_v2.io.scan import (
 )
 from gems_blanking_v2.io.store import GemsStore, sha256_file
 
-from test_channel_map import new_cohort_map
-from test_conditions import second_token_initial
+from tests.test_channel_map import new_cohort_map
+from tests.test_conditions import second_token_initial
 
 
 @pytest.fixture

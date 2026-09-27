@@ -15,7 +15,7 @@ import numpy.typing as npt
 import pytest
 from gems_blanking_v2.constants import FS_NOMINAL_HZ, MAD_TO_SIGMA
 
-from conftest import (
+from tests.conftest import (
     ADDITIVE_KINDS,
     FLANK_FRACTION,
     SPIKE_WIDTH_MS,

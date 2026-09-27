@@ -34,7 +34,7 @@ from gems_blanking_v2.physio.rpeaks import (
 from gems_blanking_v2.types import ChannelInfo, Recording
 from scipy.signal import find_peaks
 
-from conftest import inject_artifact, make_beats, make_ecg, make_slow, robust_sigma
+from tests.conftest import inject_artifact, make_beats, make_ecg, make_slow, robust_sigma
 
 F64 = npt.NDArray[np.float64]
 
