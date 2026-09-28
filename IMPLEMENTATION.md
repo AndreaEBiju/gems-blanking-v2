@@ -3900,6 +3900,49 @@ recollection:
   left-cuff connector problem below is hiding them. Report this as a finding;
   it matters for everything spike-based on the new cohort.
 
+### Polarity result, 2026-09-28 — negative-only stands; mains impulses found
+
+At her pipeline's real settings (4.5σ, 1.0 ms, 100–5000 Hz historical /
+300–3000 Hz now — not the detector's defaults, which I had quoted; invariant
+39), and excluding mains-contaminated trains, her historical `vengmetrics`
+median is **5.0 spikes/s**, about half inside 1–5/s. Negative-only matches her
+pipeline's counts; absolute does not. **Keep negative-only.** New-cohort
+tripoles give 0.1–11/s at her settings — low, not near zero (my "0–7 events"
+came from the 6σ defaults).
+
+**Mains contamination in her historical spike trains.** 47 of 175 trains are
+dominated by 30/60/90 Hz structure, and rate tracks the contamination (Spearman
+0.65). JEL's "spikes" are mains impulses: event-train peaks at 30/60/90 Hz,
+median inter-event 16.6 ms, widths 0.12–0.16 ms — too narrow for a unit — in bl
+and sr files alike. Impulses this narrow are broadband, so a 60 Hz notch (with or
+without harmonics) does not remove them. Consequences:
+
+- **`T_hardware` tolerance rows measured on the JEL host are invalid** — they
+  measured the sensitivity of a mains-impulse count, not of spike detection.
+  Mark them `gate_eligible: false`, reason `mains_dominated_host`; ORE (clean in
+  every train) is the old-cohort `T_hardware` host from now on. JEL rows for
+  other consumers are unaffected by this finding.
+- **List every contaminated train for Andrea** — recording, cuff, rate, mains
+  ratio — so she can see which of her analyses used them. Change nothing in her
+  outputs.
+- **A mains-locked-event flag is worth adding to the spike path later**
+  (inter-event histogram at 1/60 s, phase locking to mains). Andrea's call.
+
+### Generator hash must include the loader
+
+The hash now derives from the chain's imports (15 modules) and excludes the
+scorer and store — right. But the **loader** sits outside it, and the loader
+decides which samples reach the chain: a change to channel mapping, units,
+NaN handling or slicing changes candidates without moving the hash. **Include
+the load path from file to the array handed to `detect_region`** (loader,
+channel map, units scaling, NaN interop). The stim split stays outside: it
+chooses regions, and each span's region is recorded, so it cannot alter the
+scoring of a recorded region. Re-run the budget once under the widened hash.
+**Ordering:** this does not block round 2. Widening the hash changes what it
+covers, not any loaded sample, so round 2's reveal digests verify under either.
+Write the code change now; run the budget re-run (Drive-heavy) **after** Andrea
+finishes round 2; then score round 2 under the widened hash.
+
 ### Contact quality — a systematic LEFT-cuff problem
 
 Every screen failure in the 60-recording pool is "off the cuff" (r ≈ 0 with its
