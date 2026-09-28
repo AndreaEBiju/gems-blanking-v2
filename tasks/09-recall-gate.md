@@ -179,6 +179,94 @@ exceeds the budget on the eligible pool.
 5. **Round 2 at the pinned setting is the first gate evidence.** Chance recall
    and time-covered fraction are reported with every round from now on.
 
+### CORRECTION AND RULINGS, 2026-09-28 (after the budget measurement)
+
+**My "budget fails" ruling was wrong.** I scaled span 3's 1,340 candidates as if
+they were per 120 s span; they were counted over the whole assessable region.
+Measured properly on 60 pool recordings (5 per animal × condition), the budget
+holds with a wide margin: median 335, q90 716, max 1184, none over 3000.
+**Ratified:** the budget statistic is the 90th percentile over ≥ 30 sampled
+recordings, keyed to the generator's hash.
+
+**The real issue is time coverage, not count** — median 54% of time covered,
+pooled chance recall 0.897. That does **not** make the gate uninformative: a
+generator blind to artifacts would score ~0.90 and, over 149 artifacts, miss
+~15 of them, so clearing a 0.98 lower bound is strong evidence it responds to
+artifacts beyond chance. What would make the gate uninformative is coverage high
+enough that chance itself approaches the bar. **So, declared now, before round
+2:**
+
+- **A round counts as gate evidence only if the pooled chance-recall upper 95%
+  bound is below 0.98.** At the current setting it is 0.956. If a future
+  generator change pushes chance to the bar, scoring refuses to count the round
+  and says why. Report the margin (0.98 − chance upper bound) with every round.
+
+**Keep `z_enter` 3.0 and `z_exit` 1.5.** Every lever that cuts coverage costs
+recall on the round-1 tuning marks: `z_exit` 2.25 loses 5/91, 2-of-54 agreement
+loses 9/91, `z_exit` 3.0 loses 10/91. Recall is what the gate protects;
+precision is the classifier's job. The hotter first ~3 minutes of every region
+is left alone: those minutes plausibly carry more real motion (the animal has
+just been handled), and invariant 5 fixes the reference.
+
+**Contact screen: ratified**, including both corrections found on real data (the
+copy threshold at √(1−r²) < 0.01, and "off the cuff" judged against every peer,
+not the mean). Round 1 is tuning data, `fixed_at` 2026-09-28T17:07:01Z.
+
+**Three structural changes before round 2:**
+
+1. **One construction site for detection (invariant 33).** Move the chain
+   (derivations → contact screen → z → candidates) out of the audit bridge into
+   `gems_blanking_v2`, and have the bridge call it. Production and audit must
+   share it. Prove the move changes nothing: candidate lists identical on all
+   60 cached budget regions and the 5 round-1 regions. Then re-run the budget
+   under the new hash.
+2. **The generator hash covers the generation chain only** — derivations,
+   screen, z, candidate generation and their constants — not the scorer or
+   reports. A reporting edit must not invalidate a budget record or a round.
+3. **`pooled_gate` drops any round scored under a generator hash different from
+   the current one**, in addition to `fixed_at`, so a forgotten fix record
+   cannot leave tuning data in the pool. Fix the projection to count only
+   eligible rounds (149 fresh artifacts now, not "58 more").
+
+Then round 2 may be drawn.
+
+### Spike polarity — Andrea's prior, and the check it implies
+
+Andrea: vagal spike rates are usually 1–5 spikes/s, and as she remembers it the
+negative-only convention gave reasonable numbers on the old setup. **Keep
+negative-only for now**, and test that memory against data rather than against
+recollection:
+
+- Report event **rates per second** per cuff under both conventions, next to
+  the 1–5/s range. From the numbers already measured: ORE negative-only is
+  0.3–0.5/s and absolute 1.0–1.9/s; JEL is 32–46/s negative-only and 72–90/s
+  absolute — both far above 1–5/s, so what the JEL events are is itself a
+  question (multi-unit activity, a stimulation remnant in an `E1000` host, or
+  something else).
+- **Compare with what her pipeline actually reported** for the same recordings:
+  the old `*_vengmetrics.mat` (or equivalent) outputs hold her historical rates.
+  If they sit near the negative-only numbers, her memory and the pipeline
+  agree; if not, the record says so.
+- **New cohort:** most software-tripole cuffs give 0–7 events in a span — near
+  0/s, far below 1–5/s. Either the tripole is not capturing spikes at 6σ, or the
+  left-cuff connector problem below is hiding them. Report this as a finding;
+  it matters for everything spike-based on the new cohort.
+
+### Contact quality — a systematic LEFT-cuff problem
+
+Every screen failure in the 60-recording pool is "off the cuff" (r ≈ 0 with its
+peers, σ 3.8–31 µV — alive, but sharing nothing), and **every one is on the left
+cuff**, intermittently (1–5 of ~10 recordings per animal). Right cuffs pass in
+every recording. An intermittent failure on one side in every animal points at
+the left lead or connector rather than at individual electrodes — a hardware
+question for Andrea, and one worth settling before the next implants. Velocity
+(task 18) is possible on the right cuff throughout and on the left cuff in
+6–10 of ~10 recordings per animal; restrict velocity to recordings whose cuff
+passes the screen.
+
+Extend the screen to stomach contacts later: B's ANT1 is 60 Hz-dominated
+(σ 361 µV vs 54–58 µV) and feeds `stomach_ref`.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
