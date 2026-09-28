@@ -80,6 +80,7 @@ __all__ = [
     "BUDGET_QUANTILE",
     "CANDIDATE_BUDGET",
     "CHANCE_BOUND_MAX",
+    "CLASSIFICATIONS",
     "CLOSE_GAP_S",
     "CONFIDENCE",
     "CURRENT_SCORING_UNIT",
@@ -104,6 +105,7 @@ __all__ = [
     "candidate_digest",
     "chance_of_cover",
     "check_next_round",
+    "classification_path",
     "clopper_pearson",
     "close_pairs",
     "covered_fraction",
@@ -117,6 +119,7 @@ __all__ = [
     "one_sided_lower",
     "poisson_binomial_95",
     "pooled_gate",
+    "record_classification",
     "record_generator_change",
     "score_round",
     "score_stored_round",
@@ -1061,6 +1064,61 @@ def last_fix_at(store: GemsStore) -> datetime | None:
 GENERATOR_CHANGE_PREFIX: Final = "generator_change:"
 """Resolution key prefix for a task 07 change that answers no miss. It cannot
 collide with a miss id, which is ``<span_id>#<index>``."""
+
+
+Classification = Literal["artifact", "not_artifact", "part_of_neighbour", "separate"]
+CLASSIFICATIONS: Final[tuple[str, ...]] = ("artifact", "not_artifact", "part_of_neighbour",
+                                           "separate")
+"""What the labeller can say about a miss after seeing its traces: whether it is a
+real artifact she would blank, or - for a mark just apart from another - whether it
+is part of that neighbouring artifact."""
+
+
+def classification_path(store: GemsStore, plan_id: str) -> Path:
+    """Where a round's miss classifications live: beside its score, never in the marks."""
+    return store.audit_score_path(plan_id).with_name(f"{plan_id}_classifications.json")
+
+
+def record_classification(
+    store: GemsStore, plan_id: str, miss_id: str, *, classification: Classification,
+    words: str, by: str, at: datetime,
+) -> Path:
+    """Record the labeller's classification of one miss, beside the round's score.
+
+    Her judgement of a miss from its traces is recorded as exactly that - a
+    classification, in her own words - and reported alongside the score. The
+    committed marks are never edited and the score stands as committed: changing a
+    label after learning it was missed is the one relabelling the audit cannot
+    survive (ruling 2026-09-28). Raises ``ValueError`` for an unknown miss id,
+    classification or naive time, and for a miss already classified.
+    """
+    if classification not in CLASSIFICATIONS:
+        msg = f"classification must be one of {CLASSIFICATIONS}, got {classification!r}"
+        raise ValueError(msg)
+    if at.tzinfo is None:
+        msg = "the classification time must be timezone-aware (invariant 31)"
+        raise ValueError(msg)
+    if not words.strip():
+        msg = "record her words, not only the category"
+        raise ValueError(msg)
+    score = _read_json(store.audit_score_path(plan_id))
+    if score is None:
+        msg = f"{plan_id} has no score to classify misses against"
+        raise ValueError(msg)
+    ids = {a["id"] for a in score.get("artifacts", [])}
+    if miss_id not in ids:
+        msg = f"{miss_id!r} is not an artifact in {plan_id}'s score"
+        raise ValueError(msg)
+    path = classification_path(store, plan_id)
+    doc = _read_json(path) or {}
+    if miss_id in doc:
+        msg = f"{miss_id} is already classified; a classification is written once"
+        raise ValueError(msg)
+    doc[miss_id] = {"classification": classification, "words": words, "by": by,
+                    "at": at.isoformat()}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, json.dumps(doc, indent=1, sort_keys=True, ensure_ascii=True) + "\n")
+    return path
 
 
 def record_generator_change(

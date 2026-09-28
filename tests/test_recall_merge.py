@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -10,9 +11,11 @@ import pytest
 from gems_blanking_v2.detect.recall import (
     CURRENT_SCORING_UNIT,
     SpanInput,
+    classification_path,
     close_pairs,
     load_round,
     merge_marks,
+    record_classification,
     score_round,
     score_stored_round,
 )
@@ -153,3 +156,46 @@ def test_scoring_merged_never_rewrites_the_committed_marks(tmp_path: Path) -> No
 
     score_stored_round(store, PID, _reveal_with(CANDS), mode="tuning", unit="merged")
     assert {f: f.read_bytes() for f in before} == before
+
+
+# --- the labeller's classification of a miss, beside the score (2026-09-29) ----------
+
+
+def test_a_classification_is_recorded_beside_the_score_and_never_touches_the_marks(
+    tmp_path: Path,
+) -> None:
+    store = GemsStore.initialise(tmp_path / "gems")
+    _write_round(store, PID, [[[210, 211], [230, 231]], [[250, 252]]],
+                 committed_at="2026-09-27T10:05:00+00:00", revealed=CANDS)
+    score_stored_round(store, PID, _reveal_with(CANDS))
+    _, spans = load_round(store, PID)
+    marks = [f for sp in spans
+             for f in store.audit_dir(sp["animal"], sp["recording_id"]).glob("*_blind_marks.json")]
+    before = {f: f.read_bytes() for f in marks}
+    score_before = store.audit_score_path(PID).read_bytes()
+    at = datetime(2026, 9, 29, 9, 0, tzinfo=UTC)
+
+    path = record_classification(store, PID, f"{PID}_s1#0", classification="artifact",
+                                 words="a real pop, I would blank it", by="Andrea", at=at)
+
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    assert path == classification_path(store, PID)
+    assert doc[f"{PID}_s1#0"] == {"classification": "artifact", "by": "Andrea",
+                                  "words": "a real pop, I would blank it", "at": at.isoformat()}
+    assert {f: f.read_bytes() for f in marks} == before
+    assert store.audit_score_path(PID).read_bytes() == score_before
+    with pytest.raises(ValueError, match="already classified"):
+        record_classification(store, PID, f"{PID}_s1#0", classification="not_artifact",
+                              words="changed my mind", by="Andrea", at=at)
+    with pytest.raises(ValueError, match="not an artifact"):
+        record_classification(store, PID, f"{PID}_s9#0", classification="artifact",
+                              words="x", by="Andrea", at=at)
+    with pytest.raises(ValueError, match="one of"):
+        record_classification(store, PID, f"{PID}_s1#1", classification="maybe",  # type: ignore[arg-type]
+                              words="x", by="Andrea", at=at)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        record_classification(store, PID, f"{PID}_s1#1", classification="separate",
+                              words="x", by="Andrea", at=datetime(2026, 9, 29))
+    with pytest.raises(ValueError, match="her words"):
+        record_classification(store, PID, f"{PID}_s1#1", classification="separate",
+                              words="  ", by="Andrea", at=at)
