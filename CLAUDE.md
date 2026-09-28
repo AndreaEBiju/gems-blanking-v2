@@ -381,6 +381,17 @@ violating one, stop and say so rather than working around it.
     be quoted, and verify a commit from a clean checkout of exactly that commit,
     submodules included.
 
+43. **A quality screen that hides a signal from detection must hide it from
+    every consumer too — otherwise it hides artifacts, not bad data.** Detection
+    reads every signal any consumer reads. A contact judged unhealthy may be
+    distrusted for derived quantities (a tripole, a velocity), but if any
+    consumer still reads it, detection must too. *Found in round 2:* the contact
+    screen removed the left cuff's contact 3 from detection because it shared
+    nothing with its peers — and it shared nothing because it was popping at
+    rail scale. The consumers still read it. Nine of fourteen misses were those
+    pops. The broken contact was the artifact source, and the screen was built
+    to look away from exactly that.
+
 ---
 
 ## Cross-platform rules (macOS + Windows; Linux best-effort)
