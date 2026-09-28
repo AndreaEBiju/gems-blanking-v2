@@ -80,7 +80,9 @@ __all__ = [
     "BUDGET_QUANTILE",
     "CANDIDATE_BUDGET",
     "CHANCE_BOUND_MAX",
+    "CLOSE_GAP_S",
     "CONFIDENCE",
+    "CURRENT_SCORING_UNIT",
     "DESCRIPTIVE_NOTE",
     "DIGEST_RULE",
     "GATE_RECALL",
@@ -103,12 +105,14 @@ __all__ = [
     "chance_of_cover",
     "check_next_round",
     "clopper_pearson",
+    "close_pairs",
     "covered_fraction",
     "diagnose_miss",
     "generator_provenance",
     "is_covered",
     "last_fix_at",
     "load_round",
+    "merge_marks",
     "next_round_gate",
     "one_sided_lower",
     "poisson_binomial_95",
@@ -145,6 +149,16 @@ Z_EXIT: Final[float] = float(_DEFAULTS["z_exit"].default)
 """The generator's hysteresis floor: below it a pair is not even sustaining."""
 
 TUNING_LABEL: Final = "tuning check, not gate evidence"
+
+ScoringUnit = Literal["as_committed", "merged"]
+
+CURRENT_SCORING_UNIT: Final[ScoringUnit] = "merged"
+"""The unit a plan created now declares (Andrea, 2026-09-28): one artifact is one
+connected run of committed marks. A plan without ``scoring_unit`` - rounds 1 and 2
+- was declared ``as_committed``, and is scored that way as gate evidence."""
+
+CLOSE_GAP_S: Final = 0.100
+"""Marks this close but not touching are listed for Andrea, never merged."""
 
 CHANCE_BOUND_MAX: Final = 0.98
 """A round counts as gate evidence only while the POOLED chance-recall upper 95%
@@ -314,11 +328,18 @@ class ArtifactScore:
     covered: bool
     covered_fraction: float
     diagnosis: MissDiagnosis | None = None
+    merged_from: tuple[int, ...] | None = None
+    """In the merged unit, the committed marks (their indices in the marks file) this
+    artifact is the union of; ``None`` in the as-committed unit."""
 
     @property
     def miss_id(self) -> str:
-        """``<span_id>#<index>``: the key a resolution is recorded under."""
-        return f"{self.span_id}#{self.index}"
+        """Return the key a resolution is recorded under: ``<span_id>#<index>``.
+
+        A merged artifact's is ``<span_id>#m<index>``; the ``m`` keeps the ids of the
+        two scoring units apart.
+        """
+        return f"{self.span_id}#{'m' if self.merged_from is not None else ''}{self.index}"
 
     def to_json(self) -> dict[str, Any]:
         """Return a JSON-ready record of this artifact."""
@@ -327,6 +348,8 @@ class ArtifactScore:
             "stop_s": self.stop_s, "covered": self.covered,
             "covered_fraction": self.covered_fraction,
         }
+        if self.merged_from is not None:
+            out["merged_from"] = list(self.merged_from)
         if self.diagnosis is not None:
             out["diagnosis"] = self.diagnosis.to_json()
         return out
@@ -378,6 +401,51 @@ def covered_fraction(artifact: tuple[float, float], candidates: npt.ArrayLike) -
             total += e - end
             end = e
     return total / (a1 - a0)
+
+
+def merge_marks(marks: npt.ArrayLike) -> tuple[F64, list[tuple[int, ...]]]:
+    """Merge one span's committed marks into artifacts: connected runs of marks.
+
+    Marks whose intervals overlap or touch (gap <= 0) are one artifact, their union
+    (Andrea, 2026-09-28: the viewport's width made her mark one artifact as several
+    overlapping marks). Any positive gap keeps them apart - that could be two
+    artifacts. Mechanical and independent of the candidates. Returns the artifacts
+    in time order and, for each, the indices of the marks (in the order given, i.e.
+    the marks file's) it came from. The committed marks are never rewritten.
+    """
+    a = _intervals(marks)
+    order = sorted(range(len(a)), key=lambda i: (a[i, 0], a[i, 1]))
+    out: list[list[float]] = []
+    groups: list[list[int]] = []
+    for i in order:
+        s0, s1 = float(a[i, 0]), float(a[i, 1])
+        if out and s0 <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], s1)
+            groups[-1].append(i)
+        else:
+            out.append([s0, s1])
+            groups.append([i])
+    merged = np.asarray(out, dtype=np.float64).reshape(-1, 2)
+    return merged, [tuple(sorted(g)) for g in groups]
+
+
+def close_pairs(marks: npt.ArrayLike, max_gap_s: float = CLOSE_GAP_S
+                ) -> list[tuple[int, int, float]]:
+    """Adjacent artifacts separated by ``0 < gap < max_gap_s``: listed, never merged.
+
+    ``(i, j, gap_s)`` with ``i`` the committed mark that ends the earlier artifact
+    and ``j`` the one that starts the later.
+    """
+    a = _intervals(marks)
+    merged, groups = merge_marks(a)
+    out = []
+    for k in range(len(merged) - 1):
+        gap = float(merged[k + 1, 0] - merged[k, 1])
+        if gap < max_gap_s:  # always > 0: touching artifacts were merged
+            i = max(groups[k], key=lambda m: a[m, 1])
+            j = min(groups[k + 1], key=lambda m: a[m, 0])
+            out.append((int(i), int(j), gap))
+    return out
 
 
 def chance_of_cover(length: float, span: tuple[float, float], candidates: npt.ArrayLike) -> float:
@@ -534,6 +602,7 @@ class RoundScore:
     mode: Literal["gate", "tuning"] = "gate"
     warnings: list[str] = field(default_factory=list)
     pooled: dict[str, Any] | None = None
+    unit: ScoringUnit = "as_committed"
 
     @property
     def found(self) -> int:
@@ -643,6 +712,7 @@ class RoundScore:
         return {
             "plan_id": self.plan_id, **({"seed": self.seed} if self.seed is not None else {}),
             "mode": self.mode,
+            "scoring_unit": self.unit,
             "evidence": TUNING_LABEL if self.mode == "tuning" else "gate",
             "warnings": list(self.warnings),
             **({"pooled_gate": self.pooled} if self.pooled is not None else {}),
@@ -662,6 +732,9 @@ class RoundScore:
         s = self.statistics()
         lines = [f"Audit round {self.plan_id}" + (f"  (seed {self.seed})" if self.seed else "")
                  + (f"   ** {TUNING_LABEL.upper()} **" if self.mode == "tuning" else ""),
+                 "  scoring unit    " + ("MERGED - one artifact per connected run of marks"
+                                         if self.unit == "merged" else
+                                         "AS COMMITTED - one artifact per mark"),
                  f"  labelled        {s['minutes_labelled']:.1f} min over "
                  f"{len(self.per_span)} spans",
                  f"  artifacts       found {s['found']}, covered {s['covered']}, "
@@ -735,13 +808,22 @@ class RoundScore:
 def score_round(
     plan_id: str, spans: Sequence[SpanInput], *, seed: int | None = None,
     z_enter: float = Z_ENTER, z_exit: float = Z_EXIT, rounds_scored: int = 1,
-    provenance: dict[str, Any] | None = None,
+    provenance: dict[str, Any] | None = None, unit: ScoringUnit = "as_committed",
 ) -> RoundScore:
-    """Score one round of committed blind spans."""
+    """Score one round of committed blind spans, in ``unit``.
+
+    ``as_committed``: one artifact per committed mark. ``merged``: one artifact per
+    connected run of marks (:func:`merge_marks`), applied before anything else.
+    """
     arts: list[ArtifactScore] = []
     per_span: list[dict[str, Any]] = []
     for sp in spans:
-        a = _intervals(sp.artifacts)
+        committed = _intervals(sp.artifacts)
+        if unit == "merged":
+            a, groups = merge_marks(committed)
+            members: list[tuple[int, ...] | None] = list(groups)
+        else:
+            a, members = committed, [None] * len(committed)
         c = _intervals(sp.candidates)
         cov = 0
         for i, (a0, a1) in enumerate(a):
@@ -750,10 +832,12 @@ def score_round(
             arts.append(ArtifactScore(
                 sp.span_id, i, float(a0), float(a1), hit, covered_fraction((a0, a1), c),
                 None if hit else diagnose_miss((a0, a1), sp.traces,
-                                               z_enter=z_enter, z_exit=z_exit)))
+                                               z_enter=z_enter, z_exit=z_exit),
+                merged_from=members[i]))
         window = (sp.start_s, sp.stop_s)
         per_span.append({"span_id": sp.span_id, "recording_id": sp.recording_id,
                          "animal": sp.animal, "condition": sp.condition,
+                         "marks_committed": len(committed),
                          "found": len(a), "covered": cov, "minutes": sp.minutes,
                          "candidates": len(c), "traces": sp.traces is not None,
                          "candidates_in_span": int(sum(
@@ -762,7 +846,7 @@ def score_round(
                          "chance_per_mark": [chance_of_cover(float(a1 - a0), window, c)
                                              for a0, a1 in a]})
     return RoundScore(plan_id, seed, arts, per_span, sum(sp.minutes for sp in spans),
-                      rounds_scored, dict(provenance or {}))
+                      rounds_scored, dict(provenance or {}), unit=unit)
 
 
 def next_round_gate(
@@ -874,6 +958,7 @@ def score_stored_round(
     store: GemsStore, plan_id: str, reveal: RevealFn, *,
     mode: Literal["gate", "tuning"] = "gate",
     provenance: dict[str, Any] | None = None, write: bool = True,
+    unit: ScoringUnit | None = None,
 ) -> RoundScore:
     """Score a committed round from the store and write the score.
 
@@ -884,8 +969,21 @@ def score_stored_round(
     would swap gate evidence for a re-score. ``tuning`` scores the round with the
     CURRENT generator, whatever it revealed: labelled :data:`TUNING_LABEL`, written
     to its own file, never pooled.
+
+    ``unit`` defaults to the unit the plan DECLARED (``scoring_unit``; absent means
+    ``as_committed``, rounds 1 and 2). Gate evidence is scored only in the declared
+    unit; the other unit is a tuning score, labelled with its unit.
     """
     plan, spans = load_round(store, plan_id)
+    declared: ScoringUnit = plan.get("scoring_unit", "as_committed")
+    if declared not in ("as_committed", "merged"):
+        msg = f"{plan_id} declares an unknown scoring unit {declared!r}"
+        raise ValueError(msg)
+    unit = declared if unit is None else unit
+    if mode == "gate" and unit != declared:
+        msg = (f"{plan_id} declared the {declared!r} unit before labelling; gate evidence "
+               f"is scored in that unit only - score {unit!r} with mode='tuning'")
+        raise ValueError(msg)
     generator = generator_provenance()
     inputs, warnings = [], []
     digest_state: dict[str, str] = {}
@@ -922,7 +1020,8 @@ def score_stored_round(
         "scored_at": datetime.now(UTC).isoformat(),
         "generator": generator,
         "reveal_digests": digest_state,
-        **(provenance or {})})
+        "declared_scoring_unit": declared,
+        **(provenance or {})}, unit=unit)
     score = replace(score, mode=mode, warnings=warnings)
     if not write:
         return score
