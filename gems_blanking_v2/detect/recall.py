@@ -75,6 +75,9 @@ from gems_blanking_v2.io.store import GemsStore, atomic_write_text
 __all__ = [
     "BOOTSTRAP_DRAWS",
     "BOOTSTRAP_SEED",
+    "BUDGET_MIN_RECORDINGS",
+    "BUDGET_QUANTILE",
+    "CANDIDATE_BUDGET",
     "CONFIDENCE",
     "DIGEST_RULE",
     "GATE_RECALL",
@@ -89,6 +92,9 @@ __all__ = [
     "RoundScore",
     "SpanInput",
     "artifacts_needed",
+    "budget_key",
+    "budget_record",
+    "budget_status",
     "candidate_digest",
     "check_next_round",
     "clopper_pearson",
@@ -106,6 +112,7 @@ __all__ = [
     "source_sha256",
     "span_bootstrap",
     "span_id",
+    "write_budget",
 ]
 
 F64 = npt.NDArray[np.float64]
@@ -889,21 +896,116 @@ def pooled_gate(store: GemsStore) -> dict[str, Any]:
     return out
 
 
-def check_next_round(store: GemsStore) -> tuple[bool, str]:
+# ---------------------------------------------------------------------------
+# the candidate budget (task 09, declared before any marks; enforced 2026-09-28)
+# ---------------------------------------------------------------------------
+
+CANDIDATE_BUDGET: Final = 3000
+"""Candidates per recording the pinned generator may produce (task 09: class balance
+of >= 5% true positives at ~150 real artifacts per recording). Round 1 showed why
+it matters: at 93-96% of a span covered, recall is met by coverage alone."""
+
+BUDGET_QUANTILE: Final = 0.9
+"""The pool statistic: the generator is within budget when this quantile of the
+measured candidates-per-recording is <= :data:`CANDIDATE_BUDGET` - at most 10% of
+recordings over. The declared rule is per recording; which pool statistic decides
+is this module's choice, reported for ratification (2026-09-28)."""
+
+BUDGET_MIN_RECORDINGS: Final = 30
+"""A budget is measured on many recordings, not a handful of spans."""
+
+
+def budget_key(generator_sha: str, reveal_sha: str | None) -> str:
+    """Key a budget measurement to the exact generator it measured."""
+    return f"{generator_sha[:16]}_{(reveal_sha or 'noreveal')[:16]}"
+
+
+def budget_record(rows: Sequence[dict[str, Any]], *, reveal_sha: str | None,
+                  sample_rule: str) -> dict[str, Any]:
+    """Summarise per-recording measurements into a budget record for this generator.
+
+    Each row carries ``candidates`` (per recording, over its assessable regions),
+    ``assessable_s`` and ``covered_s``, plus ``animal`` and ``condition``.
+    """
+    generator = generator_provenance()
+    counts = np.asarray([r["candidates"] for r in rows], dtype=float)
+    frac = np.asarray([r["covered_s"] / r["assessable_s"] for r in rows if r["assessable_s"] > 0])
+    q = float(np.quantile(counts, BUDGET_QUANTILE)) if counts.size else float("nan")
+    by_cell: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        by_cell.setdefault(f"{r['animal']}|{r['condition']}", []).append(r)
+    cells = {k: {"n": len(v),
+                 "median_candidates": float(np.median([x["candidates"] for x in v])),
+                 "max_candidates": float(max(x["candidates"] for x in v)),
+                 "median_time_covered": float(np.median(
+                     [x["covered_s"] / x["assessable_s"] for x in v if x["assessable_s"] > 0]))}
+             for k, v in sorted(by_cell.items())}
+    return {
+        "key": budget_key(generator["source_sha256"], reveal_sha),
+        "generator": generator, "reveal_source_sha256": reveal_sha,
+        "measured_at": datetime.now(UTC).isoformat(), "sample_rule": sample_rule,
+        "budget": CANDIDATE_BUDGET, "quantile": BUDGET_QUANTILE,
+        "min_recordings": BUDGET_MIN_RECORDINGS, "n_recordings": len(rows),
+        "candidates_quantile": q,
+        "candidates_median": float(np.median(counts)) if counts.size else float("nan"),
+        "fraction_over_budget": float(np.mean(counts > CANDIDATE_BUDGET)) if counts.size else 1.0,
+        "time_covered_median": float(np.median(frac)) if frac.size else float("nan"),
+        "within_budget": bool(len(rows) >= BUDGET_MIN_RECORDINGS and q <= CANDIDATE_BUDGET),
+        "by_animal_condition": cells, "recordings": list(rows),
+    }
+
+
+def write_budget(store: GemsStore, record: dict[str, Any]) -> Path:
+    """Write a budget record at its generator's key."""
+    path = store.audit_budget_path(record["key"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, json.dumps(record, indent=1, sort_keys=True, allow_nan=False) + "\n")
+    return path
+
+
+def budget_status(store: GemsStore, reveal_sha: str | None = None) -> tuple[bool, str]:
+    """Return whether the CURRENT generator is measured and within the candidate budget."""
+    key = budget_key(generator_provenance()["source_sha256"], reveal_sha)
+    rec = _read_json(store.audit_budget_path(key))
+    if rec is None:
+        return False, (f"the candidate budget has not been measured for the current "
+                       f"generator ({key}); measure it on the eligible pool first")
+    if rec["n_recordings"] < BUDGET_MIN_RECORDINGS:
+        return False, (f"the budget measurement covers {rec['n_recordings']} recordings; "
+                       f"at least {BUDGET_MIN_RECORDINGS} are needed")
+    if not rec["within_budget"]:
+        return False, (f"the generator exceeds the candidate budget: the "
+                       f"{rec['quantile']:.0%} quantile is {rec['candidates_quantile']:.0f} "
+                       f"candidates per recording against {CANDIDATE_BUDGET} "
+                       f"({rec['fraction_over_budget']:.0%} of {rec['n_recordings']} over) - "
+                       "a round now would clear recall by coverage alone")
+    return True, (f"within budget: {rec['quantile']:.0%} quantile "
+                  f"{rec['candidates_quantile']:.0f} <= {CANDIDATE_BUDGET}")
+
+
+def check_next_round(store: GemsStore, *, reveal_sha: str | None = None) -> tuple[bool, str]:
     """May another audit round be drawn now? ``(allowed, reason)``.
 
-    The first round is always allowed. After that, the latest round must be
-    complete and scored, and :func:`next_round_gate` must pass on its score and
-    the human-recorded resolutions.
+    Every round, the first included, needs the current generator measured and
+    within :data:`CANDIDATE_BUDGET` (:func:`budget_status`). After the first, the
+    latest round must also be complete and scored, and :func:`next_round_gate` must
+    pass on its score and the human-recorded resolutions.
     """
     folder = store.audit_plan_path("x").parent
     plans = sorted(folder.glob("plan_*.json")) if folder.is_dir() else []
-    if not plans:
-        return True, "no earlier round: draw round 1"
-    plan = json.loads(plans[-1].read_text(encoding="utf-8"))
-    try:
-        load_round(store, plan["plan_id"])
-    except FileNotFoundError as exc:
-        return False, f"round {plan['plan_id']} is still open: {exc}"
-    return next_round_gate(_read_json(store.audit_score_path(plan["plan_id"])),
-                           _read_json(store.audit_resolution_path(plan["plan_id"])))
+    if plans:
+        plan = json.loads(plans[-1].read_text(encoding="utf-8"))
+        try:
+            load_round(store, plan["plan_id"])
+        except FileNotFoundError as exc:
+            return False, f"round {plan['plan_id']} is still open: {exc}"
+        ok, why = next_round_gate(_read_json(store.audit_score_path(plan["plan_id"])),
+                                  _read_json(store.audit_resolution_path(plan["plan_id"])))
+        if not ok:
+            return ok, why
+    else:
+        why = "no earlier round: draw round 1"
+    within, budget_why = budget_status(store, reveal_sha)
+    if not within:
+        return False, budget_why
+    return True, f"{why}; {budget_why}"

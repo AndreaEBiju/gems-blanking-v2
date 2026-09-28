@@ -639,6 +639,11 @@ class GemsStore:
         return (self.root / "labels" / "blind_audit_scores"
                 / f"{validate_component(plan_id)}_score.json")
 
+    def audit_budget_path(self, key: str) -> Path:
+        """Return where a candidate-budget measurement for one generator is written."""
+        return (self.root / "labels" / "blind_audit_scores"
+                / f"budget_{validate_component(key)}.json")
+
     def audit_tuning_path(self, plan_id: str, stamp: str) -> Path:
         """Return where a TUNING re-score of a round is written - never the gate score."""
         return (self.root / "labels" / "blind_audit_scores"

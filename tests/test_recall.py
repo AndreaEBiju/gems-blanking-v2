@@ -9,12 +9,16 @@ from pathlib import Path
 import numpy as np
 import pytest
 from gems_blanking_v2.detect.recall import (
+    BUDGET_MIN_RECORDINGS,
+    CANDIDATE_BUDGET,
     TUNING_LABEL,
     Z_ENTER,
     Z_EXIT,
     RevealMismatchError,
     SpanInput,
     artifacts_needed,
+    budget_record,
+    budget_status,
     candidate_digest,
     check_next_round,
     clopper_pearson,
@@ -28,6 +32,7 @@ from gems_blanking_v2.detect.recall import (
     score_round,
     score_stored_round,
     span_bootstrap,
+    write_budget,
 )
 from gems_blanking_v2.io.store import GemsStore
 
@@ -238,9 +243,22 @@ def test_a_round_is_scored_whole_or_not_at_all(tmp_path: Path) -> None:
     assert not ok and "still open" in why
 
 
+def _budget_rows(n: int, candidates: float) -> list[dict]:
+    return [{"animal": "AB"[i % 2], "condition": ("baseline", "stim_recovery")[i % 2],
+             "session": f"s{i}", "candidates": candidates, "assessable_s": 560.0,
+             "covered_s": 56.0} for i in range(n)]
+
+
+def _within_budget(store: GemsStore, reveal_sha: str | None = None) -> None:
+    write_budget(store, budget_record(_budget_rows(BUDGET_MIN_RECORDINGS, 800.0),
+                                      reveal_sha=reveal_sha, sample_rule="test"))
+
+
 def test_the_store_round_gates_the_next_round_through_its_resolutions(tmp_path: Path) -> None:
     store = GemsStore.initialise(tmp_path / "gems")
-    assert check_next_round(store) == (True, "no earlier round: draw round 1")
+    _within_budget(store)
+    ok, why = check_next_round(store)
+    assert ok and why.startswith("no earlier round: draw round 1")
     pid = "plan_20260926T000000Z_00000063"
     _write_round(store, pid, [[[210, 211], [230, 231]], [[250, 252]]])
     assert check_next_round(store)[0] is False  # complete but unscored
@@ -393,3 +411,45 @@ def test_a_round_started_before_a_fix_is_not_eligible_even_if_finished_after(
                  committed_at=["2026-09-28T08:00:00+00:00", "2026-09-28T10:00:00+00:00"])
     score = score_stored_round(store, PID, _reveal_with(CANDS))
     assert score.pooled is not None and score.pooled["pooled_rounds"] == []
+
+
+# --- the candidate budget (declared in task 09; enforced 2026-09-28) ---------
+
+
+def test_no_round_is_drawn_while_the_generator_is_unmeasured(tmp_path: Path) -> None:
+    store = GemsStore.initialise(tmp_path / "gems")
+    ok, why = check_next_round(store)
+    assert not ok and "has not been measured for the current generator" in why
+
+
+def test_no_round_is_drawn_while_the_generator_exceeds_its_budget(tmp_path: Path) -> None:
+    """Round 1's spans scaled to ~3,000-13,000 per recording: over budget, refused."""
+    store = GemsStore.initialise(tmp_path / "gems")
+    rows = _budget_rows(BUDGET_MIN_RECORDINGS, 800.0)
+    for r in rows[:4]:  # 4 of 30 over: the 90% quantile is over -> refused
+        r["candidates"] = 13_000.0
+    write_budget(store, budget_record(rows, reveal_sha=None, sample_rule="test"))
+    ok, why = check_next_round(store)
+    assert not ok and "exceeds the candidate budget" in why
+    rows = _budget_rows(BUDGET_MIN_RECORDINGS, 800.0)
+    for r in rows[:2]:  # 2 of 30 over: the 90% quantile is within -> allowed
+        r["candidates"] = 13_000.0
+    write_budget(store, budget_record(rows, reveal_sha=None, sample_rule="test"))
+    assert check_next_round(store)[0]
+
+
+def test_a_budget_on_too_few_recordings_or_another_generator_does_not_count(
+    tmp_path: Path,
+) -> None:
+    store = GemsStore.initialise(tmp_path / "gems")
+    write_budget(store, budget_record(_budget_rows(5, 100.0), reveal_sha=None,
+                                      sample_rule="five spans"))
+    ok, why = budget_status(store)
+    assert not ok and "at least" in why
+    _within_budget(store, reveal_sha="a" * 64)  # measured with a different reveal
+    assert not budget_status(store, reveal_sha="b" * 64)[0]
+    assert budget_status(store, reveal_sha="a" * 64)[0]
+
+
+def test_the_budget_threshold_is_the_declared_one() -> None:
+    assert CANDIDATE_BUDGET == 3000
