@@ -69,6 +69,7 @@ import numpy as np
 import numpy.typing as npt
 from scipy.stats import beta
 
+from gems_blanking_v2.detect import chain
 from gems_blanking_v2.detect.candidates import candidate_report
 from gems_blanking_v2.io.store import GemsStore, atomic_write_text
 
@@ -78,6 +79,7 @@ __all__ = [
     "BUDGET_MIN_RECORDINGS",
     "BUDGET_QUANTILE",
     "CANDIDATE_BUDGET",
+    "CHANCE_BOUND_MAX",
     "CONFIDENCE",
     "DESCRIPTIVE_NOTE",
     "DIGEST_RULE",
@@ -144,6 +146,13 @@ Z_EXIT: Final[float] = float(_DEFAULTS["z_exit"].default)
 
 TUNING_LABEL: Final = "tuning check, not gate evidence"
 
+CHANCE_BOUND_MAX: Final = 0.98
+"""A round counts as gate evidence only while the POOLED chance-recall upper 95%
+bound stays below this (ruling 2026-09-28, declared before round 2). Chance recall
+is what candidate coverage alone would score; if it nears the gate's own bar,
+clearing the bar no longer shows the generator responds to artifacts. The bound is
+the upper end of the central 95% Poisson-binomial range."""
+
 DESCRIPTIVE_NOTE: Final = (
     "descriptive, not a gate condition (ruling 2026-09-28): time covered is the "
     "fraction of labelled time inside candidates; chance recall is the recall a "
@@ -198,9 +207,12 @@ def source_sha256(package_dir: Path) -> str:
 def generator_provenance() -> dict[str, Any]:
     """Return the generator a score used: its parameters, gate settings and code.
 
-    ``source_sha256`` hashes the whole ``gems_blanking_v2`` package, so it names the
-    code exactly whether or not it is committed; ``commit`` and ``dirty`` say how it
-    relates to git.
+    ``generation_sha256`` (:func:`chain.generation_sha256`) hashes exactly the
+    detection chain's source - derivations, contact screen, z, candidates and their
+    constants - and is what a budget record and a gate round are keyed to (scope
+    ruled 2026-09-28), so an edit to this scorer or a report invalidates neither.
+    ``package_sha256`` hashes the whole package, for information only. ``commit``
+    and ``dirty`` say how the code relates to git.
     """
     package = Path(__file__).resolve().parents[1]
     params = {k: v.default for k, v in _DEFAULTS.items()
@@ -209,13 +221,15 @@ def generator_provenance() -> dict[str, Any]:
     commit = _git(package.parent, "rev-parse", "HEAD")
     status = _git(package.parent, "status", "--porcelain", "--", package.name)
     out: dict[str, Any] = {
-        "generator": "gems_blanking_v2.detect.candidates.candidate_report",
+        "generator": "gems_blanking_v2.detect.chain.detect_region",
         "parameters": params,
         "gate": {"gate_recall": GATE_RECALL, "confidence": CONFIDENCE,
                  "bound": "one-sided, min(Clopper-Pearson, span bootstrap)",
                  "bootstrap_draws": BOOTSTRAP_DRAWS, "bootstrap_seed": BOOTSTRAP_SEED,
                  "half_overlap": HALF_OVERLAP},
-        "source_sha256": source_sha256(package),
+        "generation_sha256": chain.generation_sha256(),
+        "generation_modules": chain.generation_modules(),
+        "package_sha256": source_sha256(package),
     }
     if commit:
         out["commit"] = commit
@@ -552,9 +566,17 @@ class RoundScore:
             [(s["covered"], s["found"]) for s in self.per_span])
         quoted = "clopper_pearson" if (cp[1] - cp[0]) >= (bhi - blo) else "span_bootstrap"
         gate_lower = min(cp1, b1)
-        need = artifacts_needed(len(self.misses))
         per_round = n / self.rounds_scored
-        more = max(need - n, 0)
+        if self.pooled is not None:  # the projection counts only rounds that count
+            need = int(self.pooled["artifacts_needed_at_zero_further_misses"])
+            more = int(self.pooled["more_artifacts_needed"])
+            basis = ("eligible rounds: " + (", ".join(self.pooled["pooled_rounds"]) or "none")
+                     + ("" if self.plan_id in self.pooled["pooled_rounds"]
+                        else f"; {self.plan_id} is not among them"))
+        else:
+            need = artifacts_needed(len(self.misses))
+            more = max(need - n, 0)
+            basis = "this round alone (eligibility not evaluated)"
         out.update(
             recall=k / n,
             clopper_pearson_95=[cp[0], cp[1]],
@@ -567,6 +589,7 @@ class RoundScore:
             gate_cleared=gate_lower >= GATE_RECALL,
             artifacts_needed_at_zero_further_misses=need,
             more_artifacts_needed=more,
+            projection_basis=basis,
             more_rounds_projected=math.ceil(more / per_round) if more else 0,
             more_minutes_projected=(more / out["artifacts_per_minute"]
                                     if more and out["artifacts_per_minute"] else 0.0),
@@ -583,6 +606,7 @@ class RoundScore:
                 "time_covered_fraction": self._time_covered(),
                 "chance_recall": float(np.mean(chance)), "chance_recall_95": [lo, hi],
                 "p_all_covered_by_chance": float(np.prod(chance)),
+                "chance_margin": CHANCE_BOUND_MAX - hi,
             }
         return out
 
@@ -601,6 +625,10 @@ class RoundScore:
         if self.mode == "tuning":
             return (f"{TUNING_LABEL.upper()}: shows whether the current generator recovers "
                     "these marks; the gate and the sequential rule are unaffected")
+        if self.pooled is not None and self.plan_id not in self.pooled["pooled_rounds"]:
+            why = next((e["reason"] for e in self.pooled["excluded_rounds"]
+                        if e["plan_id"] == self.plan_id), "not pooled")
+            return f"NOT GATE EVIDENCE: {why}"
         if not self.found:
             return "no artifacts found: recall is undefined; draw another round"
         if self.misses:
@@ -652,7 +680,8 @@ class RoundScore:
                 f"  projection      {s['artifacts_needed_at_zero_further_misses']} artifacts "
                 f"needed at zero further misses: {s['more_artifacts_needed']} more, "
                 f"~{s['more_rounds_projected']} more round(s), "
-                f"~{s['more_minutes_projected']:.0f} min of labelling",
+                f"~{s['more_minutes_projected']:.0f} min of labelling "
+                f"({s['projection_basis']})",
                 f"  secondary       mean covered fraction "
                 f"{s['secondary_mean_covered_fraction']:.2f}; recall at >=50% overlap "
                 f"{s['secondary_recall_at_half_overlap']:.3f}",
@@ -669,6 +698,9 @@ class RoundScore:
                 f"  chance recall   {d['chance_recall']:.3f} (95% {d['chance_recall_95'][0]:.3f}-"
                 f"{d['chance_recall_95'][1]:.3f}), P(all covered by chance) "
                 f"{d['p_all_covered_by_chance']:.1e}   [DESCRIPTIVE, not a gate condition]")
+            lines.append(
+                f"  chance margin   {d['chance_margin']:+.3f} = {CHANCE_BOUND_MAX} - this "
+                f"round's chance upper bound {d['chance_recall_95'][1]:.3f}")
         for m in self.misses:
             d = m.diagnosis
             head = (f"  MISS {m.miss_id}  {m.start_s:.2f}-{m.stop_s:.2f} s  "
@@ -688,6 +720,10 @@ class RoundScore:
                 + (f"{pg['covered']}/{pg['found']}, lower bound {bound:.3f} -> "
                    f"{'CLEARED' if pg['gate_cleared'] else 'not cleared'}"
                    if bound is not None else "no eligible artifacts yet"))
+            if "chance_margin" in pg:
+                lines.append(f"                  pooled chance upper bound "
+                             f"{pg['chance_recall_upper_95']:.3f}, margin "
+                             f"{pg['chance_margin']:+.3f} to {CHANCE_BOUND_MAX}")
             for ex in pg["excluded_rounds"]:
                 lines.append(f"                  left out {ex['plan_id']}: {ex['reason']}")
         for w in self.warnings:
@@ -891,16 +927,17 @@ def score_stored_round(
     if not write:
         return score
     if mode == "tuning":
+        score = replace(score, pooled=pooled_gate(store))  # the pool it does NOT join
         path = store.audit_tuning_path(plan_id, datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ"))
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(path, json.dumps(score.to_json(), indent=1, sort_keys=True) + "\n")
         return score
     path = store.audit_score_path(plan_id)
     old = _read_json(path)
-    old_src = ((old or {}).get("provenance", {}).get("generator", {}) or {}).get("source_sha256")
-    if old_src is not None and old_src != generator["source_sha256"]:
+    if old is not None and _generation_of(old) != generator["generation_sha256"]:
+        was = _generation_of(old) or "an unscoped hash"
         msg = (f"{plan_id} already has a gate score made under a different generator "
-               f"({old_src[:12]} vs {generator['source_sha256'][:12]}); replacing it would "
+               f"({was[:12]} vs {generator['generation_sha256'][:12]}); replacing it would "
                "swap gate evidence for a re-score. Use mode='tuning'.")
         raise RevealMismatchError(msg)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -961,47 +998,94 @@ def record_generator_change(
     return key
 
 
-def pooled_gate(store: GemsStore) -> dict[str, Any]:
-    """Pool the gate-mode rounds labelled AFTER the last fix into the cumulative gate.
+def _generation_of(doc: dict[str, Any]) -> str | None:
+    """Return the generation hash a score or budget record was made under, if any."""
+    gen = doc.get("provenance", {}).get("generator") or doc.get("generator") or {}
+    value = gen.get("generation_sha256")
+    return value if isinstance(value, str) else None
 
-    Returns which rounds were pooled, which were left out and why, and the pooled
-    one-sided 95% lower bound - the more conservative of Clopper-Pearson and the
-    span bootstrap over every pooled span - against :data:`GATE_RECALL`.
+
+def _chance_of(doc: dict[str, Any]) -> list[float] | None:
+    """Return per-mark chance of cover over a score's spans; None if any is unrecorded."""
+    out: list[float] = []
+    for sp in doc.get("per_span", []):
+        ps = sp.get("chance_per_mark")
+        if ps is None or len(ps) != sp.get("found", 0):
+            return None
+        out += [float(q) for q in ps]
+    return out
+
+
+def pooled_gate(store: GemsStore) -> dict[str, Any]:
+    """Pool the gate-mode rounds that still count into the cumulative gate.
+
+    A round counts when it was scored in gate mode, under the CURRENT generation
+    hash (so a forgotten fix record cannot leave tuning data in the pool), labelled
+    after the last recorded fix, and - taken in labelling order - keeps the POOLED
+    chance-recall upper 95% bound below :data:`CHANCE_BOUND_MAX`. Returns which
+    rounds were pooled, which were left out and why, the pooled one-sided 95% lower
+    bound (the more conservative of Clopper-Pearson and the span bootstrap) against
+    :data:`GATE_RECALL`, the chance margin, and the projection over eligible rounds.
     """
     fix = last_fix_at(store)
+    current = chain.generation_sha256()
     folder = store.audit_score_path("x").parent
+    docs = [json.loads(f.read_text(encoding="utf-8"))
+            for f in (sorted(folder.glob("plan_*_score.json")) if folder.is_dir() else [])]
+    docs.sort(key=lambda d: (d.get("provenance", {}).get("labelled_at") or "", d["plan_id"]))
     pooled, excluded, per_span = [], [], []
-    for f in sorted(folder.glob("plan_*_score.json")) if folder.is_dir() else []:
-        doc = json.loads(f.read_text(encoding="utf-8"))
+    chance: list[float] = []
+    for doc in docs:
         pid = doc["plan_id"]
         labelled = _parse_time(doc.get("provenance", {}).get("labelled_at"))
+        gen = _generation_of(doc)
+        ps = _chance_of(doc)
         if doc.get("mode", "gate") != "gate":
             excluded.append({"plan_id": pid, "reason": "not a gate-mode score"})
+        elif gen != current:
+            excluded.append({"plan_id": pid, "reason": (
+                f"scored under generator {(gen or 'unscoped')[:12]}, not the current "
+                f"{current[:12]} - tuning data now")})
         elif fix is not None and labelled is None:
             excluded.append({"plan_id": pid, "reason": "labelling time unknown"})
         elif fix is not None and labelled is not None and labelled <= fix:
             excluded.append({"plan_id": pid, "reason": f"labelled {labelled.isoformat()}, "
                              f"before the last fix at {fix.isoformat()} - tuning data now"})
+        elif ps is None:
+            excluded.append({"plan_id": pid, "reason": (
+                "chance recall not recorded, so the chance bound cannot be checked")})
+        elif ps and (upper := poisson_binomial_95(chance + ps)[1]) >= CHANCE_BOUND_MAX:
+            excluded.append({"plan_id": pid, "reason": (
+                f"with it the pooled chance-recall upper 95% bound would be {upper:.3f}, "
+                f"not below {CHANCE_BOUND_MAX}: coverage alone would approach the gate's "
+                "bar, so the round cannot count as gate evidence")})
         else:
             pooled.append(pid)
+            chance += ps
             per_span += [(s["covered"], s["found"]) for s in doc.get("per_span", [])]
-    out: dict[str, Any] = {"last_fix_at": fix.isoformat() if fix else None,
-                           "pooled_rounds": pooled, "excluded_rounds": excluded,
-                           "gate_recall": GATE_RECALL, "gate_cleared": False}
     k, n = sum(c for c, _ in per_span), sum(f for _, f in per_span)
-    out.update(found=n, covered=k)
+    need = artifacts_needed(n - k)
+    out: dict[str, Any] = {"last_fix_at": fix.isoformat() if fix else None,
+                           "generation_sha256": current,
+                           "pooled_rounds": pooled, "excluded_rounds": excluded,
+                           "gate_recall": GATE_RECALL, "gate_cleared": False,
+                           "found": n, "covered": k,
+                           "artifacts_needed_at_zero_further_misses": need,
+                           "more_artifacts_needed": max(need - n, 0),
+                           "chance_bound_max": CHANCE_BOUND_MAX}
+    if chance:
+        upper = poisson_binomial_95(chance)[1]
+        out.update(chance_recall=float(np.mean(chance)), chance_recall_upper_95=upper,
+                   chance_margin=CHANCE_BOUND_MAX - upper)
     if n == 0:
         out["lower_bound_one_sided_95"] = None
         return out
     cp1 = one_sided_lower(k, n)
     b1 = span_bootstrap(per_span)[2]
     lower = min(cp1, b1)
-    need = artifacts_needed(n - k)
     out.update(lower_bound_one_sided_95=lower,
                lower_bound_parts={"clopper_pearson": cp1, "span_bootstrap": b1},
-               gate_cleared=lower >= GATE_RECALL,
-               artifacts_needed_at_zero_further_misses=need,
-               more_artifacts_needed=max(need - n, 0))
+               gate_cleared=lower >= GATE_RECALL)
     return out
 
 
@@ -1050,7 +1134,7 @@ def budget_record(rows: Sequence[dict[str, Any]], *, reveal_sha: str | None,
                      [x["covered_s"] / x["assessable_s"] for x in v if x["assessable_s"] > 0]))}
              for k, v in sorted(by_cell.items())}
     return {
-        "key": budget_key(generator["source_sha256"], reveal_sha),
+        "key": budget_key(generator["generation_sha256"], reveal_sha),
         "generator": generator, "reveal_source_sha256": reveal_sha,
         "measured_at": datetime.now(UTC).isoformat(), "sample_rule": sample_rule,
         "budget": CANDIDATE_BUDGET, "quantile": BUDGET_QUANTILE,
@@ -1074,7 +1158,7 @@ def write_budget(store: GemsStore, record: dict[str, Any]) -> Path:
 
 def budget_status(store: GemsStore, reveal_sha: str | None = None) -> tuple[bool, str]:
     """Return whether the CURRENT generator is measured and within the candidate budget."""
-    key = budget_key(generator_provenance()["source_sha256"], reveal_sha)
+    key = budget_key(chain.generation_sha256(), reveal_sha)
     rec = _read_json(store.audit_budget_path(key))
     if rec is None:
         return False, (f"the candidate budget has not been measured for the current "

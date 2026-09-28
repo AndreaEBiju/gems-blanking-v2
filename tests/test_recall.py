@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from gems_blanking_v2.detect import chain
 from gems_blanking_v2.detect.recall import (
     BUDGET_MIN_RECORDINGS,
     CANDIDATE_BUDGET,
@@ -408,7 +409,8 @@ def test_the_score_records_the_generator_it_used(tmp_path: Path) -> None:
     doc = json.loads(store.audit_score_path(PID).read_text(encoding="utf-8"))
     gen = doc["provenance"]["generator"]
     assert gen["parameters"]["z_enter"] == Z_ENTER and gen["parameters"]["z_exit"] == Z_EXIT
-    assert len(gen["source_sha256"]) == 64 and gen["gate"]["gate_recall"] == 0.98
+    assert len(gen["generation_sha256"]) == 64 and gen["gate"]["gate_recall"] == 0.98
+    assert "gems_blanking_v2.detect.chain" in gen["generation_modules"]
 
 
 # --- only rounds labelled after the last fix count ----------------------------
@@ -461,7 +463,7 @@ def test_a_gate_score_is_not_replaced_under_a_different_generator(tmp_path: Path
     score_stored_round(store, PID, _reveal_with(CANDS))
     path = store.audit_score_path(PID)
     doc = json.loads(path.read_text(encoding="utf-8"))
-    doc["provenance"]["generator"]["source_sha256"] = "0" * 64  # scored by older code
+    doc["provenance"]["generator"]["generation_sha256"] = "0" * 64  # scored by older code
     path.write_text(json.dumps(doc), encoding="utf-8")
     with pytest.raises(RevealMismatchError, match="different generator"):
         score_stored_round(store, PID, _reveal_with(CANDS))
@@ -501,7 +503,7 @@ def test_a_generator_change_with_no_miss_still_makes_the_round_tuning_data(
 
     res = json.loads(store.audit_resolution_path(PID).read_text(encoding="utf-8"))
     assert set(res) == {f"{PID}_s1#0", key} and key.startswith("generator_change:")
-    assert len(res[key]["generator"]["source_sha256"]) == 64
+    assert len(res[key]["generator"]["generation_sha256"]) == 64
     after = pooled_gate(store)
     assert after["pooled_rounds"] == [] and after["last_fix_at"] == when.isoformat()
     with pytest.raises(ValueError, match="never overwritten"):
@@ -511,6 +513,147 @@ def test_a_generator_change_with_no_miss_still_makes_the_round_tuning_data(
                                 fixed_at=datetime(2026, 9, 28, 19))
     assert next_round_gate(json.loads(store.audit_score_path(PID).read_text(
         encoding="utf-8")), res)[0] is True  # a change keyed off-miss blocks nothing
+
+
+# --- the pool: generation hash, chance bound, eligible projection (2026-09-28) --
+
+FULL = [np.array([[200.0, 320.0]]), np.array([[200.0, 320.0]])]  # every second covered
+
+
+def test_a_round_under_another_generation_hash_leaves_the_pool_without_a_fix_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A forgotten fix record must not leave tuning data in the pool."""
+    store = GemsStore.initialise(tmp_path / "gems")
+    _write_round(store, PID, [[[210, 211]], [[250, 252]]],
+                 committed_at="2026-09-27T10:05:00+00:00", revealed=CANDS)
+    score_stored_round(store, PID, _reveal_with(CANDS))
+    assert pooled_gate(store)["pooled_rounds"] == [PID]
+
+    monkeypatch.setattr(chain, "generation_sha256", lambda: "f" * 64)
+    after = pooled_gate(store)
+
+    assert after["pooled_rounds"] == [] and after["last_fix_at"] is None
+    assert "scored under generator" in after["excluded_rounds"][0]["reason"]
+
+
+def test_a_round_whose_chance_bound_reaches_the_bar_is_not_counted_and_says_why(
+    tmp_path: Path,
+) -> None:
+    store = GemsStore.initialise(tmp_path / "gems")
+    _write_round(store, PID, [[[210, 211], [230, 231]], [[250, 252]]],
+                 committed_at="2026-09-27T10:05:00+00:00", revealed=FULL)
+    score = score_stored_round(store, PID, _reveal_with(FULL))
+
+    assert score.covered == score.found == 3  # clean on its face...
+    assert score.pooled is not None and score.pooled["pooled_rounds"] == []
+    why = score.pooled["excluded_rounds"][0]["reason"]
+    assert "chance-recall upper 95% bound would be 1.000" in why
+    assert score.next_step().startswith("NOT GATE EVIDENCE") and "1.000" in score.next_step()
+    assert score.statistics()["descriptive"]["chance_margin"] == pytest.approx(0.98 - 1.0)
+    assert "chance margin   -0.020" in score.report()
+
+
+def test_a_round_below_the_chance_bound_counts_and_reports_its_margin(tmp_path: Path) -> None:
+    store = GemsStore.initialise(tmp_path / "gems")
+    _write_round(store, PID, [[[210, 211], [230, 231]], [[250, 252]]],
+                 committed_at="2026-09-27T10:05:00+00:00", revealed=CANDS)
+    score = score_stored_round(store, PID, _reveal_with(CANDS))
+
+    assert score.pooled is not None and score.pooled["pooled_rounds"] == [PID]
+    assert 0.0 < score.pooled["chance_margin"] <= 0.98
+    assert score.pooled["chance_margin"] == pytest.approx(
+        0.98 - score.pooled["chance_recall_upper_95"])
+    assert "pooled chance upper bound" in score.report()
+    assert score.next_step().startswith("zero misses")
+
+
+def test_the_chance_bound_is_pooled_in_labelling_order(tmp_path: Path) -> None:
+    """Round a (full coverage) cannot count alone; round b (sparse) can.
+
+    Taken in labelling order, a is refused, then b is admitted on its own chance.
+    """
+    store = GemsStore.initialise(tmp_path / "gems")
+    a, b = "plan_20260927T100000Z_0000000a", "plan_20260928T100000Z_0000000b"
+    _write_round(store, a, [[[210, 211]], [[250, 252]]],
+                 committed_at="2026-09-27T10:05:00+00:00", revealed=FULL)
+    _write_round(store, b, [[[210, 211], [230, 231]], [[250, 252]]],
+                 committed_at="2026-09-28T10:05:00+00:00", revealed=CANDS)
+    score_stored_round(store, a, _reveal_with(FULL))
+    pg = score_stored_round(store, b, _reveal_with(CANDS)).pooled
+
+    assert pg is not None and pg["pooled_rounds"] == [b]
+    assert [e["plan_id"] for e in pg["excluded_rounds"]] == [a]
+
+
+def test_the_bound_is_the_pools_not_each_rounds(tmp_path: Path) -> None:
+    """Sparse first, then fully covered: pooled, the second counts.
+
+    Alone it would be refused (upper bound 1.0); pooled the bound stays below 0.98.
+    """
+    store = GemsStore.initialise(tmp_path / "gems")
+    a, b = "plan_20260927T100000Z_0000000a", "plan_20260928T100000Z_0000000b"
+    sparse = [[[210, 211], [230, 231], [240, 241], [260, 261]], [[250, 252], [270, 271]]]
+    _write_round(store, a, sparse, committed_at="2026-09-27T10:05:00+00:00", revealed=CANDS)
+    _write_round(store, b, [[[210, 211]], [[250, 252]]],
+                 committed_at="2026-09-28T10:05:00+00:00", revealed=FULL)
+    score_stored_round(store, a, _reveal_with(CANDS))
+    pg = score_stored_round(store, b, _reveal_with(FULL)).pooled
+
+    assert pg is not None and pg["pooled_rounds"] == [a, b]
+    assert pg["chance_recall_upper_95"] < 0.98
+
+
+def test_a_chance_bound_exactly_at_the_bar_does_not_count(tmp_path: Path) -> None:
+    """'Below 0.98': 49 certain marks and one at p = 0.02 put the upper end at 49/50."""
+    store = GemsStore.initialise(tmp_path / "gems")
+    path = store.audit_score_path(PID)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "plan_id": PID, "mode": "gate",
+        "provenance": {"generator": {"generation_sha256": chain.generation_sha256()}},
+        "per_span": [{"found": 50, "covered": 50,
+                      "chance_per_mark": [1.0] * 49 + [0.02]}]}), encoding="utf-8")
+
+    pg = pooled_gate(store)
+    assert poisson_binomial_95([1.0] * 49 + [0.02])[1] == 0.98
+    assert pg["pooled_rounds"] == [] and "0.980" in pg["excluded_rounds"][0]["reason"]
+
+
+def test_a_round_without_recorded_chance_cannot_count(tmp_path: Path) -> None:
+    """Fail closed: a bound that cannot be checked is not a bound that passed."""
+    store = GemsStore.initialise(tmp_path / "gems")
+    _write_round(store, PID, [[[210, 211]], [[250, 252]]],
+                 committed_at="2026-09-27T10:05:00+00:00", revealed=CANDS)
+    score_stored_round(store, PID, _reveal_with(CANDS))
+    path = store.audit_score_path(PID)
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    for sp in doc["per_span"]:
+        del sp["chance_per_mark"]
+    path.write_text(json.dumps(doc), encoding="utf-8")
+
+    pg = pooled_gate(store)
+    assert pg["pooled_rounds"] == []
+    assert "chance recall not recorded" in pg["excluded_rounds"][0]["reason"]
+
+
+def test_the_projection_counts_only_eligible_rounds(tmp_path: Path) -> None:
+    """Round 1's report said '58 more' from a round that no longer counts: 149 fresh."""
+    store = GemsStore.initialise(tmp_path / "gems")
+    _write_round(store, PID, [[[210, 211], [230, 231]], [[250, 252]]],
+                 committed_at="2026-09-27T10:05:00+00:00", revealed=CANDS)
+    counted = score_stored_round(store, PID, _reveal_with(CANDS)).statistics()
+    assert counted["artifacts_needed_at_zero_further_misses"] == 149
+    assert counted["more_artifacts_needed"] == 149 - 3
+    assert counted["projection_basis"] == f"eligible rounds: {PID}"
+
+    record_generator_change(store, PID, change="x", reason="y",
+                            fixed_at=datetime(2026, 9, 28, 17, 7, 1, tzinfo=UTC))
+    tune = score_stored_round(store, PID, _reveal_with(CANDS), mode="tuning")
+    s = tune.statistics()
+    assert s["more_artifacts_needed"] == 149  # 149 fresh, not 149 - 3
+    assert s["projection_basis"] == f"eligible rounds: none; {PID} is not among them"
+    assert "149 more" in tune.report()
 
 
 # --- the candidate budget (declared in task 09; enforced 2026-09-28) ---------
