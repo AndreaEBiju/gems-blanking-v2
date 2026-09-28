@@ -15,7 +15,9 @@ from gems_blanking_v2.detect.recall import (
     close_pairs,
     load_round,
     merge_marks,
+    next_round_gate,
     record_classification,
+    record_miss_fixes,
     score_round,
     score_stored_round,
 )
@@ -199,3 +201,36 @@ def test_a_classification_is_recorded_beside_the_score_and_never_touches_the_mar
     with pytest.raises(ValueError, match="her words"):
         record_classification(store, PID, f"{PID}_s1#1", classification="separate",
                               words="  ", by="Andrea", at=at)
+
+
+def test_only_misses_get_a_fix_once_and_the_rest_stay_unresolved(tmp_path: Path) -> None:
+    """A partial fix leaves the next-round gate naming the misses it did not fix."""
+    store = GemsStore.initialise(tmp_path / "gems")
+    _write_round(store, PID, [[[210, 211], [230, 231], [240, 241]], [[250, 252], [270, 271]]],
+                 committed_at="2026-09-27T10:05:00+00:00", revealed=CANDS)
+    score_stored_round(store, PID, _reveal_with(CANDS))
+    doc = json.loads(store.audit_score_path(PID).read_text(encoding="utf-8"))
+    for art in doc["artifacts"]:  # diagnosed, so the gate reaches its fix check
+        if not art["covered"]:
+            art["diagnosis"] = {"verdict": "threshold"}
+    misses = [a["id"] for a in doc["artifacts"] if not a["covered"]]
+    covered = [a["id"] for a in doc["artifacts"] if a["covered"]]
+    assert len(misses) == 2 and covered
+    at = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
+
+    record_miss_fixes(store, PID, {misses[0]: "chain change 0abda6b"}, fixed_at=at)
+    res = json.loads(store.audit_resolution_path(PID).read_text(encoding="utf-8"))
+    assert res[misses[0]] == {"task07_fix": "chain change 0abda6b", "fixed_at": at.isoformat()}
+    ok, why = next_round_gate(doc, res)
+    assert not ok and "no recorded task 07 fix" in why and misses[1] in why
+    assert misses[0] not in why
+    with pytest.raises(ValueError, match="never overwritten"):
+        record_miss_fixes(store, PID, {misses[0]: "again"}, fixed_at=at)
+    with pytest.raises(ValueError, match="not misses"):
+        record_miss_fixes(store, PID, {covered[0]: "x"}, fixed_at=at)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        record_miss_fixes(store, PID, {misses[1]: "x"}, fixed_at=datetime(2026, 9, 29))
+    record_miss_fixes(store, PID, {misses[1]: "second"}, fixed_at=at)
+    resolved = json.loads(store.audit_resolution_path(PID).read_text(encoding="utf-8"))
+    assert set(resolved) == set(misses)
+    assert next_round_gate(doc, resolved)[0] is True

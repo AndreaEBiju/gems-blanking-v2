@@ -121,6 +121,7 @@ __all__ = [
     "pooled_gate",
     "record_classification",
     "record_generator_change",
+    "record_miss_fixes",
     "score_round",
     "score_stored_round",
     "source_sha256",
@@ -1171,6 +1172,43 @@ def _chance_of(doc: dict[str, Any]) -> list[float] | None:
             return None
         out += [float(q) for q in ps]
     return out
+
+
+def record_miss_fixes(
+    store: GemsStore, plan_id: str, fixes: dict[str, str], *, fixed_at: datetime
+) -> Path:
+    """Record the task 07 fix for each named miss of a scored round (sequential rule).
+
+    Only a MISS of the round's score can be given a fix, only once, and only with a
+    timezone-aware ``fixed_at``; a miss left out stays unresolved, and the next-round
+    gate keeps naming it. The round's other resolutions are kept.
+    """
+    if fixed_at.tzinfo is None:
+        msg = "fixed_at must be timezone-aware (invariant 31: store the zone)"
+        raise ValueError(msg)
+    score = _read_json(store.audit_score_path(plan_id))
+    if score is None:
+        msg = f"{plan_id} has no score"
+        raise ValueError(msg)
+    misses = {a["id"] for a in score.get("artifacts", []) if not a.get("covered")}
+    unknown = sorted(set(fixes) - misses)
+    if unknown:
+        msg = f"not misses of {plan_id}: {unknown}"
+        raise ValueError(msg)
+    path = store.audit_resolution_path(plan_id)
+    res = _read_json(path) or {}
+    again = sorted(m for m in fixes if m in res)
+    if again:
+        msg = f"already resolved, never overwritten: {again}"
+        raise ValueError(msg)
+    for miss_id, fix in fixes.items():
+        if not fix.strip():
+            msg = f"{miss_id}: a fix needs a description"
+            raise ValueError(msg)
+        res[miss_id] = {"task07_fix": fix, "fixed_at": fixed_at.isoformat()}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, json.dumps(res, indent=1, sort_keys=True, allow_nan=False) + "\n")
+    return path
 
 
 def pooled_gate(store: GemsStore) -> dict[str, Any]:
