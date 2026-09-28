@@ -3773,6 +3773,87 @@ candidates it revealed, so the scorer recomputes them. Two guards:
 This supersedes Method B's "≥6 recordings" for the first round: the 5-span plan
 across 2–3 animals is round 1; later rounds add recordings.
 
+### ROUND 1 RESULT, 2026-09-28 — recall passes, the generator fails its budget
+
+**Pre-declared score:** 91 found, 91 covered, 0 missed (9.1 per minute). One-sided
+95% lower bound **0.968** against 0.98: not cleared. All five spans carried
+reveal digests and every recompute matched. Clopper–Pearson set the bound; the
+span bootstrap collapsed to 1.000–1.000, as it must with zero misses, and says
+nothing about clustering (80 of 91 marks sit in two spans, so 0.968 is if
+anything optimistic).
+
+| span | animal, cond | candidates / 120 s | time covered | marks | chance recall |
+|---|---|---|---|---|---|
+| 1 | B bl | 307 | 20.5% | 1 | 0.25 |
+| 2 | J sr | 344 | 73.7% | 48 | 0.85 |
+| 3 | A sr | **1,340** | **95.9%** | 1 | 0.98 |
+| 4 | B sr | 180 | 93.4% | 32 | 0.96 |
+| 5 | I bl | 153 | 93.0% | 9 | 0.96 |
+
+Chance recall (descriptive; defined before the score existed): the probability a
+randomly placed interval of each mark's duration overlaps a candidate. In spans
+3–5 candidates cover 93–96% of the time, so 100% recall there is **no evidence**
+the generator responds to artifacts. Nearly all the evidence is span 2.
+
+**Ruling: do not add a post-hoc chance condition — apply the budget that was
+already declared.** This section has required, since before any marks existed,
+that the pinned `z_enter` meet **both** recall ≥ 98% **and ≤ 3000 candidates per
+recording**. Scaled to a 20-min recording, span 3 is ~13,000 and spans 1–2 are
+~3,000–3,400. **The budget condition fails.** So the correct reading of round 1
+is not "one more round clears the gate" — it is that the generator, as
+configured, flags most of the recording in some spans, and a second round drawn
+now would clear the recall bound by coverage alone. Also enforce it in code:
+`--check-next` and the Create-plan button refuse while the current generator
+exceeds the budget on the eligible pool.
+
+**Order of work before round 2:**
+
+1. **Attribute the over-coverage.** In each high-coverage span, which signal
+   and band carried the max z over the covered time? If a few signals dominate,
+   it is a contact-quality problem (the adapter checks found collapsed tripole
+   fits, a flat J ANT3, K's two cuffs with identical σ and zero spikes); if it
+   is spread across signals, it is the threshold or the reference. Also check
+   whether stim/recovery spans are high because the reference is computed over
+   a window that includes, or excludes, the recovery state. No labels needed.
+2. **Fix accordingly** — a per-contact quality screen that removes dead, flat
+   or duplicated contacts from the max (invariant 6 says detection reads the
+   contacts; it does not say it must read broken ones), and/or the `z_enter`
+   sweep 2.0–4.0.
+3. **Measure the budget on many eligible new-cohort recordings**, not five
+   spans: candidates per recording and time-covered fraction, per animal and
+   condition. Unlabelled, so it costs no labelling.
+4. **Re-score round 1 at the new setting as a TUNING CHECK**, and record the fix
+   with `fixed_at`. Round 1 is then tuning data by the existing rule.
+5. **Round 2 at the pinned setting is the first gate evidence.** Chance recall
+   and time-covered fraction are reported with every round from now on.
+
+### Adapter-check findings, 2026-09-28
+
+- **Tripole polarity.** The old hardware tripole's large events are mostly
+  **positive** (JEL top-100: 97% positive); the new software `T` is mostly
+  **negative** (B, J, I). The spike consumer detects negative peaks only, so on
+  the old cohort it counted the minority polarity. **Andrea: literature usually
+  shows negative spikes; compare negative-only against absolute-value detection
+  on both the old hardware tripole and the new software tripole** before
+  choosing. Report per cuff: event counts, the amplitude distribution of each
+  polarity, and waveform averages of each, on old clean windows and on
+  artifact-screened new windows. Do not flip the adapter or change the consumer
+  until she has seen it.
+- **Fitted tripole weights collapse to one outer contact** in most cuffs (left:
+  A, B, I; right: A, B, H, K; A's right fit leaves 0–1). Only J and H-left are
+  near 0.5. That puts a poor or dead outer contact on most cuffs, which matters
+  beyond T: **task 18's conduction velocity needs three good contacts per
+  cuff.** Report, per animal and cuff, which contact looks poor and why.
+- **Stomach reference.** The old ANT1–3 are a shared single reference, not a
+  common average, and the adapter passes new ANT1–3 raw — **matches; no
+  change.** The detection derivation's `stomach_ref` is a common average and
+  removes most of the shared slow wave; that is a detection question, noted for
+  step 1 above.
+- **Anomalies for Andrea:** animal I's stomach channels share almost nothing
+  (slow-wave r −0.05); J's ANT3 is nearly flat (6.5 µV vs ~64 µV); K's R_T and
+  L_T have identical σ (2.71 µV) and zero spikes — check whether K's two cuffs'
+  raw channels are duplicates.
+
 ### Threshold sweep
 Sweep `z_enter` over 2.0–4.0. For each value report recall, candidate count,
 fraction of frames flagged, and true-positive fraction on the 43 labelled
