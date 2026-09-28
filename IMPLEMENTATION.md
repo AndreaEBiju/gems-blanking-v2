@@ -4041,6 +4041,47 @@ survive.
 Rounds 1 and 2 are both tuning data once a fix is recorded. **Round 3 is the
 next gate evidence.**
 
+### RULING 2026-09-29 — the contact screen must not hide signals from detection
+
+**My ratification of the contact screen for detection was wrong.** I ratified it
+without asking whether the consumers also stop reading a screened contact. They
+do not: `processing_new` consumes its inputs whole and knows nothing of the
+screen. So removing a contact from detection's max while every consumer still
+reads it guarantees that artifacts on that contact damage consumers unflagged.
+Round 2 showed the cost directly: the screen removed the left cuff's contact 3 in
+4 of 5 spans, and that contact carried rail-scale electrode pops
+(24,000–59,000× σ, one at −2 V) exactly inside Andrea's marks — **9 of the 14
+misses, 5 of the 7 "brief blind spots"**. Diagnosis 2 is withdrawn for those
+five: they were a screen defect, not an envelope-z limitation. (Invariant 43.)
+
+**Rulings:**
+
+1. **Detection reads every signal any consumer reads.** The contact screen is
+   removed from detection's max. It stays for what it is right for: whether a
+   cuff's `T` is trusted, which cuffs task 18 may use for velocity
+   (`velocity_cuffs()`), and the per-recording contact-health report.
+2. **Raw ANT1–3 join the detection set**, on the same principle — `slow_wave`
+   and `mmc` read them raw, so an artifact the three share (and a common average
+   cancels) damages those consumers. Adopted on principle, not on the two
+   threshold misses it recovers.
+3. **No stomach screen for detection** — it hides `stomach_ref` and cost 5
+   round-1 marks. A hum rule may inform the contact-health report only.
+4. **`z_enter` 3.0 and `z_exit` 1.5 unchanged.**
+5. **Adopt 1 + 2 as one recorded fix** (`fixed_at`), after measuring them on the
+   60-region pool: budget q90, time covered, and pooled chance recall with its
+   margin. On the round regions the combination covers 246/250 with chance upper
+   0.916 (margin +0.064) — adequate, but the smallest margin yet, so it is
+   reported with every round from now on. If the pool pushes chance past the bar,
+   stop and report rather than adopt.
+
+Rounds 1 and 2 become tuning data under this fix. **Round 3 is the next gate
+evidence**, drawn only after the fix is adopted, the budget re-measured under
+its hash, and Andrea has classified the misses in the PDF.
+
+**Remaining misses after the fix (tuning view): 2 brief (r2 s1 at 326.44 and
+326.91 s) and 2 threshold.** Fix 2 (a fast path) is considered only if Andrea
+classifies the two brief ones as artifacts.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
