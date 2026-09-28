@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +21,7 @@ from gems_blanking_v2.detect.recall import (
     budget_record,
     budget_status,
     candidate_digest,
+    chance_of_cover,
     check_next_round,
     clopper_pearson,
     covered_fraction,
@@ -28,7 +30,9 @@ from gems_blanking_v2.detect.recall import (
     load_round,
     next_round_gate,
     one_sided_lower,
+    poisson_binomial_95,
     pooled_gate,
+    record_generator_change,
     score_round,
     score_stored_round,
     span_bootstrap,
@@ -202,6 +206,71 @@ def test_the_next_round_is_refused_until_every_miss_is_diagnosed_and_fixed() -> 
     assert ok
     ok, why = next_round_gate(_doc([None, None]), None)
     assert ok and "fresh recorded seed" in why
+
+
+# --- chance recall and time covered: DESCRIPTIVE (ruling 2026-09-28) -----------
+
+
+def test_chance_of_cover_is_the_fraction_of_legal_starts_that_touch_a_candidate() -> None:
+    """Span [0, 100), candidate [40, 50), 10 s mark: starts (30, 50) of [0, 90] -> 20/90."""
+    assert chance_of_cover(10.0, (0.0, 100.0), [[40.0, 50.0]]) == pytest.approx(20 / 90)
+    assert chance_of_cover(10.0, (0.0, 100.0), [[0.0, 100.0]]) == 1.0
+    assert chance_of_cover(10.0, (0.0, 100.0), np.zeros((0, 2))) == 0.0
+    assert chance_of_cover(100.0, (0.0, 100.0), [[99.0, 99.5]]) == 1.0  # one legal start
+    assert chance_of_cover(10.0, (0.0, 100.0), [[95.0, 99.0]]) == pytest.approx(5 / 90)
+    assert chance_of_cover(10.0, (0.0, 100.0), [[-20.0, -10.0], [140.0, 150.0]]) == 0.0
+
+
+def test_chance_of_cover_agrees_with_placing_marks_at_random() -> None:
+    rng = np.random.default_rng(20260928)
+    cands = np.array([[5.0, 5.2], [30.0, 41.0], [42.0, 43.0], [90.0, 99.0]])
+    for length in (0.05, 0.5, 3.0):
+        t = rng.uniform(0.0, 100.0 - length, 200_000)
+        hit = ((t[:, None] < cands[:, 1]) & (t[:, None] + length > cands[:, 0])).any(axis=1)
+        assert chance_of_cover(length, (0.0, 100.0), cands) == pytest.approx(hit.mean(),
+                                                                             abs=0.004)
+
+
+def test_time_covered_is_weighted_by_span_length() -> None:
+    """A 30 s span fully covered and a 90 s span bare is 25% of the time, not 50%."""
+    short = SpanInput("p_s1", "r1", "J", "baseline", 0.0, 30.0,
+                      np.array([[1.0, 1.1]]), np.array([[0.0, 30.0]]))
+    long_ = SpanInput("p_s2", "r2", "J", "baseline", 100.0, 190.0,
+                      np.array([[150.0, 150.1]]), np.zeros((0, 2)))
+    d = score_round("p", [short, long_]).statistics()["descriptive"]
+
+    assert d["time_covered_fraction"] == pytest.approx(0.25)
+
+
+def test_the_poisson_binomial_range_is_central_95() -> None:
+    lo, hi = poisson_binomial_95([0.5] * 100)
+    assert (lo, hi) == (0.4, 0.6)  # Binomial(100, 0.5): 2.5% / 97.5% quantiles 40, 60
+    assert poisson_binomial_95([1.0] * 5) == (1.0, 1.0)
+
+
+def test_every_round_reports_time_covered_and_chance_recall_as_description() -> None:
+    """Reported, labelled, and changing no gate number or verdict."""
+    full = _span(0, [[10.0, 10.1]], [[0.0, 120.0]])  # candidates everywhere
+    none = _span(1, [[150.0, 150.2]], [[150.1, 150.15], [400.0, 410.0]])  # a sliver
+    score = score_round("plan_x", [full, none])
+    s = score.statistics()
+    d = s["descriptive"]
+    assert "not a gate condition" in d["note"]
+    assert score.per_span[0]["time_covered"] == 1.0
+    assert score.per_span[1]["time_covered"] == pytest.approx(0.05 / 120, rel=1e-6)
+    assert d["time_covered_fraction"] == pytest.approx((1.0 + 0.05 / 120) / 2, rel=1e-6)
+    sliver = (0.05 + 0.2) / (120.0 - 0.2)  # covering starts (149.9, 150.15)
+    assert score.per_span[1]["candidates_in_span"] == 1
+    assert d["chance_recall"] == pytest.approx((1.0 + sliver) / 2)
+    assert d["p_all_covered_by_chance"] == pytest.approx(sliver)
+    assert "DESCRIPTIVE, not a gate condition" in score.report()
+    assert "time covered" in score.report()
+    plain = {k: v for k, v in s.items() if k != "descriptive"}
+    stripped = score_round("plan_x", [full, none])
+    for sp in stripped.per_span:
+        sp.pop("chance_per_mark")
+    assert dict(stripped.statistics()) == plain  # gate numbers unmoved
+    assert stripped.next_step() == score.next_step()
 
 
 # --- a round in the store -----------------------------------------------------
@@ -411,6 +480,37 @@ def test_a_round_started_before_a_fix_is_not_eligible_even_if_finished_after(
                  committed_at=["2026-09-28T08:00:00+00:00", "2026-09-28T10:00:00+00:00"])
     score = score_stored_round(store, PID, _reveal_with(CANDS))
     assert score.pooled is not None and score.pooled["pooled_rounds"] == []
+
+
+def test_a_generator_change_with_no_miss_still_makes_the_round_tuning_data(
+    tmp_path: Path,
+) -> None:
+    """Round 1's case: zero misses, a changed generator, and it must leave the pool."""
+    store = GemsStore.initialise(tmp_path / "gems")
+    _write_round(store, PID, [[[210, 211], [230, 231]], [[250, 252]]],
+                 committed_at="2026-09-27T10:05:00+00:00", revealed=CANDS)
+    score_stored_round(store, PID, _reveal_with(CANDS))
+    assert pooled_gate(store)["pooled_rounds"] == [PID]
+    store.audit_resolution_path(PID).write_text(json.dumps(
+        {f"{PID}_s1#0": {"task07_fix": "earlier", "fixed_at": "2026-09-27T09:00:00+00:00"}}),
+        encoding="utf-8")  # an earlier miss fix that must survive
+    when = datetime(2026, 9, 28, 18, 0, tzinfo=UTC)
+
+    key = record_generator_change(store, PID, change="contact screen", reason="coverage",
+                                  fixed_at=when)
+
+    res = json.loads(store.audit_resolution_path(PID).read_text(encoding="utf-8"))
+    assert set(res) == {f"{PID}_s1#0", key} and key.startswith("generator_change:")
+    assert len(res[key]["generator"]["source_sha256"]) == 64
+    after = pooled_gate(store)
+    assert after["pooled_rounds"] == [] and after["last_fix_at"] == when.isoformat()
+    with pytest.raises(ValueError, match="never overwritten"):
+        record_generator_change(store, PID, change="x", reason="y", fixed_at=when)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        record_generator_change(store, PID, change="x", reason="y",
+                                fixed_at=datetime(2026, 9, 28, 19))
+    assert next_round_gate(json.loads(store.audit_score_path(PID).read_text(
+        encoding="utf-8")), res)[0] is True  # a change keyed off-miss blocks nothing
 
 
 # --- the candidate budget (declared in task 09; enforced 2026-09-28) ---------

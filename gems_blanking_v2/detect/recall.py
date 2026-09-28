@@ -79,8 +79,10 @@ __all__ = [
     "BUDGET_QUANTILE",
     "CANDIDATE_BUDGET",
     "CONFIDENCE",
+    "DESCRIPTIVE_NOTE",
     "DIGEST_RULE",
     "GATE_RECALL",
+    "GENERATOR_CHANGE_PREFIX",
     "HALF_OVERLAP",
     "TUNING_LABEL",
     "Z_ENTER",
@@ -96,6 +98,7 @@ __all__ = [
     "budget_record",
     "budget_status",
     "candidate_digest",
+    "chance_of_cover",
     "check_next_round",
     "clopper_pearson",
     "covered_fraction",
@@ -106,7 +109,9 @@ __all__ = [
     "load_round",
     "next_round_gate",
     "one_sided_lower",
+    "poisson_binomial_95",
     "pooled_gate",
+    "record_generator_change",
     "score_round",
     "score_stored_round",
     "source_sha256",
@@ -138,6 +143,11 @@ Z_EXIT: Final[float] = float(_DEFAULTS["z_exit"].default)
 """The generator's hysteresis floor: below it a pair is not even sustaining."""
 
 TUNING_LABEL: Final = "tuning check, not gate evidence"
+
+DESCRIPTIVE_NOTE: Final = (
+    "descriptive, not a gate condition (ruling 2026-09-28): time covered is the "
+    "fraction of labelled time inside candidates; chance recall is the recall a "
+    "uniform placement of the same marks would get from that coverage alone")
 """What a re-score of an old round with the current generator says it is."""
 
 DIGEST_RESOLUTION_S: Final = 1e-6
@@ -356,6 +366,34 @@ def covered_fraction(artifact: tuple[float, float], candidates: npt.ArrayLike) -
     return total / (a1 - a0)
 
 
+def chance_of_cover(length: float, span: tuple[float, float], candidates: npt.ArrayLike) -> float:
+    """P(a mark of ``length`` s, placed uniformly inside ``span``, overlaps a candidate).
+
+    ``[t, t + L)`` overlaps ``[c0, c1)`` iff ``c0 - L < t < c1``, so the covering
+    starts are the union of ``(c0 - L, c1)`` clipped to the legal starts
+    ``[s0, s1 - L]``. DESCRIPTIVE (ruling 2026-09-28): the recall that candidate
+    coverage alone would give these marks, reported with every round and never a
+    gate condition. A mark as long as the span has one legal start.
+    """
+    s0, s1 = span
+    c = _intervals(candidates)
+    hi = s1 - length
+    if hi <= s0:
+        return float(any(min(e, s1) > max(b, s0) for b, e in c))
+    starts = [(max(b - length, s0), min(e, hi)) for b, e in c]
+    return covered_fraction((s0, hi), [(b, e) for b, e in starts if e > b])
+
+
+def poisson_binomial_95(ps: Sequence[float]) -> tuple[float, float]:
+    """Central 95% range of ``mean(Bernoulli(p_i))`` - where chance recall would land."""
+    dist = np.array([1.0])
+    for q in ps:
+        dist = np.convolve(dist, [1.0 - q, q])
+    cdf = np.cumsum(dist)
+    n = len(ps)
+    return (int(np.searchsorted(cdf, 0.025)) / n, int(np.searchsorted(cdf, 0.975)) / n)
+
+
 # ---------------------------------------------------------------------------
 # the statistics
 # ---------------------------------------------------------------------------
@@ -537,7 +575,21 @@ class RoundScore:
             secondary_recall_at_half_overlap=sum(
                 a.covered_fraction >= HALF_OVERLAP for a in self.artifacts) / n,
         )
+        chance = [q for sp in self.per_span for q in sp.get("chance_per_mark", [])]
+        if len(chance) == n:
+            lo, hi = poisson_binomial_95(chance)
+            out["descriptive"] = {
+                "note": DESCRIPTIVE_NOTE,
+                "time_covered_fraction": self._time_covered(),
+                "chance_recall": float(np.mean(chance)), "chance_recall_95": [lo, hi],
+                "p_all_covered_by_chance": float(np.prod(chance)),
+            }
         return out
+
+    def _time_covered(self) -> float:
+        total = sum(sp["minutes"] for sp in self.per_span)
+        return (sum(sp["time_covered"] * sp["minutes"] for sp in self.per_span) / total
+                if total else 0.0)
 
     def next_step(self) -> str:
         """Return the sequential rule's verdict for this round.
@@ -605,6 +657,18 @@ class RoundScore:
                 f"{s['secondary_mean_covered_fraction']:.2f}; recall at >=50% overlap "
                 f"{s['secondary_recall_at_half_overlap']:.3f}",
             ]
+        if self.per_span and "time_covered" in self.per_span[0]:
+            lines.append(
+                f"  time covered    {self._time_covered():.1%} of labelled time inside "
+                "candidates; per span " + ", ".join(
+                    f"{sp['time_covered']:.0%}" for sp in self.per_span)
+                + "   [DESCRIPTIVE]")
+        if "descriptive" in s:
+            d = s["descriptive"]
+            lines.append(
+                f"  chance recall   {d['chance_recall']:.3f} (95% {d['chance_recall_95'][0]:.3f}-"
+                f"{d['chance_recall_95'][1]:.3f}), P(all covered by chance) "
+                f"{d['p_all_covered_by_chance']:.1e}   [DESCRIPTIVE, not a gate condition]")
         for m in self.misses:
             d = m.diagnosis
             head = (f"  MISS {m.miss_id}  {m.start_s:.2f}-{m.stop_s:.2f} s  "
@@ -651,10 +715,16 @@ def score_round(
                 sp.span_id, i, float(a0), float(a1), hit, covered_fraction((a0, a1), c),
                 None if hit else diagnose_miss((a0, a1), sp.traces,
                                                z_enter=z_enter, z_exit=z_exit)))
+        window = (sp.start_s, sp.stop_s)
         per_span.append({"span_id": sp.span_id, "recording_id": sp.recording_id,
                          "animal": sp.animal, "condition": sp.condition,
                          "found": len(a), "covered": cov, "minutes": sp.minutes,
-                         "candidates": len(c), "traces": sp.traces is not None})
+                         "candidates": len(c), "traces": sp.traces is not None,
+                         "candidates_in_span": int(sum(
+                             min(e, sp.stop_s) > max(b, sp.start_s) for b, e in c)),
+                         "time_covered": covered_fraction(window, c),
+                         "chance_per_mark": [chance_of_cover(float(a1 - a0), window, c)
+                                             for a0, a1 in a]})
     return RoundScore(plan_id, seed, arts, per_span, sum(sp.minutes for sp in spans),
                       rounds_scored, dict(provenance or {}))
 
@@ -850,6 +920,45 @@ def last_fix_at(store: GemsStore) -> datetime | None:
             if t:
                 times.append(t)
     return max(times) if times else None
+
+
+GENERATOR_CHANGE_PREFIX: Final = "generator_change:"
+"""Resolution key prefix for a task 07 change that answers no miss. It cannot
+collide with a miss id, which is ``<span_id>#<index>``."""
+
+
+def record_generator_change(
+    store: GemsStore, plan_id: str, *, change: str, reason: str, fixed_at: datetime
+) -> str:
+    """Record a task 07 change made in response to a round but not to a miss.
+
+    Round 1 (2026-09-28) had no misses and still changed the generator: its
+    candidates covered 74-96% of three spans' time, so its recall was met by
+    coverage. The sequential rule's "fix" is keyed by miss, so without this the
+    change would leave no ``fixed_at`` and the round would stay pooled as gate
+    evidence for a generator that no longer exists. Kept in the round's own
+    resolutions file, so :func:`last_fix_at` reads it like any other fix.
+
+    Returns the key written. Raises ``ValueError`` for a naive ``fixed_at`` or a
+    key already recorded - a fix record is written once, never overwritten.
+    """
+    if fixed_at.tzinfo is None:
+        msg = "fixed_at must be timezone-aware (invariant 31: store the zone)"
+        raise ValueError(msg)
+    if not change.strip() or not reason.strip():
+        msg = "a generator change needs both what changed and why"
+        raise ValueError(msg)
+    path = store.audit_resolution_path(plan_id)
+    res = _read_json(path) or {}
+    key = f"{GENERATOR_CHANGE_PREFIX}{fixed_at.isoformat()}"
+    if key in res:
+        msg = f"{plan_id} already records {key!r}; a fix record is never overwritten"
+        raise ValueError(msg)
+    res[key] = {"task07_fix": change, "reason": reason, "fixed_at": fixed_at.isoformat(),
+                "generator": generator_provenance()}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, json.dumps(res, indent=1, sort_keys=True, allow_nan=False) + "\n")
+    return key
 
 
 def pooled_gate(store: GemsStore) -> dict[str, Any]:
