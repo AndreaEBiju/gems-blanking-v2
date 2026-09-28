@@ -366,6 +366,29 @@ def gate_eligible(summary: dict[str, object]) -> bool:
     return int(summary["n_placements"]) >= MIN_GATE_PLACEMENTS  # type: ignore[call-overload]
 
 
+HOST_EXCLUSIONS: Final[dict[tuple[str, str], dict[str, str]]] = {
+    ("host1_JEL", "T_hardware"): {
+        "reason": "mains_dominated_host",
+        "ruling": (
+            "2026-09-28 (task 09, polarity result): the JEL host's spike events are "
+            "mains impulses - event-train peaks at 30/60/90 Hz, median inter-event "
+            "16.6 ms, widths 0.12-0.16 ms - so its T_hardware rows measured the "
+            "sensitivity of a mains-impulse count, not of spike detection. ORE, clean "
+            "in every train, is the old-cohort T_hardware host. JEL rows for other "
+            "consumers are unaffected."
+        ),
+    },
+}
+"""(host, consumer) pairs whose rows the gate may not read, whatever their
+replication, with the reason written onto each row."""
+
+
+def host_exclusion(host: str, consumer: str) -> str | None:
+    """Return why ``(host, consumer)`` rows are not gate-eligible, or None."""
+    entry = HOST_EXCLUSIONS.get((host, consumer))
+    return entry["reason"] if entry else None
+
+
 def bracket_key(host: str, kind: str, dur_s: float, chan_set: str) -> str:
     """Canonical key shared by the analyser and the generator.
 
@@ -632,8 +655,11 @@ def final(scratch: Path) -> None:
             "beyond_observed_range": beyond[k].get(value, False),
             # A FIELD the gate reads, not a rule it has to remember: a single
             # placement says nothing about the tail when placement moves the
-            # threshold 4-16x. Eligible only once replicated.
-            "gate_eligible": gate_eligible(summary),
+            # threshold 4-16x. Eligible only once replicated - and never for a
+            # (host, consumer) the host could not measure (HOST_EXCLUSIONS).
+            "gate_eligible": gate_eligible(summary) and host_exclusion(host, cons) is None,
+            **({"gate_ineligible_reason": host_exclusion(host, cons)}
+               if host_exclusion(host, cons) else {}),
         })
 
     doc = {
@@ -649,8 +675,11 @@ def final(scratch: Path) -> None:
         "gate_eligible_rule": (
             f"gate_eligible is true only for a measured or bounded row with >= "
             f"{MIN_GATE_PLACEMENTS} placements. Locate-only rows (1 placement) and "
-            "criterion_degenerate rows are false; a row becomes eligible once replicated."
+            "criterion_degenerate rows are false; a row becomes eligible once replicated. "
+            "A (host, consumer) in host_exclusions is false whatever its replication, "
+            "with gate_ineligible_reason on the row."
         ),
+        "host_exclusions": {f"{h}|{c}": v for (h, c), v in HOST_EXCLUSIONS.items()},
         "breathing_criterion": BREATHING_CRITERION,
         "non_monotone_rule": (
             "For a placement whose output changes, then stops changing, as amplitude "

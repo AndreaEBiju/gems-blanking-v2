@@ -248,3 +248,35 @@ def test_the_criterion_change_is_recorded_with_its_date() -> None:
     assert BREATHING_SHIFT_S == 0.07
     assert BREATHING_CRITERION["changed_on"] == "2026-09-26"
     assert "count only" in BREATHING_CRITERION["was"]
+
+
+def test_jel_spike_rows_are_not_gate_eligible_and_say_why(tmp_path: Path) -> None:
+    """JEL's T_hardware events are mains impulses (ruling 2026-09-28).
+
+    Its T_hardware rows go ineligible with a reason; its other consumers and ORE's
+    rows do not.
+    """
+    from tolerance_analyze import final  # noqa: PLC0415
+
+    grid = [round(0.5 * 2 ** (i / 2), 6) for i in range(9)]
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"kind_direction": {"step": "up", "clip": "down"}, "amp_sigma": grid,
+                    "observed_max_uv": {}}),
+        encoding="utf-8")
+    (tmp_path / "prepare.json").write_text(json.dumps({"hosts": []}), encoding="utf-8")
+    rows = [{"host_tag": host, "kind": "step", "dur_s": 0.5, "chan_set": "nerve",
+             "seed": seed, "amp_sigma": grid[i], "ok": True,
+             "T_hardware_changed": int(i >= 4), "hrv_changed": int(i >= 5)}
+            for host in ("host1_JEL", "host2_ORE") for seed in (1, 2, 3) for i in range(9)]
+    (tmp_path / "sweep_manifest_replicate.json").write_text(json.dumps(rows), encoding="utf-8")
+
+    final(tmp_path)
+    doc = json.loads((tmp_path / "consumer_tolerances.json").read_text(encoding="utf-8"))
+    by = {(r["host_tag"], r["consumer"]): r for r in doc["results"]}
+
+    jel = by[("host1_JEL", "T_hardware")]
+    assert jel["gate_eligible"] is False
+    assert jel["gate_ineligible_reason"] == "mains_dominated_host"
+    for key in (("host1_JEL", "hrv"), ("host2_ORE", "T_hardware"), ("host2_ORE", "hrv")):
+        assert by[key]["gate_eligible"] is True and "gate_ineligible_reason" not in by[key]
+    assert "host1_JEL|T_hardware" in doc["host_exclusions"]
