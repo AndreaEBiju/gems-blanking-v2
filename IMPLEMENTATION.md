@@ -3938,10 +3938,15 @@ the load path from file to the array handed to `detect_region`** (loader,
 channel map, units scaling, NaN interop). The stim split stays outside: it
 chooses regions, and each span's region is recorded, so it cannot alter the
 scoring of a recorded region. Re-run the budget once under the widened hash.
-**Ordering:** this does not block round 2. Widening the hash changes what it
-covers, not any loaded sample, so round 2's reveal digests verify under either.
-Write the code change now; run the budget re-run (Drive-heavy) **after** Andrea
-finishes round 2; then score round 2 under the widened hash.
+**Ordering — corrected.** I wrote that this "does not block round 2"; it would:
+Create-plan refuses without a budget measured under the current hash, so
+shipping the widened hash first would lock Andrea out until a Drive-heavy re-run.
+So: **Andrea creates round 2's plan first, under the current hash and its valid
+budget. The widening is built in a separate worktree, not the tree the app runs
+from** (a lazy import mid-session could otherwise load a mix of versions), and
+lands only after round 2's last span is committed. Then re-run the budget under
+the widened hash, then score round 2. The loader itself is unchanged, so round
+2's reveal digests verify under the new scope.
 
 ### Contact quality — a systematic LEFT-cuff problem
 
@@ -3957,6 +3962,60 @@ passes the screen.
 
 Extend the screen to stomach contacts later: B's ANT1 is 60 Hz-dominated
 (σ 361 µV vs 54–58 µV) and feeds `stomach_ref`.
+
+### ROUND 2 RESULT, 2026-09-28 — 14 misses; the rule says stop
+
+`plan_20260928T200912Z_3dc153e2` (seed 1036080098), labelled after the last fix,
+every reveal digest verified. **166 found, 152 covered, 14 missed** (16.6/min);
+recall 0.916 (CP 0.863–0.953), one-sided lower bound **0.786** against 0.98.
+Time covered 54.8%; chance recall 0.750 (0.687–0.807), margin +0.173 — so the
+round is valid gate evidence, and it fails. The generator responds to artifacts
+(P(all covered by chance) ≈ 3e-24) but misses too many. Andrea confirms she used
+the **same criterion** as round 1; round 2 simply contained more, and briefer,
+artifacts.
+
+**Misses, by class — none gated:**
+
+- **Threshold (7):** z 1.54–2.98, **six of seven peak on `stomach_ref`**.
+- **Blind spot (7):** z < 1.5 in every band; all **20–60 ms** marks, peaking on
+  raw nerve contacts, R_T or `stomach_ref`. Eight of the 14 are in span 1
+  (H stim/recovery).
+
+**Diagnosis 1 — the stomach is read only through a common average.** The
+detection set carries raw nerve contacts but, for the stomach, only
+`stomach_ref`, a common average of ANT1–3. A common average subtracts what the
+contacts share, and motion artifact is largely what they share — so the one
+stomach signal detection reads is built to cancel the thing it should detect.
+That fits six threshold misses peaking on `stomach_ref` just under `z_enter`.
+**Proposed fix:** add raw ANT1–3 to the detection signal set — invariant 6
+(detection reads the contacts) applied to the stomach as it already is to the
+nerves — and extend the contact screen to stomach contacts, adding a mains-hum
+rule (B's ANT1 is 60 Hz-dominated). Do **not** lower `z_enter`: at 2.0 chance
+recall reaches 0.95 and the chance margin collapses, and pinning it to 2.8 to
+catch 2.85 and 2.98 would be fitting the threshold to the misses.
+
+**Diagnosis 2 — brief events are a structural blind spot of envelope z.** A
+20–60 ms event is averaged away by an envelope window longer than itself, so no
+threshold recovers it. Whether these are target artifacts (brief electrode pops
+— "sharp excursions", which Andrea blanks) or something else is **Andrea's
+judgement from the traces**, not the generator's. If they are artifacts, the fix
+is a fast path: a short-window detector on the broadband raw contacts, sized to
+the marks' durations.
+
+**Evaluation rule for any fix (tuning, not gate evidence):** re-score rounds 1
+and 2 with the candidate fix and report, together — misses recovered by class;
+round-1 marks still covered; time covered and candidate budget on the 60-region
+pool; pooled chance recall and its margin against 0.98. A fix that recovers
+misses by raising coverage until chance approaches the bar is not a fix.
+
+**Committed marks are never edited.** If Andrea judges a brief mark not to be an
+artifact, that is recorded as her classification of the miss and reported
+alongside the score; the score itself stands as committed. Changing labels after
+learning they were missed is the one kind of relabelling the audit cannot
+survive.
+
+Rounds 1 and 2 are both tuning data once a fix is recorded. **Round 3 is the
+next gate evidence.**
 
 ### Adapter-check findings, 2026-09-28
 
