@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 import shutil
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -13,6 +15,7 @@ from gems_blanking_v2.derive.derivations import build_derivations
 from gems_blanking_v2.detect import candidates as cand_mod
 from gems_blanking_v2.detect import chain
 from gems_blanking_v2.detect.candidates import candidate_report
+from gems_blanking_v2.io import detector_core
 from gems_blanking_v2.physio.rpeaks import detect_rpeaks
 from gems_blanking_v2.types import Recording
 
@@ -73,16 +76,59 @@ def test_z_enter_is_the_generators_own_unless_given(
     assert seen == [{}, {"z_enter": 2.5}]
 
 
-def test_the_generation_scope_is_the_chain_and_nothing_else() -> None:
+def test_the_generation_scope_is_the_chain_and_its_load_path_and_nothing_else() -> None:
     mods = set(chain.generation_modules())
 
     assert {"gems_blanking_v2.detect.chain", "gems_blanking_v2.derive.derivations",
             "gems_blanking_v2.derive.contact_quality", "gems_blanking_v2.bands.envelope",
             "gems_blanking_v2.bands.reference", "gems_blanking_v2.bands.zscore",
             "gems_blanking_v2.detect.candidates", "gems_blanking_v2.physio.rpeaks",
-            "gems_blanking_v2.constants", "gems_blanking_v2.types"} <= mods
-    assert not mods & {"gems_blanking_v2.detect.recall", "gems_blanking_v2.io.store",
-                       "gems_blanking_v2.io.audit_pool", "gems_blanking_v2.cli"}
+            "gems_blanking_v2.constants", "gems_blanking_v2.types",
+            # the load path (widened 2026-09-28): file -> the array detect_region gets
+            "gems_blanking_v2.io.recording", "gems_blanking_v2.io.channel_map",
+            "gems_blanking_v2.io.chanlabels", "gems_blanking_v2.io.stim_split"} <= mods
+    assert not mods & {"gems_blanking_v2.detect.recall", "gems_blanking_v2.io.audit_pool",
+                       "gems_blanking_v2.cli", "gems_blanking_v2.io.scan"}
+
+
+def test_the_external_list_is_every_detector_module_the_loader_imports() -> None:
+    """Held equal by a test, since the import closure cannot see outside the package."""
+    tree = ast.parse((PACKAGE / "io" / "recording.py").read_bytes())
+    called = {node.args[0].value for node in ast.walk(tree)
+              if isinstance(node, ast.Call) and getattr(node.func, "id", "") ==
+              "import_detector_module" and node.args and isinstance(node.args[0], ast.Constant)}
+
+    assert called == set(chain.EXTERNAL_MODULES)
+
+
+def test_the_file_reader_outside_the_package_is_hashed(tmp_path: Path,
+                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    """detector.recording_io reads the file itself, so an edit to it moves the hash.
+
+    A machine that cannot import it gets a different hash, never the same one.
+    """
+    real = chain.generation_sha256()
+    copy = tmp_path / "recording_io.py"
+    src = Path(str(detector_core.import_detector_module("recording_io").__file__))
+    copy.write_bytes(src.read_bytes())
+    monkeypatch.setattr(detector_core, "import_detector_module",
+                        lambda name, root=None: SimpleNamespace(__file__=str(copy)))
+    assert chain.generation_sha256() == real
+    lf = src.read_bytes().replace(b"\r\n", b"\n")
+    copy.write_bytes(lf)
+    unix = chain.generation_sha256()
+    copy.write_bytes(lf.replace(b"\n", b"\r\n"))  # a Windows checkout of the same file
+    assert chain.generation_sha256() == unix == real
+    copy.write_bytes(lf)
+    with copy.open("a", encoding="utf-8", newline="\n") as f:
+        f.write("\n# a reader change\n")
+    assert chain.generation_sha256() != real
+
+    def missing(name: str, root: object = None) -> object:
+        raise FileNotFoundError(name)
+
+    monkeypatch.setattr(detector_core, "import_detector_module", missing)
+    assert chain.generation_sha256() != real
 
 
 def _copy(tmp_path: Path) -> Path:
@@ -103,6 +149,10 @@ def test_a_scorer_or_report_edit_leaves_the_hash_and_a_chain_edit_moves_it(tmp_p
     with (pkg / "derive" / "contact_quality.py").open("a", encoding="utf-8", newline="\n") as f:
         f.write("\n# a screen change\n")
     assert chain.generation_sha256(pkg) != before
+    loader = chain.generation_sha256(pkg)
+    with (pkg / "io" / "channel_map.py").open("a", encoding="utf-8", newline="\n") as f:
+        f.write("\n# a channel-order change reaches the array detect_region gets\n")
+    assert chain.generation_sha256(pkg) != loader
     moved = chain.generation_sha256(pkg)
     with (pkg / "bands" / "__init__.py").open("a", encoding="utf-8", newline="\n") as f:
         f.write("\n# a package init runs whenever a band module is imported\n")

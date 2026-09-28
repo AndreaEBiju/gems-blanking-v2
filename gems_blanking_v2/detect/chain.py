@@ -5,12 +5,16 @@ the recall audit both call :func:`detect_region`; the audit's bridge only reshap
 its result for display. Until 2026-09-28 the chain was composed inside the audit
 app, so the gate measured a composition production did not share.
 
-:func:`generation_sha256` hashes exactly the source this chain executes - this
-module and every ``gems_blanking_v2`` module it imports, transitively - and
-nothing else. A budget record or a gate round is keyed to it, so an edit to the
-scorer or a report cannot invalidate either, while any edit that could change a
-candidate does. The scope is DERIVED from the imports, not listed, so it cannot
-drift from the code (invariant 28).
+:func:`generation_sha256` hashes exactly the source that decides a candidate:
+this chain AND the load path that produces the array handed to it (widened
+2026-09-28: channel map, units, NaN interop and slicing all change candidates) -
+the entry modules in :data:`ENTRIES` and every ``gems_blanking_v2`` module they
+import, transitively. A budget record or a gate round is keyed to it, so an edit
+to the scorer or a report cannot invalidate either, while any edit that could
+change a candidate does. The scope is DERIVED from the imports, not listed, so it
+cannot drift from the code (invariant 28). The loader reads the cohort's units
+from the protocol book, so ``io.stim_split`` is inside the scope; its split, which
+only chooses regions, therefore moves the hash too - the loud direction.
 """
 
 from __future__ import annotations
@@ -34,6 +38,7 @@ from gems_blanking_v2.derive.contact_quality import ContactQuality, screened_sig
 from gems_blanking_v2.derive.derivations import build_derivations
 from gems_blanking_v2.detect import candidates as _candidates
 from gems_blanking_v2.detect.candidates import CandidateReport
+from gems_blanking_v2.io import detector_core
 from gems_blanking_v2.physio.rpeaks import detect_rpeaks
 from gems_blanking_v2.types import Recording
 
@@ -123,6 +128,31 @@ def detect_region(
 
 PACKAGE = "gems_blanking_v2"
 ENTRY = f"{PACKAGE}.detect.chain"
+LOADER = f"{PACKAGE}.io.recording"
+ENTRIES: tuple[str, ...] = (ENTRY, LOADER)
+"""Where candidates are decided: the chain, and the loader that feeds it."""
+
+EXTERNAL_MODULES: tuple[str, ...] = ("recording_io",)
+"""``detector.<name>`` modules the loader imports from the pinned detector-core
+checkout - the step that reads the file itself. Outside this package, so the
+import closure cannot reach them; a test holds this tuple equal to every
+``import_detector_module(...)`` call in the loader."""
+
+
+def _external_sources() -> list[tuple[str, bytes]]:
+    """``(label, LF-normalised source)`` for each external module, as imported here.
+
+    A module that cannot be imported contributes nothing, so the hash differs from
+    any machine that has it - loud, never silently equal.
+    """
+    out: list[tuple[str, bytes]] = []
+    for name in EXTERNAL_MODULES:
+        try:
+            path = Path(str(detector_core.import_detector_module(name).__file__))
+            out.append((f"<detector>/{name}.py", path.read_bytes().replace(b"\r\n", b"\n")))
+        except (FileNotFoundError, ImportError):
+            continue
+    return out
 
 
 def _module_file(package_dir: Path, module: str) -> Path | None:
@@ -156,15 +186,17 @@ def _imports(path: Path, module: str) -> set[str]:
     return {m for m in out if m == PACKAGE or m.startswith(PACKAGE + ".")}
 
 
-def generation_modules(package_dir: Path | None = None, entry: str = ENTRY) -> list[str]:
-    """Every package module the chain executes: ``entry`` and its import closure.
+def generation_modules(
+    package_dir: Path | None = None, entries: str | tuple[str, ...] = ENTRIES
+) -> list[str]:
+    """Every package module that decides a candidate: ``entries`` and their closure.
 
     Each module's parent packages are included too, since importing a submodule
     runs its packages' ``__init__``. Sorted, as dotted names.
     """
     root = package_dir or Path(__file__).resolve().parents[1]
     seen: set[str] = set()
-    todo = [entry]
+    todo = [entries] if isinstance(entries, str) else list(entries)
     while todo:
         mod = todo.pop()
         parts = mod.split(".")
@@ -180,7 +212,9 @@ def generation_modules(package_dir: Path | None = None, entry: str = ENTRY) -> l
     return sorted(seen)
 
 
-def generation_sha256(package_dir: Path | None = None, entry: str = ENTRY) -> str:
+def generation_sha256(
+    package_dir: Path | None = None, entries: str | tuple[str, ...] = ENTRIES
+) -> str:
     """SHA-256 over the chain's own source: :func:`generation_modules`, LF-normalised.
 
     Each file contributes its package-relative POSIX path and its bytes with CRLF
@@ -188,9 +222,11 @@ def generation_sha256(package_dir: Path | None = None, entry: str = ENTRY) -> st
     """
     root = package_dir or Path(__file__).resolve().parents[1]
     h = hashlib.sha256()
-    for name in generation_modules(root, entry):
+    for name in generation_modules(root, entries):
         path = _module_file(root, name)
         assert path is not None
         h.update(path.relative_to(root).as_posix().encode("utf-8") + b"\0")
         h.update(path.read_bytes().replace(b"\r\n", b"\n") + b"\0")
+    for label, source in _external_sources():
+        h.update(label.encode("utf-8") + b"\0" + source + b"\0")
     return h.hexdigest()
