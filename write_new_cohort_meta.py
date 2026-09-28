@@ -428,8 +428,27 @@ matches no enumerated recording raises: a ruling that silently applies to
 nothing is the failure this exists to prevent."""
 
 
+RULED_ANIMAL_EXCLUSIONS: Final[dict[str, dict[str, str]]] = {
+    "D": {
+        "reason": "animal_excluded",
+        "source": "new-cohort animal D (every gems_d_... recording): its signals "
+                  "are noise (found in the blind audit, round 1)",
+        "ruling": "Andrea 2026-09-27: remove animal D from everything - audit, "
+                  "training, corpora - as if the data did not exist",
+    },
+}
+"""Whole-animal exclusions by a named ruling, keyed by the animal letter read from
+the CORRECTED folder name (``gems_<letter>_...``). Every recording of the animal is
+excluded - its partners are the same animal, so pairing adds nothing. An animal
+that matches no enumerated recording raises, like a folder ruling."""
+
+
 def _ruled(folders: dict[str, str]) -> dict[str, dict[str, str]]:
-    """Map :data:`RULED_EXCLUSIONS` from folder names onto session keys."""
+    """Map :data:`RULED_EXCLUSIONS` and :data:`RULED_ANIMAL_EXCLUSIONS` onto session keys.
+
+    A session named by both keeps its folder ruling (the more specific) and carries
+    the animal ruling as ``also_animal``.
+    """
     by_folder: dict[str, list[str]] = {}
     for session, folder in folders.items():
         by_folder.setdefault(folder, []).append(session)
@@ -441,6 +460,17 @@ def _ruled(folders: dict[str, str]) -> dict[str, dict[str, str]]:
                    f"(expected exactly 1): {sessions}")
             raise SystemExit(msg)
         out[sessions[0]] = dict(record)
+    for animal, record in RULED_ANIMAL_EXCLUSIONS.items():
+        matched = [s for s, f in folders.items()
+                   if (m := ANIMAL_RE.match(f)) and m.group(1).upper() == animal]
+        if not matched:
+            msg = f"ruled animal exclusion {animal!r} matches no recording"
+            raise SystemExit(msg)
+        for session in matched:
+            if session in out:
+                out[session] = {**out[session], "also_animal": animal}
+            else:
+                out[session] = {**record, "animal": animal}
     return out
 
 
