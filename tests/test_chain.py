@@ -27,35 +27,70 @@ PACKAGE = Path(chain.__file__).resolve().parents[1]
 
 @pytest.fixture(scope="module")
 def rec() -> Recording:
-    return make_cuff_contacts(FS, 30.0, {"L3": "uncorrelated"}, seed=21)
+    return make_cuff_contacts(FS, 30.0, {"L3": "uncorrelated"}, n_stomach=3, seed=21)
 
 
 def test_the_chain_is_exactly_its_parts_composed_by_hand(rec: Recording) -> None:
-    """The move out of the audit bridge changed nothing: same parts, same order."""
+    """Every derived signal plus the raw stomach contacts, and nothing removed."""
     region = (4.0, 28.0)
     got = chain.detect_region(rec, region)
 
     sub = replace(rec, data=rec.data[round(4.0 * FS):round(28.0 * FS)])
     signals, _ = build_derivations(sub)
-    drop = screened_signals(assess_contacts(sub))
-    names = sorted(n for n in signals if n not in drop)
-    z = chain.z_by_pair(np.column_stack([signals[n] for n in names]), FS, names)
+    raw = {c.name: np.asarray(sub.data[:, c.index], float) for c in sub.channels
+           if c.role == "stomach"}
+    detection = {**signals, **raw}
+    names = sorted(detection)
+    z = chain.z_by_pair(np.column_stack([detection[n] for n in names]), FS, names)
     report = candidate_report(z, detect_rpeaks(signals["R_T"], FS))
     want = np.array([[c.start_s + 4.0, c.stop_s + 4.0] for c in report.candidates]).reshape(-1, 2)
 
-    assert got.signals == tuple(names) and got.screened == drop
+    assert got.signals == tuple(names)
+    assert got.untrusted == screened_signals(assess_contacts(sub))
     np.testing.assert_array_equal(got.intervals, want)
     assert set(got.z) == set(z)
     assert all(np.array_equal(got.z[k], z[k], equal_nan=True) for k in z)
 
 
-def test_a_screened_contact_leaves_the_max_with_its_cuffs_tripole(rec: Recording) -> None:
+def test_a_screened_contact_stays_in_the_max_and_is_reported_untrusted(rec: Recording) -> None:
+    """Invariant 43: every consumer still reads it, so detection must too."""
     got = chain.detect_region(rec, (0.0, 30.0))
 
-    assert got.screened == {"L_V3", "L_T"}
-    assert "L_V3" not in got.signals and "L_T" not in got.signals
-    assert {"L_V1", "L_V2", "R_T", "R_V1", "R_V2", "R_V3"} <= set(got.signals)
-    assert not any(sig in got.screened for sig, _band in got.z)
+    assert got.untrusted == {"L_V3", "L_T"}
+    assert {"L_V1", "L_V2", "L_V3", "L_T", "R_T", "R_V1", "R_V2", "R_V3"} <= set(got.signals)
+    assert any(sig == "L_V3" for sig, _band in got.z)
+
+
+def test_the_raw_stomach_contacts_are_read(rec: Recording) -> None:
+    """slow_wave and mmc read ANT1-3 raw; a shared artifact cancels in stomach_ref."""
+    got = chain.detect_region(rec, (0.0, 30.0))
+
+    assert {"ANT1", "ANT2", "ANT3", "stomach_ref"} <= set(got.signals)
+    assert {("ANT1", "0-2"), ("ANT3", "300-3000")} <= set(got.z)
+
+
+def test_a_pop_on_a_screened_contact_is_detected() -> None:
+    """A pop on a distrusted contact is still a candidate (invariant 43).
+
+    Round 2: rail-scale pops on a broken contact the screen had removed were 9 of 14
+    misses. The contact is still distrusted, and its pop is still detected.
+    """
+    rec = make_cuff_contacts(FS, 30.0, {"L3": "uncorrelated"}, n_stomach=3, seed=22)
+    col = next(c.index for c in rec.channels if c.cuff_id == "L" and c.contact_index == 3)
+    data = np.array(rec.data, dtype=np.float64)
+    data[round(18.00 * FS):round(18.05 * FS), col] -= 2.0e5  # a 50 ms rail-scale pop
+    got = chain.detect_region(replace(rec, data=data), (0.0, 30.0))
+
+    assert "L_V3" in got.untrusted
+    assert any(a <= 18.05 and b >= 18.0 for a, b in got.intervals)
+
+
+def test_a_raw_stomach_name_that_collides_with_a_derived_signal_refuses() -> None:
+    rec = make_cuff_contacts(FS, 30.0, n_stomach=1, seed=23)
+    channels = [replace(c, name="R_T") if c.role == "stomach" else c for c in rec.channels]
+
+    with pytest.raises(ValueError, match="collide"):
+        chain.detect_region(replace(rec, channels=channels), (0.0, 30.0))
 
 
 def test_z_enter_is_the_generators_own_unless_given(

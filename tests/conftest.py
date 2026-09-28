@@ -1034,9 +1034,13 @@ def make_cuff_contacts(
     faults: dict[str, ContactFault] | None = None,
     *,
     common_sigma_uv: float = 20.0,
+    n_stomach: int = 0,
     seed: int = 0,
 ) -> Recording:
     """Two cuffs of three contacts, sharing an ENG-band common mode, with faults.
+
+    ``n_stomach`` adds that many stomach channels (ANT1..) from
+    :func:`make_multichannel`, untouched by the nerve common mode.
 
     ``make_multichannel``'s contacts are independent in 300-3000 Hz; real ones are
     not - on this rig same-cuff contacts correlate 0.85-0.99 there because a common
@@ -1049,12 +1053,12 @@ def make_cuff_contacts(
     ``"uncorrelated"`` - its own ENG only, none of the common mode (off the cuff);
     ``("duplicate", "R1")`` - a bit-exact copy of another contact's column.
     """
-    rec, _truth = make_multichannel(fs, dur_s, n_cuff=2, n_stomach=0, common_mode=False,
-                                    seed=seed)
+    rec, _truth = make_multichannel(fs, dur_s, n_cuff=2, n_stomach=n_stomach,
+                                    common_mode=False, seed=seed)
     rng = np.random.default_rng(seed + 7)
     shared = make_common_mode(fs, dur_s, 300.0, 3000.0, sigma_uv=common_sigma_uv, seed=seed + 11)
     data = np.array(rec.data, dtype=np.float64)
-    label = {f"{c.cuff_id}{c.contact_index}": c.index for c in rec.channels}
+    label = {f"{c.cuff_id}{c.contact_index}": c.index for c in rec.channels if c.cuff_id}
     for col in label.values():
         data[:, col] += float(rng.uniform(0.85, 1.15)) * shared
     for name, fault in (faults or {}).items():

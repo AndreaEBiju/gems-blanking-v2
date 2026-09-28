@@ -1,10 +1,14 @@
-"""Per-contact quality screen: which cuff contacts carry independent signal.
+"""Per-contact quality screen: which contacts carry independent, trustworthy signal.
 
-Invariant 41: a detector must establish that its input carries signal before it
-reports a location. A contact that is dead, a copy of another, or disconnected
-from its cuff produces z traces that mean nothing - and, through ``T``, corrupts
-its cuff's tripole too. This module states the screen as a rule with fixed
-thresholds, and answers the velocity question (three good contacts per cuff).
+What the screen is FOR (ruling 2026-09-29, invariant 43): whether a cuff's ``T`` is
+trusted (a tripole formed from a failed contact keeps the common mode it exists to
+remove), which cuffs velocity may use (three good contacts), and the per-recording
+contact-health report. What it is NOT for: hiding a contact from detection. Every
+consumer still reads a screened contact, so detection must too - round 2's broken
+left contact 3 "shared nothing with its peers" because it was popping at rail
+scale, and removing it from detection hid 9 of 14 missed artifacts. The stomach
+contacts get a health check (:func:`assess_stomach_contacts`, with a mains-hum
+rule) that feeds the report only.
 
 The rule, over ``SCREEN_WINDOW_S`` of the recording, in ``SCREEN_BAND_HZ``:
 
@@ -43,7 +47,7 @@ from typing import Final, Literal
 
 import numpy as np
 import numpy.typing as npt
-from scipy.signal import butter, sosfiltfilt
+from scipy.signal import butter, sosfiltfilt, welch
 
 from gems_blanking_v2.types import Recording
 
@@ -160,10 +164,11 @@ def assess_contacts(
 
 
 def screened_signals(quality: dict[str, ContactQuality]) -> frozenset[str]:
-    """Return the detection signals the failed contacts remove: each own ``V``, its ``T``.
+    """Return the derived signals a failed contact makes untrustworthy: its ``V``, its ``T``.
 
     ``T`` goes with it because a tripole formed from a failed contact is not a
-    tripole - it keeps the common mode the tripole exists to remove.
+    tripole - it keeps the common mode the tripole exists to remove. Untrusted is
+    not unread: these stay in detection's max (invariant 43).
     """
     drop: set[str] = set()
     for q in quality.values():
@@ -180,3 +185,92 @@ def velocity_cuffs(quality: dict[str, ContactQuality]) -> tuple[str, ...]:
         if {q.contact_index for q in quality.values() if q.cuff_id == cuff and not q.screened}
         >= {1, 2, 3}
     )
+
+
+# ---------------------------------------------------------------------------
+# stomach contacts: report only (ruling 2026-09-29)
+# ---------------------------------------------------------------------------
+
+MAINS_HZ: Final = (60.0, 120.0, 180.0)
+"""The mains fundamental and the harmonics the hum rule sums, +/- 1 Hz each."""
+
+MAINS_SHARE_BAND_HZ: Final = (1.0, 1000.0)
+"""The band ``mains_share`` is a fraction of."""
+
+HUM_RATIO: Final = 10.0
+"""A stomach contact whose mains power exceeds this many times the median of its
+peers' is hum-dominated. On the 70-region pool the ratio's p90 was 2.4 and the
+values ran continuously to 7.6, then jumped to 13.7-88 (B's ANT1, I's ANT2)."""
+
+StomachReason = Literal["flat", "duplicate", "mains_hum"]
+
+
+@dataclass(frozen=True, slots=True)
+class StomachQuality:
+    """One stomach contact's health, for the contact-health report only."""
+
+    label: str
+    sigma_uv: float
+    """ENG-band robust sigma, microvolts."""
+    flat_fraction: float
+    copy_residual: float
+    """``sqrt(1 - r**2)`` against the most correlated other stomach contact."""
+    mains_share: float
+    """Mains power as a fraction of 1-1000 Hz power."""
+    mains_over_peers: float
+    """Mains power over the median of the other stomach contacts' mains power."""
+    reasons: tuple[StomachReason, ...]
+
+
+def assess_stomach_contacts(
+    rec: Recording, *, start_s: float = 0.0, window_s: float = SCREEN_WINDOW_S
+) -> dict[str, StomachQuality]:
+    """Health of every stomach contact over ``[start_s, start_s + window_s)``.
+
+    ``flat`` and ``duplicate`` are the nerve rules; ``mains_hum`` fires when a
+    contact's mains power exceeds :data:`HUM_RATIO` times its peers' median. Never
+    used by detection (ruling 2026-09-29): it hid ``stomach_ref`` and cost five
+    round-1 marks when tried there.
+    """
+    fs = float(rec.fs)
+    stom = [c for c in rec.channels if c.role == "stomach"]
+    if not stom:
+        return {}
+    i0 = max(round(start_s * fs), 0)
+    i1 = min(i0 + round(window_s * fs), rec.data.shape[0])
+    if i1 - i0 < fs:
+        msg = f"stomach health window [{start_s}, {start_s + window_s}) s holds < 1 s of data"
+        raise ValueError(msg)
+    raw = np.column_stack([np.asarray(rec.data[i0:i1, c.index], dtype=np.float64) for c in stom])
+    raw = raw[np.isfinite(raw).all(axis=1)]
+    eng = sosfiltfilt(butter(4, SCREEN_BAND_HZ, btype="bandpass", fs=fs, output="sos"),
+                      raw, axis=0)
+    f, p = welch(raw - raw.mean(axis=0), fs=fs, nperseg=min(int(4 * fs), raw.shape[0]), axis=0)
+    mains = np.array([sum(float(p[(f > h - 1) & (f < h + 1), k].sum()) for h in MAINS_HZ)
+                      for k in range(raw.shape[1])])
+    lo, hi = MAINS_SHARE_BAND_HZ
+    total = np.array([float(p[(f > lo) & (f < hi), k].sum()) for k in range(raw.shape[1])])
+    with np.errstate(invalid="ignore", divide="ignore"):
+        r = np.corrcoef(eng.T)
+    r = np.where(np.isfinite(r), r, 0.0)
+    out: dict[str, StomachQuality] = {}
+    for k, c in enumerate(stom):
+        others = [j for j in range(len(stom)) if j != k]
+        peer = float(np.median(mains[others])) if others else float("nan")
+        best = max((abs(float(r[k, j])) for j in others), default=0.0)
+        sigma = _robust_sigma(eng[:, k])
+        flat = float(np.mean(np.diff(raw[:, k]) == 0)) if raw.shape[0] > 1 else 1.0
+        residual = float(np.sqrt(max(0.0, 1.0 - best ** 2)))
+        over = float(mains[k] / peer) if peer > 0 else float("inf")
+        reasons: list[StomachReason] = []
+        if sigma < FLAT_SIGMA_UV or flat > FLAT_FRACTION:
+            reasons.append("flat")
+        if others and residual < DUPLICATE_RESIDUAL:
+            reasons.append("duplicate")
+        if others and over > HUM_RATIO:
+            reasons.append("mains_hum")
+        out[c.name] = StomachQuality(
+            label=c.name, sigma_uv=sigma, flat_fraction=flat, copy_residual=residual,
+            mains_share=float(mains[k] / total[k]) if total[k] > 0 else float("nan"),
+            mains_over_peers=over, reasons=tuple(reasons))
+    return out

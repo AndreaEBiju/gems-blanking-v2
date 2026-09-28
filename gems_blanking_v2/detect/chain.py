@@ -1,4 +1,12 @@
-"""The detection chain: derivations -> contact screen -> z -> candidates.
+"""The detection chain: derivations + raw stomach contacts -> z -> candidates.
+
+Detection reads every signal any consumer reads (ruling 2026-09-29, invariant 43):
+the derived nerve signals (every raw contact and each cuff's ``T``), ``stomach_ref``,
+and the raw stomach contacts ANT1-3, which ``slow_wave`` and ``mmc`` read raw. The
+contact screen no longer removes anything from the max - it hid rail-scale pops on a
+broken contact that every consumer still read (9 of round 2's 14 misses). It is
+still run, and reported (:attr:`RegionDetection.untrusted`), for what it is right
+for: whether a cuff's ``T`` is trusted, and which cuffs velocity may use.
 
 ONE construction site for "what is a candidate" (invariant 33). Production and
 the recall audit both call :func:`detect_region`; the audit's bridge only reshapes
@@ -85,9 +93,10 @@ class RegionDetection:
     report: CandidateReport
     z: dict[Pair, F64]
     signals: tuple[str, ...]
-    """The detection signals that entered the max, sorted."""
-    screened: frozenset[str]
-    """Signals the contact screen removed (a failed contact's V and its cuff's T)."""
+    """The detection signals that entered the max, sorted - every signal a consumer reads."""
+    untrusted: frozenset[str]
+    """Derived signals the contact screen distrusts (a failed contact's V and its cuff's
+    T). Reported for T trust and velocity; they stay in the max (invariant 43)."""
     quality: dict[str, ContactQuality]
 
 
@@ -98,20 +107,28 @@ def detect_region(
 
     Everything is computed on the REGION - the baseline, or a stim/recovery file's
     recovery epoch - so the stim epoch never enters a reference. The contact screen
-    reads the region's first 120 s. ``z_enter`` defaults to ``candidate_report``'s
-    own default: the value is never restated here (invariant 39).
+    reads the region's first 120 s and is reported, not applied. ``z_enter``
+    defaults to ``candidate_report``'s own default: never restated here (invariant 39).
     """
     lo, hi = region
     i0, i1 = round(lo * rec.fs), round(hi * rec.fs)
     sub = replace(rec, data=rec.data[i0:i1])
     signals, _weights = build_derivations(sub)
+    raw_stomach = {c.name: np.asarray(sub.data[:, c.index], dtype=np.float64)
+                   for c in sub.channels if c.role == "stomach"}
+    clash = set(raw_stomach) & set(signals)
+    if clash:
+        msg = f"raw stomach channel names collide with derived signals: {sorted(clash)}"
+        raise ValueError(msg)
+    detection = {**signals, **raw_stomach}
     quality = contact_quality.assess_contacts(sub)
-    dropped = screened_signals(quality)
-    if dropped:
+    untrusted = screened_signals(quality)
+    if untrusted:
         why = {k: q.reasons for k, q in quality.items() if q.screened}
-        _log.warning("contact screen removed %s from detection (%s)", sorted(dropped), why)
-    names = sorted(n for n in signals if n not in dropped)
-    z = z_by_pair(np.column_stack([signals[n] for n in names]), float(rec.fs), names)
+        _log.warning("contact screen distrusts %s (%s); they stay in detection",
+                     sorted(untrusted), why)
+    names = sorted(detection)
+    z = z_by_pair(np.column_stack([detection[n] for n in names]), float(rec.fs), names)
     beats = detect_rpeaks(signals[BEAT_SIGNAL], float(rec.fs))
     kw: dict[str, Any] = {} if z_enter is None else {"z_enter": z_enter}
     report = _candidates.candidate_report(z, beats, **kw)
@@ -119,7 +136,7 @@ def detect_region(
     intervals = (np.asarray(spans, dtype=np.float64) if spans
                  else np.zeros((0, 2), dtype=np.float64))
     return RegionDetection(region=(float(lo), float(hi)), intervals=intervals, report=report,
-                           z=z, signals=tuple(names), screened=dropped, quality=quality)
+                           z=z, signals=tuple(names), untrusted=untrusted, quality=quality)
 
 
 # ---------------------------------------------------------------------------

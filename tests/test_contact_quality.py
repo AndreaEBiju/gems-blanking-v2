@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 from gems_blanking_v2.derive.contact_quality import (
     assess_contacts,
+    assess_stomach_contacts,
     screened_signals,
     velocity_cuffs,
 )
@@ -163,3 +164,59 @@ def test_masked_samples_are_left_out_not_propagated() -> None:
 
     assert all(np.isfinite(v.r_peers).all() and np.isfinite(v.sigma_uv) for v in q.values())
     assert not any(v.screened for v in q.values())
+
+
+# --- stomach contacts: health for the report, never for detection (2026-09-29) ---
+
+
+def _with_column_by_name(rec: Recording, label: str, x: np.ndarray) -> Recording:
+    data = np.array(rec.data, dtype=np.float64)
+    data[:, next(c.index for c in rec.channels if c.name == label)] = x
+    return replace(rec, data=data)
+
+
+def test_healthy_stomach_contacts_pass() -> None:
+    q = assess_stomach_contacts(make_cuff_contacts(FS, DUR, n_stomach=3, seed=31))
+
+    assert set(q) == {"ANT1", "ANT2", "ANT3"}
+    assert not any(v.reasons for v in q.values())
+    assert all(0.5 < v.mains_over_peers < 2.0 for v in q.values())
+
+
+@pytest.mark.parametrize(("amp", "hum"), [(0.4, False), (0.6, True)])
+def test_the_mains_hum_threshold(amp: float, hum: bool) -> None:
+    """Mains power over 10x the peers' median: ~7x does not fire, ~15x does."""
+    rec = make_cuff_contacts(FS, DUR, n_stomach=3, seed=31)
+    q = assess_stomach_contacts(_with_hum_by_name(rec, "ANT1", amp))["ANT1"]
+
+    assert (10.0 < q.mains_over_peers < 20.0) if hum else (3.0 < q.mains_over_peers < 10.0)
+    assert ("mains_hum" in q.reasons) is hum
+
+
+def _with_hum_by_name(rec: Recording, label: str, amp_uv: float) -> Recording:
+    col = next(c.index for c in rec.channels if c.name == label)
+    t = np.arange(rec.data.shape[0]) / rec.fs
+    hum = amp_uv * np.sin(2 * np.pi * 60.0 * t)
+    return _with_column_by_name(rec, label, rec.data[:, col] + hum)
+
+
+def test_a_flat_stomach_contact_is_reported_flat() -> None:
+    rec = make_cuff_contacts(FS, DUR, n_stomach=3, seed=32)
+    q = assess_stomach_contacts(_with_column_by_name(rec, "ANT2", np.full(rec.data.shape[0], 3.0)))
+
+    assert "flat" in q["ANT2"].reasons and not q["ANT1"].reasons
+
+
+def test_a_copied_stomach_contact_is_reported() -> None:
+    rec = make_cuff_contacts(FS, DUR, n_stomach=3, seed=33)
+    col = next(c.index for c in rec.channels if c.name == "ANT1")
+    q = assess_stomach_contacts(_with_column_by_name(rec, "ANT3", -2.0 * rec.data[:, col]))
+
+    assert "duplicate" in q["ANT3"].reasons and "duplicate" in q["ANT1"].reasons
+
+
+def test_a_recording_without_stomach_contacts_has_no_stomach_report() -> None:
+    assert assess_stomach_contacts(make_cuff_contacts(FS, DUR, seed=34)) == {}
+    with pytest.raises(ValueError, match="< 1 s"):
+        assess_stomach_contacts(make_cuff_contacts(FS, DUR, n_stomach=3, seed=34),
+                                start_s=DUR - 0.5)
