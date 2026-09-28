@@ -4008,6 +4008,30 @@ round-1 marks still covered; time covered and candidate budget on the 60-region
 pool; pooled chance recall and its margin against 0.98. A fix that recovers
 misses by raising coverage until chance approaches the bar is not a fix.
 
+**Overlapping marks are one artifact — Andrea, 2026-09-28.** Because of the
+viewport's width she sometimes marked one artifact as several slightly
+overlapping marks. The scoring unit therefore becomes **one artifact = one
+connected run of committed marks**: marks in the same span whose intervals
+overlap or touch (gap ≤ 0) are merged into their union before scoring. The rule
+is mechanical, independent of the candidates, and applied identically to every
+round.
+
+- **Marks separated by any positive gap stay separate** — that could be two
+  artifacts. List pairs with gaps under 100 ms for Andrea to see, unmerged.
+- **Report both** the as-committed score and the merged score for rounds 1 and
+  2, clearly labelled. Both rounds become tuning data once a fix is recorded, so
+  this changes no gate decision; from round 3 the merged unit is the declared
+  unit.
+- **Check this first against the 7 brief misses.** A 20–60 ms sliver at a
+  viewport edge, overlapping a larger mark that *was* covered, is exactly what
+  this would produce. Any brief miss that merges into a covered artifact is not
+  a blind spot at all, and does not need a fast path.
+- **Committed marks files are not rewritten.** The merge is a scoring step over
+  the committed marks, not an edit of them.
+- **Fix the cause in the window for round 3:** a mark may extend past the
+  visible viewport, and at commit the window shows any overlapping or touching
+  marks merged, with a count, before she confirms.
+
 **Committed marks are never edited.** If Andrea judges a brief mark not to be an
 artifact, that is recorded as her classification of the miss and reported
 alongside the score; the score itself stands as committed. Changing labels after
