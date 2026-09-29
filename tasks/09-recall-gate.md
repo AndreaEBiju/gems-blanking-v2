@@ -500,6 +500,57 @@ measured the generator on baselines. **Rulings:**
 3. Test both, mutation-check both. The planner is outside the generation hash,
    so no budget re-run; the app needs a restart to load it.
 
+### ROUND 4 MISS, 2026-09-29 — a common-mode transient; decide by consumer harm, not by size
+
+Round 4 (5 baseline spans): 154/155 pooled with round 3, lower bound 0.970,
+5 bl + 5 sr spans. The one miss is a **1.2 ms spike, ~310 µV, the same size on all
+nine raw channels** — both vagus cuffs and the stomach. Andrea would blank it, and
+says there are many like it she did not mark because they are hard to see; six
+more of the same shape sit unmarked in the same span.
+
+**What it is.** No nerve spike appears at the same instant and amplitude on two
+cuffs and three stomach contacts. An identical, simultaneous transient on every
+channel is electrical common mode (rig, ground, connector), not physiology.
+
+**Why it probably does not need a mask — to be measured, not assumed:**
+
+- **The spike consumer reads `T`**, and any tripole with a + b = 1 cancels a signal
+  that is identical on its three contacts exactly (a·x + b·x − x = 0). Only the
+  residual from inter-channel gain mismatch survives.
+- **Stomach, HR and breathing consumers work below 100 Hz**, where a 1.2 ms spike
+  carries almost no energy.
+- **Velocity reads raw contact pairs**, and a common-mode transient there is a
+  zero-lag (infinitely fast) event. That is physically impossible for conduction
+  at 1.5 mm pitch, so task 18 must reject zero-lag / all-channel-simultaneous
+  events — which is Andrea's point: distinguish them from nerve spikes by their
+  characteristics, downstream.
+
+**Also: human labels will keep missing this class.** They are hard to see, so the
+audit systematically under-counts them, and the audit cannot be the instrument
+that validates handling them. Physics (simultaneity across all channels) and
+injection of a known 1.2 ms common-mode waveform can.
+
+**Decision rule:**
+
+1. **Measure consumer harm** on the seven transients plus a larger sample found by
+   a simple all-channel-simultaneity filter in a few recordings: residual
+   amplitude on `T` (300–3000 Hz) against the spike consumer's 4.5σ threshold;
+   whether `detectSortNerveSpikesECAP` actually fires on them; their energy below
+   100 Hz; and their rate per minute.
+2. **If no consumer is damaged:** close the miss as `accepted_limitation` with the
+   reason "common-mode transient, harmless to every consumer by construction",
+   citing the measurement. Add zero-lag rejection to task 18's requirements. No
+   generator change, so rounds 3 and 4 stay eligible.
+3. **If the spike consumer is damaged** (residual on `T` crosses 4.5σ): add a
+   deterministic common-mode-transient detector — simultaneity across channels,
+   not amplitude, as the criterion — validated by injection, and routed to the
+   `T` consumer's mask. Because it only **adds** candidates, rounds 3 and 4 remain
+   valid, conservative evidence *if* (a) it is proven a strict superset on every
+   cached region, (b) their original scores are kept, not re-scored, so the miss
+   that motivated it still counts, and (c) the chance margin is recomputed with
+   the added coverage. Record this as an explicit additive extension, never a
+   silent exception to the hash rule.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
