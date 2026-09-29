@@ -551,6 +551,90 @@ injection of a known 1.2 ms common-mode waveform can.
    the added coverage. Record this as an explicit additive extension, never a
    silent exception to the hash rule.
 
+### RULING 2026-09-29 — common-mode events: close the miss, correct the class, don't blank it
+
+**Measured** (10 round-3/4 recordings, her real spike settings: 300–3000 Hz,
+order 4, negative, 4.5σ, 8–150 µV, 0.2–2.5 ms):
+
+- **The round-4 miss is harmless**: 2.3σ / 1.6σ on T, her detector does not fire.
+- **The class is not rare.** Same-instant, same-polarity, equal-amplitude events on
+  ≥ 7 of 9 contacts run at **124–2,900 per minute in every recording**, rate-modulated
+  at 0.32–0.63 Hz with bursts. Common mode dominates the raw contacts' spike band
+  (σ ~10 µV raw vs ~2.2 µV on T). The seven seen were the visible tail.
+- **The tripole cancels them to ~1%**, but gain mismatch leaks. Damage is concentrated:
+  1,319 of 1,343 firing events are in two cuff-recordings — **H t01 es2 bl left
+  (83 false spikes/min)**, a cuff with a distrusted contact (σ(T) 4.9 vs ~2.2 µV,
+  LVN1 6.7 vs 10–11 µV), and **B t03 sr right (14/min)**.
+- My premises that failed: "electrical, not physiology" is unestablished (the
+  0.32–0.63 Hz rhythm could be physiological common mode through the reference);
+  "almost no energy below 100 Hz" is wrong (median 11–35%) — `mmc`/`slow_wave`
+  are protected because `stomach_ref` cancels it, not by band; and the HR consumer
+  reads 10–150 Hz with `best_hr_channel` undefined for the new cohort.
+
+**Rulings:**
+
+1. **Close the round-4 miss** as `accepted_limitation`: "common-mode transient;
+   this instance measured harmless to the spike consumer (2.3σ/1.6σ on T;
+   detector did not fire)". Round 5 may then be drawn. The class is a routing
+   question (task 14), not a candidate-recall one — most of it is invisible to a
+   human, so the audit cannot measure it anyway.
+2. **Do not blank the class.** Masking T for ±1.5 ms wherever it reaches 4σ at an
+   event would also remove real spikes that coincide with events — at up to ~48
+   events/s, a real share of the spike consumer's time — and if the event rhythm
+   is physiological, it would bias exactly the rhythm-locked spike analyses. Keep
+   it only as a fallback.
+3. **Distrusted cuff → the spike consumer does not read that cuff's T** for that
+   recording (invariant 43 allows distrusting a derived quantity). Confirm the
+   contact screen does flag H t01 es2 left; if it does not, say so.
+4. **Correct the leak by subtraction (task 14's "subtract" route).** Per cuff per
+   recording, regress T (300–3000 Hz) on a common-mode reference built from the
+   channels **outside** that cuff (the other cuff and the stomach contacts, so
+   none of this nerve's own signal is in it), and subtract k·ref. Verify, as the
+   route requires: firing on events drops to the random-time control rate; an
+   injected *differential* spike on T (present on this cuff only) survives within
+   5% amplitude; the residual is reported per cuff. If it fails verification, fall
+   back to 2.
+5. **Measure first, before building:** the fraction of spike-consumer time within
+   ±1 ms of an event, per recording, and whether her detected spikes coincide
+   with events more than chance — that quantifies the concern behind ruling 2.
+6. **HR consumer:** define `best_hr_channel` for the new cohort (task 05's ranking),
+   then decide harm with the operational test (beat train unchanged), not by
+   amplitude.
+7. **Task 18:** velocity must not run on raw contacts — with this background, a
+   raw-pair cross-correlation is dominated by the zero-lag common mode. Run it on
+   the common-mode-corrected contacts from 4 (or on differential pairs), and
+   reject any event arriving at zero lag across the pair or on all nine contacts
+   within 0.2 ms: conduction at 1.5 mm pitch cannot be simultaneous.
+
+**Andrea, 2026-09-29, on the source.** The new cohort has **no reference
+channel**; in the old cohort the nerve reference was on the cuff and ground in the
+abdominal wall, and the stomach's reference and ground were both in the fundus. So
+new-cohort contacts are single-ended against the shared ground/reference, and
+**anything at that site enters all nine channels identically** — the likeliest
+source of the common mode (e.g. muscle activity near the ground), which also
+explains why it is on both cuffs and the stomach at once. Consequences:
+
+- Differential derivations (the tripole, contact differences) cancel it up to gain
+  mismatch; **any consumer that reads a single raw contact carries it in full**
+  (the HR channel; velocity if run on raw contacts). Rulings 5–7 stand.
+- The subtraction reference in ruling 5 is sound: the common mode is the ground
+  site's signal, identical on every channel, so channels outside the cuff measure
+  it without this nerve's activity.
+- The 20–40/min rhythm has no analytic meaning for Andrea **unless it is
+  breathing**. Her breathing range is 70–150/min, so it is probably not, but check
+  rather than assume: cross-correlate the event-rate time course with the breathing
+  trace and the heart-rate trace from `HR_BR_HRVAnalysis_new` in the same
+  recordings.
+- **Andrea: the new cohort's ground, for both nerve and stomach, is in the
+  abdominal wall.** So the common mode is most likely abdominal-wall muscle
+  activity entering every channel through the shared ground. The old cohort did
+  not have this problem on the nerves, because each cuff had its own reference on
+  the cuff; the change of referencing between cohorts is what exposed it.
+  Old-cohort results on this point do not transfer to the new cohort.
+- For future implants (Andrea's call, not the build's): a dedicated reference
+  electrode placed away from muscle, or recording each cuff differentially, would
+  remove most of this at the source.
+
 ### Candidates are much wider than the marks — expected, but it must not reach the mask
 
 Andrea, 2026-09-29: candidates cover far more signal than she marks, in almost
