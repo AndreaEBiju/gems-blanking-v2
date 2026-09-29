@@ -37,6 +37,7 @@ import numpy.typing as npt
 import pytest
 from gems_blanking_v2.constants import FS_NOMINAL_HZ, MAD_TO_SIGMA
 from gems_blanking_v2.types import ChannelInfo, Recording
+from scipy.signal import butter, sosfiltfilt
 
 F64 = npt.NDArray[np.float64]
 
@@ -1071,6 +1072,75 @@ def make_cuff_contacts(
             data[:, col] = data[:, label[fault[1]]]
     return Recording(fs=rec.fs, data=data, channels=rec.channels, animal=rec.animal,
                      session=rec.session, path=rec.path)
+
+
+class SharedGroundSynth(NamedTuple):
+    """Return of :func:`make_shared_ground`."""
+
+    rec: Recording
+    common: F64
+    """The ground-site signal, microvolts, before each channel's gain."""
+    gains: dict[str, float]
+    """Per channel name, the gain the common signal enters that channel with."""
+    transients_s: F64
+    """Times of the 1.2 ms common-mode transients, seconds."""
+
+
+def make_shared_ground(
+    fs: float,
+    dur_s: float,
+    *,
+    common_sigma_uv: float = 10.0,
+    own_eng_sigma_uv: float = 1.8,
+    gain_spread: float = 0.03,
+    n_transients: int = 40,
+    transient_uv: float = 310.0,
+    seed: int = 0,
+) -> SharedGroundSynth:
+    """Nine single-ended channels against one shared ground, as the new cohort is wired.
+
+    Andrea, 2026-09-29: the new cohort has no reference channel and its ground, for
+    nerve and stomach alike, is in the abdominal wall, so whatever is at that site
+    enters all nine channels identically. Measured there: the raw contacts' 300-3000
+    Hz sigma is ~10 uV against ~2.2 uV on T, and 1.2 ms, ~310 uV common-mode
+    transients arrive on every channel at once. This builds that world on top of
+    :func:`make_cuff_contacts` (two cuffs, three stomach contacts, per-contact ENG):
+    a continuous 300-3000 Hz common signal of ``common_sigma_uv`` plus
+    ``n_transients`` Gaussian transients of 1.2 ms FWHM and ``transient_uv``, added
+    to EVERY channel with its own gain drawn from ``1 +/- gain_spread`` - the gain
+    mismatch that makes a tripole leak.
+
+    Each channel's own content is scaled so its 300-3000 Hz robust sigma is
+    ``own_eng_sigma_uv``: 1.8 uV, from the measured sigma(T) of ~2.2 uV and
+    ``T = V1/2 + V3/2 - V2`` (sigma_own = sigma_T / sqrt(1.5)). The ratio of common to
+    own content is the property a leak fit is tested on, so it must be the rig's
+    (invariant 41's corollary); :func:`make_cuff_contacts` alone gives ~2.85 uV.
+    """
+    base = make_cuff_contacts(fs, dur_s, common_sigma_uv=0.0, n_stomach=3, seed=seed)
+    sos = butter(4, (300.0, 3000.0), btype="bandpass", fs=fs, output="sos")
+    own = np.median([robust_sigma(sosfiltfilt(sos, np.asarray(base.data[:, c.index], float)))
+                     for c in base.channels])
+    rec = Recording(fs=base.fs, data=np.asarray(base.data, np.float64) * (own_eng_sigma_uv / own),
+                    channels=base.channels, animal=base.animal, session=base.session,
+                    path=base.path)
+    rng = np.random.default_rng(seed + 23)
+    n = rec.data.shape[0]
+    t = np.arange(n, dtype=np.float64) / fs
+    common = make_common_mode(fs, dur_s, 300.0, 3000.0, sigma_uv=common_sigma_uv, seed=seed + 29)
+    when = np.sort(rng.uniform(0.05 * dur_s, 0.95 * dur_s, n_transients))
+    width = 0.0012 / (2.0 * math.sqrt(2.0 * math.log(2.0)))
+    for w in when:
+        near = np.abs(t - w) < 10 * width
+        common[near] += transient_uv * np.exp(-0.5 * ((t[near] - w) / width) ** 2)
+    data = np.array(rec.data, dtype=np.float64)
+    gains = {}
+    for c in rec.channels:
+        g = float(rng.uniform(1.0 - gain_spread, 1.0 + gain_spread))
+        gains[c.name] = g
+        data[:, c.index] += g * common
+    out = Recording(fs=rec.fs, data=data, channels=rec.channels, animal=rec.animal,
+                    session=rec.session, path=rec.path)
+    return SharedGroundSynth(out, common, gains, when)
 
 
 # ---------------------------------------------------------------------------
