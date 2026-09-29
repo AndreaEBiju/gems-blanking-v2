@@ -4122,6 +4122,32 @@ against the chance margin before adoption, as this one was.
 **Contact-health report scoped to the 68 measured recordings — ratified.**
 Streaming ~700 GB to extend it to the cohort is not worth it now (invariant 26).
 
+### ROUND 3 RESULT, 2026-09-29 — clean, not yet enough; planner must stratify conditions
+
+First gate-evidence round under the adopted chain, merged unit as declared:
+**101 found, 101 covered**, one-sided lower bound **0.971** against 0.98 — not
+cleared, 48 more artifacts needed at zero misses. Chance 0.731, margin +0.168;
+time covered 51%. Every digest verified. None of the four accepted limitations
+recurred.
+
+**All five spans were stim/recovery.** The spec (Change 2's sampling rule) says
+the plan is stratified across animals **and conditions**; the planner only
+rotates animals. That is a planner defect against the spec, not a property of
+round 3's result, and round 3 stands as valid evidence for what it sampled.
+But a gate that clears with no baseline span among its eligible rounds has not
+measured the generator on baselines. **Rulings:**
+
+1. **The planner balances conditions across the eligible pool's spans**, using
+   only the composition of earlier eligible plans — never their scores. With
+   round 3 at 5 sr / 0 bl, round 4 draws baseline spans until the pool is
+   balanced (5 bl), then later rounds alternate. Correct the docstring to say
+   exactly this.
+2. **The gate requires at least 3 eligible spans of each condition**, in
+   addition to the lower bound and the chance margin. A lower bound reached on
+   one condition only is reported as such and does not clear.
+3. Test both, mutation-check both. The planner is outside the generation hash,
+   so no budget re-run; the app needs a restart to load it.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
