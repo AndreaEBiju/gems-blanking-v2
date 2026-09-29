@@ -661,6 +661,39 @@ downstream, and three things must hold:**
    candidates routinely exceed it, the review queue becomes the bottleneck;
    measure that fraction now.
 
+### Candidate width measured, 2026-09-29 — judge long candidates by their cores
+
+Over all 405 merged marks from rounds 1–4 (cores module `detect/cores.py`, outside
+the hash; generation hash unchanged):
+
+- **Under the duration cap, candidates are ~1.9× the marks by time**, and 61% of
+  candidate time is the hysteresis tail (`z_enter` → `z_exit`); merging adds 0.5%.
+  **The core touching a mark is about the mark's size** (median 0.73× baseline,
+  0.90× stim/recovery). Cores localise the evidence as intended.
+- **Over the cap: 24 candidates (1.9%) carry 44% of candidate time and contain 49%
+  of covered marks.** Baseline over-cap candidates are 88% core — sustained real
+  elevation, not hysteresis; the largest is 164 s, driven by L_V3 at 2–50 Hz above
+  `z_enter` for 127 s, in a span where Andrea marked 90 artifacts.
+- **The duration cap had no source.** The spec's p99 was to come from old
+  `*_segment_indices.mat`; none exist. **Provisional cap: 15.3 s**, the p99 of merged
+  audit marks — resting on ~4 marks and bounded by the 2-min span. Recompute after
+  each round and record its source.
+
+**Rulings:**
+
+1. **A long candidate is judged by its cores.** Downstream of generation —
+   classification, extent, Andrea's candidate adjudication — an over-cap candidate
+   is split into its cores, and only a core that itself exceeds the cap goes to the
+   review queue. Sending half of all artifacts to manual review is not a queue, it
+   is the whole job. Generation and the gate are untouched.
+2. **Attribute the 24 over-cap candidates** before designing more: for each, the
+   signal and band of its core, whether that contact is distrusted by the contact
+   screen, and whether any consumer reads that (signal, band) pair. L_V3 at 2–50 Hz
+   is a left-cuff contact (the side that fails the screen) in a band no nerve
+   consumer reads; if that pattern dominates, it says what the long candidates are.
+3. The ~10% of marks wider than any candidate are rough edges on Andrea's marks,
+   not misses; no action.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
