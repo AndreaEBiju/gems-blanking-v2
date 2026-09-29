@@ -434,6 +434,46 @@ its hash, and Andrea has classified the misses in the PDF.
 326.91 s) and 2 threshold.** Fix 2 (a fast path) is considered only if Andrea
 classifies the two brief ones as artifacts.
 
+### RULING 2026-09-29 — how a miss is closed
+
+The chain fix is **adopted** (`0abda6b`, `fixed_at` 2026-09-28T23:35:43Z, budget
+key `0133349b…_4c4337ce…`): q90 595, median time covered 61.5%, pooled chance
+upper 0.916 (margin +0.064). Rounds 1 and 2 are tuning data. Four round-2 misses
+remain: s1 #22 (60 ms) and s1 #23 (20 ms), brief; s1 #29 (420 ms) and s3 #17
+(50 ms), threshold.
+
+The sequential rule required a task-07 fix for every miss before another round.
+That rule exists so Andrea does not label against a generator already known to
+miss **for a fixable reason**; it cannot mean "no round until every miss is
+fixable", which would block forever on a miss nothing should fix. **A miss is
+closed by exactly one of:**
+
+1. **Fixed** — a recorded generator change recovers it (the 10 already closed).
+2. **Not the target class** — Andrea classifies it as not an artifact she would
+   blank. Recorded as her classification; the committed mark and score stand.
+3. **Accepted limitation** — diagnosed, no fix without fitting the generator to
+   the miss, and accepted with a written reason. The two threshold misses close
+   this way: lowering or pinning `z_enter` to reach them is exactly the fitting
+   this section forbids.
+
+An accepted limitation is not a pass. **Fresh rounds measure it honestly**: if
+that kind of miss recurs, it counts against the gate in rounds that are gate
+evidence, and a recurring class is then the signal to design a fix (e.g. the
+fast path for brief events). `check_next_round` accepts any of the three
+closures and records which.
+
+**The two brief misses wait for Andrea.** If they are artifacts, they close as
+accepted limitations (a fast path for two events would be fitting); if not, as
+not-target, and a labelling note is declared before round 3 so round 3 marks the
+same class of event consistently.
+
+**Watch the margin.** Median time covered rose from 54% to 61.5%; round 1 alone
+now sits at +0.013. Any further expansion of the detection set must be measured
+against the chance margin before adoption, as this one was.
+
+**Contact-health report scoped to the 68 measured recordings — ratified.**
+Streaming ~700 GB to extend it to the cohort is not worth it now (invariant 26).
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly

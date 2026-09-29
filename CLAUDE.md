@@ -392,6 +392,16 @@ violating one, stop and say so rather than working around it.
     pops. The broken contact was the artifact source, and the screen was built
     to look away from exactly that.
 
+44. **A verified commit's SHA is an identity other records point at; never
+    rewrite it.** Budget records and gate scores name the commit they were
+    measured under. A rebase that replays verified commits gives them new SHAs
+    and leaves that provenance pointing at nothing, silently. On the build
+    machine, integrate the spec with a merge, never a rebase, once any commit
+    has been verified. *Found when a `git pull --rebase` — which I had
+    instructed — rewrote three verified commits; they were restored and the
+    spec merged in instead.* (The spec machine has no verified commits, so a
+    rebase there is harmless.)
+
 ---
 
 ## Cross-platform rules (macOS + Windows; Linux best-effort)
