@@ -182,13 +182,23 @@ def test_a_classification_is_recorded_beside_the_score_and_never_touches_the_mar
 
     doc = json.loads(path.read_text(encoding="utf-8"))
     assert path == classification_path(store, PID)
-    assert doc[f"{PID}_s1#0"] == {"classification": "artifact", "by": "Andrea",
-                                  "words": "a real pop, I would blank it", "at": at.isoformat()}
+    assert doc[f"{PID}_s1#0"] == {"is_artifact": {
+        "classification": "artifact", "by": "Andrea", "words": "a real pop, I would blank it",
+        "at": at.isoformat()}}
     assert {f: f.read_bytes() for f in marks} == before
     assert store.audit_score_path(PID).read_bytes() == score_before
-    with pytest.raises(ValueError, match="already classified"):
+    with pytest.raises(ValueError, match="already answers 'is_artifact'"):
         record_classification(store, PID, f"{PID}_s1#0", classification="not_artifact",
                               words="changed my mind", by="Andrea", at=at)
+    # the other question about the same miss is still open, and answered once
+    record_classification(store, PID, f"{PID}_s1#0", classification="separate",
+                          words="its own event", by="Andrea", at=at)
+    both = json.loads(path.read_text(encoding="utf-8"))[f"{PID}_s1#0"]
+    assert set(both) == {"is_artifact", "neighbour"}
+    assert both["neighbour"]["classification"] == "separate"
+    with pytest.raises(ValueError, match="already answers 'neighbour'"):
+        record_classification(store, PID, f"{PID}_s1#0", classification="part_of_neighbour",
+                              words="x", by="Andrea", at=at)
     with pytest.raises(ValueError, match="not an artifact"):
         record_classification(store, PID, f"{PID}_s9#0", classification="artifact",
                               words="x", by="Andrea", at=at)

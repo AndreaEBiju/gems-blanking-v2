@@ -89,6 +89,7 @@ __all__ = [
     "GATE_RECALL",
     "GENERATOR_CHANGE_PREFIX",
     "HALF_OVERLAP",
+    "QUESTION_OF",
     "TUNING_LABEL",
     "Z_ENTER",
     "Z_EXIT",
@@ -1070,9 +1071,16 @@ collide with a miss id, which is ``<span_id>#<index>``."""
 Classification = Literal["artifact", "not_artifact", "part_of_neighbour", "separate"]
 CLASSIFICATIONS: Final[tuple[str, ...]] = ("artifact", "not_artifact", "part_of_neighbour",
                                            "separate")
-"""What the labeller can say about a miss after seeing its traces: whether it is a
-real artifact she would blank, or - for a mark just apart from another - whether it
-is part of that neighbouring artifact."""
+"""What the labeller can say about a miss after seeing its traces. Two independent
+questions, each answered at most once per miss (:data:`QUESTION_OF`): is it a real
+artifact she would blank, and - for a mark just apart from another - is it part of
+that neighbouring artifact."""
+
+QUESTION_OF: Final[dict[str, str]] = {
+    "artifact": "is_artifact", "not_artifact": "is_artifact",
+    "part_of_neighbour": "neighbour", "separate": "neighbour",
+}
+"""Which question each classification answers."""
 
 
 def classification_path(store: GemsStore, plan_id: str) -> Path:
@@ -1090,8 +1098,10 @@ def record_classification(
     classification, in her own words - and reported alongside the score. The
     committed marks are never edited and the score stands as committed: changing a
     label after learning it was missed is the one relabelling the audit cannot
-    survive (ruling 2026-09-28). Raises ``ValueError`` for an unknown miss id,
-    classification or naive time, and for a miss already classified.
+    survive (ruling 2026-09-28). Each miss holds at most one answer per question
+    (:data:`QUESTION_OF`), so "is it part of its neighbour" and "is it an artifact"
+    can both be recorded. Raises ``ValueError`` for an unknown miss id,
+    classification or naive time, and for a question already answered.
     """
     if classification not in CLASSIFICATIONS:
         msg = f"classification must be one of {CLASSIFICATIONS}, got {classification!r}"
@@ -1112,11 +1122,14 @@ def record_classification(
         raise ValueError(msg)
     path = classification_path(store, plan_id)
     doc = _read_json(path) or {}
-    if miss_id in doc:
-        msg = f"{miss_id} is already classified; a classification is written once"
+    question = QUESTION_OF[classification]
+    entry = doc.setdefault(miss_id, {})
+    if question in entry:
+        msg = (f"{miss_id} already answers {question!r} ({entry[question]['classification']}); "
+               "a classification is written once")
         raise ValueError(msg)
-    doc[miss_id] = {"classification": classification, "words": words, "by": by,
-                    "at": at.isoformat()}
+    entry[question] = {"classification": classification, "words": words, "by": by,
+                       "at": at.isoformat()}
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, json.dumps(doc, indent=1, sort_keys=True, ensure_ascii=True) + "\n")
     return path
