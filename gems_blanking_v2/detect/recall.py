@@ -87,6 +87,8 @@ __all__ = [
     "CURRENT_SCORING_UNIT",
     "DESCRIPTIVE_NOTE",
     "DIGEST_RULE",
+    "DURATION_CAP_QUANTILE",
+    "DURATION_CAP_SOURCE",
     "GATE_CONDITIONS",
     "GATE_RECALL",
     "GENERATOR_CHANGE_PREFIX",
@@ -115,6 +117,7 @@ __all__ = [
     "condition_plan",
     "covered_fraction",
     "diagnose_miss",
+    "duration_cap",
     "generator_provenance",
     "is_covered",
     "last_fix_at",
@@ -178,6 +181,16 @@ MIN_SPANS_PER_CONDITION: Final = 3
 """The gate clears only with at least this many eligible spans of EACH condition
 (ruling 2026-09-29): a lower bound reached on one condition alone has not measured
 the generator on the other, and is reported as such."""
+
+DURATION_CAP_QUANTILE: Final = 0.99
+"""The duration cap is this quantile of labelled artifact durations: candidates (or,
+downstream, cores) longer than it go to review, never auto-masked (task 07)."""
+
+DURATION_CAP_SOURCE: Final = (
+    "blind-audit marks, merged unit, every scored round - PROVISIONAL (ruling "
+    "2026-09-29): the spec's source, the old cohort's *_segment_indices.mat, does not "
+    "exist (none on the shared drive, searched 2026-09-22); recomputed after each round")
+"""Where the duration cap comes from, recorded with every value of it."""
 
 CHANCE_BOUND_MAX: Final = 0.98
 """A round counts as gate evidence only while the POOLED chance-recall upper 95%
@@ -622,6 +635,7 @@ class RoundScore:
     warnings: list[str] = field(default_factory=list)
     pooled: dict[str, Any] | None = None
     unit: ScoringUnit = "as_committed"
+    duration_cap: dict[str, Any] | None = None
 
     @property
     def found(self) -> int:
@@ -735,6 +749,7 @@ class RoundScore:
             "evidence": TUNING_LABEL if self.mode == "tuning" else "gate",
             "warnings": list(self.warnings),
             **({"pooled_gate": self.pooled} if self.pooled is not None else {}),
+            **({"duration_cap": self.duration_cap} if self.duration_cap is not None else {}),
             "scoring": "PRE-DECLARED 2026-09-26, ratified 2026-09-27 (IMPLEMENTATION.md, task 09)",
             "gate_recall": GATE_RECALL, "confidence": CONFIDENCE,
             "bootstrap": {"draws": BOOTSTRAP_DRAWS, "seed": BOOTSTRAP_SEED,
@@ -824,6 +839,13 @@ class RoundScore:
                              f"{pg['chance_margin']:+.3f} to {CHANCE_BOUND_MAX}")
             for ex in pg["excluded_rounds"]:
                 lines.append(f"                  left out {ex['plan_id']}: {ex['reason']}")
+        if self.duration_cap is not None:
+            c = self.duration_cap
+            lines.append(
+                f"  duration cap    {c['cap_s']:.1f} s = p{100 * c['quantile']:g} of "
+                f"{c['n_marks']} {c['unit']} marks over {len(c['rounds'])} scored round(s); "
+                f"rests on the {c['marks_above']} mark(s) above it   [PROVISIONAL]")
+            lines.append(f"                  source: {c['source']}")
         for w in self.warnings:
             lines.append(f"  WARNING         {w}")
         lines.append(f"  NEXT            {self.next_step()}")
@@ -1145,7 +1167,8 @@ def score_stored_round(
     if not write:
         return score
     if mode == "tuning":
-        score = replace(score, pooled=pooled_gate(store))  # the pool it does NOT join
+        score = replace(score, pooled=pooled_gate(store),  # the pool it does NOT join
+                        duration_cap=duration_cap(store))
         path = store.audit_tuning_path(plan_id, datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ"))
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(path, json.dumps(score.to_json(), indent=1, sort_keys=True) + "\n")
@@ -1160,9 +1183,41 @@ def score_stored_round(
         raise RevealMismatchError(msg)
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, json.dumps(score.to_json(), indent=1, sort_keys=True) + "\n")
-    score = replace(score, pooled=pooled_gate(store))
+    # both read the score just written, so this round is in the pool and in the cap
+    score = replace(score, pooled=pooled_gate(store), duration_cap=duration_cap(store))
     atomic_write_text(path, json.dumps(score.to_json(), indent=1, sort_keys=True) + "\n")
     return score
+
+
+def duration_cap(store: GemsStore) -> dict[str, Any] | None:
+    """Return the provisional duration cap, from every scored round's merged marks.
+
+    :data:`DURATION_CAP_QUANTILE` of the durations of the artifacts (marks merged by
+    :func:`merge_marks`) in every round with a score file, gate or tuning alike -
+    they are labels either way. Recorded with its source (:data:`DURATION_CAP_SOURCE`),
+    the rounds and the mark count, and ``marks_above`` - how many marks the value
+    actually rests on, since a p99 of a few hundred marks is set by its top few.
+    None when no scored round has a mark. Recompute after each round (ruling
+    2026-09-29); it is never pinned by this function.
+    """
+    folder = store.audit_score_path("x").parent
+    rounds, durations = [], []
+    for f in sorted(folder.glob("plan_*_score.json")) if folder.is_dir() else []:
+        pid = f.name[: -len("_score.json")]
+        try:
+            _plan, spans = load_round(store, pid)
+        except FileNotFoundError:
+            continue
+        rounds.append(pid)
+        for sp in spans:
+            arts, _groups = merge_marks(sp["marks"])
+            durations += [float(b - a) for a, b in arts]
+    if not durations:
+        return None
+    value = float(np.quantile(durations, DURATION_CAP_QUANTILE))
+    return {"cap_s": value, "quantile": DURATION_CAP_QUANTILE, "unit": "merged",
+            "n_marks": len(durations), "marks_above": int(sum(d > value for d in durations)),
+            "rounds": rounds, "source": DURATION_CAP_SOURCE, "provisional": True}
 
 
 def last_fix_at(store: GemsStore) -> datetime | None:
