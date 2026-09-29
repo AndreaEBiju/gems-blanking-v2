@@ -230,9 +230,10 @@ def test_only_misses_get_a_fix_once_and_the_rest_stay_unresolved(tmp_path: Path)
 
     record_miss_fixes(store, PID, {misses[0]: "chain change 0abda6b"}, fixed_at=at)
     res = json.loads(store.audit_resolution_path(PID).read_text(encoding="utf-8"))
-    assert res[misses[0]] == {"task07_fix": "chain change 0abda6b", "fixed_at": at.isoformat()}
+    assert res[misses[0]] == {"closure": "fixed", "task07_fix": "chain change 0abda6b",
+                              "fixed_at": at.isoformat()}
     ok, why = next_round_gate(doc, res)
-    assert not ok and "no recorded task 07 fix" in why and misses[1] in why
+    assert not ok and "not closed" in why and misses[1] in why
     assert misses[0] not in why
     with pytest.raises(ValueError, match="never overwritten"):
         record_miss_fixes(store, PID, {misses[0]: "again"}, fixed_at=at)

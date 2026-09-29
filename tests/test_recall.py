@@ -195,7 +195,7 @@ def test_the_next_round_is_refused_until_every_miss_is_diagnosed_and_fixed() -> 
     ok, why = next_round_gate(_doc([None, "undiagnosed"]), None)
     assert not ok and "undiagnosed" in why
     ok, why = next_round_gate(_doc([None, "threshold"]), None)
-    assert not ok and "no recorded task 07 fix" in why
+    assert not ok and "not closed" in why and "no closure recorded" in why
     ok, why = next_round_gate(_doc([None, "threshold"]), {"s1#1": {"task07_fix": "   "}})
     assert not ok
     ok, why = next_round_gate(_doc([None, "threshold"]),
@@ -344,7 +344,7 @@ def test_the_store_round_gates_the_next_round_through_its_resolutions(tmp_path: 
     assert on_disk["statistics"]["missed"] == 1
     assert on_disk["artifacts"][1]["diagnosis"]["verdict"] == "gated"
     ok, why = check_next_round(store)
-    assert not ok and "task 07 fix" in why
+    assert not ok and "not closed" in why
     store.audit_resolution_path(pid).write_text(json.dumps(
         {f"{pid}_s1#1": {"task07_fix": "combine rule fixed in commit abc123",
                          "fixed_at": "2026-09-28T10:00:00+00:00"}}), encoding="utf-8")

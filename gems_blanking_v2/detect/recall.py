@@ -82,6 +82,7 @@ __all__ = [
     "CHANCE_BOUND_MAX",
     "CLASSIFICATIONS",
     "CLOSE_GAP_S",
+    "CLOSURES",
     "CONFIDENCE",
     "CURRENT_SCORING_UNIT",
     "DESCRIPTIVE_NOTE",
@@ -116,12 +117,14 @@ __all__ = [
     "last_fix_at",
     "load_round",
     "merge_marks",
+    "miss_closures",
     "next_round_gate",
     "one_sided_lower",
     "poisson_binomial_95",
     "pooled_gate",
     "record_classification",
     "record_generator_change",
+    "record_miss_closure",
     "record_miss_fixes",
     "score_round",
     "score_stored_round",
@@ -854,15 +857,59 @@ def score_round(
                       rounds_scored, dict(provenance or {}), unit=unit)
 
 
+Closure = Literal["fixed", "not_target", "accepted_limitation"]
+CLOSURES: Final[tuple[str, ...]] = ("fixed", "not_target", "accepted_limitation")
+"""How a miss is closed (ruling 2026-09-29) - exactly one of: a recorded generator
+change recovers it; the labeller classifies it as not an artifact she would blank;
+or it is diagnosed, cannot be fixed without fitting the generator to it, and is
+accepted with a written reason. An accepted limitation is not a pass: if its kind
+recurs, fresh gate rounds count it."""
+
+
+def miss_closures(
+    score: dict[str, Any], resolutions: dict[str, Any] | None,
+    classifications: dict[str, Any] | None = None,
+) -> dict[str, tuple[Closure | None, str]]:
+    """``{miss_id: (closure, why)}`` for every miss of a scored round.
+
+    ``closure`` is None when the miss is not closed, with ``why`` saying what is
+    missing. A fix needs ``task07_fix`` and a ``fixed_at``; ``not_target`` needs the
+    labeller's recorded "not an artifact"; ``accepted_limitation`` needs a reason.
+    """
+    res, cls = resolutions or {}, classifications or {}
+    out: dict[str, tuple[Closure | None, str]] = {}
+    for a in (x for x in score.get("artifacts", []) if not x.get("covered")):
+        mid = a["id"]
+        entry = res.get(mid, {})
+        kind = entry.get("closure")
+        if kind in ("not_target", "accepted_limitation"):
+            reason = str(entry.get("reason", "")).strip()
+            if not reason or _parse_time(entry.get("closed_at")) is None:
+                out[mid] = (None, f"{kind} without a reason and a closed_at time")
+            elif kind == "not_target" and (cls.get(mid, {}).get("is_artifact", {})
+                                           .get("classification") != "not_artifact"):
+                out[mid] = (None, "not_target without her 'not an artifact' classification")
+            else:
+                out[mid] = (kind, reason)
+        elif str(entry.get("task07_fix", "")).strip():
+            if _parse_time(entry.get("fixed_at")) is None:
+                out[mid] = (None, "a fix with no fixed_at time")
+            else:
+                out[mid] = ("fixed", str(entry["task07_fix"]))
+        else:
+            out[mid] = (None, "no closure recorded")
+    return out
+
+
 def next_round_gate(
     score: dict[str, Any] | None, resolutions: dict[str, Any] | None,
+    classifications: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
-    """Whether another round may be drawn, from a round's score and its resolutions.
+    """Whether another round may be drawn, from a round's score and its closures.
 
-    Refused when the round is unscored, when any miss is undiagnosed, and - the
-    spec's rule, stricter than "diagnosed" - when any miss has no recorded task 07
-    fix in ``resolutions`` (``{miss_id: {"task07_fix": "..."}}``). Labelling more
-    against a generator already known to miss wastes the labeller's time.
+    Refused when the round is unscored, when any miss is undiagnosed, and when any
+    miss is not closed (:func:`miss_closures`): fixed, not the target class, or an
+    accepted limitation. The reason names each closure so the decision is on record.
     """
     if score is None:
         return False, "the last round has not been scored"
@@ -871,19 +918,69 @@ def next_round_gate(
                    if a.get("diagnosis", {}).get("verdict", "undiagnosed") == "undiagnosed"]
     if undiagnosed:
         return False, f"undiagnosed miss(es): {', '.join(undiagnosed)}"
-    res = resolutions or {}
-    unfixed = [a["id"] for a in misses
-               if not str(res.get(a["id"], {}).get("task07_fix", "")).strip()]
-    if unfixed:
-        return False, (f"miss(es) with no recorded task 07 fix: {', '.join(unfixed)} - "
-                       "fix the generator before labelling more")
-    untimed = [a["id"] for a in misses if _parse_time(res[a["id"]].get("fixed_at")) is None]
-    if untimed:
-        return False, (f"fix(es) with no fixed_at time: {', '.join(untimed)} - the gate "
-                       "needs it to tell which rounds were labelled after the fix")
+    closed = miss_closures(score, resolutions, classifications)
+    open_ = {m: why for m, (kind, why) in closed.items() if kind is None}
+    if open_:
+        return False, ("miss(es) not closed (fixed, not_target or accepted_limitation): "
+                       + "; ".join(f"{m} - {why}" for m, why in open_.items())
+                       + " - close each before labelling more")
     if misses:
-        return True, "every miss diagnosed and fixed in task 07: draw the next round"
+        counts = {k: sum(v[0] == k for v in closed.values()) for k in CLOSURES}
+        limited = [m for m, (k, _w) in closed.items() if k == "accepted_limitation"]
+        return True, ("every miss closed: " + ", ".join(f"{n} {k}" for k, n in counts.items())
+                      + (f" (accepted limitations, counted again if they recur: "
+                         f"{', '.join(limited)})" if limited else "")
+                      + ": draw the next round")
     return True, "zero misses: draw the next round with a fresh recorded seed"
+
+
+def record_miss_closure(
+    store: GemsStore, plan_id: str, miss_id: str, *,
+    closure: Literal["not_target", "accepted_limitation"], reason: str, at: datetime,
+) -> Path:
+    """Close one miss of a scored round as not_target or an accepted limitation.
+
+    ``not_target`` requires the labeller's recorded "not an artifact"
+    (:func:`record_classification`); ``accepted_limitation`` requires a diagnosed
+    miss. Both need a written reason and are written once. Neither is a generator
+    change, so neither moves :func:`last_fix_at`. The marks and the score stand.
+    """
+    if closure not in ("not_target", "accepted_limitation"):
+        msg = f"closure must be not_target or accepted_limitation, got {closure!r}"
+        raise ValueError(msg)
+    if at.tzinfo is None:
+        msg = "the closure time must be timezone-aware (invariant 31)"
+        raise ValueError(msg)
+    if not reason.strip():
+        msg = "a closure needs a written reason"
+        raise ValueError(msg)
+    score = _read_json(store.audit_score_path(plan_id))
+    if score is None:
+        msg = f"{plan_id} has no score"
+        raise ValueError(msg)
+    miss = next((a for a in score.get("artifacts", [])
+                 if a["id"] == miss_id and not a.get("covered")), None)
+    if miss is None:
+        msg = f"{miss_id!r} is not a miss of {plan_id}"
+        raise ValueError(msg)
+    if closure == "accepted_limitation" and miss.get("diagnosis", {}).get(
+            "verdict", "undiagnosed") == "undiagnosed":
+        msg = f"{miss_id} is undiagnosed; an accepted limitation must be diagnosed first"
+        raise ValueError(msg)
+    if closure == "not_target":
+        cls = _read_json(classification_path(store, plan_id)) or {}
+        if cls.get(miss_id, {}).get("is_artifact", {}).get("classification") != "not_artifact":
+            msg = f"{miss_id}: not_target needs her recorded 'not an artifact' classification"
+            raise ValueError(msg)
+    path = store.audit_resolution_path(plan_id)
+    res = _read_json(path) or {}
+    if miss_id in res:
+        msg = f"{miss_id} is already closed; a closure is never overwritten"
+        raise ValueError(msg)
+    res[miss_id] = {"closure": closure, "reason": reason, "closed_at": at.isoformat()}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, json.dumps(res, indent=1, sort_keys=True, allow_nan=False) + "\n")
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -1218,7 +1315,7 @@ def record_miss_fixes(
         if not fix.strip():
             msg = f"{miss_id}: a fix needs a description"
             raise ValueError(msg)
-        res[miss_id] = {"task07_fix": fix, "fixed_at": fixed_at.isoformat()}
+        res[miss_id] = {"closure": "fixed", "task07_fix": fix, "fixed_at": fixed_at.isoformat()}
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, json.dumps(res, indent=1, sort_keys=True, allow_nan=False) + "\n")
     return path
@@ -1401,7 +1498,8 @@ def check_next_round(store: GemsStore, *, reveal_sha: str | None = None) -> tupl
         except FileNotFoundError as exc:
             return False, f"round {plan['plan_id']} is still open: {exc}"
         ok, why = next_round_gate(_read_json(store.audit_score_path(plan["plan_id"])),
-                                  _read_json(store.audit_resolution_path(plan["plan_id"])))
+                                  _read_json(store.audit_resolution_path(plan["plan_id"])),
+                                  _read_json(classification_path(store, plan["plan_id"])))
         if not ok:
             return ok, why
     else:
