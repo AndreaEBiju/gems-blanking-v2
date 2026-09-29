@@ -87,9 +87,11 @@ __all__ = [
     "CURRENT_SCORING_UNIT",
     "DESCRIPTIVE_NOTE",
     "DIGEST_RULE",
+    "GATE_CONDITIONS",
     "GATE_RECALL",
     "GENERATOR_CHANGE_PREFIX",
     "HALF_OVERLAP",
+    "MIN_SPANS_PER_CONDITION",
     "QUESTION_OF",
     "TUNING_LABEL",
     "Z_ENTER",
@@ -110,6 +112,7 @@ __all__ = [
     "classification_path",
     "clopper_pearson",
     "close_pairs",
+    "condition_plan",
     "covered_fraction",
     "diagnose_miss",
     "generator_provenance",
@@ -167,6 +170,14 @@ connected run of committed marks. A plan without ``scoring_unit`` - rounds 1 and
 
 CLOSE_GAP_S: Final = 0.100
 """Marks this close but not touching are listed for Andrea, never merged."""
+
+GATE_CONDITIONS: Final[tuple[str, ...]] = ("baseline", "stim_recovery")
+"""The conditions the gate must have measured the generator on."""
+
+MIN_SPANS_PER_CONDITION: Final = 3
+"""The gate clears only with at least this many eligible spans of EACH condition
+(ruling 2026-09-29): a lower bound reached on one condition alone has not measured
+the generator on the other, and is reported as such."""
 
 CHANCE_BOUND_MAX: Final = 0.98
 """A round counts as gate evidence only while the POOLED chance-recall upper 95%
@@ -801,6 +812,12 @@ class RoundScore:
                 + (f"{pg['covered']}/{pg['found']}, lower bound {bound:.3f} -> "
                    f"{'CLEARED' if pg['gate_cleared'] else 'not cleared'}"
                    if bound is not None else "no eligible artifacts yet"))
+            if "spans_by_condition" in pg:
+                lines.append("                  eligible spans by condition: " + ", ".join(
+                    f"{n} {c}" for c, n in pg["spans_by_condition"].items())
+                    + f" (need {pg['min_spans_per_condition']} of each)")
+            if "condition_note" in pg:
+                lines.append(f"                  {pg['condition_note']}")
             if "chance_margin" in pg:
                 lines.append(f"                  pooled chance upper bound "
                              f"{pg['chance_recall_upper_95']:.3f}, margin "
@@ -1321,6 +1338,33 @@ def record_miss_fixes(
     return path
 
 
+def condition_plan(store: GemsStore, n_spans: int) -> tuple[str, ...]:
+    """Return the condition each span of the next round must have (ruling 2026-09-29).
+
+    Balances conditions across the gate's ELIGIBLE pool, from the composition of the
+    eligible rounds' plans only - never their scores. Each span in turn takes the
+    condition with fewer eligible spans so far; on a tie it takes the other one
+    from the span just drawn (the first tie of all goes to ``baseline``). So a pool
+    at 5 stim_recovery / 0 baseline draws five baselines, and a balanced pool
+    alternates, keeping the two within one span of each other.
+    """
+    eligible = pooled_gate(store)["pooled_rounds"]
+    counts = dict.fromkeys(GATE_CONDITIONS, 0)
+    for pid in eligible:
+        plan = _read_json(store.audit_plan_path(pid)) or {}
+        for sp in plan.get("spans", []):
+            if sp.get("condition") in counts:
+                counts[sp["condition"]] += 1
+    out: list[str] = []
+    for _ in range(n_spans):
+        low = min(counts.values())
+        tied = [c for c in GATE_CONDITIONS if counts[c] == low]
+        pick = tied[0] if len(tied) == 1 or not out else next(c for c in tied if c != out[-1])
+        out.append(pick)
+        counts[pick] += 1
+    return tuple(out)
+
+
 def pooled_gate(store: GemsStore) -> dict[str, Any]:
     """Pool the gate-mode rounds that still count into the cumulative gate.
 
@@ -1340,6 +1384,7 @@ def pooled_gate(store: GemsStore) -> dict[str, Any]:
     docs.sort(key=lambda d: (d.get("provenance", {}).get("labelled_at") or "", d["plan_id"]))
     pooled, excluded, per_span = [], [], []
     chance: list[float] = []
+    by_condition = dict.fromkeys(GATE_CONDITIONS, 0)
     for doc in docs:
         pid = doc["plan_id"]
         labelled = _parse_time(doc.get("provenance", {}).get("labelled_at"))
@@ -1368,6 +1413,9 @@ def pooled_gate(store: GemsStore) -> dict[str, Any]:
             pooled.append(pid)
             chance += ps
             per_span += [(s["covered"], s["found"]) for s in doc.get("per_span", [])]
+            for sp in doc.get("per_span", []):
+                by_condition[sp.get("condition", "unknown")] = (
+                    by_condition.get(sp.get("condition", "unknown"), 0) + 1)
     k, n = sum(c for c, _ in per_span), sum(f for _, f in per_span)
     need = artifacts_needed(n - k)
     out: dict[str, Any] = {"last_fix_at": fix.isoformat() if fix else None,
@@ -1377,7 +1425,9 @@ def pooled_gate(store: GemsStore) -> dict[str, Any]:
                            "found": n, "covered": k,
                            "artifacts_needed_at_zero_further_misses": need,
                            "more_artifacts_needed": max(need - n, 0),
-                           "chance_bound_max": CHANCE_BOUND_MAX}
+                           "chance_bound_max": CHANCE_BOUND_MAX,
+                           "spans_by_condition": by_condition,
+                           "min_spans_per_condition": MIN_SPANS_PER_CONDITION}
     if chance:
         upper = poisson_binomial_95(chance)[1]
         out.update(chance_recall=float(np.mean(chance)), chance_recall_upper_95=upper,
@@ -1388,9 +1438,17 @@ def pooled_gate(store: GemsStore) -> dict[str, Any]:
     cp1 = one_sided_lower(k, n)
     b1 = span_bootstrap(per_span)[2]
     lower = min(cp1, b1)
+    short = [c for c in GATE_CONDITIONS if by_condition.get(c, 0) < MIN_SPANS_PER_CONDITION]
     out.update(lower_bound_one_sided_95=lower,
                lower_bound_parts={"clopper_pearson": cp1, "span_bootstrap": b1},
-               gate_cleared=lower >= GATE_RECALL)
+               gate_cleared=lower >= GATE_RECALL and not short)
+    if short:
+        have = ", ".join(f"{by_condition.get(c, 0)} {c}" for c in GATE_CONDITIONS)
+        reached_on = ", ".join(c for c in GATE_CONDITIONS if c not in short) or "no condition"
+        out["condition_note"] = (
+            f"eligible spans: {have}; {MIN_SPANS_PER_CONDITION} of each are needed"
+            + (f" - the lower bound was reached on {reached_on} only, so the gate is NOT "
+               "cleared" if lower >= GATE_RECALL else ""))
     return out
 
 
