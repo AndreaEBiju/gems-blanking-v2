@@ -4199,6 +4199,32 @@ injection of a known 1.2 ms common-mode waveform can.
    the added coverage. Record this as an explicit additive extension, never a
    silent exception to the hash rule.
 
+### Candidates are much wider than the marks — expected, but it must not reach the mask
+
+Andrea, 2026-09-29: candidates cover far more signal than she marks, in almost
+every case. That is the generator's design, not a defect in it: candidates run
+from `z_enter` down to `z_exit` (1.5), merge across 100 ms gaps, take the max over
+~57 signals, and the slow bands' 6–7.5 s windows smear onsets by seconds.
+Measured earlier: covered time is 1.75–2.4× the time any signal is over
+`z_enter`. Narrowing it at the generator costs recall (`z_exit` 2.25 lost 5/91 on
+tuning marks), and recall is what the gate protects. **So width is handled
+downstream, and three things must hold:**
+
+1. **The blank is never the candidate interval.** Task 13 already says extent is
+   where *that consumer's band* exceeds *that consumer's tolerance*, plus measured
+   settling. Add to task 13's acceptance: on the audit marks, report per-consumer
+   extent duration against mark duration. A spike-consumer extent that tracks the
+   candidate width rather than the mark is a task 13 failure.
+2. **Each candidate carries its core** — the sub-intervals where some signal is over
+   `z_enter` — so the classifier's features and Andrea's candidate adjudication
+   (task 16 Change 1) look at where the evidence is, not at seconds of clean
+   signal around it. Compute cores in a module **outside** the generation hash,
+   from the same z traces, so the budget and eligible rounds are untouched.
+3. **Measure the review-queue load.** Candidates longer than the duration cap (p99
+   of labelled durations) go to review and are never auto-masked. If merged
+   candidates routinely exceed it, the review queue becomes the bottleneck;
+   measure that fraction now.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
