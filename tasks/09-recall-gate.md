@@ -625,6 +625,12 @@ explains why it is on both cuffs and the stomach at once. Consequences:
   rather than assume: cross-correlate the event-rate time course with the breathing
   trace and the heart-rate trace from `HR_BR_HRVAnalysis_new` in the same
   recordings.
+- **Andrea: the new cohort's ground, for both nerve and stomach, is in the
+  abdominal wall.** So the common mode is most likely abdominal-wall muscle
+  activity entering every channel through the shared ground. The old cohort did
+  not have this problem on the nerves, because each cuff had its own reference on
+  the cuff; the change of referencing between cohorts is what exposed it.
+  Old-cohort results on this point do not transfer to the new cohort.
 - For future implants (Andrea's call, not the build's): a dedicated reference
   electrode placed away from muscle, or recording each cuff differentially, would
   remove most of this at the source.
