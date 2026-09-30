@@ -32,6 +32,7 @@ from scipy.io import loadmat, savemat
 
 __all__ = [
     "MASK_BEATS_SUFFIX",
+    "read_gap_after",
     "read_hr_beats",
     "read_mask_beats",
     "to_heartlocs",
@@ -65,16 +66,40 @@ def to_heartlocs(beats_s: npt.ArrayLike, fs: float, epoch_start_s: float, n_samp
 
 def write_hr_beats(
     path: Path, beats_s: npt.ArrayLike, *, fs: float, epoch_start_s: float, n_samples: int,
-    channel: str, source: str,
+    channel: str, source: str, gap_after: npt.ArrayLike | None = None,
 ) -> Path:
-    """Write the beats file her ``HR_BR_HRVAnalysis_beats`` reads (a fully vetted train)."""
+    """Write the beats file her ``HR_BR_HRVAnalysis_beats`` reads (a fully vetted train).
+
+    ``gap_after`` (ruling (h) 3): per beat, in ``beats_s``'s sorted order, whether the
+    interval after it spans a tagged gap - a dropped or unfilled beat. Stored as
+    ``gapAfter``, a logical column the length of ``heartlocs``. Her function loads only
+    ``heartlocs`` and ``fs``, so its outputs do not change; using the tags is Andrea's
+    decision. A single dropped beat reads as one ~2 RR interval, inside her [100, 500] ms
+    range, so without the tags HRV would take it as real.
+    """
     if Path(path).name.endswith(MASK_BEATS_SUFFIX):
         msg = f"{Path(path).name} is a mask-grade name; HRV beats must not carry it"
         raise ValueError(msg)
-    savemat(path, {"heartlocs": to_heartlocs(beats_s, fs, epoch_start_s, n_samples),
-                   "fs": float(fs), "beatChannel": channel, "source": source,
-                   "epochStart_s": float(epoch_start_s)}, do_compression=False)
+    heartlocs = to_heartlocs(beats_s, fs, epoch_start_s, n_samples)
+    doc = {"heartlocs": heartlocs, "fs": float(fs), "beatChannel": channel, "source": source,
+           "epochStart_s": float(epoch_start_s)}
+    if gap_after is not None:
+        raw = np.asarray(gap_after, dtype=bool).ravel()
+        if raw.size != heartlocs.shape[0]:
+            msg = f"gap_after has {raw.size} entries for {heartlocs.shape[0]} beats"
+            raise ValueError(msg)
+        order = np.argsort(np.asarray(beats_s, dtype=np.float64), kind="stable")
+        doc["gapAfter"] = raw[order].reshape(-1, 1)
+    savemat(path, doc, do_compression=False)
     return path
+
+
+def read_gap_after(path: Path) -> npt.NDArray[np.bool_] | None:
+    """Return the file's ``gapAfter`` tags, or None when it carries none."""
+    m = loadmat(path)
+    if "gapAfter" not in m:
+        return None
+    return np.asarray(m["gapAfter"], dtype=bool).ravel()
 
 
 def read_hr_beats(path: Path) -> tuple[F64, float]:

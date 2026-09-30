@@ -33,8 +33,11 @@ transient is 10-20 ms wide and cannot be excised; here it stays ~1 ms).
    clean beats that are NOT suspects, each scored exactly as a candidate is (its own
    events excised, plus the candidate's). Fewer than :data:`MIN_FLOOR_BEATS` such beats:
    no train. There is no fallback to suspects - that is where captures hide.
-7. **Suspects** - a candidate within :data:`SUSPECT_S` of an event is kept only if its
-   masked score reaches the floor; its fiducial is then the masked alignment's.
+7. **Every candidate meets the floor** ((h) 2) - its score, masked or not, must reach
+   the floor built the same way, or it is dropped and its gap re-searched under the same
+   floor. About 1% of real beats fall under a 1st-percentile floor by construction; they
+   leave tagged gaps (:attr:`TemplateTrain.gap_after`), never a false beat. A candidate
+   within :data:`SUSPECT_S` of an event takes its fiducial from the masked alignment.
 8. **Refractory** - beats closer than ``k`` x the running median RR conflict and the
    higher template score stays, never the larger peak. The running median (centred,
    +/-:data:`RUNNING_MEDIAN_HALF_S`) is over template-matching beats only, so extras
@@ -164,11 +167,21 @@ class TemplateTrain:
     split_jitter_s: float = float("nan")
     """SD of the RR difference between the two subtrains, when split."""
     gaps_s: list[tuple[float, float]] = field(default_factory=list)
+    """Every interval the re-search could not fill - tagged, never filled ((h) 3)."""
     counts: dict[str, int] = field(default_factory=dict)
     fiducial_offset_s: float = float("nan")
     """Mean signed (alignment - peak) fiducial over clean beats; must be under 0.5 ms."""
     floor: float = float("nan")
     """The unmasked floor."""
+
+    @property
+    def gap_after(self) -> npt.NDArray[np.bool_]:
+        """Per beat: whether the interval after it spans a tagged gap ((h) 3).
+
+        HRV must not read such an interval as one long real RR.
+        """
+        starts = np.asarray([a for a, _b in self.gaps_s], dtype=np.float64)
+        return np.isin(self.t_s, starts)  # a gap starts at a beat, the same float
 
 
 @dataclass
@@ -371,9 +384,10 @@ def _judge(idx: I64, scorer: _Scorer, masks: list[Mask], sus_r: int,
     floors = np.array([scorer.floor(m) if not un else np.inf
                        for m, un in zip(masks, undefined, strict=True)])
     matching = ~undefined & (sc >= floors)
-    keep = ~undefined & (~suspect | matching)
+    keep = ~undefined & matching  # (h) 2: the floor applies to every candidate
     counts["suspects"] = int(suspect.sum())
     counts["suspects_dropped"] = int((suspect & ~undefined & ~keep).sum())
+    counts["nonsuspects_dropped"] = int((~suspect & ~undefined & ~keep).sum())
     counts["undefined_dropped"] = int(undefined.sum())
     fid = np.where(suspect, idx + shift, idx)[keep]
     kind = np.where(suspect, "aligned", "peak")[keep]

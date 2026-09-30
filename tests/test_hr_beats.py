@@ -98,3 +98,23 @@ def test_the_two_grades_cannot_be_written_or_read_as_each_other(tmp_path) -> Non
     hrv = write_hr_beats(tmp_path / "r_beats.mat", [0.5], **kw)
     with pytest.raises(ValueError, match="not a mask-grade"):
         read_mask_beats(hrv)
+
+
+# --- gap tags (ruling (h) 3) -------------------------------------------------------------
+
+
+def test_gap_tags_ride_along_without_changing_what_her_function_reads(tmp_path) -> None:  # noqa: ANN001
+    from gems_blanking_v2.emit.hr_beats import read_gap_after  # noqa: PLC0415
+
+    b = np.array([0.8, 0.5, 0.65])  # unsorted on purpose: tags follow the sorted order
+    kw = {"fs": 1000.0, "epoch_start_s": 0.0, "n_samples": 2000, "channel": "c", "source": "s"}
+    plain = write_hr_beats(tmp_path / "a_beats.mat", b, **kw)
+    tagged = write_hr_beats(tmp_path / "b_beats.mat", b, gap_after=[False, False, True], **kw)
+    p, t = loadmat(plain), loadmat(tagged)
+    assert np.array_equal(p["heartlocs"], t["heartlocs"])
+    assert p["fs"].item() == t["fs"].item()
+    assert read_gap_after(plain) is None
+    # tags follow the beats into sorted order: 0.5 (F), 0.65 (T), 0.8 (F)
+    assert read_gap_after(tagged).tolist() == [False, True, False]
+    with pytest.raises(ValueError, match="entries for 3 beats"):
+        write_hr_beats(tmp_path / "c_beats.mat", b, gap_after=[True], **kw)

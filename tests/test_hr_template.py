@@ -35,12 +35,18 @@ def _dist(a: F64, b: F64) -> F64:
                       np.abs(b[np.clip(j, 0, b.size - 1)] - a))
 
 
-def recall(w: HrTrouble, got: F64) -> float:
-    return float(np.mean(_dist(w.beats_s, got) <= 0.001))
+def recall(w: HrTrouble, got: F64, tol: float = 0.001) -> float:
+    return float(np.mean(_dist(w.beats_s, got) <= tol))
 
 
-def extras(w: HrTrouble, got: F64) -> int:
-    return int((_dist(np.asarray(got, float), w.beats_s) > 0.001).sum())
+def extras(w: HrTrouble, got: F64, tol: float = 0.001) -> int:
+    return int((_dist(np.asarray(got, float), w.beats_s) > tol).sum())
+
+
+def untagged_losses(w: HrTrouble, t: ht.TemplateTrain) -> int:
+    """(h) 3: every real beat the train lacks must sit inside a tagged gap."""
+    lost = w.beats_s[_dist(w.beats_s, t.t_s) > 0.001]
+    return int(sum(not any(a < b < c for a, c in t.gaps_s) for b in lost))
 
 
 def _case(**kw: float) -> HrTrouble:
@@ -78,7 +84,9 @@ def test_the_running_median_is_centred() -> None:
 def test_a_clean_channel_is_returned_unchanged_with_aligned_fiducials_on_the_peaks(clean) -> None:  # noqa: ANN001
     t = ht.template_train(clean.signal, FS, clean.events_s, P)
     assert t.no_train == "" and t.seed == "task05"
-    assert recall(clean, t.t_s) == 1.0 and extras(clean, t.t_s) == 0
+    # (h) 2: ~1% of real beats fall under a 1st-percentile floor by construction
+    assert 0.98 <= recall(clean, t.t_s) < 1.0 and extras(clean, t.t_s) == 0
+    assert untagged_losses(clean, t) == 0
     assert abs(t.fiducial_offset_s) < ht.MAX_FIDUCIAL_OFFSET_S
     assert t.counts["floor_beats"] >= ht.MIN_FLOOR_BEATS
 
@@ -95,9 +103,10 @@ def test_captures_are_dropped_extras_fall_and_recall_rises(rate: float, gain: fl
     assert t.counts["suspects_dropped"] >= 0.99 * t.counts["suspects"]
     lone = w.transients_s[_dist(w.transients_s, w.beats_s) > 0.02]
     assert np.mean(_dist(lone, t.t_s) <= 0.002) <= 0.01  # no transient is taken as a beat
-    assert extras(w, t.t_s) <= 0.1 * extras(w, fp)
+    assert extras(w, t.t_s) == 0  # (h) 2: no candidate escapes the floor
     assert recall(w, t.t_s) >= recall(w, fp) + gain
     assert t.counts["researched"] > 0  # recovered beats come from the re-search
+    assert untagged_losses(w, t) == 0
 
 
 def test_an_everywhere_unclear_autocorrelation_yields_no_train() -> None:
@@ -113,6 +122,7 @@ def test_a_real_beat_hit_by_a_transient_is_kept_by_masked_correlation() -> None:
     hit_beats = w.beats_s[_dist(w.beats_s, hit) <= 0.002]
     assert hit_beats.size > 50
     assert np.mean(_dist(hit_beats, t.t_s) <= 0.001) >= 0.9
+    assert extras(w, t.t_s) == 0 and untagged_losses(w, t) == 0
 
 
 def test_the_score_band_is_10_to_900_hz() -> None:
@@ -128,7 +138,8 @@ def test_extras_at_the_findpeaks_spacing_floor_are_resolved_by_template_match() 
     assert extras(w, fp) > 0.5 * w.beats_s.size  # a noise peak at ~100 ms on most cycles
     for k in (0.6, 0.8):
         t = ht.template_train(w.signal, FS, w.events_s, ht.TemplateParams(k, 0.5, 0.5))
-        assert extras(w, t.t_s) == 0 and recall(w, t.t_s) >= 0.995
+        assert extras(w, t.t_s) == 0 and recall(w, t.t_s) >= 0.98
+        assert untagged_losses(w, t) == 0
 
 
 # --- a mid-cycle peak ---------------------------------------------------------------------
@@ -143,7 +154,8 @@ def test_a_mid_cycle_peak_on_every_cycle_is_split_off_by_template_snr() -> None:
     hi, lo = t.split_snr
     assert (hi - lo) / hi > ht.AMBIGUOUS_SNR
     assert np.isfinite(t.split_jitter_s)
-    assert extras(w, t.t_s) == 0 and recall(w, t.t_s) >= 0.995
+    assert extras(w, t.t_s) == 0 and recall(w, t.t_s) >= 0.98
+    assert untagged_losses(w, t) == 0
 
 
 def test_a_mid_cycle_wave_as_strong_as_the_qrs_is_ambiguous_and_yields_no_train() -> None:
@@ -154,17 +166,22 @@ def test_a_mid_cycle_wave_as_strong_as_the_qrs_is_ambiguous_and_yields_no_train(
     assert (hi - lo) / hi <= ht.AMBIGUOUS_SNR
 
 
-# --- task 05's misses ---------------------------------------------------------------------
+# --- weak beats (task 05's misses are NOT reproduced synthetically) -----------------------
 
 
-def test_task05_misses_are_reproduced_and_not_made_worse() -> None:
+def test_weak_beats_in_noise_are_kept_within_two_ms_without_extras() -> None:
+    """Keep weak beats in noise: within 2 ms, with no extras.
+
+    Alternans in noise moves weak beats' fiducials 1-2 ms; it does not make task 05 miss
+    them (its rescue recovers them down to 0.08 x). Task 05's real misses (A t02,
+    H t01 3_3) have a mechanism this fixture does not reproduce - A/B tests it on real
+    data.
+    """
     w = _case(alternans=0.3, noise_uv=12.0)
-    t5 = np.asarray(detect_rpeaks(w.signal, FS).t_s)
-    assert recall(w, t5) < 0.97  # task 05 misses the weak beats (control)
+    assert recall(w, np.asarray(detect_rpeaks(w.signal, FS).t_s), tol=0.005) >= 0.99
     t = ht.template_train(w.signal, FS, w.events_s, ht.TemplateParams(0.8, 0.2, 0.5))
-    # measured ceiling, not a pass: a noise peak takes the weak beat's place, so no gap
-    # opens for the re-search (reported for ruling)
-    assert recall(w, t.t_s) >= recall(w, t5) - 0.005
+    assert recall(w, t.t_s, tol=0.002) >= 0.98
+    assert extras(w, t.t_s, tol=0.002) <= 0.002 * w.beats_s.size
 
 
 # --- rate rises ---------------------------------------------------------------------------
@@ -174,8 +191,9 @@ def test_task05_misses_are_reproduced_and_not_made_worse() -> None:
 def test_the_refractory_removes_no_real_beat_during_a_rate_rise(k: float) -> None:
     w = _case(rr_s=0.19, rr_end_s=0.15)
     t = ht.template_train(w.signal, FS, w.events_s, ht.TemplateParams(k, 0.5, 0.5))
-    assert recall(w, t.t_s) == 1.0 and extras(w, t.t_s) == 0
+    assert recall(w, t.t_s) >= 0.98 and extras(w, t.t_s) == 0
     assert t.counts["refractory_removed"] == 0
+    assert untagged_losses(w, t) == 0
 
 
 # --- cardiac events on most beats ---------------------------------------------------------
@@ -189,7 +207,7 @@ def test_cardiac_events_on_most_beats_do_not_starve_the_template_or_the_median()
     assert t.counts["floor_beats"] >= ht.MIN_FLOOR_BEATS
     assert t.counts["suspects"] > 0.8 * w.beats_s.size
     assert recall(w, t.t_s) >= recall(alone, base.t_s) - 0.05
-    assert extras(w, t.t_s) <= 0.01 * w.beats_s.size
+    assert extras(w, t.t_s) == 0 and untagged_losses(w, t) == 0
 
 
 def test_fewer_than_50_non_suspect_clean_beats_yield_no_train() -> None:
@@ -224,6 +242,18 @@ def test_every_beat_is_a_measured_peak_never_an_expected_time() -> None:
     assert np.all(near <= reach)
 
 
+def test_a_missing_beat_leaves_a_tagged_gap_never_a_noise_peak() -> None:
+    w = _case(missing_frac=0.02)
+    fp = findpeaks_replica(w.signal, FS)
+    assert extras(w, fp) > 10  # findpeaks puts noise in the gaps (control)
+    t = ht.template_train(w.signal, FS, w.events_s, P)
+    assert extras(w, t.t_s) == 0
+    assert all(any(a < m < b for a, b in t.gaps_s) for m in w.missing_s)
+    after = t.gap_after
+    assert after.dtype == bool and after.size == t.t_s.size
+    assert np.array_equal(t.t_s[after], np.asarray([a for a, _b in t.gaps_s]))
+
+
 def test_hr_template_is_outside_the_generation_hash() -> None:
     assert "gems_blanking_v2.physio.hr_template" not in chain.generation_modules()
 
@@ -255,3 +285,19 @@ def test_the_median_template_resists_transients_a_mean_would_absorb() -> None:
     assert near.mean() > 0.2
     assert np.corrcoef(sc.template, ref)[0, 1] > np.corrcoef(mean_t, ref)[0, 1]
     assert np.corrcoef(sc.template, ref)[0, 1] > 0.99
+
+
+def test_a_refractory_conflict_keeps_the_better_template_match_not_the_first() -> None:
+    fd = 1000.0
+    fid = np.array([0, 150, 300, 390, 450, 600], dtype=np.int64)  # 390: an extra 90 ms after 300
+    score = np.array([0.99, 0.99, 0.50, 0.40, 0.99, 0.99])
+    score_hi_late = score.copy()
+    score_hi_late[3] = 0.995  # now the later of the conflicting pair matches better
+    ac = np.full(fid.size, 0.150)
+    match = np.ones(fid.size, dtype=bool)
+    counts: dict[str, int] = {}
+    kind = np.full(fid.size, "peak")
+    kept, *_ = ht._refractory(fid, score, kind, match, 0.8, fd, ac, counts)
+    assert 300 in kept and 390 not in kept
+    kept, *_ = ht._refractory(fid, score_hi_late, kind, match, 0.8, fd, ac, counts)
+    assert 390 in kept and 300 not in kept
