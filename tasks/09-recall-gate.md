@@ -694,6 +694,101 @@ the hash; generation hash unchanged):
 3. The ~10% of marks wider than any candidate are rough edges on Andrea's marks,
    not misses; no action.
 
+### ROUND 5 AND THE POST-ROUND-5 PASS, 2026-09-30 — score against the pass condition as written; correct, then mask the residual; veto raw contacts for HR
+
+**Measured (Claude Code, 2026-09-30):**
+
+- **Round 5:** 51/53. Pooled rounds 3–5: **205/208, lower bound 0.959** (Clopper-Pearson 0.963, bootstrap 0.959). Not cleared.
+  - Eligible spans: 8 baseline, 7 stim/recovery.
+  - Chance margin: round 5 −0.001 (candidates covered 65% of labelled time); pooled +0.143.
+  - Duration cap: 14.9 s (p99 of 458 marks; rests on 5).
+- **All three gate-evidence misses are baseline, and all are below `z_enter` on every signal:**
+  - s4#m0: common mode, closed.
+  - s3#m7: max z 2.12, on stomach_ref 2–50 Hz and ANT1 300–3000 Hz.
+  - s3#m13: max z 2.52, on ANT1 10–150 Hz.
+  - Both round-5 misses are in B t03 es2, and both peak on ANT1.
+- **Subtraction (ruling 4 of 2026-09-29):**
+  - It removes the linear leak everywhere (R² of T on the reference goes to 0.000), and injected differential spikes survive (1.000).
+  - But **3 of 20 cuff-recordings pass** the event-firing test. It helps only where the leak was a large gain error.
+  - In A t05 L it **raised** firing on events far from beats (0.019 → 0.081): one scalar fits a blend of two sources.
+- **Part of the common-mode class is the heartbeat:** events fall within 5 ms of a beat 1.3–5× more often than chance.
+- **HR:** 200 injected transients at the recording's own event amplitude cost 4–135 beats on a raw contact, and 0–2 on T.
+- **Event rate:** it co-varies with breathing (4/9 recordings) and heart rate (6/9) at r ≈ 0.1–0.35, near zero lag, even after cardiac events are excluded. The modulation (20–40/min) is not the breathing rhythm (76–98/min).
+- **Contact screen:**
+  - It does **not** flag H t01 es2 L. L1 is low-gain (R² 0.67 against 0.98 for its peers) but correlated (r 0.70), so the left T is 75% common mode.
+  - It flags B t02 1_3 L on L1, yet L1 carries the ground signal (R² 0.94) while L2 and L3 do not (0.04 and 0.01).
+  - ANT1 is mains-dominated in B t01 3_2, B t02 3_3 and B t03 2_2.
+
+**What the gate arithmetic says.**
+- A one-sided Clopper-Pearson bound ≥ 0.98 needs 386 artifacts at 3 misses, 456 at 4, and 523 at 5: about 67 more per miss.
+- At the pool's observed miss rate (3/208, 1.4%), a miss arrives about every 70 artifacts. So the bound creeps toward about 0.986 and clears only near ~1,200 artifacts, some 20 more rounds. Baseline alone is 104/107.
+
+That is **not** a reason to relax the gate (see "Do not"). It is a reason to check that the gate is scored against what task 09 says it is. The revised pass condition reads "≥98% recall for artifacts **above each consumer's tolerance**", and the audit scores every mark. Every gate-evidence miss is below `z_enter` on every signal. If those misses are also below every consumer's tolerance, the audit is partly measuring recall of harmless events.
+
+**Rulings:**
+
+1. **The two round-5 misses.**
+   - **Andrea classifies both** from the misses PDF: would she blank it?
+     - Not-target: close it that way.
+     - Target: measure consumer harm exactly as for s4#m0, using each consumer's own input and threshold over the mark: the spike detector's firing, and the HR beat train. If harmless, close it as `accepted_limitation`: "threshold class, recurring, measured harmless". If a consumer is harmed, **stop and report**. That is branch 1 of "If it fails", a diagnosable class.
+   - **Diagnostic, not a fix:**
+     - Is ANT1 mains-dominated in B t03 es2, as it is in B t03 2_2? A mains line sits inside 10–150 Hz and inflates that signal's baseline σ, which depresses z. That would be one cause behind both misses.
+     - Report the misses' z on a notched ANT1.
+     - A notch is a generator change: it resets eligible rounds through `fixed_at`, so it is not adopted without a ruling.
+   - **Round 6 is drawn only after both misses are closed.**
+
+2. **Measure the audit against the pass condition as written. Do not adopt it yet.**
+   - Claude Code writes a per-consumer damage rule **before computing it on any mark**, blind to hit or miss. It must come from each consumer's own input and threshold:
+     - spike consumer: the T it reads and the 4.5σ detector;
+     - HR: the operational beat-train test;
+     - stomach consumers: their own bands.
+   - I ratify the rule and Andrea approves it. Only then is it applied to **all** pooled marks, hits and misses alike. The tolerance-filtered recall is reported beside the raw recall, and raw recall stays in every round report whatever is decided.
+   - **Whether the gate moves to tolerance-filtered recall is Andrea's decision**, recorded before the round it first applies to is scored.
+
+3. **Artifact or physiology? The lag histogram decides.**
+   - For each cuff, histogram her detected spikes against lag from the nearest event: 0.1 ms bins, ±50 ms. Do this separately for near-beat and far-from-beat events, with the random-time control.
+   - A peak confined to the event's own width (about ±1 ms) is electrical. No conduction or reflex coupling to a heartbeat or a muscle twitch is sub-millisecond.
+   - A broad hump of tens of ms is physiology and is **never** masked.
+   - Report per cuff. Rulings 4b and 4c apply only where the peak is narrow.
+
+4. **Correct, then mask the residual.** Everything here lives in `derive/`, outside the hash.
+   - **a. Keep the single-scalar subtraction only where it helps.** Keep it on a cuff only if it lowers event-locked firing in **both** the near-beat and the far-from-beat subsets. Otherwise the consumer reads uncorrected T. A correction that adds artifacts is worse than none (A t05 L).
+   - **b. One extension, in the same pass: multi-regressor subtraction.**
+     - Each outside channel is its own regressor, plus a beat-locked cardiac template.
+     - Fit on one half of the recording, verify on the other.
+     - Adopt it per cuff only if it passes the pre-declared verification: no significant excess firing on events, and injected spikes surviving within 5%.
+   - **c. Cuffs that still fail get the pre-declared fallback, for the spike consumer only:** mask T for ±1.5 ms wherever T reaches 4σ within an event, **with exposure accounting**. Masked time is removed from the denominator of every rate, and from every phase bin of any rhythm-locked analysis.
+     - This answers the objection in ruling 2 of 2026-09-29. Real spikes inside the mask are lost only in proportion to masked time, so rates stay unbiased. And a peak confined to ±1 ms is not physiology, so nothing rhythm-locked is removed.
+     - Events co-vary with breathing and heart rate, i.e. with state. That is why exposure accounting is mandatory, not optional.
+   - **Verify the mask:**
+     - in unmasked time, firing on events is not above control;
+     - injected differential spikes outside the mask survive within 5%;
+     - injected spikes inside the mask are lost at the masked-time fraction.
+   - **Report per cuff:** masked time %, spikes removed %, and the excess event-locked spikes as a fraction of the cuff's spikes, before and after.
+
+5. **Trust in T for the spike consumer is decided by ruling 4's verification, not by contact heuristics.**
+   - H t01 es2 L shows why: a low-gain contact passes the correlation rule while T is 75% common mode.
+   - The contact screen remains for consumers that read raw contacts (HR, velocity), with two fixes for the new cohort:
+     - **Missing ground signal:** with a shared ground and no local reference, every healthy single-ended contact must carry the ground-site signal. A contact with R² near zero against the outside reference is the suspect one, whatever the peer correlation says. In B t02 1_3 L that is **L2 and L3**, not L1. Report the L2–L3 correlation: a short between them would make them agree with each other and not with the ground. The whole left cuff of B t02 1_3 is distrusted for every consumer until this is explained.
+     - **Low gain:** flag a contact whose R² sits well below its peers' (0.67 against 0.98), with a `PROVISIONAL_` threshold.
+   - **ANT1** in B t01 3_2, B t02 3_3 and B t03 2_2: no consumer reads it. Detection keeps reading it. Invariant 43 forbids hiding a signal from detection alone; it does not forbid the reverse.
+
+6. **HR: the operational injection test becomes task 05's transient veto.**
+   - A channel is vetoed if 200 transients at the recording's own non-cardiac event amplitude change the beat train (lost beats, or a fiducial shifted by more than 2 ms) in more than 1% of injections: `PROVISIONAL_MAX_TRANSIENT_HARM = 0.01`.
+   - Template SNR ranks only the survivors. SNR cannot see this harm, because the far-field ECG is common mode too.
+   - **Measure, don't adopt:** does a minimum-QRS-width check in the beat detector remove the harm on raw contacts? A 1.2 ms transient cannot be a rat QRS. Adopting it is a separate ruling.
+   - **H t01 3_3, every candidate vetoed:** raising is correct (task 05). Report whether the implausible intervals are short (extra beats) or long (missed beats), per channel. Do not move the threshold on one recording.
+
+7. **The old-cohort QRS premise is withdrawn for the new cohort.**
+   - "The QRS carries 0.00–0.54% of its energy above 300 Hz" was measured on an old-cohort tripole.
+   - Re-measure it per new-cohort cuff, on T (corrected as in ruling 4) and on raw contacts.
+   - Anything in tasks 02 and 07 that relied on the old figure uses the new-cohort number for the new cohort.
+
+8. **Ratified:**
+   - The width attribution. The real review load is the 12 over-cap candidates read by a consumer on a trusted contact (42 marks, 409 s).
+   - The duration cap of 14.9 s, provisional.
+   - The breathing and HR cross-correlation. The events co-vary with state and do not form a rhythm of analytic interest. No further analysis, beyond the exposure accounting in 4c.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
