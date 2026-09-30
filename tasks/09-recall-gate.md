@@ -973,6 +973,55 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
 4. **Test skips.** List the 23 extra skips in the clean worktree with their reasons. A skip other than "needs local real data that is not in the repo" is a defect: fix it.
 5. **stomach_ref's 60 Hz residual** (about 1,500× the floor in B t01 and B t02 3_3, after the ANT1 notch): report which inputs carry it. Compare mmc with 60 Hz notched on every stomach_ref input against ANT1 alone. If mmc differs, the notch applies to all inputs in those recordings.
 
+### RULING 2026-09-30 (d) — the frozen table and the recompute: addendum 3 corrected; round 6 appends
+
+**Measured (gems `c53a2ba`; hash unchanged):**
+- **Frozen routing table:** `46ce9b0b0081…`, stored at `labels/blind_audit_routing/routing_46ce9b0b00819823.json`.
+- **Under addendum 3, all 208 pooled marks are target.** 28 changed class, and 29 are target *only* because an input is excluded. Filtered recall therefore equals raw: 205/208, lower bound 0.959.
+- **s3#m7 and s3#m13** had been measured harmless on B t03 es2 R_T. They became target misses only because R was then distrusted by check (iii).
+- **Round-5 routes:** no cuff adopts multi (A t01 1_2 L: 147 → 28,736 spikes, rejected by the amended 4b). B t03 es2 R is distrusted by check (iii). Four hump cuffs are distrusted for lack of a count-gated train.
+- **Spike consumer, rounds 3–5:** about 11 of 30 cuff-recordings are now distrusted.
+- **H t05 L:** against a count-correct train there is no QRS-centred hump. There is a component at +14.25 ms, 0.5 ms wide, outside the > 300 Hz QRS envelope (−5.0 to +2.3 ms).
+- **B t01 3_2:** notching all stomach_ref inputs exposes real mmc damage on 3 marks (the hum had inflated the MAD).
+- **Skips:** the 23 extra clean-worktree skips were a test predicate defect, now fixed (clean worktree 1137 passed / 7 skipped, the same as local).
+
+**Rulings:**
+
+1. **Addendum 3 was wrong. It is replaced.** It contradicted task 09's written pass condition, "above each consumer's tolerance". An input no consumer reads cannot damage a consumer. Its visible failure: two marks measured harmless became "damaging" because we stopped reading the cuff they were measured on.
+
+   **Andrea decided (2026-09-30): only consumers that run count.**
+   - **A consumer's input that the routing excludes contributes nothing** to a mark's class. This covers a distrusted cuff for the spike consumer, and HR in a recording with no HRV-grade train.
+   - **Unassessable still means target.** If a consumer does read the input but cannot judge the mark (for example, fewer than 10 local beats), the mark is target. The same holds if no running consumer can judge the mark at all.
+   - This also supersedes the clause in ruling (b) 8 that made a recording with no HR channel unassessable for HR.
+   - **This correction was made knowing its effect** (about 178/179 instead of 205/208). So both classifications are computed and reported every round: "consumers that run" is the gate, and "excluded = target" is reported beside it with raw recall. Neither report is ever dropped.
+   - A later change to either convention needs Andrea's decision, recorded before the next score.
+
+2. **Round 6 and later rounds append to the frozen table.**
+   - A new recording's routes are computed by the same mechanical rules and **appended**. Existing entries must stay byte-identical.
+   - Store the table as per-recording entries, each with its own hash. The score records the old table hash, the new one, and a check that every old entry hash is unchanged.
+   - That counts as "scored on the frozen table". Any change to an existing entry is a routing change: recompute every pooled mark and report it as a change.
+
+3. **Sub-millisecond R-locked components are electrical, whatever their lag.** This is the same reasoning as ruling (a) 3: no neural or reflex chain holds 0.5 ms precision.
+   - H t05 L's +14.25 ms component goes into its peri-R extent.
+   - The QRS-envelope test missed it because the envelope comes from the averaged template's energy, where a small late high-frequency feature falls below threshold.
+   - Rule: an R-locked excess narrower than 1 ms at half height is included in the peri-R extent. Broader components follow ruling (c) 3.
+
+4. **Ratified:**
+   - mask-grade beats (`maskBeatlocs`), with their guards;
+   - the round-5 routes;
+   - the all-inputs notch in B t01 3_2 and B t02 3_3, and ANT1 only in B t03 2_2;
+   - `frozen_filtered_gate`;
+   - the skip fix;
+   - the peri-R extents for A t01 L (−9.5 to −4.5 ms) and B t03 es2 L (−2.0 to 0 ms).
+
+5. **Recompute now under ruling 1 on the same routing.** The routing is unchanged, so the table hash stays `46ce9b0b…`.
+   - Report both classifications per round and pooled, the gate numbers under each, and the marks whose class differs between them, with reasons.
+   - Store the "consumers that run" classes as the gate classes under that hash.
+
+6. **Report the spike-consumer coverage.** Give a table of every cuff-recording in rounds 3–5 marked trusted or distrusted, with the reason, and the share of spike-consumer time lost to distrust.
+   - Most distrust now comes from missing count-gated HR trains (hump cuffs) and from failed check (iii).
+   - Better HR trains would recover data. That is the next lever, and it is Andrea's priority call.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
