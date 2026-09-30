@@ -301,3 +301,15 @@ def test_a_refractory_conflict_keeps_the_better_template_match_not_the_first() -
     assert 300 in kept and 390 not in kept
     kept, *_ = ht._refractory(fid, score_hi_late, kind, match, 0.8, fd, ac, counts)
     assert 390 in kept and 300 not in kept
+
+
+def test_one_preparation_serves_every_parameter_set_identically() -> None:
+    w = _case(transients_per_s=1.0, rr_s=0.2)
+    prep = ht.prepare(w.signal, FS, w.events_s)
+    for k in (0.6, 0.8):
+        for h in (0.25, 0.75):
+            params = ht.TemplateParams(k, h, 0.5)
+            a = ht.resolve(prep, params)
+            b = ht.template_train(w.signal, FS, w.events_s, params)
+            assert np.array_equal(a.t_s, b.t_s) and a.gaps_s == b.gaps_s
+            assert a.counts == b.counts

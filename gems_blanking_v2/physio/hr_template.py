@@ -92,8 +92,11 @@ __all__ = [
     "SHORT_FRACTION",
     "SNAP_S",
     "SUSPECT_S",
+    "Prepared",
     "TemplateParams",
     "TemplateTrain",
+    "prepare",
+    "resolve",
     "running_median_rr",
     "template_train",
 ]
@@ -508,14 +511,32 @@ def _no_train(reason: str, counts: dict[str, int], seed: _Seed | None = None) ->
                          split_jitter_s=seed.jitter if seed else float("nan"))
 
 
-def template_train(
-    x: npt.ArrayLike, fs: float, events_s: npt.ArrayLike, params: TemplateParams,
-) -> TemplateTrain:
-    """Return the template-resolved train on one channel, or why there is none.
+@dataclass
+class Prepared:
+    """Hold everything a channel's train needs that does not depend on the parameters.
 
-    ``events_s``: the recording's common-mode event times (``cm_events.find_events``),
-    seconds, on this channel's timeline.
+    Candidates, seed, clean set, template, floors and the floor judgement: one
+    :func:`prepare` serves every (k, height, width) of :func:`resolve`.
     """
+
+    no_train: TemplateTrain | None
+    y: F64 = field(default_factory=lambda: np.zeros(0), repr=False)
+    fd: float = float("nan")
+    scorer: _Scorer | None = field(default=None, repr=False)
+    ev: I64 = field(default_factory=lambda: np.zeros(0, dtype=np.int64), repr=False)
+    sus_r: int = 0
+    seed: _Seed | None = None
+    fid: I64 = field(default_factory=lambda: np.zeros(0, dtype=np.int64), repr=False)
+    score: F64 = field(default_factory=lambda: np.zeros(0), repr=False)
+    kind: S = field(default_factory=lambda: np.zeros(0, dtype="<U10"), repr=False)
+    match: B = field(default_factory=lambda: np.zeros(0, dtype=bool), repr=False)
+    ac: F64 = field(default_factory=lambda: np.zeros(0), repr=False)
+    counts: dict[str, int] = field(default_factory=dict)
+    fiducial_offset_s: float = float("nan")
+
+
+def prepare(x: npt.ArrayLike, fs: float, events_s: npt.ArrayLike) -> Prepared:
+    """Run every parameter-free step of :func:`template_train` on one channel."""
     from gems_blanking_v2.physio.hr_channel import (  # noqa: PLC0415
         AC_WINDOW_S,
         autocorr_rate,
@@ -526,7 +547,7 @@ def template_train(
     y, fd = _prepare(x, fs, DETECT_BAND_HZ)
     counts: dict[str, int] = {}
     if y.size == 0 or not np.any(y):
-        return _no_train("flat channel", counts)
+        return Prepared(_no_train("flat channel", counts))
     ys, _fd = _prepare(x, fs, SCORE_BAND_HZ)
     r, mr = max(int(round(SNAP_S * fd)), 1), int(round(MERGE_S * fd))
 
@@ -538,13 +559,14 @@ def template_train(
     idx = snapped(np.r_[t05 / fd, findpeaks_replica(x, fs)])
     counts["candidates"] = int(idx.size)
     if idx.size < 3:  # noqa: PLR2004
-        return _no_train("fewer than 3 candidates", counts)
+        return Prepared(_no_train("fewer than 3 candidates", counts))
     starts, bpm = autocorr_rate(x, fs)
     if not np.isfinite(bpm).any():  # (g) 3: clean exists in clear minutes only
-        return _no_train("the autocorrelation is unclear in every minute: no clean beat", counts)
+        return Prepared(_no_train("the autocorrelation is unclear in every minute: no clean beat",
+                                  counts))
     seed = _seed(y, fd, idx, t05, _ac_rr(starts, bpm, t05, fd, AC_WINDOW_S))
     if seed.ambiguous:
-        return _no_train(seed.ambiguous, counts, seed)
+        return Prepared(_no_train(seed.ambiguous, counts, seed))
     clean = _clean(seed.idx, _ac_rr(starts, bpm, seed.idx, fd, AC_WINDOW_S), fd)
     counts["clean"] = int(clean.size)
     ev = np.sort(np.round(np.asarray(events_s, float) * fd).astype(np.int64))
@@ -552,19 +574,41 @@ def template_train(
     scorer = _Scorer(ys, fd, clean, ev, sus_r)
     counts["floor_beats"] = int(scorer.floor_rows.size)
     if scorer.floor_rows.size < MIN_FLOOR_BEATS:
-        return _no_train(f"{scorer.floor_rows.size} non-suspect clean beats, fewer than "
-                         f"{MIN_FLOOR_BEATS}: no floor", counts, seed)
-    unmasked = scorer.floor(())
+        return Prepared(_no_train(f"{scorer.floor_rows.size} non-suspect clean beats, fewer than "
+                                  f"{MIN_FLOOR_BEATS}: no floor", counts, seed))
     fid, score, kind, match = _judge(idx, scorer, _masks(ev, idx, scorer.reach), sus_r, counts)
-    ac = _ac_rr(starts, bpm, fid, fd, AC_WINDOW_S)
-    fid, score, kind, match, ac = _refractory(fid, score, kind, match, params.k, fd, ac, counts)
-    found, gaps = _research(_Context(y, fd, scorer, ev, sus_r, params, unmasked), fid, match, ac)
+    _c, cs = scorer.score(scorer.clean, [()] * scorer.clean.size)  # (f) 2: alignment vs peak
+    return Prepared(None, y, fd, scorer, ev, sus_r, seed, fid, score, kind, match,
+                    _ac_rr(starts, bpm, fid, fd, AC_WINDOW_S), counts, float(np.mean(cs)) / fd)
+
+
+def resolve(p: Prepared, params: TemplateParams) -> TemplateTrain:
+    """Run the parameter-dependent steps (refractory, re-search) on a prepared channel."""
+    if p.no_train is not None:
+        return p.no_train
+    assert p.scorer is not None and p.seed is not None  # set whenever no_train is None
+    counts = dict(p.counts)
+    fid, _score, kind, match, ac = _refractory(p.fid, p.score, p.kind, p.match, params.k, p.fd,
+                                              p.ac, counts)
+    unmasked = p.scorer.floor(())
+    found, gaps = _research(_Context(p.y, p.fd, p.scorer, p.ev, p.sus_r, params, unmasked),
+                            fid, match, ac)
     counts["researched"] = len(found)
     t_idx = np.r_[fid, np.asarray(found, dtype=np.int64)]
     t_kind = np.r_[kind, np.full(len(found), "researched")]
     order = np.argsort(t_idx, kind="stable")
-    _c, cs = scorer.score(scorer.clean, [()] * scorer.clean.size)  # (f) 2: alignment vs peak
-    return TemplateTrain(t_s=np.asarray(t_idx[order] / fd, dtype=np.float64), kind=t_kind[order],
-                         seed=seed.kind, split_snr=seed.snr, split_jitter_s=seed.jitter,
-                         gaps_s=gaps, counts=counts, fiducial_offset_s=float(np.mean(cs)) / fd,
-                         floor=unmasked)
+    return TemplateTrain(t_s=np.asarray(t_idx[order] / p.fd, dtype=np.float64),
+                         kind=t_kind[order], seed=p.seed.kind, split_snr=p.seed.snr,
+                         split_jitter_s=p.seed.jitter, gaps_s=gaps, counts=counts,
+                         fiducial_offset_s=p.fiducial_offset_s, floor=unmasked)
+
+
+def template_train(
+    x: npt.ArrayLike, fs: float, events_s: npt.ArrayLike, params: TemplateParams,
+) -> TemplateTrain:
+    """Return the template-resolved train on one channel, or why there is none.
+
+    ``events_s``: the recording's common-mode event times (``cm_events.find_events``),
+    seconds, on this channel's timeline. Equivalent to ``resolve(prepare(...), params)``.
+    """
+    return resolve(prepare(x, fs, events_s), params)
