@@ -27,6 +27,7 @@ Design notes that matter for correctness:
 
 from __future__ import annotations
 
+import itertools
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -1522,3 +1523,138 @@ def make_band_z(
         winner[i0:i1] = [who] * (i1 - i0)
     z[: int(round(nan_before_s / grid_s))] = np.nan
     return BandZSynth(band, z, tuple(winner), grid_s)
+
+
+# ---------------------------------------------------------------------------
+# HR trains in trouble (ruling 2026-09-30 (f): the template candidate detector)
+# ---------------------------------------------------------------------------
+
+
+class HrTrouble(NamedTuple):
+    """Return of :func:`make_hr_trouble`."""
+
+    signal: F64
+    """One channel, microvolts."""
+    beats_s: F64
+    """True R times, seconds - every beat that has a QRS in the signal."""
+    missing_s: F64
+    """True beats deliberately given NO QRS (a real gap nothing may fill)."""
+    transients_s: F64
+    """Common-mode transient times, seconds (non-cardiac)."""
+    events_s: F64
+    """What the event finder reports: the transients, plus the R times of the beats
+    whose QRS edge triggers it (``cardiac_event_frac``)."""
+
+
+def make_hr_trouble(  # noqa: PLR0912, PLR0915 - one knob per measured failure mode
+    fs: float,
+    dur_s: float,
+    *,
+    rr_s: float = 0.155,
+    rr_end_s: float | None = None,
+    amp_uv: float = 60.0,
+    noise_uv: float = 5.0,
+    burst_frac: float = 0.0,
+    burst_uv: float = 60.0,
+    transients_per_s: float = 0.0,
+    transient_uv: float = 300.0,
+    on_beat_frac: float = 0.0,
+    cardiac_event_frac: float = 0.0,
+    alternans: float = 1.0,
+    missing_frac: float = 0.0,
+    midcycle_amp: float = 0.0,
+    midcycle_frac: float = 1.0,
+    midcycle_width_ms: float = 6.0,
+    seed: int = 0,
+) -> HrTrouble:
+    """One HR channel carrying the failure modes measured on 9 recordings (216 trains).
+
+    Each knob reproduces one measured mechanism (invariant 41):
+
+    - ``rr_s`` -> ``rr_end_s``: a linear rate change (H t01 3_3 rose 311 -> 379 bpm,
+      193 -> 158 ms); intervals jittered 2%. Default 155 ms (A/H: 150-167 ms).
+    - QRS: :func:`make_qrs` at ``amp_uv`` on white ``noise_uv`` (60 / 5 uV, as
+      :func:`make_ecg`). Cycles longer than ~200 ms leave room for findpeaks (no height
+      floor, 100 ms spacing) to take a noise peak at its floor - the measured extras.
+    - ``burst_frac``: that fraction of the time in 2-4 s bursts of 10-150 Hz noise of
+      ``burst_uv`` sigma, about the R amplitude, burying the ECG.
+    - ``transients_per_s`` non-cardiac common-mode transients, 1.2 ms FWHM Gaussians of
+      ``transient_uv`` (the shared-ground fixture's measured ~310 uV), at least 20 ms
+      from every beat; ``on_beat_frac`` of them instead land 0.5-1.5 ms from a beat.
+      Filtered to 10-150 Hz a transient is as wide as a beat (ruling 6).
+    - ``cardiac_event_frac``: the event finder also reports that fraction of R times
+      (the QRS edge triggering it, measured on some channels).
+    - ``alternans``: every other beat at that fraction of ``amp_uv`` - task 05 misses
+      the weak ones (measured: H t01 3_3 lost every other beat).
+    - ``missing_frac``: beats with no QRS at all (gaps nothing may fill).
+    - ``midcycle_amp``: a second peak at 0.5 RR of that fraction of R, ``midcycle_width_ms``
+      wide, on ``midcycle_frac`` of cycles (measured: 22-28% of short intervals on
+      H t01 3_3, A t02, H t09). At 10 ms and amplitude 1 it is shaped like the QRS.
+    """
+    rng = np.random.default_rng(seed)
+    n = _n_samples(fs, dur_s)
+    t_end = n / fs
+    beats = []
+    b = 0.3
+    while b < t_end - 0.3:
+        beats.append(b)
+        rr = rr_s if rr_end_s is None else rr_s + (rr_end_s - rr_s) * b / t_end
+        b += rr * float(rng.uniform(0.98, 1.02))
+    beats_all = np.round(np.asarray(beats) * fs) / fs
+    n_b = beats_all.size
+    missing = np.zeros(n_b, bool)
+    if missing_frac:
+        gone = rng.choice(np.arange(5, n_b - 5), int(round(missing_frac * n_b)), replace=False)
+        missing[gone] = True
+    amps = np.full(n_b, amp_uv)
+    amps[1::2] *= alternans
+    sig = rng.normal(0.0, noise_uv, n)
+    kernel = make_qrs(fs)
+    half = kernel.size // 2
+    for t_b, a, gone_b in zip(beats_all, amps, missing, strict=True):
+        if not gone_b:
+            c = int(round(t_b * fs))
+            sig[c - half:c + half + 1] += a * kernel
+    if midcycle_amp:
+        mk = make_qrs(fs, width_ms=midcycle_width_ms)
+        mh = mk.size // 2
+        for t0, t1 in itertools.pairwise(beats_all):
+            if rng.random() < midcycle_frac:
+                c = int(round(0.5 * (t0 + t1) * fs))
+                sig[c - mh:c + mh + 1] += midcycle_amp * amp_uv * mk
+    if burst_frac:
+        sos = butter(4, (10.0, 150.0), btype="bandpass", fs=fs, output="sos")
+        covered = 0.0
+        while covered < burst_frac * t_end:
+            d = float(rng.uniform(2.0, 4.0))
+            s0 = float(rng.uniform(1.0, t_end - d - 1.0))
+            i0, i1 = int(s0 * fs), int((s0 + d) * fs)
+            w = sosfiltfilt(sos, rng.normal(0.0, 1.0, i1 - i0))
+            sig[i0:i1] += burst_uv * w / np.std(w) * np.hanning(i1 - i0) ** 0.25
+            covered += d
+    trans: list[float] = []
+    if transients_per_s:
+        k = int(round(transients_per_s * t_end))
+        cand = np.sort(rng.uniform(1.0, t_end - 1.0, 4 * k))
+        j = np.searchsorted(beats_all, cand)
+        dmin = np.minimum(np.abs(cand - beats_all[np.clip(j - 1, 0, n_b - 1)]),
+                          np.abs(beats_all[np.clip(j, 0, n_b - 1)] - cand))
+        far = cand[dmin > 0.020]  # a uniform random subset - never the first k in time
+        trans = list(np.sort(rng.choice(far, min(k, far.size), replace=False)))
+        n_on = int(round(on_beat_frac * len(trans)))
+        if n_on:
+            hit = rng.choice(np.flatnonzero(~missing), n_on, replace=False)
+            off = rng.choice([-1, 1], n_on) * rng.uniform(0.0005, 0.0015, n_on)
+            trans = trans[n_on:] + list(beats_all[hit] + off)
+        sd = 0.0012 / 2.3548
+        tt = np.arange(n) / fs
+        for t0 in trans:
+            m = np.abs(tt - t0) < 0.006
+            sig[m] += transient_uv * np.exp(-0.5 * ((tt[m] - t0) / sd) ** 2)
+    trans_s = np.sort(np.asarray(trans, dtype=np.float64))
+    ev = list(trans_s)
+    if cardiac_event_frac:
+        pick = (rng.random(n_b) < cardiac_event_frac) & ~missing
+        ev += list(beats_all[pick] + rng.uniform(-0.0005, 0.0005, int(pick.sum())))
+    return HrTrouble(sig, beats_all[~missing], beats_all[missing], trans_s,
+                     np.sort(np.asarray(ev, dtype=np.float64)))
