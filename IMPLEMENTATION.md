@@ -4541,7 +4541,7 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
 - **stomach_ref in the hum recordings.** slow_wave is untouched by the hum (100% of peaks match with ANT1 notched). mmc is changed by it (Jaccard 0.18 and 0.25 in B t01 3_2 and B t02 3_3; 0.82 in B t03).
   - The no-ANT1 alternative changes both consumers far more (Jaccard 0.16–0.20), because it is a different derivation.
 - **Damage rule on all 208 marks.** 180 are target.
-  - Filtered recall is **179/180, lower bound 0.974**, against 205/208 (0.963) raw.
+  - Filtered recall is **179/180, lower bound 0.974**, against 205/208 (0.959 raw: the span bootstrap is the more conservative; Clopper-Pearson alone is 0.963).
   - The only target miss is s4#m0, flagged by a spike deficit (p = 0.033).
   - The round-5 recordings had no routing entry and were judged on uncorrected T without the veto.
 
@@ -4603,6 +4603,23 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
 - The other conditions are unchanged: ≥ 3 eligible spans per condition, and a positive pooled chance margin, computed over target marks.
 - Raw recall and its bound are reported beside it in every round.
 - The rule and its routing are frozen as ratified. A change to either means recomputing every pooled mark, and it is reported as a change.
+
+**Addendum to ruling (c), 2026-09-30 — answers to the build's questions:**
+
+1. **The peri-R mask may use "mask-grade" beats.** A train that passes the count gate but fails the transient veto is allowed for the peri-R time mask only.
+   - It is stored under a separate name, and `HR_BR_HRVAnalysis_beats.m` never reads it. HRV still needs a fully vetted train.
+   - The veto protects fiducial precision, which HRV needs. The mask needs every beat to be present, which the count gate checks.
+   - Fiducial jitter is self-correcting here: the extent is measured from the crossing-rate histogram against that same train, so jitter widens the measured hump and the extent with it.
+   - Run ruling 3 on A t02 L, H t01 3_3 L and H t05 L with these trains, and place H t05 L's +14.5 ms component.
+   - A recording with no train passing the count gate gets no peri-R route. Its spike-consumer cuffs with a QRS hump are distrusted.
+2. **Recompute every pooled mark once routing settles.** Ruling (c) changed routing (A t05 and H t01 es2 L distrusted, new HR trains, notched stomach_ref), so Andrea's clause applies: ruling 6's "only those marks" is superseded.
+   - When items 3–6 are complete, freeze the routing table and record its hash.
+   - Recompute the damage rule on all pooled marks and report the old and new classes side by side, with the reasons for every mark that changes class.
+   - Round 6 is scored on that frozen table.
+3. **An input the routing excludes counts as unassessable, therefore target.** This covers a distrusted cuff, a recording with no HR train, and any consumer with no admissible input.
+   - It is the convention already ratified for missing HR channels. The gate must not become easier to pass by excluding data.
+4. **Test skips.** List the 23 extra skips in the clean worktree with their reasons. A skip other than "needs local real data that is not in the repo" is a defect: fix it.
+5. **stomach_ref's 60 Hz residual** (about 1,500× the floor in B t01 and B t02 3_3, after the ANT1 notch): report which inputs carry it. Compare mmc with 60 Hz notched on every stomach_ref input against ANT1 alone. If mmc differs, the notch applies to all inputs in those recordings.
 
 ### Adapter-check findings, 2026-09-28
 
