@@ -121,6 +121,7 @@ __all__ = [
     "diagnose_miss",
     "duration_cap",
     "filtered_gate",
+    "frozen_filtered_gate",
     "generator_provenance",
     "is_covered",
     "last_fix_at",
@@ -1631,6 +1632,24 @@ def pooled_filtered_gate(store: GemsStore, damage: Mapping[str, str]) -> dict[st
     return {"pooled_rounds": base["pooled_rounds"], "excluded_rounds": base["excluded_rounds"],
             "pooled": filtered_gate(marks) if marks else None, "per_round": per_round}
 
+
+
+def frozen_filtered_gate(store: GemsStore, table_hash: str) -> dict[str, Any]:
+    """:func:`pooled_filtered_gate` on the damage classes stored under one frozen routing.
+
+    Each pooled round's classes are read from ``emit.routing.damage_path`` and must name
+    ``table_hash`` (addendum to ruling (c) 2: rounds are scored on the frozen table). A
+    pooled round with no classes under that table raises, naming it.
+    """
+    from gems_blanking_v2.emit.routing import damage_path, read_damage  # noqa: PLC0415
+
+    damage: dict[str, str] = {}
+    for pid in pooled_gate(store)["pooled_rounds"]:
+        if not damage_path(store, pid, table_hash).is_file():
+            msg = f"{pid} has no damage classes under routing {table_hash[:16]}"
+            raise FileNotFoundError(msg)
+        damage.update(read_damage(store, pid, table_hash))
+    return {"routing_hash": table_hash, **pooled_filtered_gate(store, damage)}
 
 # ---------------------------------------------------------------------------
 # the candidate budget (task 09, declared before any marks; enforced 2026-09-28)

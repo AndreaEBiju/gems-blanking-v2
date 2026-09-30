@@ -65,3 +65,36 @@ def test_the_round_trip_is_exact_to_the_sample(samples: list[int], start: float)
 
 def test_hr_beats_is_outside_the_generation_hash() -> None:
     assert "gems_blanking_v2.emit.hr_beats" not in chain.generation_modules()
+
+
+# --- mask-grade beats (addendum to ruling (c) 1) --------------------------------
+
+
+def test_mask_grade_beats_round_trip_under_their_own_name_and_variable(tmp_path) -> None:  # noqa: ANN001
+    from gems_blanking_v2.emit.hr_beats import read_mask_beats, write_mask_beats  # noqa: PLC0415
+
+    b = np.array([0.5, 0.65, 0.8])
+    f = write_mask_beats(tmp_path / "r_peri_r_beats.mat", b, fs=1000.0, epoch_start_s=0.0,
+                         n_samples=2000, channel="RVN3", source="count gate only")
+    m = loadmat(f)
+    assert "heartlocs" not in m  # her function loads heartlocs and refuses without it
+    assert m["maskBeatlocs"].ravel().tolist() == [501.0, 651.0, 801.0]
+    t, fs = read_mask_beats(f)
+    assert fs == 1000.0 and np.allclose(t, b)
+
+
+def test_the_two_grades_cannot_be_written_or_read_as_each_other(tmp_path) -> None:  # noqa: ANN001
+    from gems_blanking_v2.emit.hr_beats import (  # noqa: PLC0415
+        read_mask_beats,
+        write_hr_beats,
+        write_mask_beats,
+    )
+
+    kw = {"fs": 1000.0, "epoch_start_s": 0.0, "n_samples": 2000, "channel": "c", "source": "s"}
+    with pytest.raises(ValueError, match="mask-grade name"):
+        write_hr_beats(tmp_path / "r_peri_r_beats.mat", [0.5], **kw)
+    with pytest.raises(ValueError, match="must end with"):
+        write_mask_beats(tmp_path / "r_beats.mat", [0.5], **kw)
+    hrv = write_hr_beats(tmp_path / "r_beats.mat", [0.5], **kw)
+    with pytest.raises(ValueError, match="not a mask-grade"):
+        read_mask_beats(hrv)

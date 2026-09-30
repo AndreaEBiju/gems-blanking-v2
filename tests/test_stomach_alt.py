@@ -111,7 +111,7 @@ def test_a_notch_outside_nyquist_or_a_missing_contact_is_refused(rec) -> None:  
     with pytest.raises(ValueError, match="outside"):
         notch(np.zeros(100), FS, (1500.0,))
     with pytest.raises(ValueError, match="no stomach contact"):
-        notched_stomach_ref(rec, (60.0,), contact="LVN1")
+        notched_stomach_ref(rec, (60.0,), contacts=("LVN1",))
 
 
 def test_the_reference_is_notched_ant1_minus_the_mean_with_notched_ant1(rec) -> None:  # noqa: ANN001
@@ -132,3 +132,16 @@ def test_the_zero_phase_notch_halves_59_and_61_hz() -> None:
         assert amp == pytest.approx(0.5, abs=0.03)
     y = notch(np.sin(2 * np.pi * 50.0 * t), FS, (60.0,))  # mmc's band edge passes
     assert float(np.sqrt(2) * np.std(y[int(5 * FS):-int(5 * FS)])) > 0.98
+
+
+def test_every_named_input_is_notched(rec) -> None:  # noqa: ANN001
+    data = np.array(rec.data, dtype=np.float64)
+    t = np.arange(data.shape[0]) / FS
+    for c in rec.channels:
+        if c.role == "stomach":
+            data[:, c.index] += 300.0 * np.sin(2 * np.pi * 60.0 * t + c.index)
+    humming = replace(rec, data=data)
+    only1 = notched_stomach_ref(humming, (60.0,))
+    every = notched_stomach_ref(humming, (60.0,), contacts=("ANT1", "ANT2", "ANT3"))
+    assert _line(only1, 60.0) > 50.0  # ANT2 and ANT3 still bring their hum
+    assert _line(every, 60.0) < 2.0

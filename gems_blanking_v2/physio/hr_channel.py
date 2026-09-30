@@ -63,6 +63,7 @@ __all__ = [
     "gated_selection",
     "hr_candidates",
     "implausible_fraction",
+    "peri_r_train",
     "pick_train",
     "transient_harm",
 ]
@@ -474,3 +475,21 @@ def pick_train(rows: list[TrainGate]) -> TrainGate | None:
     if not passing:
         return None
     return max(passing, key=lambda r: (r.snr, -r.count.median_abs_dev))
+
+
+def peri_r_train(rows: list[TrainGate]) -> tuple[TrainGate | None, str]:
+    """Return ``(train, grade)`` for the peri-R time mask (addendum to ruling (c) 1).
+
+    The vetted train (:func:`pick_train`) when there is one, grade ``"hrv"``;
+    otherwise the train with the best template SNR among those that pass the count
+    gate and task 05's plausibility gates, whatever their transient harm - grade
+    ``"mask"``, for the mask only. ``(None, "none")`` when no train passes the count
+    gate: the recording gets no peri-R route.
+    """
+    vetted = pick_train(rows)
+    if vetted is not None:
+        return vetted, "hrv"
+    ok = [r for r in rows if r.count.passes and r.plausible and np.isfinite(r.snr)]
+    if not ok:
+        return None, "none"
+    return max(ok, key=lambda r: (r.snr, -r.count.median_abs_dev)), "mask"

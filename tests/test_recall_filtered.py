@@ -108,3 +108,50 @@ def test_score_marks_takes_each_marks_chance_in_artifact_order() -> None:
 
 def test_recall_is_outside_the_generation_hash() -> None:
     assert "gems_blanking_v2.detect.recall" not in chain.generation_modules()
+
+
+# --- scoring on the frozen routing (addendum to ruling (c) 2) --------------------
+
+
+def _scored(tmp_path, monkeypatch):  # noqa: ANN001, ANN202
+    import json  # noqa: PLC0415
+
+    from gems_blanking_v2.detect import recall  # noqa: PLC0415
+    from gems_blanking_v2.io.store import GemsStore  # noqa: PLC0415
+
+    store = GemsStore.initialise(tmp_path / "gems")
+    pid = "plan_20260930T000000Z_00000001"
+    doc = {"plan_id": pid,
+           "per_span": [{"span_id": f"{pid}_s1", "condition": "baseline",
+                         "chance_per_mark": [0.2, 0.3]}],
+           "artifacts": [{"id": f"{pid}_s1#m0", "span_id": f"{pid}_s1", "covered": True},
+                         {"id": f"{pid}_s1#m1", "span_id": f"{pid}_s1", "covered": False}]}
+    path = store.audit_score_path(pid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    monkeypatch.setattr(recall, "pooled_gate",
+                        lambda _s: {"pooled_rounds": [pid], "excluded_rounds": []})
+    return store, pid
+
+
+def test_the_frozen_gate_reads_the_classes_stored_under_that_routing(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    from gems_blanking_v2.detect.recall import frozen_filtered_gate  # noqa: PLC0415
+    from gems_blanking_v2.emit.routing import write_damage  # noqa: PLC0415
+
+    store, pid = _scored(tmp_path, monkeypatch)
+    h = "a" * 64
+    write_damage(store, pid, h, {f"{pid}_s1#m0": "target", f"{pid}_s1#m1": "below"}, {})
+    g = frozen_filtered_gate(store, h)
+    assert g["routing_hash"] == h
+    assert g["pooled"]["filtered"]["found"] == 1 and g["pooled"]["raw"]["found"] == 2
+    assert g["pooled"]["target_misses_unclassified"] == []
+
+
+def test_a_round_without_classes_under_the_frozen_routing_is_refused(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    from gems_blanking_v2.detect.recall import frozen_filtered_gate  # noqa: PLC0415
+    from gems_blanking_v2.emit.routing import write_damage  # noqa: PLC0415
+
+    store, pid = _scored(tmp_path, monkeypatch)
+    write_damage(store, pid, "b" * 64, {f"{pid}_s1#m0": "target", f"{pid}_s1#m1": "target"}, {})
+    with pytest.raises(FileNotFoundError, match="no damage classes under routing aaaaaaaa"):
+        frozen_filtered_gate(store, "a" * 64)

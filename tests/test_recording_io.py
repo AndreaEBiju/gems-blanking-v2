@@ -35,7 +35,6 @@ from gems_blanking_v2.io.detector_core import (
     DETECTOR_CORE_ENV,
     SUBMODULE_PATH,
     _search_roots,
-    detector_core_available,
     find_detector_core,
     import_detector_module,
 )
@@ -56,8 +55,23 @@ F64 = npt.NDArray[np.float64]
 
 FS = 24414.0625
 
+def _detector_importable() -> bool:
+    """Whether ``detector`` imports by the path these tests use (no root given).
+
+    That path is the editable install of the one checkout, and it works wherever this
+    repository sits; the old predicate, ``detector_core_available()``, looked only
+    beside the repository, so a clean worktree anywhere else skipped 23 tests that
+    would have passed (addendum to ruling (c) 4).
+    """
+    try:
+        import_detector_module("recording_io")
+    except (FileNotFoundError, ImportError):
+        return False
+    return True
+
+
 needs_detector_core = pytest.mark.skipif(
-    not detector_core_available(),
+    not _detector_importable(),
     reason="GEMSBlanking checkout not found; it is private, so CI cannot see it",
 )
 

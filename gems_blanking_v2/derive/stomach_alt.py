@@ -80,19 +80,23 @@ def notch(x: npt.ArrayLike, fs: float, freqs_hz: Sequence[float], q: float = NOT
 
 
 def notched_stomach_ref(
-    rec: Recording, freqs_hz: Sequence[float], contact: str = "ANT1"
+    rec: Recording, freqs_hz: Sequence[float], contacts: Sequence[str] = ("ANT1",)
 ) -> F64:
-    """Return ``stomach_ref`` as ``derivations`` builds it, from ``contact`` notched.
+    """Return ``stomach_ref`` as ``derivations`` builds it, from ``contacts`` notched.
 
-    Only ``contact`` is filtered (:func:`notch` at ``freqs_hz``); every other column,
-    and the construction itself, are the derivation's. The input is never written to.
+    Only the named stomach contacts are filtered (:func:`notch` at ``freqs_hz``);
+    every other column, and the construction itself, are the derivation's. The input
+    is never written to. Ruling (c) 5 notches ANT1; its addendum extends the notch to
+    every input of a recording where the residual changes mmc.
     """
-    col = next((c.index for c in rec.channels if c.name == contact and c.role == "stomach"), None)
-    if col is None:
-        msg = f"no stomach contact named {contact!r}"
-        raise ValueError(msg)
     data = np.array(rec.data, dtype=np.float64)
-    data[:, col] = notch(data[:, col], float(rec.fs), freqs_hz)
+    for name in contacts:
+        col = next((c.index for c in rec.channels if c.name == name and c.role == "stomach"),
+                   None)
+        if col is None:
+            msg = f"no stomach contact named {name!r}"
+            raise ValueError(msg)
+        data[:, col] = notch(data[:, col], float(rec.fs), freqs_hz)
     ref, _how = build_stomach_reference(replace(rec, data=data))
     if ref is None:
         msg = "the recording has no stomach reference"

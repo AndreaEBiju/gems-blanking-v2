@@ -159,3 +159,33 @@ def test_the_gate_is_outside_the_generation_hash() -> None:
     from gems_blanking_v2.detect import chain  # noqa: PLC0415
 
     assert "gems_blanking_v2.physio.hr_channel" not in chain.generation_modules()
+
+
+# --- the peri-R train (addendum to ruling (c) 1: mask-grade beats) --------------
+
+
+def _gate(snr: float, count_ok: bool, harm: float, plausible: bool = True,
+          name: str = "x") -> TrainGate:
+    cg = CountGate(minutes=1, clear_minutes=1, fraction_within=1.0 if count_ok else 0.5,
+                   median_abs_dev=0.01, assessable=True, passes=count_ok)
+    return TrainGate(channel=name, detector="findpeaks", beats_s=np.zeros(0), snr=snr, count=cg,
+                     transient_harm=harm, implausible_frac=0.0, rescue_rate=0.0,
+                     plausible=plausible,
+                     passes=count_ok and plausible and harm <= hc.PROVISIONAL_MAX_TRANSIENT_HARM)
+
+
+def test_the_vetted_train_places_the_mask_when_there_is_one() -> None:
+    rows = [_gate(90.0, True, 0.3, name="raw"), _gate(40.0, True, 0.0, name="T")]
+    train, grade = hc.peri_r_train(rows)
+    assert (train.channel, grade) == ("T", "hrv")
+
+
+def test_without_a_vetted_train_a_count_passing_one_is_mask_grade() -> None:
+    rows = [_gate(90.0, False, 0.0, name="miscount"), _gate(60.0, True, 0.4, name="raw"),
+            _gate(80.0, True, 0.4, plausible=False, name="implausible")]
+    train, grade = hc.peri_r_train(rows)
+    assert (train.channel, grade) == ("raw", "mask")
+
+
+def test_no_count_passing_train_means_no_peri_r_route() -> None:
+    assert hc.peri_r_train([_gate(90.0, False, 0.0)]) == (None, "none")
