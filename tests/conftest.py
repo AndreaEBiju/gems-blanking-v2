@@ -1143,6 +1143,68 @@ def make_shared_ground(
     return SharedGroundSynth(out, common, gains, when)
 
 
+class TwoSourceSynth(NamedTuple):
+    """Return of :func:`make_two_source_ground`."""
+
+    rec: Recording
+    ground: SharedGroundSynth
+    """The shared-ground world underneath, with its own gains."""
+    cardiac: F64
+    """The far-field cardiac signal, microvolts, before each channel's gain."""
+    cardiac_gains: dict[str, float]
+    beats_s: F64
+
+
+def make_two_source_ground(
+    fs: float,
+    dur_s: float,
+    *,
+    cardiac_uv: float = 150.0,
+    cardiac_gain_spread: float = 0.15,
+    gain_spread: float = 0.03,
+    rr_s: float = 0.155,
+    seed: int = 0,
+) -> TwoSourceSynth:
+    """Build the shared-ground world plus a far-field heart with its OWN gain pattern.
+
+    Measured 2026-09-30: part of the new cohort's common-mode class is the heartbeat -
+    events sit within 5 ms of a beat 1.3-5x more often than chance - and one
+    subtraction scalar per cuff raised event-locked firing far from beats in A t05 L
+    while lowering it near them: two common-mode sources entering the contacts with
+    different gains. This adds the second source: a sharp beat-locked waveform (a
+    0.4 ms-sigma biphasic spike on a 3 ms-sigma wave, so it carries energy above
+    300 Hz, as the new cohort's does) at ``rr_s`` with 2% jitter, entering every
+    channel with a gain from ``1 +/- cardiac_gain_spread``, independent of the
+    ground's. ``gain_spread`` is the ground's, passed to :func:`make_shared_ground`.
+    """
+    g = make_shared_ground(fs, dur_s, gain_spread=gain_spread, seed=seed)
+    rng = np.random.default_rng(seed + 31)
+    n = g.rec.data.shape[0]
+    t = np.arange(n, dtype=np.float64) / fs
+    beats = []
+    b = 0.1
+    while b < dur_s - 0.1:
+        beats.append(b)
+        b += rr_s * float(rng.uniform(0.98, 1.02))
+    beats_s = np.asarray(beats)
+    cardiac = np.zeros(n)
+    s1, s2 = 0.0004, 0.003
+    for b in beats_s:
+        near = np.abs(t - b) < 0.02
+        u = t[near] - b
+        cardiac[near] += cardiac_uv * (-(u / s1) * np.exp(0.5 - 0.5 * (u / s1) ** 2)
+                                       + 0.5 * np.exp(-0.5 * (u / s2) ** 2))
+    data = np.array(g.rec.data, dtype=np.float64)
+    cg = {}
+    for c in g.rec.channels:
+        k = float(rng.uniform(1.0 - cardiac_gain_spread, 1.0 + cardiac_gain_spread))
+        cg[c.name] = k
+        data[:, c.index] += k * cardiac
+    rec = Recording(fs=g.rec.fs, data=data, channels=g.rec.channels, animal=g.rec.animal,
+                    session=g.rec.session, path=g.rec.path)
+    return TwoSourceSynth(rec, g, cardiac, cg, beats_s)
+
+
 # ---------------------------------------------------------------------------
 # fixtures
 # ---------------------------------------------------------------------------

@@ -45,13 +45,17 @@ from gems_blanking_v2.derive.derivations import NAIVE_WEIGHTS, tripole
 from gems_blanking_v2.types import Recording
 
 __all__ = [
+    "ALIGN_SEARCH_S",
     "FIT_ORDER",
     "SETTLE_S",
+    "TEMPLATE_HALF_S",
     "LeakFit",
+    "MultiFit",
     "differential_survival",
     "fit_leak",
     "outside_reference",
     "subtract_common_mode",
+    "subtract_multi",
 ]
 
 F64 = npt.NDArray[np.float64]
@@ -193,3 +197,129 @@ def differential_survival(
     corr = _eng(with_spike - base, fs)
     i0, i1 = int((at_s - 0.005) * fs), int((at_s + 0.005) * fs)
     return float(np.nanmax(np.abs(corr[i0:i1])) / np.nanmax(np.abs(raw[i0:i1])))
+
+
+# ---------------------------------------------------------------------------
+# multi-regressor subtraction (ruling 2026-09-30, item 4b)
+# ---------------------------------------------------------------------------
+
+TEMPLATE_HALF_S: Final = 0.020
+"""Half-width of the beat-locked template: the QRS spans ~10-20 ms in these rats."""
+
+ALIGN_SEARCH_S: Final = 0.0005
+"""Sub-sample refinement searches only +/-0.5 ms about each consumer beat, so the
+fiducial cannot be dragged onto a nearby nerve spike (PIPELINE.md 10.2's failure)."""
+
+
+@dataclass(frozen=True, slots=True)
+class MultiFit:
+    """One cuff's multi-regressor fit: ``T_corrected = T - sum(coef_i * X_i)``.
+
+    ``names`` are the regressors - every channel outside the cuff and ``"cardiac"``
+    (the beat-locked template) when beats were given; ``coefs`` match them. The fit
+    used only the samples where ``fit`` was True (one half of the recording).
+    """
+
+    cuff: str
+    names: tuple[str, ...]
+    coefs: tuple[float, ...]
+    n_fit: int
+    n_beats_template: int
+    rms_fit_before_uv: float
+    rms_fit_after_uv: float
+
+
+def _shift(x: F64, delay: float) -> F64:
+    """``x`` delayed by ``delay`` samples (any real value), linear interpolation."""
+    idx = np.arange(x.size, dtype=np.float64)
+    return np.interp(idx - delay, idx, x, left=0.0, right=0.0)
+
+
+def _cardiac_regressor(
+    t: F64, beats_s: F64, fs: float, fit: npt.NDArray[np.bool_]
+) -> tuple[F64, int]:
+    """Return the beat-locked template of ``t`` placed at every beat, sub-sample aligned.
+
+    The template is the mean of ``t`` about the beats inside ``fit`` only (so the
+    held-out half never shapes it). Alignment: integer fiducials from the HR
+    consumer's beats, then each beat refined within :data:`ALIGN_SEARCH_S` by the
+    cross-correlation peak with the template, interpolated parabolically; the
+    template is rebuilt from the aligned fit-half beats and placed at every beat
+    with its fractional offset. PIPELINE.md 10.2's integer alignment left ~25 uV at
+    24.4 kHz, and its unbounded ``max(|seg|)`` search moved fiducials onto spikes.
+    """
+    n, h = t.size, int(round(TEMPLATE_HALF_S * fs))
+    s = max(int(round(ALIGN_SEARCH_S * fs)), 1)
+    m = s + 2
+    centres = np.round(np.asarray(beats_s) * fs).astype(np.int64)
+    centres = centres[(centres - h - m >= 0) & (centres + h + m < n)]
+    in_fit = np.asarray(fit, dtype=bool)[centres]
+    tt = np.nan_to_num(t)  # NaN never enters a template or a correlation
+    if not in_fit.any():
+        return np.zeros(n), 0
+    template = np.mean([tt[c - h:c + h + 1] for c in centres[in_fit]], axis=0)
+    lags = np.arange(-s, s + 1)
+    frac = np.zeros(centres.size)
+    for k, c in enumerate(centres):
+        r = np.array([float(tt[c - h + j:c + h + 1 + j] @ template) for j in lags])
+        j = int(np.argmax(r))
+        off = 0.0
+        if 0 < j < r.size - 1:
+            den = r[j - 1] - 2 * r[j] + r[j + 1]
+            off = 0.5 * (r[j - 1] - r[j + 1]) / den if den != 0 else 0.0
+        frac[k] = lags[j] + off
+    template = np.mean([_shift(tt[c - h - m:c + h + m + 1], -f)[m:m + 2 * h + 1]
+                        for c, f in zip(centres[in_fit], frac[in_fit], strict=True)], axis=0)
+    padded = np.concatenate([np.zeros(m), template, np.zeros(m)])
+    reg = np.zeros(n)
+    for c, f in zip(centres, frac, strict=True):
+        reg[c - h - m:c + h + m + 1] += _shift(padded, f)
+    return reg, int(in_fit.sum())
+
+
+def subtract_multi(
+    rec: Recording, cuff: str, fit: npt.NDArray[np.bool_], beats_s: F64 | None = None
+) -> tuple[F64, MultiFit]:
+    """Return ``cuff``'s tripole corrected by every outside channel (and the heart).
+
+    Each channel outside the cuff is its own regressor (two common-mode sources with
+    different gain patterns - the shared ground and the far-field heart - cannot be
+    cancelled by one scalar on their mean), plus, when ``beats_s`` is given, the
+    beat-locked cardiac template of ``T``. Least squares in the ENG band over the
+    ``fit`` samples only (one half; the other half verifies), applied broadband to
+    the whole recording. NaN stays NaN and is kept out of the fit with the
+    :data:`SETTLE_S` pad.
+    """
+    fs = float(rec.fs)
+    t = _tripole(rec, cuff)
+    outside = [c for c in rec.channels if c.cuff_id != cuff]
+    if not outside:
+        msg = f"no channel outside cuff {cuff!r}: a common-mode reference needs one"
+        raise ValueError(msg)
+    fit = np.asarray(fit, dtype=bool)
+    if fit.shape != t.shape:
+        msg = f"fit mask has {fit.size} samples, the recording {t.size}"
+        raise ValueError(msg)
+    xs = [np.asarray(rec.data[:, c.index], dtype=np.float64) for c in outside]
+    names = [c.name for c in outside]
+    n_tpl = 0
+    if beats_s is not None and len(beats_s):
+        reg, n_tpl = _cardiac_regressor(t, np.asarray(beats_s, np.float64), fs, fit)
+        xs.append(reg)
+        names.append("cardiac")
+    te = _eng(t, fs)
+    xe = np.column_stack([_eng(x, fs) for x in xs])
+    ok = fit & np.isfinite(te) & np.all(np.isfinite(xe), axis=1)
+    pad = int(round(SETTLE_S * fs))
+    bad = ~(np.isfinite(te) & np.all(np.isfinite(xe), axis=1))
+    if pad and bad.any():
+        ok &= ~(np.convolve(bad.astype(np.int64), np.ones(2 * pad + 1, np.int64), "same") > 0)
+    if not ok.any():
+        msg = "no finite fit sample"
+        raise ValueError(msg)
+    coefs, *_ = np.linalg.lstsq(xe[ok], te[ok], rcond=None)
+    resid = te[ok] - xe[ok] @ coefs
+    out = np.asarray(t - np.column_stack(xs) @ coefs, dtype=np.float64)
+    out[~np.isfinite(t) | ~np.all(np.isfinite(np.column_stack(xs)), axis=1)] = np.nan
+    return out, MultiFit(cuff, tuple(names), tuple(float(c) for c in coefs), int(ok.sum()), n_tpl,
+                         float(np.sqrt(np.mean(te[ok] ** 2))), float(np.sqrt(np.mean(resid**2))))
