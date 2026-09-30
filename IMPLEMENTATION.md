@@ -4514,6 +4514,7 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
 **Order.** Andrea classifies the two misses. If she draws round 6, Claude Code stops Drive and MATLAB work and builds rulings 2–5 against synthetic data only. The real-data runs follow her "done", in this order: 2, 3, 4, 5, 6, then the damage rule on all pooled marks once Andrea approves it.
 
 **Andrea, 2026-09-30:**
+- **s3#m7 and s3#m13: "can be ignored"** — close both as `not_target` (her classification; committed marks and the round-5 score stand). Both also measured harmless. Round 6 may be drawn once `--check-next` returns ALLOWED.
 - **The damage rule is approved as amended.** Apply it after the real-data runs, in the order given.
 - **Beats are computed once.** Her HRV analysis has its own `findpeaks`. She does not want double computation if the pipeline's beats are reliable. So:
   - **One detector, and the veto tests it.** The pipeline's beat detector (task 05's, the more robust of the two) is the only beat computation, and ruling 5's transient veto runs on it. The replica is kept for the comparison below, then retired.
