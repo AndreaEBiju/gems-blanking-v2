@@ -114,3 +114,25 @@ def test_nan_in_the_reference_never_vetoes() -> None:
 
 def test_the_veto_is_outside_the_generation_hash() -> None:
     assert "gems_blanking_v2.derive.spike_veto" not in chain.generation_modules()
+
+
+# --- ruling 2026-09-30 (c) 2: distrust where verification fails ------------------
+
+
+def test_the_cuffs_that_failed_verification_are_distrusted_for_spikes() -> None:
+    from gems_blanking_v2.derive.spike_veto import spike_trusted  # noqa: PLC0415
+
+    for rid, cuff in (("gems_h_t01_es2_bl_224901_20260905T024908Z", "L"),
+                      ("gems_a_t05_2_1_bl_183840_20260924T223845Z", "L"),
+                      ("gems_a_t05_2_1_bl_183840_20260924T223845Z", "R")):
+        ok, why = spike_trusted(rid, cuff)
+        assert not ok and "ruling 2026-09-30 (c) 2" in why
+    assert spike_trusted("gems_h_t01_es2_bl_224901_20260905T024908Z", "R") == (True, "")
+
+
+def test_a_cuff_distrusted_for_every_consumer_is_distrusted_for_spikes() -> None:
+    from gems_blanking_v2.derive.consumer_screen import DISTRUSTED_CUFFS  # noqa: PLC0415
+    from gems_blanking_v2.derive.spike_veto import spike_trusted  # noqa: PLC0415
+
+    for key, why in DISTRUSTED_CUFFS.items():
+        assert spike_trusted(*key) == (False, why)

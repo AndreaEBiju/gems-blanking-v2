@@ -59,7 +59,7 @@ import inspect
 import json
 import math
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -85,10 +85,12 @@ __all__ = [
     "CLOSURES",
     "CONFIDENCE",
     "CURRENT_SCORING_UNIT",
+    "DAMAGE_CLASSES",
     "DESCRIPTIVE_NOTE",
     "DIGEST_RULE",
     "DURATION_CAP_QUANTILE",
     "DURATION_CAP_SOURCE",
+    "FILTERED_GATE_FROM_ROUND",
     "GATE_CONDITIONS",
     "GATE_RECALL",
     "GENERATOR_CHANGE_PREFIX",
@@ -118,6 +120,7 @@ __all__ = [
     "covered_fraction",
     "diagnose_miss",
     "duration_cap",
+    "filtered_gate",
     "generator_provenance",
     "is_covered",
     "last_fix_at",
@@ -127,11 +130,13 @@ __all__ = [
     "next_round_gate",
     "one_sided_lower",
     "poisson_binomial_95",
+    "pooled_filtered_gate",
     "pooled_gate",
     "record_classification",
     "record_generator_change",
     "record_miss_closure",
     "record_miss_fixes",
+    "score_marks",
     "score_round",
     "score_stored_round",
     "source_sha256",
@@ -1505,6 +1510,126 @@ def pooled_gate(store: GemsStore) -> dict[str, Any]:
             + (f" - the lower bound was reached on {reached_on} only, so the gate is NOT "
                "cleared" if lower >= GATE_RECALL else ""))
     return out
+
+
+# ---------------------------------------------------------------------------
+# the filtered gate (Andrea, 2026-09-30: from round 6 the gate is filtered recall)
+# ---------------------------------------------------------------------------
+
+DAMAGE_CLASSES: Final[tuple[str, ...]] = ("target", "below")
+"""The ratified damage rule's classes: ``target`` if any assessable consumer is damaged
+or none is assessable, else ``below`` (under every consumer's tolerance)."""
+
+FILTERED_GATE_FROM_ROUND: Final = 6
+"""Andrea, 2026-09-30: task 09's gate is filtered recall from round 6 on."""
+
+
+def _bounds(per_span: Sequence[tuple[int, int]]) -> dict[str, Any]:
+    """Recall and its gate bound (the more conservative one-sided 95% lower bound)."""
+    k = sum(c for c, _ in per_span)
+    n = sum(f for _, f in per_span)
+    if n == 0:
+        return {"found": 0, "covered": 0}
+    cp1 = one_sided_lower(k, n)
+    b1 = span_bootstrap(per_span)[2]
+    return {"found": n, "covered": k, "recall": k / n, "lower_bound_one_sided_95": min(cp1, b1),
+            "lower_bound_parts": {"clopper_pearson": cp1, "span_bootstrap": b1}}
+
+
+def filtered_gate(marks: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Score the gate over the ``target`` marks, with raw recall beside it.
+
+    Each mark carries ``id``, ``span_id``, ``condition``, ``covered`` (bool),
+    ``damage_class`` (one of :data:`DAMAGE_CLASSES`) and ``chance`` (its chance of
+    cover). The gate clears when the filtered one-sided 95% lower bound - the more
+    conservative of Clopper-Pearson and the span bootstrap, over target marks only -
+    reaches :data:`GATE_RECALL`, every gate condition has at least
+    :data:`MIN_SPANS_PER_CONDITION` spans, and the chance margin over target marks
+    is positive. Target misses are listed as they are, unclassified. Raises on a
+    mark without a valid class, naming it: the rule is total (unassessable is
+    target), so a missing class is a missing computation, never a default.
+    """
+    for m in marks:
+        if m.get("damage_class") not in DAMAGE_CLASSES:
+            msg = f"mark {m.get('id')!r} has no damage class (got {m.get('damage_class')!r})"
+            raise ValueError(msg)
+    spans: dict[str, dict[str, Any]] = {}
+    for m in marks:
+        s = spans.setdefault(m["span_id"], {"condition": m["condition"], "raw": [0, 0],
+                                            "target": [0, 0]})
+        s["raw"][0] += bool(m["covered"])
+        s["raw"][1] += 1
+        if m["damage_class"] == "target":
+            s["target"][0] += bool(m["covered"])
+            s["target"][1] += 1
+    by_condition = dict.fromkeys(GATE_CONDITIONS, 0)
+    for s in spans.values():
+        by_condition[s["condition"]] = by_condition.get(s["condition"], 0) + 1
+    targets = [m for m in marks if m["damage_class"] == "target"]
+    out: dict[str, Any] = {
+        "gate_recall": GATE_RECALL, "gate_cleared": False,
+        "filtered": _bounds([tuple(s["target"]) for s in spans.values()]),
+        "raw": _bounds([tuple(s["raw"]) for s in spans.values()]),
+        "below_marks": len(marks) - len(targets),
+        "target_misses_unclassified": [m["id"] for m in targets if not m["covered"]],
+        "spans_by_condition": by_condition, "min_spans_per_condition": MIN_SPANS_PER_CONDITION,
+        "chance_bound_max": CHANCE_BOUND_MAX,
+    }
+    chance = [float(m["chance"]) for m in targets]
+    if chance:
+        upper = poisson_binomial_95(chance)[1]
+        out["chance_over_targets"] = {"chance_recall": float(np.mean(chance)),
+                                      "upper_95": upper, "margin": CHANCE_BOUND_MAX - upper}
+    short = [c for c in GATE_CONDITIONS if by_condition.get(c, 0) < MIN_SPANS_PER_CONDITION]
+    lower = out["filtered"].get("lower_bound_one_sided_95")
+    margin = out.get("chance_over_targets", {}).get("margin")
+    out["gate_cleared"] = bool(lower is not None and lower >= GATE_RECALL and not short
+                               and margin is not None and margin > 0)
+    if short:
+        out["condition_note"] = ("eligible spans: " + ", ".join(
+            f"{by_condition.get(c, 0)} {c}" for c in GATE_CONDITIONS)
+            + f"; {MIN_SPANS_PER_CONDITION} of each are needed")
+    return out
+
+
+def score_marks(doc: Mapping[str, Any], damage: Mapping[str, str]) -> list[dict[str, Any]]:
+    """Return one score document's artifacts as :func:`filtered_gate` marks.
+
+    ``damage`` maps artifact id to its class. The chance of each mark is its span's
+    ``chance_per_mark`` entry, in artifact order within the span.
+    """
+    chance = {sp["span_id"]: list(sp.get("chance_per_mark") or []) for sp in doc["per_span"]}
+    cond = {sp["span_id"]: sp["condition"] for sp in doc["per_span"]}
+    seen: dict[str, int] = {}
+    out = []
+    for a in doc["artifacts"]:
+        k = seen.get(a["span_id"], 0)
+        seen[a["span_id"]] = k + 1
+        ps = chance[a["span_id"]]
+        if len(ps) <= k:
+            msg = f"span {a['span_id']} records no chance of cover for {a['id']}"
+            raise ValueError(msg)
+        out.append({"id": a["id"], "span_id": a["span_id"], "condition": cond[a["span_id"]],
+                    "covered": bool(a["covered"]), "damage_class": damage.get(a["id"]),
+                    "chance": ps[k]})
+    return out
+
+
+def pooled_filtered_gate(store: GemsStore, damage: Mapping[str, str]) -> dict[str, Any]:
+    """:func:`filtered_gate` over the rounds :func:`pooled_gate` pools, and per round.
+
+    Eligibility is :func:`pooled_gate`'s, unchanged. ``damage`` must class every mark
+    of every pooled round (:func:`filtered_gate` raises otherwise).
+    """
+    base = pooled_gate(store)
+    marks, per_round = [], {}
+    for pid in base["pooled_rounds"]:
+        doc = json.loads(store.audit_score_path(pid).read_text(encoding="utf-8"))
+        m = score_marks(doc, damage)
+        per_round[pid] = filtered_gate(m)
+        marks += m
+    return {"pooled_rounds": base["pooled_rounds"], "excluded_rounds": base["excluded_rounds"],
+            "pooled": filtered_gate(marks) if marks else None, "per_round": per_round}
 
 
 # ---------------------------------------------------------------------------

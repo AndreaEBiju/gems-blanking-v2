@@ -17,12 +17,17 @@ that reference's own robust sigma) peaks above ``theta`` within ``+/-w`` of it.
 
 The gate is independent of the cuff under test: it reads only channels outside it.
 
+Ruling 2026-09-30 (c), item 2: where the veto's verification fails, the cuff is
+distrusted for the spike consumer in that recording (:data:`SPIKE_DISTRUSTED`,
+:func:`spike_trusted`); a cuff distrusted for every consumer is distrusted here too.
+
 OUTSIDE THE GENERATION HASH: nothing that decides a candidate imports it.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from typing import Final
 
 import numpy as np
@@ -30,6 +35,7 @@ import numpy.typing as npt
 from scipy.stats import poisson
 
 from gems_blanking_v2.derive.common_mode import _eng, outside_reference
+from gems_blanking_v2.derive.consumer_screen import DISTRUSTED_CUFFS
 from gems_blanking_v2.types import Recording
 
 __all__ = [
@@ -37,6 +43,7 @@ __all__ = [
     "CORE_P",
     "CORE_P_WINDOW_S",
     "CORE_SEARCH_S",
+    "SPIKE_DISTRUSTED",
     "TARGET_CHANCE_LOSS",
     "W_STEP_S",
     "calibrate_theta",
@@ -44,6 +51,7 @@ __all__ = [
     "core_half_width",
     "over_theta",
     "reference_sigma",
+    "spike_trusted",
     "veto_spikes",
 ]
 
@@ -67,6 +75,33 @@ CORE_P: Final = 1e-3
 
 CORE_EXCESS_SHARE: Final = 0.9
 """The half-width holds this share of the excess within :data:`CORE_SEARCH_S`."""
+
+
+SPIKE_DISTRUSTED: Final[Mapping[tuple[str, str], str]] = {
+    ("gems_h_t01_es2_bl_224901_20260905T024908Z", "L"): (
+        "ruling 2026-09-30 (c) 2: fails check (iii) - an event core x3.0 survives the "
+        "veto (w = 0.2 ms) - and is the low-gain cuff"),
+    ("gems_a_t05_2_1_bl_183840_20260924T223845Z", "L"): (
+        "ruling 2026-09-30 (c) 2: the left-right zero-lag core persists outside both "
+        "cuffs' peri-R windows (x4.18, p 1.4e-6; x4.3 on all spikes)"),
+    ("gems_a_t05_2_1_bl_183840_20260924T223845Z", "R"): (
+        "ruling 2026-09-30 (c) 2: the left-right zero-lag core persists outside both "
+        "cuffs' peri-R windows (x4.18, p 1.4e-6; x4.3 on all spikes)"),
+}
+"""(recording id, cuff) -> why, for the spike consumer only. Lifted only by a ruling."""
+
+
+def spike_trusted(recording_id: str, cuff: str) -> tuple[bool, str]:
+    """Return ``(trusted, why not)`` for the spike consumer reading ``cuff``'s ``T``.
+
+    Distrusted when the cuff is in :data:`SPIKE_DISTRUSTED` or distrusted for every
+    consumer (``consumer_screen.DISTRUSTED_CUFFS``); ``why`` is empty when trusted.
+    """
+    for table in (SPIKE_DISTRUSTED, DISTRUSTED_CUFFS):
+        why = table.get((recording_id, cuff))
+        if why is not None:
+            return False, why
+    return True, ""
 
 
 def reference_sigma(rec: Recording, cuff: str) -> tuple[F64, float]:
