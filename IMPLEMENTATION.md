@@ -4703,6 +4703,49 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
 
 5. **Priority is Andrea's call. The default is to run in parallel.** Andrea draws audit rounds. Claude Code does ruling 3's diagnosis on locally cached data and synthetic data while she labels, and real-data runs follow her "done".
 
+### RULING 2026-09-30 (f) — the HR candidate detector: ratified with amendments
+
+**Measured (diagnosis on 9 recordings, 216 trains):**
+- The count gate reproduces exactly. 532 unclear minutes were excluded as ruled.
+- **Capture, not loss, is the veto harm on raw contacts.** The injected transient itself becomes the beat in 50–94% of harmed injections. This alone blocks A t01, H t05 and H t01 es2.
+- After 10–150 Hz filtering, a captured 1.2 ms transient is 10–20 ms wide, so **width cannot separate it** from a beat.
+- **Most findpeaks extras sit at its 100 ms spacing floor** (RR median 101–116 ms, phase 0.60–0.70 RR). A true 0.4–0.6 RR mid-cycle peak is a minority, except on H t01 3_3, A t02 and H t09.
+- Task 05 misses beats on A t02 and H t01 3_3.
+- Tripoles have almost no harm but a weak ECG, so most of their minutes are unclear.
+- The autocorrelation reference is wrong in 2 minutes, both in H t03.
+- One read-only Drive pass was made with no round open. That is within the rule: the constraint is no Drive or MATLAB while a round is open.
+
+**The design in the build's report is ratified: a new module outside the hash, one extra candidate train per channel, the same unchanged gates. These amendments apply:**
+
+1. **The template is the median across clean beats**, where clean means RR within 10% of the running median. Do **not** exclude beats that have an event within 20 ms: on channels where the QRS edge itself triggers the event finder, that would exclude most beats. The median is robust to the occasional transient.
+
+2. **Judge suspect candidates by masked correlation.**
+   - A candidate within 2 ms of a common-mode event is scored by template correlation with the event's ±2 ms **excised from both** candidate and template.
+   - A real beat hit by a transient keeps most of its QRS and scores well. A captured transient with no QRS under it has little left and scores poorly.
+   - The excision is for scoring only. The output signal is untouched (invariant 8).
+   - **Fiducial of a kept suspect beat:** taken from masked template alignment, expressed as the template's peak offset, so it means the same thing as a clean beat's peak.
+   - Report, on clean beats, how far alignment-based fiducials sit from peak-based ones. Any systematic offset must be under 0.5 ms, or mixed fiducials will add HRV jitter.
+
+3. **The correlation floor is a rule fixed now, not a number tuned on A/B.** Answer to (b): per channel, the floor is the **1st percentile of that channel's own clean-beat template correlations**. H applies the same rule to its own clean beats. The quantity that protects against capture is never tuned across animals.
+
+4. **The refractory fraction is a development parameter, capped at 0.8.**
+   - The 0.6 used in the earlier measurement cannot resolve the dominant extras. At RR ≈ 150–165 ms, 0.6 × RR = 90–99 ms, below the 101–116 ms extras.
+   - Choose k on A/B from {0.6, 0.65, 0.7, 0.75, 0.8} and fix it before H runs. Real beats during rate rises stay above ~0.8 × median.
+   - The rate-rise check is the pass/fail test: the count gate in every minute where the autocorrelation rate rises > 10%.
+
+5. **Re-searched beats must pass the same correlation floor** (rule 3). Only height and width are relaxed.
+   - The height and width multipliers are development parameters, fixed on A/B before H.
+   - Nothing is inserted and gaps stay tagged (Andrea's rule, invariant 8).
+
+6. **Holding out H whole is accepted.** Answer to (a).
+   - Capture is present in the development set (A t01), so the capture mechanism is not first met in the held-out set.
+   - Holding out one animal is thin evidence. So every recording from round 6 on, gated by the frozen detector, is reported as further held-out evidence, per animal.
+
+7. **Written down before H runs:** k, the height and width multipliers, the template and floor rules, and the code commit.
+   - The H run happens once. If it fails, report it. Do not tune and re-run on H.
+
+8. **Report the regression set (B's five recordings):** stored trains reproduced (≥ 99% of beats within 2 ms) or still passing every gate. Also report the beats changed and why.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
