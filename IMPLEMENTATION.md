@@ -4437,6 +4437,91 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
    - The duration cap of 14.9 s, provisional.
    - The breathing and HR cross-correlation. The events co-vary with state and do not form a rhythm of analytic interest. No further analysis, beyond the exposure accounting in 4c.
 
+### RULING 2026-09-30 (b) — the time mask is withdrawn; judge each spike by what the other channels saw
+
+**Measured (Claude Code, gems `ce3bafa`, `fa5955c`; hash unchanged):**
+- **Round-5 misses:** both harmless to the spike and HR consumers.
+  - ANT1 in B t03 es2 is mains-dominated (91% of its power). Notching *lowers* the misses' z (2.52 → 0.58), so part of the in-mark elevation is the hum itself.
+  - Both still await Andrea's classification.
+- **Lag histograms:** 14 of 20 cuffs have a narrow (±1 ms) electrical core, 4–6× their flank on the worst. Humps appear only around near-beat events. Every cuff has a flat floor near events at 1–15× the global rate.
+- **Excess event-locked spikes as a fraction of each cuff's spikes:** up to **0.62** (B t03 R), and 0.44 each on H t05 L and H t01 3_3 L. **On the worst new-cohort cuffs, a quarter to more than half of the detected spikes are electrical.**
+- **The gated 4c mask fails its own premise:**
+  - H t05 L loses 88% of its spikes against 2.1% effective exposure.
+  - The gate (T ≥ 4σ at an event) selects exactly the events where T carries a spike-sized deflection, real or not. Her detector then pads every NaN run by 10 ms.
+  - So the mask is placed *by the spikes* and removes them wholesale. Its "no firing on events in unmasked time" check cannot fail.
+- **4b's check passed a correction that tripled spikes everywhere** (B t02 1_3 L, 3,684 → 9,413), because the control rate rose with them.
+- **HR:**
+  - The veto leaves A t02, H t01 es2 and H t05 with **no HR channel**.
+  - The veto ran on task 05's detector, which is more robust than the consumer's own `findpeaks`. On B t02 3_3 RVN3 the consumer's own injection test lost 4 beats per 200.
+  - A QRS-width floor does not help: a transient moves the fiducial within the beat wave.
+  - H t01 3_3's implausible intervals are extra beats at about half the RR interval.
+- **QRS energy above 300 Hz, new cohort:** median 0.24% on T. Tail up to 4.4% (A t05 R_T), and up to 15% on raw contacts.
+
+**Rulings:**
+
+1. **Withdraw ruling 4c (the gated time mask) and my claim that masked-time loss is proportional.** Both fail for the reason above. Any gate must be independent of the cuff under test, and a NaN mask must never reach her detector (its 10 ms pad multiplies it).
+
+2. **Replace it with a per-spike outside-coincidence veto.** This is Andrea's proposal from 2026-09-29: tell leak from nerve spikes by their characteristics. Physiology cannot put one vagus's spike on the other cuff and the stomach at the same instant. **Decided per spike, after detection, in `derive/`:**
+   - Run her detector on the T the consumer reads (4a/4b as ruled). For each detected spike, take the peak |outside reference| (300–3000 Hz, channels outside this cuff) within ±w of the spike time, in units of that reference's robust σ.
+   - **w** is the cuff's measured core half-width from the lag histogram, rounded up to 0.1 ms. Veto the spike if the peak exceeds **θ**.
+   - **θ is set on the first half** so that at random times the veto fires at most 2% (the chance loss). It is applied to the whole recording, and the chance loss is reported on the second half.
+   - Nothing is NaN'd. Exposure is unchanged. Rates are divided by (1 − chance loss), with the chance loss reported per event-rate tertile, because state moves the outside noise.
+   - **Verification, pre-declared, and independent of the veto:**
+     - (i) **Left–right spike cross-correlogram** per recording, 0.1 ms bins over ±50 ms. Two vagi cannot fire together to sub-millisecond precision, so a narrow zero-lag peak is leak. Pass: no zero-lag core above flank after the veto, where there was one before. This uses neither the events nor the reference.
+     - (ii) Injected differential spikes at random times are lost at the chance-loss rate (±1%) on the second half.
+     - (iii) The surviving spikes' lag histogram around events has no narrow core.
+   - **Report per cuff:** spikes before and after, fraction vetoed, chance loss, and (i)–(iii).
+   - **Also report the floor.** After the veto, does the 1–15× floor near events remain?
+     - If it drops, it was sub-event leak (muscle activity below the event finder's size rule), not state.
+     - If it remains, it is state co-variation and stays.
+
+3. **4b's check is amended:** a correction is adopted only if the spike rate more than 50 ms from any event does not rise by more than 5%. A correction that adds spikes in clean time is adding noise. B t02 1_3 L is not adopted (it is distrusted anyway). A t05 fails survival and is not adopted.
+
+4. **Cardiac humps are not physiology until shown to be.** My ruling 3 ("broad hump = physiology, never mask") was too quick. A rat QRS lasts ~10–20 ms, so QRS leak on T is itself a broad hump. Cardiac-locked vagal afferent firing follows the pressure pulse, tens of ms *after* the R-wave, and is not centred on the QRS.
+   - Histogram spikes against lag from the **R-peak** (not the event) on the four hump cuffs, before and after ruling 2.
+   - A hump centred within the QRS that ruling 2 removes is leak.
+   - A hump within the QRS that survives goes to the task 02/13 peri-R route, measured per new-cohort cuff by crossing rate per lag bin (task 02's method, now needed because of ruling 7).
+   - A hump after the QRS is physiology and is left alone.
+
+5. **HR:**
+   - **The veto runs on the detector that produces the beats the analysis uses.** If Andrea's HRV analysis uses its own `findpeaks` on the chosen channel, the binding veto uses the validated replica (99.7–100% match). Report task 05's detector beside it.
+   - **The three recordings with no channel.** Measure one route: two-pass bridging.
+     - Pass 1 detects beats.
+     - Events within 5 ms of a pass-1 beat are cardiac and are *not* bridged.
+     - The remaining events are bridged ±1.5 ms by linear interpolation on the raw contact.
+     - Pass 2 detects the beats.
+   - Judge the route by the same injection veto, run through both passes. Adopt it per recording only if it passes. Until then these recordings have no HR, and raising is correct.
+   - **The QRS-width floor is rejected.**
+   - **H t01 3_3:** are the extra mid-cycle peaks locked to stimulation pulses (present only in stim periods) or to the cardiac cycle (a T-wave, present throughout)? Report only; no threshold moves.
+
+6. **`stomach_ref` in the three ANT1-hum recordings:** measure the harm first, and don't touch `derivations.py`. Compare each stomach consumer's output on `stomach_ref` as-is against an alternative built outside the hash that excludes ANT1. If the outputs agree within the consumer's tolerance, no action. If not, the stomach consumers read the alternative in those recordings (invariant 43 permits distrusting a derived quantity).
+
+7. **Ratified:**
+   - The contact-screen fixes (B t02 1_3 L: L2 and L3 shorted or locally driven, whole cuff distrusted; H t01 es2 L1 low-gain).
+   - The revised lag-histogram rule, with its clean controls.
+   - The sub-sample cardiac template inside 4b: CLAUDE.md's "do not re-implement" line is narrowed to allow it under the three stated conditions.
+   - The finder and veto modules outside the hash.
+   - The non-cardiac-only gains for injection.
+
+8. **Damage rule (ruling 2 of 2026-09-30): ratified with amendments.** Andrea approves before it is applied.
+   - **Spike consumer:** the test is **two-sided**. An artifact that suppresses the detector (σ inflation, clipping) damages as much as one that adds spikes; s3#m7 had 0 spikes where 2.5 were expected. A mark is damaging on a cuff at p < **0.05** (not 0.005), on the consumer's input as routed at ratification. Counting a mark as damaging is the conservative direction: it keeps the mark in the denominator. A strict threshold on a sub-second Poisson count has almost no power and would label nearly everything harmless, which inflates the filtered recall.
+   - **HR:** damaging if any RR interval touching the mark deviates more than 20% from the local median. The ±1-beat count rule may add damage but never clear it (one missed beat is a doubled RR, which HRV cannot absorb).
+   - **Slow wave:** a 1 s peak shift, *or* a cycle added or lost, is damage.
+   - **Unassessable → target:** ratified. A recording with no HR channel is unassessable for HR.
+   - **Velocity left out:** ratified. Consequence, written down: the filtered recall says nothing about velocity, so task 18 must handle its own artifacts (zero-lag rejection) or be re-scored when it is built.
+   - **The routing table the rule reads is frozen at ratification.** A later routing change means recomputing it for every mark.
+
+**Order.** Andrea classifies the two misses. If she draws round 6, Claude Code stops Drive and MATLAB work and builds rulings 2–5 against synthetic data only. The real-data runs follow her "done", in this order: 2, 3, 4, 5, 6, then the damage rule on all pooled marks once Andrea approves it.
+
+**Andrea, 2026-09-30:**
+- **The damage rule is approved as amended.** Apply it after the real-data runs, in the order given.
+- **Beats are computed once.** Her HRV analysis has its own `findpeaks`. She does not want double computation if the pipeline's beats are reliable. So:
+  - **One detector, and the veto tests it.** The pipeline's beat detector (task 05's, the more robust of the two) is the only beat computation, and ruling 5's transient veto runs on it. The replica is kept for the comparison below, then retired.
+  - **Beats are stored in her analysis's own format**: the same variable names, units, and sample or time base her function builds today, per recording, beside her existing outputs. Claude Code reads the format from her code and does not invent one.
+  - **A new post-processing-only version of her function** reads the stored beats and skips peak finding. Her original function stays untouched, beside it.
+  - **Reliability is shown before the switch.** Feed the new function her own `findpeaks` beats converted to the stored format: its HRV outputs must equal the original's exactly. Then compare pipeline beats with her `findpeaks` beats per recording (match %, and where they disagree, which one the injection test and the RR plausibility favour).
+  - **She switches when she has seen that comparison.** For recordings with no vetted channel, nothing is stored and the function says so. It does not fall back to its own peak finding.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly

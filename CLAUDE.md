@@ -661,3 +661,9 @@ See `PIPELINE.md` §10. In particular: adaptive-threshold QRS detection
 (Pan–Tompkins), cardiac template subtraction, rate targeting, HMM/Viterbi
 smoothing, pooled clean-null calibration, per-cohort model splits, detection on the
 tripole. Each was tested or ruled out on a stated requirement.
+
+**Narrowed 2026-09-30:** a beat-locked cardiac template is allowed as one regressor
+inside the multi-regressor common-mode subtraction (`derive/common_mode.py`), and only
+there: fiducials from the consumer's beats refined within ±0.5 ms, sub-sample
+alignment, per-cuff verification as ruled in task 09. Stand-alone template
+subtraction stays ruled out.
