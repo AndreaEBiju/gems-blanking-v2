@@ -4822,6 +4822,14 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
    - After the synthetic re-measure passes, run A/B development while no round is open, and choose k and the height and width multipliers.
    - **Report** the A/B results, the frozen parameter set and the commit, then stop. The single H run follows my go-ahead.
 
+**Andrea, 2026-09-30: add `GapAfter`.**
+- `HR_BR_HRVAnalysis_beats.m` gets an optional name-value input, `'GapAfter'`: a logical vector the length of `heartlocs`.
+- An RR interval whose start beat is tagged is masked exactly as her [100, 500] ms rule masks an implausible interval, and it is treated as a run boundary.
+- With `'GapAfter'` absent, outputs are identical to the original, and the identity proof is re-run to show it.
+- Add a test on a stored train with known gaps, checking the masked intervals and that no successive difference crosses a gap.
+- `HR_BR_HRVAnalysis_new.m` stays untouched. processing_new stays local and uncommitted until Andrea says otherwise.
+- **Found on the way:** her 100–500 ms rule passes both a missed-beat interval (about 310–380 ms) and findpeaks' floor extras (about 101–116 ms). So HRV computed from her own `findpeaks` beats today counts both as real intervals. Report, per recording already analysed, how many intervals fall into each class (for her information only; no re-analysis unless she asks).
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
