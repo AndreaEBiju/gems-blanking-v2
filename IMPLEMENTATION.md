@@ -4523,6 +4523,87 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
   - **Reliability is shown before the switch.** Feed the new function her own `findpeaks` beats converted to the stored format: its HRV outputs must equal the original's exactly. Then compare pipeline beats with her `findpeaks` beats per recording (match %, and where they disagree, which one the injection test and the RR plausibility favour).
   - **She switches when she has seen that comparison.** For recordings with no vetted channel, nothing is stored and the function says so. It does not fall back to its own peak finding.
 
+### RULING 2026-09-30 (c) — veto ratified; distrust where it fails; HR needs an independent count check; notch mmc's input
+
+**Measured (gems `d346584`, `dd5b062`; hash unchanged):**
+- **The veto on 11 cuffs.** It rejects **22–74%** of each cuff's detected spikes. Its chance loss is 0.9–7.2% on the second half, and up to 10.7% in the busiest tertile.
+  - (ii) passes on all 11 at 3,000 injections.
+  - (iii) fails on H t01 es2 L (event core ×3.0 remains, w = 0.2 ms).
+  - (i) The left–right zero-lag core clears in A t01, A t02 and H t01 3_3, but **persists in A t05** (×4.0 → ×4.3).
+  - The floor near events mostly drops, so it was sub-event leak. Part of it remains on four cuffs: that is state.
+- **Humps.** All four QRS-centred humps survive the veto. H t05 L has a further component peaking at +14.5 ms after the R.
+- **HR detectors.** Task 05's detector and her `findpeaks` each win on some recordings.
+  - Task 05 misses 12–43% of beats on A t05 and B t02 1_3, locks onto every other beat on A t02, and picks a **one-beat** channel on A t01 that passes every gate.
+  - `findpeaks` adds false beats on B t03 and B t02 3_3.
+  - Two-pass bridging fails everywhere.
+  - H t01 3_3's extra peaks sit at 0.50 RR and are cardiac-locked, not stim-locked.
+- **The post-processing-only HRV function** (`HR_BR_HRVAnalysis_beats.m`) is identical to the original on 9/9 recordings when fed her own beats.
+- **stomach_ref in the hum recordings.** slow_wave is untouched by the hum (100% of peaks match with ANT1 notched). mmc is changed by it (Jaccard 0.18 and 0.25 in B t01 3_2 and B t02 3_3; 0.82 in B t03).
+  - The no-ANT1 alternative changes both consumers far more (Jaccard 0.16–0.20), because it is a different derivation.
+- **Damage rule on all 208 marks.** 180 are target.
+  - Filtered recall is **179/180, lower bound 0.974**, against 205/208 (0.963) raw.
+  - The only target miss is s4#m0, flagged by a spike deficit (p = 0.033).
+  - The round-5 recordings had no routing entry and were judged on uncorrected T without the veto.
+
+**Rulings:**
+
+1. **The veto is ratified as the spike consumer's leak rejection**, with these amendments:
+   - **θ stays fixed per cuff**, as calibrated. It is a physical criterion and must not be loosened in busy periods.
+   - **Rates are corrected by the per-tertile chance loss.** Measure it at ≥ 10,000 random times over the whole recording. (ii) showed that injected loss tracks it, so the correction is valid.
+   - **Report the corrected rate beside the raw count everywhere.** Any analysis resolved by state must use the loss of the tertile it sits in.
+
+2. **Where verification fails, the cuff is distrusted for the spike consumer in that recording** (ruling (b) 5: trust follows verification).
+   - **H t01 es2 L** fails (iii). It is also the low-gain cuff. Distrusted.
+   - **A t05:** first run (i) again, restricted to spikes outside the peri-R window measured under ruling 3.
+     - If the zero-lag core vanishes, the residual synchrony was QRS leak on both cuffs, and the peri-R route handles it.
+     - If it persists, distrust both A t05 cuffs for the spike consumer.
+
+3. **The QRS humps go to the peri-R route (tasks 02 and 13), measured per new-cohort cuff.**
+   - **Extent:** the crossing rate per lag bin around the R-peak, after the veto, on the routed T. The extent is where it exceeds the flank.
+   - **It is a time mask on R-peak lags, so it is independent of this cuff's spikes.** Exposure is removed and rates are corrected. Analyses locked to the cardiac phase report the blanked phase as not measured; they do not interpolate it.
+   - **R-peaks come from the recording's vetted beat source (ruling 4)**, never from a detector that halves or misses beats.
+   - **H t05 L's +14.5 ms component is unresolved. It is not physiology by default.**
+     - +14.5 ms is too early for pressure-driven afferent firing (tens of ms after the R, following the pulse) and is within reach of the QRS tail.
+     - Report its lag and width against the QRS template's > 300 Hz envelope on that cuff.
+     - If it sits under the envelope, it is leak and the extent covers it. If it is clear of the envelope, it is left alone.
+
+4. **HR: a beat train is stored only if it passes an independent count check.**
+   - Task 05 lists beat count as "a sanity print only". That is why a one-beat channel passed. The 2026-09-23 header already asked for beat-count consensus.
+   - **The independent reference: a per-minute heart rate from the autocorrelation** of the rectified 10–150 Hz signal, searched only over rat heart rates (250–550 bpm). It uses no peak picking, so it cannot share a detector's errors.
+   - **Count gate** (`PROVISIONAL_MAX_COUNT_DEV = 0.05`): a beat train passes if its beats per minute are within 5% of the autocorrelation rate in ≥ 95% of minutes where the autocorrelation peak is clear. It must also pass the transient veto and task 05's plausibility gates.
+     - Every-other-beat (50%), 12–43% misses, +7% false beats and a single beat all fail it.
+     - If the autocorrelation is not clear in most minutes, the recording is unassessable and nothing is stored.
+   - **One computation, two candidates.** Per channel, the pipeline computes both candidate trains (task 05's detector and the `findpeaks` replica), gates both, and stores one:
+     - the passing train with the best template SNR;
+     - on a tie, the one closest to the autocorrelation count.
+     
+     Her function only post-processes what is stored. This satisfies Andrea's "compute once": nothing is recomputed downstream.
+   - **A t01:** nothing is stored until a train passes.
+   - **A t02, H t01 es2 and H t05:** re-run under this gate with both candidates. Bridging is dropped.
+   - **H t01 3_3:** measure, without adopting, a refractory relative to the running median RR, rejecting any peak within 0.6 × median RR of the previous one and keeping the one that matches the template. Check it against the autocorrelation count. A heart does not halve its interval in one beat, but it can speed up quickly, so the rule must not remove real beats during rate rises.
+   - Andrea switches to `HR_BR_HRVAnalysis_beats.m` only after seeing the gated comparison.
+
+5. **stomach_ref in the three ANT1-hum recordings: stomach consumers read stomach_ref built from notched ANT1**, derived outside the hash. They do not read the no-ANT1 alternative.
+   - The notch removes the hum and keeps the derivation, which is the only change warranted.
+   - It applies to all three recordings, including B t03 (0.82), so that no tolerance judgement is needed.
+   - slow_wave is unchanged by it (100% match), so the rule is uniform at no cost.
+   - Report whether a 60 Hz-only notch (Andrea's practice) suffices, or whether harmonics are needed.
+   - Detection keeps un-notched ANT1 (invariant 43).
+
+6. **The damage rule's routing must be complete.**
+   - Compute the round-5 recordings' routes by the same mechanical rules (4a, 4b, veto, distrust).
+   - Recompute only those marks. The rule itself is unchanged.
+   - Report the result beside the current one. Both are recorded.
+
+7. **The gate question is put to Andrea.** Raw recall stays in every report whatever she decides.
+   - **Filtered recall at 1 target miss needs 236 target marks** for a lower bound ≥ 0.98, about 56 more at zero further target misses: one or two rounds. With one more target miss, 313.
+   - **Raw recall at 3 misses needs 386**, and at the observed miss rate about 1,200.
+
+**Andrea, 2026-09-30: the gate is filtered recall.** From round 6 on, task 09's gate is a one-sided 95% lower bound ≥ 0.98 (the more conservative of Clopper-Pearson and span bootstrap) over marks the ratified damage rule calls **target**. This is task 09's written pass condition: "above each consumer's tolerance".
+- The other conditions are unchanged: ≥ 3 eligible spans per condition, and a positive pooled chance margin, computed over target marks.
+- Raw recall and its bound are reported beside it in every round.
+- The rule and its routing are frozen as ratified. A change to either means recomputing every pooled mark, and it is reported as a change.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
