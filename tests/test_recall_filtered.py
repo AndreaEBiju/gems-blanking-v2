@@ -155,3 +155,25 @@ def test_a_round_without_classes_under_the_frozen_routing_is_refused(tmp_path, m
     write_damage(store, pid, "b" * 64, {f"{pid}_s1#m0": "target", f"{pid}_s1#m1": "target"}, {})
     with pytest.raises(FileNotFoundError, match="no damage classes under routing aaaaaaaa"):
         frozen_filtered_gate(store, "a" * 64)
+
+
+def test_three_numbers_are_the_gate_the_excluded_view_and_raw(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    from gems_blanking_v2.detect.recall import three_numbers  # noqa: PLC0415
+    from gems_blanking_v2.emit.routing import routing_check_path, write_damage  # noqa: PLC0415
+
+    store, pid = _scored(tmp_path, monkeypatch)
+    h = "d" * 64
+    write_damage(store, pid, h, {f"{pid}_s1#m0": "target", f"{pid}_s1#m1": "below"}, {}, "run")
+    write_damage(store, pid, h, {f"{pid}_s1#m0": "target", f"{pid}_s1#m1": "target"}, {},
+                 "excluded_is_target")
+    chk = routing_check_path(store, pid)
+    chk.parent.mkdir(parents=True, exist_ok=True)
+    chk.write_text('{"old_hash": "o", "new_hash": "n", "unchanged_entries": true}',
+                   encoding="utf-8")
+    out = three_numbers(store, h)
+    r = out["per_round"][pid]
+    assert (r["gate"]["found"], r["gate"]["covered"]) == (1, 1)
+    assert (r["excluded_is_target"]["found"], r["excluded_is_target"]["covered"]) == (2, 1)
+    assert (r["raw"]["found"], r["raw"]["covered"]) == (2, 1)
+    assert r["routing_check"]["unchanged_entries"] is True
+    assert out["pooled"]["excluded_is_target"]["found"] == 2

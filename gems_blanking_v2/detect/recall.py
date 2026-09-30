@@ -143,6 +143,7 @@ __all__ = [
     "source_sha256",
     "span_bootstrap",
     "span_id",
+    "three_numbers",
     "write_budget",
 ]
 
@@ -1634,22 +1635,62 @@ def pooled_filtered_gate(store: GemsStore, damage: Mapping[str, str]) -> dict[st
 
 
 
-def frozen_filtered_gate(store: GemsStore, table_hash: str) -> dict[str, Any]:
+def frozen_filtered_gate(store: GemsStore, table_hash: str,
+                         convention: str = "run") -> dict[str, Any]:
     """:func:`pooled_filtered_gate` on the damage classes stored under one frozen routing.
 
-    Each pooled round's classes are read from ``emit.routing.damage_path`` and must name
-    ``table_hash`` (addendum to ruling (c) 2: rounds are scored on the frozen table). A
-    pooled round with no classes under that table raises, naming it.
+    Each pooled round's classes are read from ``emit.routing.damage_path`` under
+    ``table_hash`` and ``convention`` - ``run`` (only consumers that run count: the
+    gate, ruling (d) 1) or ``excluded_is_target`` (reported beside it). A pooled round
+    with no classes under that table and convention raises, naming it.
     """
     from gems_blanking_v2.emit.routing import damage_path, read_damage  # noqa: PLC0415
 
     damage: dict[str, str] = {}
     for pid in pooled_gate(store)["pooled_rounds"]:
-        if not damage_path(store, pid, table_hash).is_file():
-            msg = f"{pid} has no damage classes under routing {table_hash[:16]}"
+        if not damage_path(store, pid, table_hash, convention).is_file():
+            msg = (f"{pid} has no damage classes under routing {table_hash[:16]} "
+                   f"({convention})")
             raise FileNotFoundError(msg)
-        damage.update(read_damage(store, pid, table_hash))
-    return {"routing_hash": table_hash, **pooled_filtered_gate(store, damage)}
+        damage.update(read_damage(store, pid, table_hash, convention))
+    return {"routing_hash": table_hash, "convention": convention,
+            **pooled_filtered_gate(store, damage)}
+
+
+
+def three_numbers(store: GemsStore, table_hash: str) -> dict[str, Any]:
+    """Return the three numbers every round reports (ruling (d) 1), per round and pooled.
+
+    ``gate``: filtered recall with only running consumers counting (the gate);
+    ``excluded_is_target``: the same with an excluded input making a mark target;
+    ``raw``: every mark. Each with its one-sided 95% lower bound. A round's routing
+    check (``emit.routing.routing_check_path``) is attached when the round has one.
+    """
+    from gems_blanking_v2.emit.routing import routing_check_path  # noqa: PLC0415
+
+    run = frozen_filtered_gate(store, table_hash, "run")
+    exc = frozen_filtered_gate(store, table_hash, "excluded_is_target")
+
+    def pick(g: dict[str, Any] | None) -> dict[str, Any]:
+        if g is None:
+            return {}
+        return {"gate": g["filtered"], "raw": g["raw"],
+                "target_misses_unclassified": g["target_misses_unclassified"],
+                "chance_over_targets": g.get("chance_over_targets"),
+                "spans_by_condition": g["spans_by_condition"], "gate_cleared": g["gate_cleared"]}
+
+    out: dict[str, Any] = {"routing_hash": table_hash, "per_round": {}}
+    for pid in run["pooled_rounds"]:
+        r = pick(run["per_round"][pid])
+        r["excluded_is_target"] = exc["per_round"][pid]["filtered"]
+        chk = routing_check_path(store, pid)
+        if chk.is_file():
+            r["routing_check"] = json.loads(chk.read_text(encoding="utf-8"))
+        out["per_round"][pid] = r
+    out["pooled"] = pick(run["pooled"])
+    if exc["pooled"] is not None:
+        out["pooled"]["excluded_is_target"] = exc["pooled"]["filtered"]
+    return out
 
 # ---------------------------------------------------------------------------
 # the candidate budget (task 09, declared before any marks; enforced 2026-09-28)
