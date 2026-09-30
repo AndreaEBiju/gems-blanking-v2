@@ -1,0 +1,67 @@
+"""Tests for :mod:`gems_blanking_v2.emit.hr_beats` - the MATLAB boundary (invariant 15)."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pytest
+from gems_blanking_v2.detect import chain
+from gems_blanking_v2.emit.hr_beats import read_hr_beats, to_heartlocs, write_hr_beats
+from hypothesis import given, settings
+from hypothesis import strategies as st
+from scipy.io import loadmat
+
+FS = 24414.0625
+
+
+def test_a_beat_at_zero_based_sample_k_is_heartlocs_k_plus_one() -> None:
+    h = to_heartlocs([4 / FS, 10 / FS], FS, 0.0, 100)
+    assert h.shape == (2, 1) and h.ravel().tolist() == [5.0, 11.0]
+
+
+def test_the_epoch_offset_is_subtracted_before_indexing() -> None:
+    h = to_heartlocs([132.0 + 4 / FS], FS, 132.0, 100)
+    assert h.ravel().tolist() == [5.0]
+
+
+def test_a_beat_outside_the_epoch_is_refused() -> None:
+    with pytest.raises(ValueError, match="outside the epoch"):
+        to_heartlocs([100 / FS], FS, 0.0, 100)
+    with pytest.raises(ValueError, match="outside the epoch"):
+        to_heartlocs([-1 / FS], FS, 0.0, 100)
+
+
+def test_two_beats_on_one_sample_are_refused() -> None:
+    with pytest.raises(ValueError, match="strictly increasing"):
+        to_heartlocs([4 / FS, 4.2 / FS], FS, 0.0, 100)
+
+
+def test_the_file_holds_her_variables(tmp_path: Path) -> None:
+    p = write_hr_beats(tmp_path / "b.mat", [4 / FS], fs=FS, epoch_start_s=0.0, n_samples=100,
+                       channel="L_T", source="task 05 + transient veto")
+    m = loadmat(p)
+    assert m["heartlocs"].shape == (1, 1) and float(m["heartlocs"][0, 0]) == 5.0
+    assert float(np.asarray(m["fs"]).squeeze()) == FS
+    assert str(np.asarray(m["beatChannel"]).squeeze()) == "L_T"
+
+
+@given(st.lists(st.integers(0, 10**6), min_size=1, max_size=50, unique=True),
+       st.floats(0.0, 2000.0, allow_nan=False))
+@settings(max_examples=200, deadline=None)
+def test_the_round_trip_is_exact_to_the_sample(samples: list[int], start: float) -> None:
+    """Sample k -> heartlocs k+1 -> back to the same sample, whatever the epoch start."""
+    import tempfile  # noqa: PLC0415
+
+    k = np.sort(np.asarray(samples))
+    t = start + k / FS
+    with tempfile.TemporaryDirectory() as d:
+        p = write_hr_beats(Path(d) / "b.mat", t, fs=FS, epoch_start_s=start, n_samples=10**6 + 1,
+                           channel="X", source="test")
+        back, fs = read_hr_beats(p)
+    assert fs == FS
+    assert np.array_equal(np.round((back - start) * FS).astype(int), k)
+
+
+def test_hr_beats_is_outside_the_generation_hash() -> None:
+    assert "gems_blanking_v2.emit.hr_beats" not in chain.generation_modules()
