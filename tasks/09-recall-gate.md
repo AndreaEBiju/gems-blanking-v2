@@ -1022,6 +1022,39 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
    - Most distrust now comes from missing count-gated HR trains (hump cuffs) and from failed check (iii).
    - Better HR trains would recover data. That is the next lever, and it is Andrea's priority call.
 
+### RULING 2026-09-30 (e) — (d) 3 corrected; HR trains are the next lever, diagnosed before designed
+
+**Measured (gems `835cc84`; hash unchanged):**
+- **Gate ("consumers that run"), pooled:** 178/179, lower bound **0.974** (Clopper-Pearson; bootstrap 0.980). Chance margin +0.142. 8 baseline and 7 stim/recovery spans. Not cleared; the only target miss is s4#m0.
+- **The other two numbers:** "excluded = target" and raw are both 205/208 (0.959). The 29 marks that differ between the classifications are all target only because an input is excluded.
+- **Routing:** per-entry hashes, append-only, and three-number reports are in place.
+- **H t05 L's "+14.25 ms component" is 4–5 spikes of 281** (p = 0.017 before correction for the search across lags). It fails the p < 1e-3 bar used for every other R-locked test. The "0.5 ms width" was the bin size. Ruling (d) 3 rested on my misreading of the earlier report.
+- **Spike-consumer coverage, rounds 3–5:** 11 of 30 cuff-recordings are distrusted, **36.4% of spike-consumer time**. 6 of them (24.9% of time) are hump cuffs with no count-gated HR train. A t01 1_2 and H t03 each miss the count gate by one minute (94.7%).
+
+**Rulings:**
+
+1. **(d) 3 is corrected.** A narrow R-locked excess is electrical only if it is also significant at the bar every R-locked test uses: p < 1e-3 after correction for the search across lags.
+   - Width is measured at half height at 0.1 ms bins, never read off the bin size.
+   - H t05 L's component does not qualify, so its entry reverts to the `46ce9b0b` content.
+   - That is a routing change: append the corrected entry and recompute every pooled mark. No class change is expected, since `ca04a0f9` changed none.
+   - The general rule stands for any component that does qualify.
+
+2. **The count-gate thresholds do not move to rescue A t01 1_2 or H t03.** Loosening a threshold after seeing which recordings miss it by one minute is fitting.
+   - `PROVISIONAL_MAX_COUNT_DEV` and the 95% bar get their permanent values in build-order step 9, from the cross-animal set, like task 05's other provisional thresholds.
+
+3. **HR trains are the next lever. Diagnose them before designing anything.** For every recording in rounds 3–5 without an HRV-grade train, report per channel, per detector:
+   - the minutes that fail the count gate;
+   - for each failing minute, why: missed beats, extra beats (and whether they sit at about 0.5 RR), transient hijacks, or an autocorrelation reference that is not clear. A minute whose reference is not clear should have been excluded as unassessable; check that it was;
+   - the veto harm, and its mechanism.
+
+4. **Constraints for any detector change that follows. It is proposed to me first, not adopted.**
+   - **Andrea's rule for missed beats:** re-search near the expected time with relaxed width and height tolerances, so the fiducial is measured. Never insert a beat at the expected time.
+   - **Extra beats from a second mid-cycle peak** (H t01 3_3): resolve within a refractory relative to the running median RR by template match, not by amplitude. The refractory must not remove real beats during rate rises. Check it with the count gate, which uses the independent autocorrelation.
+   - **Design out-of-sample:** develop on some animals and judge on held-out animals. Report the held-out result as the evidence.
+   - **The same gates apply unchanged:** count gate, transient veto and task 05 plausibility.
+
+5. **Priority is Andrea's call. The default is to run in parallel.** Andrea draws audit rounds. Claude Code does ruling 3's diagnosis on locally cached data and synthetic data while she labels, and real-data runs follow her "done".
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
