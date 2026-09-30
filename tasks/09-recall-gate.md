@@ -1060,7 +1060,7 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
 **Measured (diagnosis on 9 recordings, 216 trains):**
 - The count gate reproduces exactly. 532 unclear minutes were excluded as ruled.
 - **Capture, not loss, is the veto harm on raw contacts.** The injected transient itself becomes the beat in 50–94% of harmed injections. This alone blocks A t01, H t05 and H t01 es2.
-- After 10–150 Hz filtering, a captured 1.2 ms transient is 10–20 ms wide, so **width cannot separate it** from a beat.
+- After 10–150 Hz filtering, a captured transient's width falls inside that channel's beat-width range on all nine channels (10.6–21.6 ms on four; about 150–190 ms and about 7 ms on the others, matching their beats). So **width cannot separate it** from a beat. A width floor changed veto harm by no more than ±0.005.
 - **Most findpeaks extras sit at its 100 ms spacing floor** (RR median 101–116 ms, phase 0.60–0.70 RR). A true 0.4–0.6 RR mid-cycle peak is a minority, except on H t01 3_3, A t02 and H t09.
 - Task 05 misses beats on A t02 and H t01 3_3.
 - Tripoles have almost no harm but a weak ECG, so most of their minutes are unclear.
@@ -1097,6 +1097,82 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
    - The H run happens once. If it fails, report it. Do not tune and re-run on H.
 
 8. **Report the regression set (B's five recordings):** stored trains reproduced (≥ 99% of beats within 2 ms) or still passing every gate. Also report the beats changed and why.
+
+### RULING 2026-09-30 (g) — HR candidate detector: synthetic development amendments
+
+**Measured, on synthetic fixtures only (`make_hr_trouble`, matched to the diagnosis; no real data):**
+- The fixture reproduces every measured failure of the existing detectors: findpeaks recall 0.77 with 201 extras under capture, extras at the spacing floor, task 05 misses.
+- Ruling (f) as written fails in four ways:
+  - **10–150 Hz masked scoring:** 0/71 beats hit by a transient were kept.
+  - **Excising only the suspect's own event:** real beats 25–80 ms from a transient were lost, and their gaps were searched but not filled.
+  - **The 1st-percentile floor on the (f) 1 clean set:** captures make up 1.9% of it, the floor collapses, and 40–70% of captures are kept.
+  - **Periodic secondary peaks halve the train's running median**, so the refractory removes nothing at any k.
+- Fiducial alignment offset: 0.002–0.035 ms.
+
+**Rulings.** These are design corrections made on synthetic data before any real-data development. The A/B → single-H protocol of ruling (f) 6–7 is unchanged.
+
+1. **Score in 10–900 Hz. Fiducials stay 10–150 Hz peaks.** The template and every correlation are computed in 10–900 Hz, where a 1.2 ms transient stays compact enough to excise (64/71 hit beats kept).
+
+2. **Excise every event in the ±40 ms window, for candidates and clean beats alike**, so the floor is made exactly as the score is.
+   - If excision leaves under 50% of the window, the score is undefined. The candidate is not kept on score: it is dropped, its gap is re-searched, and the number of such candidates is reported.
+
+3. **The clean set and floor come from an independent reference.** This replaces (f) 1's running-median clean definition and refines (f) 3.
+   - **Clean** means both adjacent RRs are within 10% of the per-minute **autocorrelation RR**, in clear minutes only.
+   - **The floor** is the 1st percentile of masked correlations over clean beats that are **not suspect**. A capture is suspect by construction, so impostors are excluded rather than diluted.
+   - **With fewer than 50 non-suspect clean beats, this detector yields no train on that channel.** There is no fallback to the suspect-contaminated set.
+
+4. **Periodic secondary peaks: option (b), with (c) as the fallback.**
+   - **(b) Seed.** The template is seeded from task 05's beats, provided task 05's train has ≤ 25% short intervals (< 0.75 × the autocorrelation RR). The seed only needs to be pure, not complete, so task 05's missed beats do not matter here. The clean and floor rules of ruling 3 then apply.
+   - **(c) Split.** Otherwise, split the candidates into the two interleaved subtrains and keep the one with the higher template SNR (task 05's own criterion, a shape decision).
+     - Report both subtrains' SNR and their fiducial jitter (SD of the RR difference between the two).
+     - A cardiac-locked secondary wave can also be reproducible, so if the two SNRs are within 20% of each other, the split is ambiguous and the channel yields no train.
+   - **The refractory's running median is taken over template-matching beats** (at or above the unmasked floor), so extras cannot halve it. k stays a development parameter in {0.6, …, 0.8}.
+
+5. **Unchanged:**
+   - the count gate, the transient veto and task 05's plausibility gates;
+   - no insertion (invariant 8);
+   - the relaxed height and width multipliers and k are fixed on A/B before H;
+   - H runs once;
+   - every recording from round 6 on is further held-out evidence.
+
+6. **Order:**
+   - Finish the module with amendments 1–4.
+   - Synthetic tests, with a fixture case per failure mode, including a mid-cycle wave with SNR comparable to the QRS for the ambiguity rule. Then mutants.
+   - Commit, then A/B development (no round open), then the H run.
+
+### RULING 2026-09-30 (h) — HR template detector: interpretations ratified; the floor applies to every candidate
+
+**Measured (gems `e48667e`, synthetic only; hash unchanged; not wired into `gated_selection`):**
+- **The template train beats findpeaks and task 05** on capture (0.954 against 0.891 at 0.5/s; 0.797 against 0.650 at 2/s, with 34 extras against 517), on floor extras (1.000/0), on regular mid-cycle peaks (split), and on rate rises (refractory removes 0).
+- **It correctly yields no train** where the autocorrelation is never clear (capture 6/s), where the split is ambiguous, or where there are fewer than 50 non-suspect clean beats.
+- **Not solved:**
+  - task 05's misses (0.948, 60 extras);
+  - irregular mid-cycle peaks on 25% of cycles (ambiguous split);
+  - missing beats whose slots are taken by noise peaks (17).
+  
+  All three share one cause: **non-suspect candidates never face the floor.**
+- **Fixture bug found and fixed:** transients were packed into the first 45 s.
+
+**Rulings:**
+
+1. **The three interpretations are ratified:**
+   - "Template-matching" uses the floor built like the beat's own score (masked if an event is in its window, unmasked otherwise).
+   - The running median leaves out intervals ≥ 1.5 × the minute's autocorrelation RR.
+   - No clear minute means no train, reported as its own reason.
+
+2. **The floor applies to every candidate, suspect or not.** A candidate below its floor is dropped, and its gap is re-searched under the same floor.
+   - **The price** is that about 1% of real beats fall below a 1st-percentile floor by construction. These are the channel's worst-shaped beats, often ectopic or noise-corrupted, which HRV practice (NN intervals) excludes anyway.
+   - **The trade:** a false beat splits one RR into two short ones and corrupts HRV. A tagged gap can be excluded.
+   - Report the fraction of real beats dropped per fixture, and re-measure every failure mode, the three unsolved ones in particular.
+
+3. **Gaps must reach the analysis.** Every dropped or unfilled beat leaves a tagged gap. The stored beats file must carry those tags, for example a `gapAfter` logical vector the length of `heartlocs`, or a list of excluded intervals. Otherwise Andrea's function reads a gap as one long real RR interval.
+   - Report how `HR_BR_HRVAnalysis_new.m` handles RR outliers today (any range or ratio rejection) and whether that already excludes gap-spanning intervals.
+   - If it does not, propose an **optional** gap input to `HR_BR_HRVAnalysis_beats.m`. With no tags given, outputs stay identical, and the identity proof still holds.
+   - Changing her analysis's behaviour is **Andrea's decision**. Report first; do not build it.
+
+4. **Then A/B development, stopping before H.**
+   - After the synthetic re-measure passes, run A/B development while no round is open, and choose k and the height and width multipliers.
+   - **Report** the A/B results, the frozen parameter set and the commit, then stop. The single H run follows my go-ahead.
 
 ### Adapter-check findings, 2026-09-28
 
