@@ -140,8 +140,11 @@ def test_a_stored_train_passed_every_gate_and_counts_the_true_beats(rig) -> None
     best, rows = gated_selection(w.rec, ev)
     assert best is not None and best.passes
     assert {r.detector for r in rows} == {"task05", "findpeaks"}
-    assert len(rows) == 2 * len(hc.hr_candidates(w.rec).channels)
-    assert best.snr == max(r.snr for r in rows if r.passes)
+    channel = [r for r in rows if r.source == "channel"]
+    assert len(channel) == 2 * len(hc.hr_candidates(w.rec).channels)
+    assert {r.source for r in rows} == {"channel", "pair"}  # the adopted lead is a source too
+    assert best.source == "channel"  # a passing channel train is preferred to a pair
+    assert best.snr == max(r.snr for r in channel if r.passes)
     truth = np.asarray(w.beats_s)
     assert abs(best.beats_s.size / truth.size - 1.0) < PROVISIONAL_MAX_COUNT_DEV
 

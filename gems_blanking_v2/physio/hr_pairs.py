@@ -551,7 +551,8 @@ class RateCheck:
     passes: bool
 
 
-def rate_check(beats_s: npt.ArrayLike, rec: Recording, lead: PairLead) -> RateCheck:
+def rate_check(beats_s: npt.ArrayLike, rec: Recording, lead: PairLead,
+               detached: frozenset[str] = frozenset()) -> RateCheck:
     """Per minute, the lead's rate against the median clear reference.
 
     References: :func:`refined_autocorr_rate` on every raw channel of a site the lead
@@ -563,12 +564,18 @@ def rate_check(beats_s: npt.ArrayLike, rec: Recording, lead: PairLead) -> RateCh
     :data:`RATE_MIN_ASSESSABLE` of the minutes with any clear reference, and passes when
     it is assessable and at least :data:`RATE_PASS_FRACTION` of assessable minutes agree.
     Unassessable never passes.
+
+    POST-H AMENDMENT (ruling 2026-10-02 (c) 3): a ``detached`` contact is not a
+    reference - a contact that does not see the shared ground is not a physiological
+    reference, as it is left out of (c). Decided after H; it changes no H outcome.
+    ``stomach_ref`` stays: it is a derived signal, not a contact.
     """
     fs = float(rec.fs)
     used = {c.cuff_id for c in rec.channels if c.name in (lead.plus, lead.minus)}
     refs: list[tuple[str, F64]] = [
         (c.name, np.asarray(rec.data[:, c.index], dtype=np.float64)) for c in rec.channels
-        if (c.role == "stomach") or (c.role == "nerve" and c.cuff_id not in used)]
+        if c.name not in detached
+        and ((c.role == "stomach") or (c.role == "nerve" and c.cuff_id not in used))]
     signals, _w = build_derivations(rec)
     if "stomach_ref" in signals:
         refs.append(("stomach_ref", np.asarray(signals["stomach_ref"], dtype=np.float64)))

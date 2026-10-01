@@ -49,6 +49,7 @@ from gems_blanking_v2.types import ChannelInfo, Recording
 
 __all__ = [
     "AC_BPM",
+    "CARRIES_QRS",
     "DERIVED_CANDIDATES",
     "PROVISIONAL_AC_MIN_PEAK",
     "PROVISIONAL_MAX_COUNT_DEV",
@@ -382,6 +383,35 @@ class TrainGate:
     rescue_rate: float
     plausible: bool
     passes: bool
+    source: str = "channel"
+    """``"channel"`` - a train on one :func:`hr_candidates` signal; ``"pair"`` - the
+    cross-site lead (``hr_pairs``, adopted by ruling 2026-10-02 (c)), ``channel`` naming it
+    as ``"<plus>-<minus>"``."""
+    harm_median: float = float("nan")
+    """The median-pattern injection's harm - reported, never binding."""
+    cross_check: str = ""
+    """Pair rows only: ``"pass"``, or which of (a) rate / (c) morphology failed; empty when
+    the gates already failed and the cross-check was not run."""
+    gaps_s: tuple[tuple[float, float], ...] = ()
+    """Task 05's unrecovered gaps ``(beat before, beat after)``; findpeaks reports none."""
+    note: str = ""
+    """Why this row was stored, when the choice was not the plain best-SNR one."""
+
+    @property
+    def gap_after(self) -> npt.NDArray[np.bool_]:
+        """Per beat (sorted), whether the interval after it spans a tagged gap."""
+        b = np.sort(self.beats_s)
+        starts = np.asarray([g[0] for g in self.gaps_s], dtype=np.float64)
+        if starts.size == 0:
+            return np.zeros(b.size, dtype=bool)
+        return np.asarray(np.isclose(b[:, None], starts[None, :], rtol=0.0, atol=1e-9).any(axis=1))
+
+
+CARRIES_QRS: Final = 0.5
+"""Rule 2 of ruling 2026-10-02 (c): of the two trains' beats unmatched within 20 ms, the
+train whose unmatched beats reach the QRS-correlation floor in at least this fraction
+wins - when the other's do not. Both or neither: unresolved, neither is stored. Measured
+on A t05: the lead 0.974, its L_T 0.013."""
 
 
 def _inject(rec: Recording, events: Events, keep: npt.NDArray[np.bool_],
@@ -416,19 +446,63 @@ def _detect(det: str, x: F64, fs: float) -> F64:
     return findpeaks_replica(x, fs)
 
 
+def _gate_row(name: str, det: str, x: F64, x_real: F64 | None, x_med: F64 | None, times: F64,
+              fs: float, ac: tuple[F64, F64], t05: BeatTrain | None, source: str) -> TrainGate:
+    """Gate one train: count, plausibility, and the real-pattern veto (binding)."""
+    starts, bpm = ac
+    if det == "task05":
+        tr = t05 if t05 is not None else detect_rpeaks(x, fs)
+        beats = np.asarray(tr.t_s, dtype=np.float64)
+        implausible, rescue = tr.implausible_frac, tr.rescue_rate
+        gaps = tuple((float(a), float(b)) for a, b, _m in tr.gaps)
+    else:
+        beats = findpeaks_replica(x, fs)
+        implausible, rescue, gaps = implausible_fraction(beats), 0.0, ()
+    y, fs_d = _prepare(x, fs, DETECT_BAND_HZ)
+    snr = float(_template_snr(y, beats, fs_d)) if beats.size else float("nan")
+    cg = count_gate(beats, starts, bpm)
+
+    def harm_of(xi: F64 | None) -> float:
+        if xi is None:
+            return float("nan")
+        return _harmed(beats, _detect(det, xi, fs), times) / N_INJECTIONS
+    harm, harm_m = harm_of(x_real), harm_of(x_med)
+    plausible = bool(implausible <= PROVISIONAL_MAX_IMPLAUSIBLE_FRAC
+                     and rescue <= PROVISIONAL_MAX_RESCUE_RATE)
+    return TrainGate(channel=name, detector=det, beats_s=beats, snr=snr, count=cg,
+                     transient_harm=harm, implausible_frac=float(implausible),
+                     rescue_rate=float(rescue), plausible=plausible,
+                     passes=bool(cg.passes and plausible
+                                 and harm <= PROVISIONAL_MAX_TRANSIENT_HARM),
+                     source=source, harm_median=harm_m, gaps_s=gaps)
+
+
 def gated_selection(
-    rec: Recording, events: Events, *, seed: int = 0
+    rec: Recording, events: Events, *, seed: int = 0, incumbent: tuple[str, str] | None = None,
+    pairs: bool = True,
 ) -> tuple[TrainGate | None, list[TrainGate]]:
     """Return ``(stored, every train's gates)`` - ``stored`` is None if nothing passes.
 
-    Per channel of :func:`hr_candidates`, both candidate trains - task 05's
-    :func:`detect_rpeaks` and :func:`findpeaks_replica` - are gated (ruling
-    2026-09-30 (c) 4): :func:`count_gate` against :func:`autocorr_rate` on that
-    channel, the transient veto (one set of injections for every train), and task
-    05's plausibility gates (``implausible_frac``, ``rescue_rate``; findpeaks has no
-    rescue). The passing train with the best template SNR is stored; on an exact
-    tie, the one closest to the autocorrelation count. Never a least-bad fallback.
+    Sources (ruling 2026-09-30 (c) 4; ruling 2026-10-02 (c) 1): per signal of
+    :func:`hr_candidates`, task 05's :func:`detect_rpeaks` and :func:`findpeaks_replica`;
+    with ``pairs``, every cross-site lead of ``hr_pairs.pair_candidates`` (detached
+    contacts left out) with both detectors. Every row faces the same gates:
+    :func:`count_gate` against its own :func:`autocorr_rate`, task 05's plausibility
+    gates, and the transient veto with the REAL-PATTERN injection binding
+    (``hr_pairs.inject_real_patterns``; the median pattern is reported alongside). A
+    pair row must also pass the cross-check (a) ``hr_pairs.rate_check`` and (c)
+    ``hr_pairs.morphology_check``. With no non-cardiac event to inject, no row passes.
+
+    Choice: the ``incumbent`` ``(channel, detector)`` when it still passes; else the
+    passing channel row with the best template SNR (exact tie: the count closest to the
+    autocorrelation); a pair only where no channel row passes. Then rule 2: when a
+    channel train is chosen and a pair passes, a disagreement on more than 5% of beats
+    is resolved beat by beat (``hr_pairs.resolve_disagreement``) and the train that
+    carries the QRS (:data:`CARRIES_QRS`) is stored; unresolved, nothing is.
     """
+    # imported here: hr_pairs imports this module
+    from gems_blanking_v2.physio import hr_pairs as hp  # noqa: PLC0415
+
     fs = float(rec.fs)
     cand = hr_candidates(rec)
     t05 = _trains(cand)
@@ -436,33 +510,82 @@ def gated_selection(
         first, _t = rank_hr_channels(cand, t05)
     except ValueError:
         first = max(t05, key=lambda k: t05[k].n_beats)
-    injected, times = _inject(rec, events, _noncardiac(events, t05[first].t_s), seed)
-    cand_i = hr_candidates(injected)
+    keep = _noncardiac(events, t05[first].t_s)
+    rel = hp.event_patterns(events)
+    real: Recording | None = None
+    med: Recording | None = None
+    cand_r: Recording | None = None
+    cand_m: Recording | None = None
+    times = np.zeros(0)
+    if bool((keep & np.isfinite(rel).all(axis=1)).any()):  # else no row can pass the veto
+        real, times = hp.inject_real_patterns(rec, events, keep, seed=seed)
+        med, _tm = hp.inject_median_pattern(rec, events, keep, seed=seed)
+        cand_r, cand_m = hr_candidates(real), hr_candidates(med)
     rows: list[TrainGate] = []
     for c in cand.channels:
         x = np.asarray(cand.data[:, c.index], dtype=np.float64)
-        xi = np.asarray(cand_i.data[:, c.index], dtype=np.float64)
-        starts, bpm = autocorr_rate(x, fs)
-        y, fs_d = _prepare(x, fs, DETECT_BAND_HZ)
-        for det in DETECTORS:
-            if det == "task05":
-                beats = np.asarray(t05[c.name].t_s, dtype=np.float64)
-                implausible, rescue = t05[c.name].implausible_frac, t05[c.name].rescue_rate
-            else:
-                beats = findpeaks_replica(x, fs)
-                implausible, rescue = implausible_fraction(beats), 0.0
-            snr = float(_template_snr(y, beats, fs_d)) if beats.size else float("nan")
-            cg = count_gate(beats, starts, bpm)
-            harm = _harmed(beats, _detect(det, xi, fs), times) / N_INJECTIONS
-            plausible = bool(implausible <= PROVISIONAL_MAX_IMPLAUSIBLE_FRAC
-                             and rescue <= PROVISIONAL_MAX_RESCUE_RATE)
-            rows.append(TrainGate(
-                channel=c.name, detector=det, beats_s=beats, snr=snr, count=cg,
-                transient_harm=harm, implausible_frac=float(implausible),
-                rescue_rate=float(rescue), plausible=plausible,
-                passes=bool(cg.passes and plausible
-                            and harm <= PROVISIONAL_MAX_TRANSIENT_HARM)))
-    return pick_train(rows), rows
+        xr = None if cand_r is None else np.asarray(cand_r.data[:, c.index], dtype=np.float64)
+        xm = None if cand_m is None else np.asarray(cand_m.data[:, c.index], dtype=np.float64)
+        ac = autocorr_rate(x, fs)
+        rows += [_gate_row(c.name, det, x, xr, xm, times, fs, ac,
+                           t05[c.name] if det == "task05" else None, "channel")
+                 for det in DETECTORS]
+    detached: frozenset[str] = frozenset()
+    if pairs:
+        detached = hp.detached_contacts(events, keep)
+        acs: dict[frozenset[str], tuple[F64, F64]] = {}
+        for p in hp.pair_candidates(rec, detached):
+            x = hp.lead_signal(rec, p)
+            xr = hp.lead_signal(real, p) if real is not None else None
+            xm = hp.lead_signal(med, p) if med is not None else None
+            key = frozenset((p.plus, p.minus))
+            if key not in acs:
+                acs[key] = autocorr_rate(x, fs)
+            for det in DETECTORS:
+                row = _gate_row(p.name, det, x, xr, xm, times, fs, acs[key], None, "pair")
+                if row.passes:
+                    a = hp.rate_check(row.beats_s, rec, p, detached)
+                    m = hp.morphology_check(row.beats_s, rec, detached=detached)
+                    failed = [n for n, ok in (("rate", a.passes), ("morphology", m.passes))
+                              if not ok]
+                    row = replace(row, passes=not failed,
+                                  cross_check="+".join(failed) if failed else "pass")
+                rows.append(row)
+    return _choose(rows, rec, detached, incumbent), rows
+
+
+def _choose(rows: list[TrainGate], rec: Recording, detached: frozenset[str],  # noqa: PLR0911
+            incumbent: tuple[str, str] | None) -> TrainGate | None:
+    """Incumbent, else best channel, else best pair; then rule 2 (see :func:`gated_selection`)."""
+    from gems_blanking_v2.physio import hr_pairs as hp  # noqa: PLC0415
+
+    channel = [r for r in rows if r.source == "channel"]
+    best_pair = pick_train([r for r in rows if r.source == "pair"])
+    chosen = None
+    if incumbent is not None:
+        chosen = next((r for r in channel
+                       if (r.channel, r.detector) == incumbent and r.passes), None)
+    if chosen is None:
+        chosen = pick_train(channel)
+    if chosen is None:
+        if best_pair is None:
+            return None
+        return replace(best_pair, note="pair lead: no channel train passes")
+    if best_pair is None:
+        return chosen
+    t = hp.timing_check(best_pair.beats_s, chosen.beats_s)
+    if not t.disagree:
+        return chosen
+    res = hp.resolve_disagreement(best_pair.beats_s, chosen.beats_s, rec, detached=detached,
+                                  offset_s=t.offset_s)
+    pq, cq = res.lead_unmatched_qrs, res.other_unmatched_qrs
+    why = (f"rule 2: {best_pair.channel} {best_pair.detector} vs {chosen.channel} "
+           f"{chosen.detector} disagree; unmatched beats carrying the QRS {pq:.3f} vs {cq:.3f}")
+    if pq >= CARRIES_QRS > cq:
+        return replace(best_pair, note=why + " - the pair replaces it")
+    if cq >= CARRIES_QRS > pq:
+        return replace(chosen, note=why + " - the channel train stays")
+    return None  # unresolved: neither train is trusted
 
 
 def pick_train(rows: list[TrainGate]) -> TrainGate | None:
