@@ -1239,6 +1239,39 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
 - **About 141 more target marks** with no new target miss are needed (386 at 3 misses).
 - **slow_wave is not immune to the notch.** In B t03 3_1 it removed slow_wave damage from s4#m6 and s4#m7. Ruling (c) 5's "slow_wave untouched" holds only for the first three recordings; the all-inputs comparison stays the mechanical rule.
 
+### RULING 2026-10-01 (c) — tagging rejected; HR from a cross-site lead that nulls the ground signal (measure first)
+
+**Measured (diagnostic pass, 10 A/B recordings; H unspent):**
+- **Template detector, no-train channels:** the non-suspect filter is not the cause (41 of 48 channels have zero clean beats before it).
+  - The task 05 seed on route (b) is not a cardiac train: median interval 23× the autocorrelation RR, and at most 10.5% of intervals within 10%.
+  - The route (c) halves are alike (1.33–2.11× RR, near-equal SNR), so the split is ambiguous.
+- **Veto harm is mostly capture for every detector:** task 05 64%, findpeaks 83%, template 54%. The rest is mostly lost beats; moved beats are 2–5%.
+- **Tagging:**
+  - It costs 20–79% of intervals (median 34–45%).
+  - No A recording gains a train.
+  - `find_events` catches only 26–64% of the injected transients.
+  - The circular own-beat variant tags less and hides capture, as predicted.
+
+**Rulings:**
+
+1. **Tagging is rejected** and is not offered to Andrea for adoption. Its cost is a third or more of the data, and it rescues nothing.
+
+2. **Why every single-channel approach fails.** On a raw contact the ground-site transient and the far-field ECG arrive together. The transient is captured because nothing on one channel can tell it apart from a beat.
+   - The tripole cancels both: its contacts are 1.5 mm apart, so they see the same cardiac potential.
+   - The ground signal enters every channel with only modest gain differences (contact R² 0.67–0.99 against the outside reference). The cardiac far-field differs strongly **between sites** (left neck, right neck, stomach), because the heart's dipole projects differently onto each.
+   - **So a combination of channels from different sites can cancel the ground signal and keep the heart.** In effect it is a bipolar ECG lead built from distant contacts.
+
+3. **Measure, don't adopt. Two variants, A/B only, H unspent:**
+   - **(i) Cross-site pairs:** every difference of two raw contacts from different sites (L cuff − R cuff, cuff − stomach).
+   - **(ii) Ground-nulling weights:** per recording, estimate the ground gain vector **g** from non-cardiac events (the `cm_gains` method) and the cardiac gain vector **h** from the beat-locked template on the vetted or best available train. Choose **w** to maximise (w·h)² / (wᵀ Σ w) subject to w·g = 0, where Σ is the noise covariance from beat- and event-free stretches.
+     - Report how stable g is over the recording (per-minute estimates). If g drifts, w must be estimated per segment.
+   - **Detectors:** task 05 and findpeaks, run on the derived lead. The template detector is not used.
+   - **Gates, unchanged:** count gate, task 05 plausibility, and the transient veto. The veto injects **realistic** transients: the measured g pattern on all nine channels at the recording's own amplitude, so the test sees exactly what the lead must cancel.
+   - **Report per recording:** the best lead, its gate results, its veto harm against the best single-channel harm, and whether the recording gains an HRV-grade train. Report A t01, A t02, A t01 1_2 and A t04 first.
+   - **No adoption.** If it works on A/B, the design is written down and frozen and goes to H once, as in ruling (f) 6–7.
+
+4. **The round-record note is confirmed.** Add the `notes` entry to `change_2de52b5d2537d0b2_to_628d2a28cd1f5ed5.json`, written atomically, as proposed.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
