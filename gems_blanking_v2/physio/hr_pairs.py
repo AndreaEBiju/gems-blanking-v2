@@ -11,6 +11,9 @@ cancels the ground and keeps the heart: a bipolar ECG lead from distant contacts
 contact and the reverse - 9 differences in both orientations, 18 leads when both cuffs
 have three contacts - each with task 05's :func:`detect_rpeaks` and the ``findpeaks``
 replica. Both detectors take positive peaks, so orientation is part of the candidate.
+A pair containing a DETACHED contact is not a candidate (ruling 2026-10-02 1): first-half
+|g| < :data:`DETACHED_MAX_G` or sign agreement < :data:`DETACHED_MIN_AGREEMENT`
+(:func:`detached_contacts`) - a contact not seeing the shared ground cannot cancel it.
 Not in the design: weighted leads, stomach pairs, the template detector.
 
 **Gates, unchanged**: :func:`hr_channel.count_gate` against the lead's own
@@ -27,10 +30,18 @@ only that lead and detector is gated on the second half, and only that result de
 The single channels (:func:`hr_channel.hr_candidates`) go through the same protocol, so
 the comparison holds the protocol fixed (invariant 12).
 
-**Independent cross-check** (ruling (d) 2), on references that do not use the lead:
-(a) :func:`rate_check`, (b) :func:`timing_check` where a vetted train exists,
-(c) :func:`morphology_check`. A recording keeps a gain only if (a) and (c) pass, and
-(b) where it applies.
+**Independent cross-check** (ruling (d) 2, corrected by ruling 2026-10-02), on
+references that do not use the lead:
+(a) :func:`rate_check` - references from :func:`refined_autocorr_rate` (parabolic
+sub-lag; the count gate is unchanged); minutes whose references disagree by more than
+:data:`RATE_REF_SPREAD` are unassessable; too few assessable minutes is unassessable.
+(b) :func:`timing_check` where a vetted train exists and itself passes the binding veto -
+beat identity within :data:`TIMING_TOL_S`, >= 99% in both directions; trains that
+disagree on more than :data:`TIMING_DISAGREE_FRACTION` of beats are resolved beat by beat
+by :func:`resolve_disagreement`, and neither is trusted until then.
+(c) :func:`morphology_check` on every non-detached contact, at least
+:data:`MORPH_MIN_CONTACTS` on :data:`MORPH_MIN_SITES` sites.
+A recording keeps a gain only if (a) and (c) pass, and (b) where it applies.
 
 OUTSIDE THE GENERATION HASH: nothing in the detection chain imports it.
 """
@@ -42,6 +53,7 @@ from typing import Final
 
 import numpy as np
 import numpy.typing as npt
+from scipy.signal import butter, sosfiltfilt
 
 from gems_blanking_v2.derive.cm_events import Events, find_events
 from gems_blanking_v2.derive.derivations import build_derivations
@@ -58,6 +70,8 @@ from gems_blanking_v2.physio.rpeaks import (
 from gems_blanking_v2.types import ChannelInfo, Recording
 
 __all__ = [
+    "DETACHED_MAX_G",
+    "DETACHED_MIN_AGREEMENT",
     "INJECTIONS",
     "MORPH_SHUFFLES",
     "RATE_PASS_FRACTION",
@@ -69,9 +83,12 @@ __all__ = [
     "MorphologyCheck",
     "PairLead",
     "RateCheck",
+    "Resolution",
     "TimingCheck",
+    "detached_contacts",
     "event_patterns",
     "gate_half",
+    "ground_gains",
     "half_split",
     "inject_median_pattern",
     "inject_real_patterns",
@@ -79,6 +96,8 @@ __all__ = [
     "morphology_check",
     "pair_candidates",
     "rate_check",
+    "refined_autocorr_rate",
+    "resolve_disagreement",
     "select",
     "timing_check",
 ]
@@ -92,10 +111,16 @@ RATE_TOL: Final = 0.05
 """(a): the lead's beats per minute within this fraction of the reference median."""
 RATE_PASS_FRACTION: Final = 0.95
 """(a): ... in at least this fraction of the minutes that have a clear reference."""
-TIMING_TOL_S: Final = 0.002
-"""(b): a lead beat agrees with the vetted train within this, after the offset."""
+TIMING_TOL_S: Final = 0.005
+"""(b), ruling 2026-10-02 3: a beat matches within this after the offset - far below half
+an RR, so a wrong beat cannot match; identity is the question, the veto judges precision."""
 TIMING_PASS_FRACTION: Final = 0.99
-"""(b): ... for at least this fraction of the lead's beats."""
+"""(b): ... for at least this fraction of beats, in BOTH directions."""
+TIMING_DISAGREE_S: Final = 0.020
+TIMING_DISAGREE_FRACTION: Final = 0.05
+"""(b): more than this fraction unmatched within :data:`TIMING_DISAGREE_S`, either
+direction, means at least one train is wrong: neither is trusted until
+:func:`resolve_disagreement` says which carries the QRS."""
 TIMING_SEARCH_S: Final = 0.010
 """(b): the constant offset is the median lead-minus-vetted lag over pairs this close."""
 MORPH_SHUFFLES: Final = 20
@@ -103,6 +128,23 @@ MORPH_SHUFFLES: Final = 20
 MORPH_SHIFT_RR: Final[tuple[float, float]] = (0.25, 0.75)
 """(c): a shuffled template moves each beat by this range of the median RR - the same
 count of windows, none locked to a beat."""
+MORPH_MIN_CONTACTS: Final = 4
+MORPH_MIN_SITES: Final = 2
+"""(c), ruling 2026-10-02 1: at least this many non-detached contacts on at least this
+many sites, or the recording is unassessable (no gain)."""
+DETACHED_MAX_G: Final = 0.2
+DETACHED_MIN_AGREEMENT: Final = 0.75
+"""Ruling 2026-10-02 1: a contact whose first-half |g| is under :data:`DETACHED_MAX_G` or
+whose sign agreement with g is under :data:`DETACHED_MIN_AGREEMENT` is not seeing the
+shared ground - detached. From the ground physics, not from the cross-check."""
+RATE_REF_SPREAD: Final = 0.05
+"""(a), ruling 2026-10-02 2: a minute whose clear references disagree among themselves by
+more than this ((max - min) / median) is unassessable - nothing to judge against."""
+RATE_MIN_ASSESSABLE: Final = 0.5
+"""(a): assessable minutes must be at least this fraction of the minutes with any clear
+reference, or the recording is unassessable (no gain)."""
+QRS_HALF_S: Final = 0.020
+"""Template windows for :func:`resolve_disagreement`: +/- this around a beat."""
 
 
 # ---------------------------------------------------------------------------
@@ -131,13 +173,15 @@ def _neck(rec: Recording, cuff: str) -> list[ChannelInfo]:
                   key=lambda c: c.contact_index or 0)
 
 
-def pair_candidates(rec: Recording) -> list[PairLead]:
+def pair_candidates(rec: Recording, detached: frozenset[str] = frozenset()) -> list[PairLead]:
     """Every left-neck contact minus every right-neck contact, and the reverse.
 
     Contacts are the raw nerve channels with a ``cuff_id`` and a ``contact_index``;
     stomach and aux channels never enter. 18 leads when both cuffs have three contacts.
+    A pair containing a ``detached`` contact is not a candidate (ruling 2026-10-02 1).
     """
-    left, right = _neck(rec, "L"), _neck(rec, "R")
+    left = [c for c in _neck(rec, "L") if c.name not in detached]
+    right = [c for c in _neck(rec, "R") if c.name not in detached]
     out = []
     for a in left:
         for b in right:
@@ -151,6 +195,31 @@ def lead_signal(rec: Recording, lead: PairLead) -> F64:
     d = rec.data
     plus = np.asarray(d[:, lead.plus_index], dtype=np.float64)
     return plus - np.asarray(d[:, lead.minus_index], dtype=np.float64)
+
+
+def ground_gains(events: Events, keep: npt.ArrayLike) -> dict[str, tuple[float, float]]:
+    """Return ``{channel: (g, sign agreement)}`` over the non-cardiac events with a pattern.
+
+    ``g`` is the median signed relative gain (:func:`event_patterns`); the agreement is
+    the fraction of those events whose gain has g's sign. NaN when no event qualifies.
+    """
+    rel = event_patterns(events)
+    ok = np.asarray(keep, dtype=bool) & np.isfinite(rel).all(axis=1)
+    if not ok.any():
+        return {n: (float("nan"), float("nan")) for n in events.channels}
+    g = np.median(rel[ok], axis=0)
+    agree = np.mean(np.sign(rel[ok]) == np.sign(g)[None, :], axis=0)
+    return {n: (float(g[k]), float(agree[k])) for k, n in enumerate(events.channels)}
+
+
+def detached_contacts(events: Events, keep: npt.ArrayLike) -> frozenset[str]:
+    """Return the contacts not seeing the shared ground.
+
+    Detached: |g| < :data:`DETACHED_MAX_G` or sign agreement < :data:`DETACHED_MIN_AGREEMENT`.
+    With no event to measure g on, none is called detached (no evidence either way).
+    """
+    return frozenset(n for n, (g, a) in ground_gains(events, keep).items()
+                     if np.isfinite(g) and (abs(g) < DETACHED_MAX_G or a < DETACHED_MIN_AGREEMENT))
 
 
 # ---------------------------------------------------------------------------
@@ -374,8 +443,20 @@ class HalfSplit:
     chosen_single: LeadGate | None
     second_pair: LeadGate | None
     second_single: LeadGate | None
-    second_rec: Recording = field(repr=False)
-    second_events: Events = field(repr=False)
+    detached: frozenset[str]
+    """Detached contacts, from the first half's ground gains (ruling 2026-10-02 1)."""
+    second: _Half = field(repr=False)
+    """The second half with its events and injections - what the cross-check runs on."""
+
+    @property
+    def second_rec(self) -> Recording:
+        """The second half's recording."""
+        return self.second.rec
+
+    @property
+    def second_events(self) -> Events:
+        """The second half's events."""
+        return self.second.events
 
     @property
     def pairs_passing_first(self) -> int:
@@ -404,18 +485,56 @@ def half_split(rec: Recording, *, seed: int = 0) -> HalfSplit:
     """
     a, b = _halves(rec)
     h1 = _prepare_half(a, seed)
-    pairs1, singles1 = gate_half(h1)
+    detached = detached_contacts(h1.events, h1.keep)
+    pairs1, singles1 = gate_half(h1, pairs=pair_candidates(a, detached))
     cp, cs = select(pairs1), select(singles1)
     del h1
     h2 = _prepare_half(b, seed)
-    sp = gate_half(h2, only=(cp.lead, cp.detector))[0][0] if cp is not None else None
+    sp = (gate_half(h2, pairs=pair_candidates(b, detached), only=(cp.lead, cp.detector))[0][0]
+          if cp is not None else None)
     ss = gate_half(h2, pairs=[], only=(cs.lead, cs.detector))[1][0] if cs is not None else None
-    return HalfSplit(pairs1, singles1, cp, cs, sp, ss, b, h2.events)
+    return HalfSplit(pairs1, singles1, cp, cs, sp, ss, detached, h2)
 
 
 # ---------------------------------------------------------------------------
 # the independent cross-check (ruling (d) 2)
 # ---------------------------------------------------------------------------
+
+
+def refined_autocorr_rate(x: npt.ArrayLike, fs: float) -> tuple[F64, F64]:
+    """:func:`hr_channel.autocorr_rate` with a parabolic sub-lag refinement of its peak.
+
+    The same signal, windows, lag range and clarity rule - so the same minutes are clear
+    and NaN - but the rate comes from the vertex of the parabola through the peak lag and
+    its two neighbours. For the cross-check's references only (ruling 2026-10-02 2); the
+    count gate keeps :func:`hr_channel.autocorr_rate` unchanged.
+    """
+    y, fd = hc._decimate_to(np.asarray(x, dtype=np.float64), fs, hc._AC_TARGET_HZ)
+    sos = butter(4, hc.AC_BAND_HZ, btype="bandpass", fs=fd, output="sos")
+    r = np.abs(sosfiltfilt(sos, y))
+    w = int(round(hc.AC_WINDOW_S * fd))
+    lag_lo = int(np.floor(60.0 / hc.AC_BPM[1] * fd))
+    lag_hi = int(np.ceil(60.0 / hc.AC_BPM[0] * fd))
+    starts: list[float] = []
+    bpm: list[float] = []
+    for m in range(int(r.size / fd // hc.AC_WINDOW_S)):
+        a = int(round(m * hc.AC_WINDOW_S * fd))
+        if a + w > r.size:
+            break
+        seg = r[a:a + w] - r[a:a + w].mean()
+        ac = np.fft.irfft(np.abs(np.fft.rfft(seg, n=2 * w)) ** 2)[:w]
+        rate = float("nan")
+        if ac[0] > 0:
+            ac = ac / ac[0]
+            k = lag_lo + int(np.argmax(ac[lag_lo:lag_hi + 1]))
+            if (lag_lo < k < lag_hi and ac[k] >= hc.PROVISIONAL_AC_MIN_PEAK
+                    and ac[k] >= ac[k - 1] and ac[k] >= ac[k + 1]):
+                den = ac[k - 1] - 2.0 * ac[k] + ac[k + 1]
+                delta = 0.5 * (ac[k - 1] - ac[k + 1]) / den if den < 0 else 0.0
+                rate = 60.0 * fd / (k + delta)
+        starts.append(m * hc.AC_WINDOW_S)
+        bpm.append(rate)
+    return np.asarray(starts, dtype=np.float64), np.asarray(bpm, dtype=np.float64)
 
 
 @dataclass(frozen=True)
@@ -425,19 +544,25 @@ class RateCheck:
     references: tuple[str, ...]
     minutes: int
     minutes_with_reference: int
+    minutes_assessable: int
+    """Minutes whose clear references agree among themselves within :data:`RATE_REF_SPREAD`."""
     fraction_within: float
+    assessable: bool
     passes: bool
 
 
 def rate_check(beats_s: npt.ArrayLike, rec: Recording, lead: PairLead) -> RateCheck:
     """Per minute, the lead's rate against the median clear reference.
 
-    References: :func:`hr_channel.autocorr_rate` on every raw channel of a site the
-    lead does not use (a left-right pair uses both necks, so the stomach contacts) and
-    on ``stomach_ref``. A minute is judged when at least one reference is clear there;
-    it agrees when beats per minute are within :data:`RATE_TOL` of the median clear
-    reference. Passes when at least :data:`RATE_PASS_FRACTION` of judged minutes agree;
-    no judged minute fails (unassessable never passes).
+    References: :func:`refined_autocorr_rate` on every raw channel of a site the lead
+    does not use (a left-right pair uses both necks, so the stomach contacts) and on
+    ``stomach_ref``. A minute with a clear reference is ASSESSABLE when its clear
+    references agree among themselves within :data:`RATE_REF_SPREAD`; there the lead
+    agrees when its beats per minute are within :data:`RATE_TOL` of their median. The
+    recording is assessable when assessable minutes are at least
+    :data:`RATE_MIN_ASSESSABLE` of the minutes with any clear reference, and passes when
+    it is assessable and at least :data:`RATE_PASS_FRACTION` of assessable minutes agree.
+    Unassessable never passes.
     """
     fs = float(rec.fs)
     used = {c.cuff_id for c in rec.channels if c.name in (lead.plus, lead.minus)}
@@ -450,29 +575,31 @@ def rate_check(beats_s: npt.ArrayLike, rec: Recording, lead: PairLead) -> RateCh
     rates = []
     starts0: F64 | None = None
     for _name, x in refs:
-        starts, bpm = hc.autocorr_rate(x, fs)
+        starts, bpm = refined_autocorr_rate(x, fs)
         if starts0 is None:
             starts0 = starts
         assert np.array_equal(starts, starts0), "references share one minute grid"
         rates.append(bpm)
     names = tuple(n for n, _x in refs)
     if starts0 is None or starts0.size == 0:
-        return RateCheck(names, 0, 0, 0.0, passes=False)
+        return RateCheck(names, 0, 0, 0, 0.0, assessable=False, passes=False)
     stack = np.vstack(rates)
-    clear = np.isfinite(stack).any(axis=0)
+    any_clear = np.flatnonzero(np.isfinite(stack).any(axis=0))
     b = np.sort(np.asarray(beats_s, dtype=np.float64))
-    judged = np.flatnonzero(clear)
-    if judged.size == 0:
-        return RateCheck(names, int(starts0.size), 0, 0.0, passes=False)
     ok = []
-    for i in judged:
+    for i in any_clear:
+        col = stack[:, i][np.isfinite(stack[:, i])]
+        ref = float(np.median(col))
+        if (col.max() - col.min()) > RATE_REF_SPREAD * ref:
+            continue  # the references disagree: nothing to judge against
         s = starts0[i]
         per_min = np.count_nonzero((b >= s) & (b < s + hc.AC_WINDOW_S)) * 60.0 / hc.AC_WINDOW_S
-        ref = float(np.nanmedian(stack[:, i]))
         ok.append(abs(per_min - ref) <= RATE_TOL * ref)
-    frac = float(np.mean(ok))
-    return RateCheck(names, int(starts0.size), int(judged.size), frac,
-                     passes=frac >= RATE_PASS_FRACTION)
+    n_any = int(any_clear.size)
+    assessable = bool(n_any > 0 and len(ok) >= RATE_MIN_ASSESSABLE * n_any)
+    frac = float(np.mean(ok)) if ok else 0.0
+    return RateCheck(names, int(starts0.size), n_any, len(ok), frac, assessable=assessable,
+                     passes=bool(assessable and frac >= RATE_PASS_FRACTION))
 
 
 @dataclass(frozen=True)
@@ -480,33 +607,132 @@ class TimingCheck:
     """(b): the lead's beats against a vetted train, after one constant offset."""
 
     offset_s: float
-    fraction_within: float
+    matched_lead: float
+    """Fraction of the lead's beats with a vetted beat within :data:`TIMING_TOL_S`."""
+    matched_vetted: float
+    """Fraction of the vetted beats with a lead beat within :data:`TIMING_TOL_S`."""
+    sd_matched_s: float
+    """SD of the matched differences - reported, not a gate."""
+    unmatched_lead_20ms: float
+    unmatched_vetted_20ms: float
+    disagree: bool
+    """More than :data:`TIMING_DISAGREE_FRACTION` unmatched within :data:`TIMING_DISAGREE_S`,
+    either direction: at least one train is wrong (:func:`resolve_disagreement`)."""
     passes: bool
 
 
+def _signed_nearest(p: F64, q: F64) -> F64:
+    """Per element of ``p``, its signed difference to the nearest element of ``q`` (sorted)."""
+    j = np.searchsorted(q, p)
+    prev, nxt = q[np.clip(j - 1, 0, q.size - 1)], q[np.clip(j, 0, q.size - 1)]
+    return np.where(np.abs(p - prev) <= np.abs(nxt - p), p - prev, p - nxt)
+
+
 def timing_check(beats_s: npt.ArrayLike, vetted_s: npt.ArrayLike) -> TimingCheck:
-    """At least :data:`TIMING_PASS_FRACTION` of the lead's beats within :data:`TIMING_TOL_S`.
+    """Beat identity against a vetted train: >= 99% matched within 5 ms, both directions.
 
     The offset is the median lead-minus-vetted lag over lead beats with a vetted beat
-    within :data:`TIMING_SEARCH_S` (a fiducial on another lead sits at a constant lag);
-    every lead beat then counts, within tolerance or not. No vetted beat: fails.
+    within :data:`TIMING_SEARCH_S` (a fiducial on another lead sits at a constant lag).
+    After it, a lead beat is matched when a vetted beat is within :data:`TIMING_TOL_S`,
+    and a vetted beat when a lead beat is. Passes when at least
+    :data:`TIMING_PASS_FRACTION` of each train is matched. Also reported: the SD of the
+    matched differences (not a gate) and the disagreement flag. No beat: fails.
     """
     b = np.sort(np.asarray(beats_s, dtype=np.float64))
     v = np.sort(np.asarray(vetted_s, dtype=np.float64))
+    nan = float("nan")
     if b.size == 0 or v.size == 0:
-        return TimingCheck(float("nan"), 0.0, passes=False)
-    j = np.searchsorted(v, b)
-    prev, nxt = v[np.clip(j - 1, 0, v.size - 1)], v[np.clip(j, 0, v.size - 1)]
-    lag = np.where(np.abs(b - prev) <= np.abs(nxt - b), b - prev, b - nxt)
+        return TimingCheck(nan, 0.0, 0.0, nan, 1.0, 1.0, disagree=True, passes=False)
+    lag = _signed_nearest(b, v)
     close = np.abs(lag) <= TIMING_SEARCH_S
     if not close.any():
-        return TimingCheck(float("nan"), 0.0, passes=False)
+        return TimingCheck(nan, 0.0, 0.0, nan, 1.0, 1.0, disagree=True, passes=False)
     off = float(np.median(lag[close]))
-    j = np.searchsorted(v, b - off)
-    prev, nxt = v[np.clip(j - 1, 0, v.size - 1)], v[np.clip(j, 0, v.size - 1)]
-    d = np.minimum(np.abs(b - off - prev), np.abs(nxt - (b - off)))
-    frac = float(np.mean(d <= TIMING_TOL_S))
-    return TimingCheck(off, frac, passes=frac >= TIMING_PASS_FRACTION)
+    d_lead = _signed_nearest(b - off, v)
+    d_vet = _signed_nearest(v, b - off)
+    m_lead = float(np.mean(np.abs(d_lead) <= TIMING_TOL_S))
+    m_vet = float(np.mean(np.abs(d_vet) <= TIMING_TOL_S))
+    matched = d_lead[np.abs(d_lead) <= TIMING_TOL_S]
+    sd = float(np.std(matched, ddof=1)) if matched.size > 1 else nan
+    u_lead = float(np.mean(np.abs(d_lead) > TIMING_DISAGREE_S))
+    u_vet = float(np.mean(np.abs(d_vet) > TIMING_DISAGREE_S))
+    return TimingCheck(off, m_lead, m_vet, sd, u_lead, u_vet,
+                       disagree=bool(max(u_lead, u_vet) > TIMING_DISAGREE_FRACTION),
+                       passes=bool(min(m_lead, m_vet) >= TIMING_PASS_FRACTION))
+
+
+@dataclass(frozen=True)
+class Resolution:
+    """:func:`resolve_disagreement`: which train's unmatched beats carry the QRS."""
+
+    contacts: tuple[str, ...]
+    n_matched: int
+    floor: float
+    """1st percentile of the matched beats' template correlations."""
+    lead_unmatched: int
+    lead_unmatched_qrs: float
+    """Fraction of the lead's unmatched beats whose correlation reaches the floor."""
+    other_unmatched: int
+    other_unmatched_qrs: float
+
+
+def resolve_disagreement(lead_s: npt.ArrayLike, other_s: npt.ArrayLike, rec: Recording, *,
+                         detached: frozenset[str] = frozenset(),
+                         offset_s: float = 0.0) -> Resolution:
+    """Beat by beat, which train's unmatched beats carry the QRS (ruling 2026-10-02 3).
+
+    The template is the mean multichannel window (+/-:data:`QRS_HALF_S`, 10-150 Hz as
+    task 05 prepares it, every non-detached raw contact) over the beats both trains agree
+    on (within :data:`TIMING_TOL_S` after ``offset_s``). Each beat's correlation with it
+    is the Pearson correlation of the concatenated windows. A beat unmatched within
+    :data:`TIMING_DISAGREE_S` carries the QRS when its correlation reaches the floor -
+    the 1st percentile over the matched beats. Reported, not decided: the fractions say
+    which train is right.
+    """
+    fs = float(rec.fs)
+    b = np.sort(np.asarray(lead_s, dtype=np.float64))
+    o = np.sort(np.asarray(other_s, dtype=np.float64)) + offset_s  # into the lead's frame
+    contacts = [c for c in rec.channels
+                if c.role in ("nerve", "stomach") and c.name not in detached]
+    ys = []
+    fsd = fs
+    for c in contacts:
+        y, fsd = _prepare(np.asarray(rec.data[:, c.index], dtype=np.float64), fs, DETECT_BAND_HZ)
+        ys.append(y)
+    mat = np.vstack(ys)
+    h = int(round(QRS_HALF_S * fsd))
+
+    def windows(t: F64) -> tuple[F64, npt.NDArray[np.bool_]]:
+        i = np.round(t * fsd).astype(np.int64)
+        ok = (i - h >= 0) & (i + h + 1 <= mat.shape[1])
+        if not ok.any():
+            return np.zeros((0, 1)), ok
+        return np.stack([mat[:, k - h:k + h + 1].ravel() for k in i[ok]]), ok
+
+    def corr(stack: F64, tpl: F64) -> F64:
+        a = stack - stack.mean(axis=1, keepdims=True)
+        t = tpl - tpl.mean()
+        return np.asarray((a @ t) / (np.linalg.norm(a, axis=1) * np.linalg.norm(t) + 1e-300))
+
+    d_b = _signed_nearest(b, o) if o.size else np.full(b.size, np.inf)
+    d_o = _signed_nearest(o, b) if b.size else np.full(o.size, np.inf)
+    matched_t = b[np.abs(d_b) <= TIMING_TOL_S]
+    m_stack, _ok = windows(matched_t)
+    if m_stack.shape[0] < 2:  # noqa: PLR2004 - a template needs beats
+        return Resolution(tuple(c.name for c in contacts), int(m_stack.shape[0]), float("nan"),
+                          int(np.sum(np.abs(d_b) > TIMING_DISAGREE_S)), float("nan"),
+                          int(np.sum(np.abs(d_o) > TIMING_DISAGREE_S)), float("nan"))
+    tpl = m_stack.mean(axis=0)
+    floor = float(np.percentile(corr(m_stack, tpl), 1))
+
+    def qrs_fraction(t: F64) -> tuple[int, float]:
+        st, _o = windows(t)
+        if st.shape[0] == 0:
+            return int(t.size), float("nan")
+        return int(t.size), float(np.mean(corr(st, tpl) >= floor))
+    nl, fl = qrs_fraction(b[np.abs(d_b) > TIMING_DISAGREE_S])
+    no, fo = qrs_fraction(o[np.abs(d_o) > TIMING_DISAGREE_S])
+    return Resolution(tuple(c.name for c in contacts), int(m_stack.shape[0]), floor, nl, fl, no, fo)
 
 
 @dataclass(frozen=True)
@@ -516,26 +742,35 @@ class MorphologyCheck:
     snr: dict[str, float]
     shuffled_max: dict[str, float]
     failing: tuple[str, ...]
+    excluded: tuple[str, ...]
+    """Detached contacts, left out (ruling 2026-10-02 1)."""
+    assessable: bool
+    """At least :data:`MORPH_MIN_CONTACTS` non-detached contacts, :data:`MORPH_MIN_SITES` sites."""
     passes: bool
 
 
-def morphology_check(beats_s: npt.ArrayLike, rec: Recording, *, seed: int = 0) -> MorphologyCheck:
-    """Every raw contact must show the QRS at the lead's beats.
+def morphology_check(beats_s: npt.ArrayLike, rec: Recording, *,
+                     detached: frozenset[str] = frozenset(), seed: int = 0) -> MorphologyCheck:
+    """Every non-detached raw contact must show the QRS at the lead's beats.
 
-    Per raw nerve and stomach contact (10-150 Hz as task 05 prepares it), the template
-    SNR (:func:`rpeaks._template_snr`) at the lead's beats must exceed the SNR at each
-    of :data:`MORPH_SHUFFLES` shuffles of the same beats, each beat moved by a uniform
-    :data:`MORPH_SHIFT_RR` of the median RR - same count, none beat-locked. The check
-    passes only when every contact does.
+    Per raw nerve and stomach contact not in ``detached`` (10-150 Hz as task 05 prepares
+    it), the template SNR (:func:`rpeaks._template_snr`) at the lead's beats must exceed
+    the SNR at each of :data:`MORPH_SHUFFLES` shuffles of the same beats, each beat moved
+    by a uniform :data:`MORPH_SHIFT_RR` of the median RR - same count, none beat-locked.
+    Assessable only with at least :data:`MORPH_MIN_CONTACTS` such contacts on at least
+    :data:`MORPH_MIN_SITES` sites (left neck, right neck, stomach); passes when
+    assessable and every such contact shows the QRS.
     """
     fs = float(rec.fs)
     b = np.sort(np.asarray(beats_s, dtype=np.float64))
     rng = np.random.default_rng(seed)
     rr = float(np.median(np.diff(b))) if b.size > 1 else float("nan")
     snr, shuf = {}, {}
-    for c in rec.channels:
-        if c.role not in ("nerve", "stomach"):
-            continue
+    use = [c for c in rec.channels if c.role in ("nerve", "stomach") and c.name not in detached]
+    sites = {c.cuff_id if c.role == "nerve" else "stomach" for c in use}
+    excluded = tuple(sorted(c.name for c in rec.channels
+                            if c.role in ("nerve", "stomach") and c.name in detached))
+    for c in use:
         y, fsd = _prepare(np.asarray(rec.data[:, c.index], dtype=np.float64), fs, DETECT_BAND_HZ)
         s = float(_template_snr(y, b, fsd)) if b.size else float("nan")
         sh = []
@@ -549,4 +784,6 @@ def morphology_check(beats_s: npt.ArrayLike, rec: Recording, *, seed: int = 0) -
         shuf[c.name] = float(np.nanmax(sh)) if sh and np.isfinite(sh).any() else float("nan")
     failing = tuple(n for n in snr
                     if not (np.isfinite(snr[n]) and np.isfinite(shuf[n]) and snr[n] > shuf[n]))
-    return MorphologyCheck(snr, shuf, failing, passes=bool(snr) and not failing)
+    assessable = len(use) >= MORPH_MIN_CONTACTS and len(sites) >= MORPH_MIN_SITES
+    return MorphologyCheck(snr, shuf, failing, excluded, assessable,
+                           passes=bool(assessable and not failing))

@@ -7,7 +7,7 @@ from dataclasses import replace
 import numpy as np
 import numpy.typing as npt
 import pytest
-from gems_blanking_v2.derive.cm_events import Events
+from gems_blanking_v2.derive.cm_events import Events, find_events
 from gems_blanking_v2.detect import chain
 from gems_blanking_v2.physio import hr_channel as hc
 from gems_blanking_v2.physio import hr_pairs as hp
@@ -195,12 +195,60 @@ def test_the_veto_threshold_is_inclusive_at_one_percent() -> None:
     assert _gate(1.0, real=TH).passes and not _gate(1.0, real=TH + 0.005).passes
 
 
+# --- detached contacts (ruling 2026-10-02 1) ----------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def open_rig() -> CrossSiteSynth:
+    return make_cross_site_heart(FS, 65.0, transients_per_s=2.0, open_contact="LVN3",
+                                 site_gain=STRONG_STOMACH, seed=7)
+
+
+def _keep_all(ev: Events) -> npt.NDArray[np.bool_]:
+    return np.ones(len(ev.t_s), dtype=bool)
+
+
+def test_a_contact_without_the_ground_is_detached_and_the_rest_are_not(open_rig) -> None:  # noqa: ANN001
+    ev = find_events(open_rig.rec)
+    gg = hp.ground_gains(ev, _keep_all(ev))
+    assert abs(gg["LVN3"][0]) < hp.DETACHED_MAX_G
+    assert hp.detached_contacts(ev, _keep_all(ev)) == frozenset({"LVN3"})
+
+
+def _sign_column(n: int, n_negative: int) -> list[float]:
+    return [-1.0 if k < n_negative else 1.0 for k in range(n)]
+
+
+def test_detachment_is_g_below_two_tenths_or_agreement_below_three_quarters() -> None:
+    n = 40
+    names = ("U0", "U1", "U2", "C1", "C2", "C3")
+    # three unit channels keep every event's median |amplitude| at 1, so the gains are as written
+
+    def rows(col3: list[float]) -> list[list[float]]:
+        # C1 just above |g| 0.2, C2 just below
+        return [[1.0, 1.0, 1.0, 0.21, 0.19, col3[k]] for k in range(n)]
+    ev = _events(rows(_sign_column(n, 10)), [1.0] * n, names)  # C3: 30 / 40 = 0.75 agree
+    assert hp.detached_contacts(ev, np.ones(n, bool)) == frozenset({"C2"})
+    ev = _events(rows(_sign_column(n, 11)), [1.0] * n, names)  # C3: 29 / 40, under three quarters
+    assert hp.detached_contacts(ev, np.ones(n, bool)) == frozenset({"C2", "C3"})
+
+
+def test_a_pair_with_a_detached_contact_is_not_a_candidate(open_rig) -> None:  # noqa: ANN001
+    names = [p.name for p in hp.pair_candidates(open_rig.rec, frozenset({"LVN3"}))]
+    assert len(names) == 12 and not any("LVN3" in n for n in names)
+
+
 # --- (a) rate --------------------------------------------------------------------------
 
 
-def _fixed_rate(monkeypatch: pytest.MonkeyPatch, ref_bpm: list[float]) -> None:
-    starts = np.arange(len(ref_bpm), dtype=float) * hc.AC_WINDOW_S
-    monkeypatch.setattr(hc, "autocorr_rate", lambda _x, _fs: (starts, np.asarray(ref_bpm, float)))
+def _fixed_rates(monkeypatch: pytest.MonkeyPatch, per_ref: list[list[float]]) -> None:
+    """Each reference, in call order, returns its own per-minute rates."""
+    calls = iter(per_ref * 10)
+    starts = np.arange(len(per_ref[0]), dtype=float) * hc.AC_WINDOW_S
+
+    def fake(_x: object, _fs: float) -> tuple[F64, F64]:
+        return starts, np.asarray(next(calls), float)
+    monkeypatch.setattr(hp, "refined_autocorr_rate", fake)
 
 
 def _train(bpm_per_minute: list[float]) -> F64:
@@ -211,9 +259,31 @@ def _train(bpm_per_minute: list[float]) -> F64:
     return np.concatenate(out)
 
 
+NAN3 = [np.nan] * 3
+
+
 @pytest.fixture(scope="module")
 def short_rig() -> CrossSiteSynth:
     return make_cross_site_heart(FS, 65.0, transients_per_s=0.5, site_gain=STRONG_STOMACH, seed=5)
+
+
+def test_refinement_keeps_the_clear_minutes_and_lands_nearer_the_true_rate() -> None:
+    t = np.arange(int(185 * FS)) / FS
+    rr = 152.5 / (FS / 24)  # a lag of 152.5 samples at the autocorrelation's ~1017 Hz
+    x = np.zeros_like(t)
+    for b in np.arange(0.1, 184.9, rr):
+        near = np.abs(t - b) < 0.01
+        x[near] += 100.0 * np.exp(-0.5 * ((t[near] - b) / 0.002) ** 2)
+    x += np.random.default_rng(1).normal(0.0, 2.0, x.size)
+    s0, coarse = hc.autocorr_rate(x, FS)
+    s1, fine = hp.refined_autocorr_rate(x, FS)
+    assert np.array_equal(s0, s1) and np.array_equal(np.isnan(coarse), np.isnan(fine))
+    true = 60.0 / rr
+    clear = np.isfinite(fine)
+    assert clear.any()
+    err_c, err_f = np.abs(coarse - true)[clear] / true, np.abs(fine - true)[clear] / true
+    assert np.all(err_c > 0.002)  # half a lag step off: ~0.3%
+    assert np.all(err_f < 0.5 * err_c) and np.all(err_f < 0.001)
 
 
 def test_the_references_are_the_other_sites_raw_channels_and_stomach_ref(short_rig) -> None:  # noqa: ANN001
@@ -225,37 +295,56 @@ def test_the_references_are_the_other_sites_raw_channels_and_stomach_ref(short_r
 def test_the_true_beats_agree_with_a_clear_stomach_reference(short_rig) -> None:  # noqa: ANN001
     p = next(p for p in hp.pair_candidates(short_rig.rec) if p.name == "LVN1-RVN1")
     rc = hp.rate_check(short_rig.beats_s, short_rig.rec, p)
-    assert rc.minutes_with_reference >= 1 and rc.passes
+    assert rc.assessable and rc.passes
 
 
 def test_five_percent_off_the_reference_agrees_and_just_over_does_not(
     monkeypatch: pytest.MonkeyPatch, short_rig: CrossSiteSynth,
 ) -> None:
     p = hp.pair_candidates(short_rig.rec)[0]
-    _fixed_rate(monkeypatch, [400.0])
+    _fixed_rates(monkeypatch, [[400.0]] * 4)
     assert hp.rate_check(_train([420.0]), short_rig.rec, p).passes
     assert not hp.rate_check(_train([421.0]), short_rig.rec, p).passes
 
 
-def test_ninety_five_percent_of_judged_minutes_must_agree(monkeypatch, short_rig) -> None:  # noqa: ANN001
-    p = hp.pair_candidates(short_rig.rec)[0]
-    _fixed_rate(monkeypatch, [400.0] * 20)
-    one_off = _train([400.0] * 19 + [300.0])  # 19 / 20 = 0.95
-    two_off = _train([400.0] * 18 + [300.0, 300.0])
-    assert hp.rate_check(one_off, short_rig.rec, p).passes
-    assert not hp.rate_check(two_off, short_rig.rec, p).passes
-
-
-def test_only_clear_reference_minutes_are_judged_and_none_never_passes(
+def test_ninety_five_percent_of_assessable_minutes_must_agree(
     monkeypatch: pytest.MonkeyPatch, short_rig: CrossSiteSynth,
 ) -> None:
     p = hp.pair_candidates(short_rig.rec)[0]
-    _fixed_rate(monkeypatch, [400.0, np.nan])
-    rc = hp.rate_check(_train([400.0, 100.0]), short_rig.rec, p)
-    assert rc.minutes_with_reference == 1 and rc.passes  # the unclear minute is not judged
-    _fixed_rate(monkeypatch, [np.nan, np.nan])
+    _fixed_rates(monkeypatch, [[400.0] * 20] * 4)
+    assert hp.rate_check(_train([400.0] * 19 + [300.0]), short_rig.rec, p).passes  # 19 / 20
+    assert not hp.rate_check(_train([400.0] * 18 + [300.0, 300.0]), short_rig.rec, p).passes
+
+
+def test_a_minute_whose_references_disagree_by_over_five_percent_is_not_judged(
+    monkeypatch: pytest.MonkeyPatch, short_rig: CrossSiteSynth,
+) -> None:
+    p = hp.pair_candidates(short_rig.rec)[0]
+    # minute 2: references 400 and 424 differ by 5.8% of their median (412) - unassessable
+    _fixed_rates(monkeypatch, [[400.0, 400.0, 400.0], [400.0, 424.0, 400.0], NAN3, NAN3])
+    rc = hp.rate_check(_train([400.0, 100.0, 400.0]), short_rig.rec, p)
+    assert rc.minutes_with_reference == 3 and rc.minutes_assessable == 2 and rc.passes
+    # 400 and 420 differ by 4.9% of their median (410): the minute is judged
+    _fixed_rates(monkeypatch, [[400.0, 400.0], [420.0, 400.0], [np.nan] * 2, [np.nan] * 2])
+    assert hp.rate_check(_train([400.0, 400.0]), short_rig.rec, p).minutes_assessable == 2
+
+
+def test_too_few_assessable_minutes_is_unassessable_and_never_passes(
+    monkeypatch: pytest.MonkeyPatch, short_rig: CrossSiteSynth,
+) -> None:
+    p = hp.pair_candidates(short_rig.rec)[0]
+    # 1 of 3 minutes assessable (< half): unassessable although that minute agrees
+    _fixed_rates(monkeypatch, [[400.0, 400.0, 400.0], [400.0, 450.0, 450.0], NAN3, NAN3])
+    rc = hp.rate_check(_train([400.0, 400.0, 400.0]), short_rig.rec, p)
+    assert rc.minutes_assessable == 1 and not rc.assessable and not rc.passes
+    # 2 of 4 (exactly half): assessable
+    nan4 = [np.nan] * 4
+    _fixed_rates(monkeypatch, [[400.0] * 4, [400.0, 400.0, 450.0, 450.0], nan4, nan4])
+    rc = hp.rate_check(_train([400.0] * 4), short_rig.rec, p)
+    assert rc.minutes_assessable == 2 and rc.assessable and rc.passes
+    _fixed_rates(monkeypatch, [[np.nan] * 2] * 4)
     rc = hp.rate_check(_train([400.0, 400.0]), short_rig.rec, p)
-    assert rc.minutes_with_reference == 0 and not rc.passes
+    assert rc.minutes_with_reference == 0 and not rc.assessable and not rc.passes
 
 
 def test_a_lead_locked_on_another_periodic_source_fools_its_own_gate_not_the_cross_check() -> None:
@@ -267,32 +356,70 @@ def test_a_lead_locked_on_another_periodic_source_fools_its_own_gate_not_the_cro
     own = hc.count_gate(beats, *hc.autocorr_rate(x, FS))
     assert own.passes  # the lead's own gate is fooled: it agrees with itself
     rc = hp.rate_check(beats, w.rec, p)
-    assert rc.minutes_with_reference >= 1 and not rc.passes
+    assert rc.assessable and not rc.passes
 
 
 # --- (b) timing ------------------------------------------------------------------------
 
 
+V = np.arange(1000) * 0.155 + 1.0
+
+
 def test_a_constant_offset_is_removed_and_reported() -> None:
-    v = np.arange(1000) * 0.155 + 1.0
-    tc = hp.timing_check(v + 0.0009, v)
+    tc = hp.timing_check(V + 0.0009, V)
     assert tc.passes and tc.offset_s == pytest.approx(0.0009, abs=1e-9)
+    assert tc.matched_lead == 1.0 and tc.matched_vetted == 1.0 and not tc.disagree
 
 
-def test_ninety_nine_percent_within_two_ms_after_the_offset() -> None:
-    v = np.arange(1000) * 0.155 + 1.0
-    b = v + 0.0009
-    b10, b11 = b.copy(), b.copy()
-    b10[:10] += 0.005  # 990 / 1000 within tolerance
-    b11[:11] += 0.005
-    assert hp.timing_check(b10, v).passes and not hp.timing_check(b11, v).passes
-    b2 = b.copy()
-    b2[:5] += 0.0021 - 0.0  # just outside 2 ms after the offset
-    assert hp.timing_check(b2, v).fraction_within == pytest.approx(0.995)
+def test_identity_within_five_ms_after_the_offset() -> None:
+    b = V + 0.0009
+    b[:20] += 0.0049  # 4.9 ms off: still the same beat
+    assert hp.timing_check(b, V).matched_lead == 1.0
+    b[:20] += 0.0002  # 5.1 ms: not matched
+    assert hp.timing_check(b, V).matched_lead == pytest.approx(0.98)
+
+
+def test_ninety_nine_percent_matched_in_both_directions() -> None:
+    extra11 = np.sort(np.r_[V, V[:11] + 0.07])  # 11 extra lead beats: 1000 / 1011 matched
+    tc = hp.timing_check(extra11, V)
+    assert tc.matched_vetted == 1.0 and tc.matched_lead < 0.99 and not tc.passes
+    tc = hp.timing_check(V[11:], V)  # the lead lacks 11 vetted beats
+    assert tc.matched_lead == 1.0 and tc.matched_vetted == pytest.approx(0.989) and not tc.passes
+    assert hp.timing_check(V[10:], V).passes  # 990 / 1000 = 0.99
+
+
+def test_the_spread_of_matched_differences_is_reported_not_gated() -> None:
+    rng = np.random.default_rng(4)
+    b = V + rng.normal(0.0, 0.0015, V.size).clip(-0.0045, 0.0045)
+    tc = hp.timing_check(b, V)
+    assert tc.passes and 0.001 < tc.sd_matched_s < 0.002
+
+
+def test_more_than_five_percent_unmatched_at_twenty_ms_is_a_disagreement() -> None:
+    b = V.copy()
+    b[::19] += 0.06  # 53 of 1000 moved by 60 ms
+    tc = hp.timing_check(b, V)
+    assert tc.disagree and tc.unmatched_lead_20ms == pytest.approx(53 / 1000)
+    b2 = V.copy()
+    b2[::21] += 0.06  # 48 of 1000: under 5%
+    assert not hp.timing_check(b2, V).disagree
 
 
 def test_no_vetted_beat_fails_the_timing_check() -> None:
     assert not hp.timing_check(np.arange(10.0), np.zeros(0)).passes
+
+
+def test_the_resolution_finds_the_train_whose_unmatched_beats_carry_no_qrs(short_rig) -> None:  # noqa: ANN001
+    truth = short_rig.beats_s
+    rng = np.random.default_rng(6)
+    wrong = truth.copy()
+    k = rng.choice(truth.size, truth.size // 5, replace=False)
+    wrong[k] = truth[k] + rng.uniform(0.045, 0.11, k.size)  # 20% of beats not on a QRS
+    r = hp.resolve_disagreement(truth, np.sort(wrong), short_rig.rec)
+    assert r.other_unmatched >= 0.15 * truth.size and r.other_unmatched_qrs < 0.1
+    assert r.lead_unmatched >= 0.15 * truth.size and r.lead_unmatched_qrs > 0.9
+    flip = hp.resolve_disagreement(np.sort(wrong), truth, short_rig.rec)
+    assert flip.lead_unmatched_qrs < 0.1 and flip.other_unmatched_qrs > 0.9
 
 
 # --- (c) morphology --------------------------------------------------------------------
@@ -300,7 +427,7 @@ def test_no_vetted_beat_fails_the_timing_check() -> None:
 
 def test_the_true_beats_show_the_qrs_on_every_contact(short_rig) -> None:  # noqa: ANN001
     m = hp.morphology_check(short_rig.beats_s, short_rig.rec)
-    assert m.passes and not m.failing
+    assert m.assessable and m.passes and not m.failing
     assert all(m.snr[k] > m.shuffled_max[k] for k in m.snr)
 
 
@@ -310,12 +437,33 @@ def test_beats_that_are_not_the_heart_show_no_qrs(short_rig) -> None:  # noqa: A
     assert not hp.morphology_check(fake, short_rig.rec).passes
 
 
-def test_a_detached_contact_fails_and_is_named() -> None:
-    w = make_cross_site_heart(FS, 65.0, transients_per_s=0.5, open_contact="LVN3",
-                              site_gain=STRONG_STOMACH, seed=7)
-    m = hp.morphology_check(w.beats_s, w.rec)
-    assert "LVN3" in m.failing and not m.passes
-    assert set(m.failing) == {"LVN3"}
+def test_a_detached_contact_fails_unless_it_is_left_out(open_rig) -> None:  # noqa: ANN001
+    m = hp.morphology_check(open_rig.beats_s, open_rig.rec)
+    assert set(m.failing) == {"LVN3"} and not m.passes
+    m2 = hp.morphology_check(open_rig.beats_s, open_rig.rec, detached=frozenset({"LVN3"}))
+    assert m2.excluded == ("LVN3",) and "LVN3" not in m2.snr and m2.assessable and m2.passes
+
+
+def test_fewer_than_four_contacts_or_one_site_is_unassessable(short_rig) -> None:  # noqa: ANN001
+    names = {c.name for c in short_rig.rec.channels if c.role in ("nerve", "stomach")}
+
+    def only(keep: set[str]) -> hp.MorphologyCheck:
+        out = frozenset(names - keep)
+        return hp.morphology_check(short_rig.beats_s, short_rig.rec, detached=out)
+    three = only({"LVN1", "RVN1", "ANT1"})  # three contacts, three sites: too few contacts
+    assert not three.failing and not three.assessable and not three.passes
+    assert not only({"LVN1", "LVN2", "LVN3"}).assessable  # one site
+    # four contacts on ONE site: a fourth left-neck contact, so only the site rule can fail it
+    lvn4 = ChannelInfo(short_rig.rec.data.shape[1], "LVN4", "nerve", "L", 4, None, "independent")
+    src = next(c for c in short_rig.rec.channels if c.name == "LVN2")
+    data = np.column_stack([short_rig.rec.data, short_rig.rec.data[:, src.index]])
+    four = replace(short_rig.rec, data=data, channels=[*short_rig.rec.channels, lvn4])
+    rest = frozenset(c.name for c in four.channels
+                     if c.cuff_id != "L" and c.role in ("nerve", "stomach"))
+    one_site = hp.morphology_check(short_rig.beats_s, four, detached=rest)
+    assert len(one_site.snr) == 4 and not one_site.failing and not one_site.assessable
+    four_two = only({"LVN1", "LVN2", "RVN1", "RVN2"})  # the floor exactly: 4 contacts, 2 sites
+    assert four_two.assessable and four_two.passes
 
 
 def test_a_half_without_events_cannot_pass_the_veto() -> None:
@@ -327,6 +475,14 @@ def test_a_half_without_events_cannot_pass_the_veto() -> None:
     assert h.injected == {} and h.times.size == 0
     rows, _s = hp.gate_half(h, pairs=hp.pair_candidates(w.rec)[:1], only=("LVN1-RVN1", "task05"))
     assert rows and all(np.isnan(r.harm["real"]) and not r.passes for r in rows)
+
+
+def test_the_protocol_never_chooses_a_detached_contact() -> None:
+    w = make_cross_site_heart(FS, 130.0, open_contact="LVN2", seed=12)
+    r = hp.half_split(w.rec)
+    assert "LVN2" in r.detached
+    assert not any("LVN2" in g.lead for g in r.first_pairs)
+    assert r.chosen_pair is not None and "LVN2" not in r.chosen_pair.lead
 
 
 def test_hr_pairs_is_outside_the_generation_hash() -> None:
