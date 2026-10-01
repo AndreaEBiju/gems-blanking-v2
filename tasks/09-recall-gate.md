@@ -1354,6 +1354,41 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
    - Commit the corrected module, with tests and mutants, and record the frozen design.
    - **H runs once, after Andrea says "done" on round 7.**
 
+### RULING 2026-10-02 (b) — round 7; a diagnosable miss class; H go-ahead
+
+**Measured:**
+- **Round 7:** 32/33 raw. On appended table `218e053d` (no existing entry changed), there are 28 targets and 5 below tolerance. **Pooled gate: 269/273, lower bound 0.966. Not cleared.** With 4 target misses, 456 target marks are needed: about 183 more with no further target miss.
+- **The new target miss, s5#m5** (B t01 3_1, a hum recording): max z 2.81 on ANT3. Its only damage is to mmc, on the notched stomach_ref.
+- **Corrected cross-check (`78a5b2d`, development data only):**
+  - A t01 es1 and A t01 1_2 keep their gains; A t04 keeps its gain with LVN3 excluded.
+  - **A t05 is resolved:** 97.4% of the lead's unmatched beats carry the QRS, against 1.3% of the stored L_T findpeaks train's. **The stored A t05 L_T train sits on a non-QRS peak in about a fifth of its beats.**
+  - B t03 ms3 R and H t01 1_2 L are distrusted (check (iii)).
+
+**Rulings:**
+
+1. **A diagnosable miss class: hum recordings, mmc-only damage, below threshold.** Three of the four target misses (s3#m7, s3#m13, s5#m5) are in B hum recordings. Each is below `z_enter` on every detection signal, and each is a target only through mmc damage on the **notched** stomach_ref.
+   - **Hypothesis.** Detection reads un-notched inputs (invariant 43 keeps ANT1 un-notched for detection). In hum recordings, mains leakage inflates the baseline σ of the stomach signals and depresses their z. The consumer reads the cleaner notched signal, so detection is blind to exactly what mmc is sensitive to.
+   - This is branch 1 of task 09's "If it fails": a diagnosable class, which gets a generator feature and a re-measure.
+   - **Measure first, writing nothing to the store:**
+     - (a) The three misses' z on the notched stomach_ref, in detection's own bands and windows. Would any cross `z_enter`?
+     - (b) The same z for every covered target mark in hum recordings, to check the class separates.
+     - (c) The coverage and chance-margin cost of adding the notched stomach_ref signals in hum recordings only.
+   - **If (a) confirms it, the fix is the pre-declared additive extension** (ruling of 2026-09-29, round-4 miss, branch 3):
+     - add the notched stomach_ref signals in hum recordings as extra detection signals;
+     - prove it is a strict superset on every cached region;
+     - keep every original score (the four misses still count);
+     - recompute the chance margin.
+     
+     The generation hash is unchanged and the extension is recorded explicitly. Propose it to me before building.
+
+2. **H go-ahead.** The frozen design is `78a5b2d`. When the A/B re-run and item 4 finish, run H once on every H recording in rounds 3–7, under that exact commit and protocol, with nothing changed. Report per recording with all checks. If it fails, report the failure and do not tune.
+
+3. **A t05's stored L_T train is wrong in about a fifth of its beats.** It is still the stored HRV-grade train and A t05's peri-R source. At adoption it fails the binding real-pattern veto and is replaced (ruling 2026-10-02, 4).
+   - **Report now** which pooled marks' classes depend on A t05's HR or peri-R route, so the size of the change at adoption is known.
+   - **Andrea:** any HRV she has already computed from A t05's L_T findpeaks beats is affected.
+
+4. **B t02 1_3 ANT2 "detached" with (a) newly failing:** report the cause. Do not change the rule for it.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
