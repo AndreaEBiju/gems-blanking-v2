@@ -1220,6 +1220,16 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
 
 5. **Ratified:** the GapAfter implementation and its proofs; the generator carrying the nargin fix; explicit option parsing; and the finding that the earlier fix was a hand edit.
 
+### RULING 2026-10-01 (b) — the stomach_ref notch is a mechanical rule, applied to every hum recording
+
+- **The rule.** The notch rulings ((c) 5 and addendum 5) named three recordings because those were the only ones known. The rule is mechanical: **any recording whose stomach screen flags ANT1 as mains-dominated gets the notch** in the stomach consumers' stomach_ref.
+  - The inputs are chosen by addendum 5's comparison: all stomach_ref inputs if the all-inputs notch changes mmc against ANT1-only, otherwise ANT1 only.
+- **Round 6:** B t03 3_1 and B t03 ms3 are routed with the notch.
+- **B t03 es2:** its unnotched frozen entry is an omission (my error).
+  - Correct it as a routing change: append the corrected entry and recompute every pooled mark.
+  - Decided now, before its effect is known. It holds even though it may reclassify s3#m7 and s3#m13, which are in that recording.
+- **Report the gate twice,** on table `2de52b5d` (as built) and on the corrected table, with every mark that changes class and why. The corrected table governs.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
