@@ -4939,7 +4939,7 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
   - It could not be estimated in A t01 1_2 (28 clean beats for h) or in B t03 es2 (no quiet samples for Σ, at about 31 events/s).
   - Σ rests on only 1.2–2.1 quiet seconds in four recordings.
   - Where h came from a non-passing train, it can point along g (A t04 cos −0.99).
-- **Contacts carrying almost no ground signal:** A t04 LVN3 (g −0.03) and B t03 2_2 LVN3. Contact-health observations, relevant to task 18.
+- **A contact carrying almost no ground signal:** A t04 LVN3 (g −0.03). A contact-health observation, relevant to task 18. *(Corrected 2026-10-02: B t03 2_2 LVN3, listed here earlier, is healthy: g 0.985, agreement 0.999.)*
 
 **Rulings:**
 
@@ -4961,7 +4961,7 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
    - Run H once, on every H recording in rounds 3–6, H t05 2_1 sr included. Report it per recording with all checks. If it fails, report the failure and do not tune.
    - **Adoption is a separate ruling after H.** If adopted, the lead enters `gated_selection` as an additional candidate source, and each recording that gains a train is appended as a routing change with a full recompute.
 
-4. **A note for task 18:** contacts with g near 0 (A t04 LVN3, B t03 2_2 LVN3) are not seeing the shared ground. They are likely open or detached, and must not be used for conduction velocity.
+4. **A note for task 18:** a contact with g near 0 (A t04 LVN3) is not seeing the shared ground. It is likely open or detached, and must not be used for conduction velocity. *(Corrected 2026-10-02: B t03 2_2 LVN3 is healthy.)*
 
 ### RULING 2026-10-02 — the cross-check, corrected on development data before H
 
@@ -5036,6 +5036,41 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
    - **Andrea:** any HRV she has already computed from A t05's L_T findpeaks beats is affected.
 
 4. **B t02 1_3 ANT2 "detached" with (a) newly failing:** report the cause. Do not change the rule for it.
+
+### RULING 2026-10-02 (c) — H result; the pairs lead is adopted; detached contacts leave the rate references
+
+**Measured (H once, under `78a5b2d`, byte-identity checked before each recording):**
+- **H t05 2_1 bl, H t09 2_2 bl and H t01 1_2 bl gain an HRV-grade train that passes every check.** The second-half harm is 0.000 under both injections, rate and morphology pass, and no chosen single channel passes.
+- **H t01 es2 fails** (veto 0.03, rate 0.75).
+- **In all three H stim/recovery recordings, no pair passes the count gate and plausibility at all.**
+- **Development (A/B) gains:** A t01 es1, A t01 1_2 and A t04. A t05 is resolved in the lead's favour: 97.4% of its unmatched beats carry the QRS, against 1.3% for L_T.
+- **All 10 stored HRV-grade trains pass the real-pattern veto** on their full regions. A t05 L_T, B t03 2_2 L_T and B t03 es2 L_T sit exactly at 0.01. The veto cannot see wrong-peak picking.
+- **The hum/mmc class is not explained by baseline inflation.** On notched inputs the three misses peak at z 0.70–2.81. The extension would be a strict superset at negligible cost, but recovers nothing.
+
+**Rulings:**
+
+1. **The pairs-only lead (`78a5b2d`) is adopted** as an additional candidate source in `gated_selection`. Every source faces the same gates, with the real-pattern veto binding (ruling 2026-10-02, 4).
+   - **Incumbent preference:** a stored HRV-grade train that still passes every gate stays, unless rule 2 applies. The lead fills recordings with no passing train. This keeps adoption to the cases with evidence and avoids churn (B t03 2_2 keeps its L_T).
+   - **Recordings that gain:** A t01 es1, A t01 1_2, A t04, H t05 2_1 bl, H t09 2_2 bl, H t01 1_2 bl, and A t05 by replacement (rule 2).
+   - Each recording that gains is appended as a routing change. Its peri-R routes are recomputed from the new train, since hump cuffs distrusted for lack of a train may be restored. Then every pooled mark is recomputed, with all three numbers and the class changes listed.
+   - Beats are stored in Andrea's format with `gapAfter` (`emit/hr_beats.py`).
+
+2. **Disagreement beats incumbency.** Where a stored train and a passing lead disagree on > 5% of beats (unmatched within 20 ms, in either direction), resolve beat by beat by template correlation on the non-detached contacts. The train that carries the QRS wins.
+   - Applied now: A t05 → the lead.
+   - Report the same check for every recording where a stored train and a passing lead coexist.
+
+3. **Detached contacts are left out of the rate references in (a),** as they are left out of (c). A contact that does not see the ground signal is not a physiological reference.
+   - This is decided after H, but it changes no H outcome (no H contact is detached). On development data it changes only B t02 1_3, which gains nothing.
+   - Record it as a post-H amendment to the adopted module, and re-run the A/B and H cross-checks to show that no adoption decision changes.
+
+4. **HR in stim/recovery remains open.** No lead passes there on H, and most stim/recovery recordings without HR stay without it.
+   - The likely cause is stimulation itself, but that is a hypothesis.
+   - **Measure, don't build:** in the H and A stim/recovery recordings, compare the count gate and veto in the 2-minute stim epoch against the 20-minute recovery. Report whether the failures are confined to stim.
+   - Priority is Andrea's call.
+
+5. **The hum/mmc miss class: next hypothesis, measure only.** mmc's damage rule judges a mark against a local ±30 s MAD, while detection uses the whole-region baseline.
+   - Report the three misses' z against a ±30 s local baseline on detection's stomach bands, the same for the covered targets in those spans, and the coverage cost.
+   - Do not propose an extension unless the misses cross `z_enter` and separate from the covered targets.
 
 ### Adapter-check findings, 2026-09-28
 
