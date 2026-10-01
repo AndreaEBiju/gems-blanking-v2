@@ -5072,6 +5072,48 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
    - Report the three misses' z against a ±30 s local baseline on detection's stomach bands, the same for the covered targets in those spans, and the coverage cost.
    - Do not propose an extension unless the misses cross `z_enter` and separate from the covered targets.
 
+**Addendum to ruling 2026-10-02 (c), on storage:**
+- **The stored product must pass on what it is used for.** The half-split protocol exists for honest selection. A stored train covers the whole region, so `gated_selection` judges it on the full region with every gate, the cross-check included.
+- A ruled gain that fails on the full region is not stored. Report it with the cause.
+- If the cause is a defect in how the full-region check is computed, fix it, test it and re-run. If the cause is real, the recording has no gain.
+- Do not split storage into "valid minutes" without a ruling.
+
+### RULING 2026-10-02 (d) — the "fixed-rate" stomach references are a mains defect in the check; fix and re-run
+
+**Measured (full-region adoption pass, `c7358cc`):**
+- A t01 es1 matches its validation.
+- A t05 is replaced by the RVN1−LVN1 pair (rule 2).
+- **A t04 and A t01 1_2 store nothing on the full region.** Rate (a) fails because the stomach references sit at fixed rates, 360.2, 399.6, 423.7 and 480.2 bpm, each constant to ±0.2, while the lead varies smoothly. A t01 1_2 also fails morphology on LVN3 (SNR 7.2 against 7.9).
+- A t03 3_2 bl (round 7, not on the ruled list) would store a pair.
+- B incumbents stay.
+
+**Those rates are 7200/m bpm for integer m** (m = 20, 18, 17, 15 to within 0.01): autocorrelation lags of exactly m/120 s. The references are locking onto **rectified 60 Hz hum** (120 Hz after rectification), not onto any physiological source.
+- This also explains the "≈6% steps" seen earlier: neighbouring m differ by 5–7%.
+- So it is a **defect in how the cross-check reference is computed** (the addendum's first case), not evidence against the lead.
+
+**Rulings:**
+
+1. **Fix the references.**
+   - Notch every rate-reference channel at 60 Hz and its harmonics up to the band edge before rectification and autocorrelation.
+   - Then flag any reference minute whose rate lies within ±0.3 bpm of 7200/m as hum-locked, and treat it as not clear.
+   - Add a test: a synthetic rhythm with rectified hum must not lock onto the 1/120 s grid.
+   - Neither the lead nor the count gate changes. The lead is a left−right difference, so the hum is common mode and cancels.
+
+2. **Re-run the cross-check with the fixed references** on every A/B and H recording, and in the full-region adoption pass.
+   - Report every decision that changes, in either direction.
+   - **A change to an H result is reported as a post-H correction of a defect in the check, not as new evidence.** H t01 es2 fails the veto, so it cannot become a gain.
+
+3. **Check the count gate for the same defect, report only.** For every stored train and every passing pair, count the minutes where the train's own autocorrelation rate sits within ±0.3 bpm of 7200/m.
+   - If the count gate is hum-locked anywhere, report the recording and stop. Do not change the gate without a ruling.
+
+4. **A t01 1_2's LVN3 morphology failure is real under (c).** If it still fails after the fix, A t01 1_2 has no gain. Do not relax (c).
+
+5. **The adopted module applies mechanically to every recording, not only the list known at adoption.**
+   - A recording where full-region `gated_selection` stores a passing pair (every gate and the cross-check) is appended, for example A t03 3_2 bl.
+   - Report such recordings separately as further held-out evidence, since they were never seen during design.
+
+6. **Then append and recompute** as ruled, and push `c7358cc` or its fix.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
