@@ -1206,6 +1206,108 @@ def make_two_source_ground(
     return TwoSourceSynth(rec, g, cardiac, cg, beats_s)
 
 
+CROSS_SITE_CARDIAC: Final[dict[str, float]] = {"R": 1.0, "L": -0.6, "stomach": 0.3}
+"""Far-field cardiac gain per site for :func:`make_cross_site_heart`.
+
+Ruling 2026-10-01 (c) 2: the ground enters every contact with nearly the same gain
+(measured g 0.96-1.05, 99-100% sign agreement) while the heart's dipole projects
+differently onto each site - so a left-right neck difference cancels the ground and
+keeps the heart. Opposite signs on the two necks make that difference the strongest
+cardiac lead, as every chosen pair on A/B was (2026-10-01)."""
+
+
+class CrossSiteSynth(NamedTuple):
+    """Return of :func:`make_cross_site_heart`."""
+
+    rec: Recording
+    beats_s: F64
+    """True R times, s."""
+    transients_s: F64
+    """Ground transient times, s."""
+    ground_gains: dict[str, float]
+    cardiac_gains: dict[str, float]
+    periodic_s: F64
+    """Times of the differential periodic artifact (empty without one), s."""
+
+
+def make_cross_site_heart(
+    fs: float,
+    dur_s: float,
+    *,
+    transients_per_s: float = 2.0,
+    transient_uv: float = 310.0,
+    gain_spread: float = 0.03,
+    cardiac_uv: float = 150.0,
+    site_gain: dict[str, float] | None = None,
+    contact_jitter: float = 0.05,
+    rr_s: float = 0.155,
+    periodic_uv: float = 0.0,
+    periodic_rr_s: float = 0.125,
+    open_contact: str | None = None,
+    seed: int = 0,
+) -> CrossSiteSynth:
+    """Build the shared-ground rig plus a heart whose gain differs between sites.
+
+    :func:`make_shared_ground` (every channel takes the ground with a gain from
+    ``1 +/- gain_spread``) with ``transients_per_s`` 1.2 ms ground transients - the
+    rig's non-cardiac events arrive at seconds^-1 - and the sharp beat-locked waveform
+    of :func:`make_two_source_ground` at ``rr_s`` (2% jitter), entering each channel
+    with its site's gain from ``site_gain`` (:data:`CROSS_SITE_CARDIAC`) times
+    ``1 +/- contact_jitter``.
+
+    ``periodic_uv`` adds a source that is NOT the heart: a 2 ms-sigma pulse train at
+    ``periodic_rr_s`` that enters the left neck at +1 and the right neck at -1 and the
+    stomach not at all - the worst case for a pair lead, which takes it at double
+    strength while the stomach never sees it. With it, the neck channels carry no
+    heart, so a left-right lead can only lock on the artifact.
+    ``open_contact`` names a contact that sees neither the ground nor the heart, only its
+    own noise: a detached contact (g near 0, as A t04 LVN3 measured).
+    """
+    n_tr = max(int(round(transients_per_s * dur_s)), 1)
+    g = make_shared_ground(fs, dur_s, gain_spread=gain_spread, n_transients=n_tr,
+                           transient_uv=transient_uv, seed=seed)
+    sites = site_gain if site_gain is not None else CROSS_SITE_CARDIAC
+    rng = np.random.default_rng(seed + 37)
+    n = g.rec.data.shape[0]
+    t = np.arange(n, dtype=np.float64) / fs
+    beats = []
+    b = 0.1
+    while b < dur_s - 0.1:
+        beats.append(b)
+        b += rr_s * float(rng.uniform(0.98, 1.02))
+    beats_s = np.asarray(beats)
+    cardiac = np.zeros(n)
+    s1, s2 = 0.0004, 0.003
+    for b in beats_s:
+        near = np.abs(t - b) < 0.02
+        u = t[near] - b
+        cardiac[near] += cardiac_uv * (-(u / s1) * np.exp(0.5 - 0.5 * (u / s1) ** 2)
+                                       + 0.5 * np.exp(-0.5 * (u / s2) ** 2))
+    periodic = np.zeros(n)
+    per_s = np.arange(0.07, dur_s - 0.07, periodic_rr_s) if periodic_uv else np.zeros(0)
+    for p in per_s:
+        near = np.abs(t - p) < 0.012
+        periodic[near] += periodic_uv * np.exp(-0.5 * ((t[near] - p) / 0.002) ** 2)
+    data = np.array(g.rec.data, dtype=np.float64)
+    cg: dict[str, float] = {}
+    gg = dict(g.gains)
+    for c in g.rec.channels:
+        site = c.cuff_id if c.role == "nerve" else "stomach"
+        jitter = float(rng.uniform(1 - contact_jitter, 1 + contact_jitter))
+        k = sites.get(site or "stomach", 0.0) * jitter
+        if periodic_uv and c.role == "nerve":
+            k = 0.0
+            data[:, c.index] += (1.0 if c.cuff_id == "L" else -1.0) * periodic
+        cg[c.name] = k
+        data[:, c.index] += k * cardiac
+        if c.name == open_contact:
+            data[:, c.index] -= gg[c.name] * g.common + k * cardiac
+            gg[c.name], cg[c.name] = 0.0, 0.0
+    rec = Recording(fs=g.rec.fs, data=data, channels=g.rec.channels, animal=g.rec.animal,
+                    session=g.rec.session, path=g.rec.path)
+    return CrossSiteSynth(rec, beats_s, g.transients_s, gg, cg, per_s)
+
+
 # ---------------------------------------------------------------------------
 # fixtures
 # ---------------------------------------------------------------------------
