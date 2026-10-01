@@ -4830,6 +4830,44 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
 - `HR_BR_HRVAnalysis_new.m` stays untouched. processing_new stays local and uncommitted until Andrea says otherwise.
 - **Found on the way:** her 100–500 ms rule passes both a missed-beat interval (about 310–380 ms) and findpeaks' floor extras (about 101–116 ms). So HRV computed from her own `findpeaks` beats today counts both as real intervals. Report, per recording already analysed, how many intervals fall into each class (for her information only; no re-analysis unless she asks).
 
+### RULING 2026-10-01 — A/B shows no gain: H is not run; diagnose, and measure tagging instead of vetoing
+
+**Measured (gems `a228a4a`; 10 A/B recordings, 30-point grid, pre-registered rule):**
+- **The template detector gives none of the four development recordings without an HRV-grade train a train, at any combination.**
+  - At the chosen point, 48 of 120 channels have fewer than 50 non-suspect clean beats (41 have zero), 11 split ambiguously, 47 fail the transient veto, and 9 fail only the count gate.
+  - The closest misses fail the veto: A t01 RVN1 matches the count in 100% of minutes but has harm 0.18. A t02 RVN2 is at 74% with harm 0.43.
+- **The no-floor channels are not starved by suspects** (only 1–16% of beats are within 2 ms of an event). Why the clean set is empty was not recorded.
+- **Fiducial alignment on real clean beats:** −0.21 to +0.02 ms.
+- **The parameter set** (k 0.7, height 0.25, width 0.5) was chosen by the third tie-break, with zero gains.
+- **Regression set:** unchanged except B t01, where a template L_T train (SNR 761, 98.0% of stored beats within 2 ms) would replace the stored one.
+- **GapAfter is done** (local in processing_new): identity 9/9, the known-gaps test passes, misspelt names are refused, and the nargin fix now lives in the generator.
+- **Her own findpeaks beats:** floor extras are 0.2–14% of the intervals her 100–500 ms rule accepts. Missed-beat intervals are near zero.
+
+**Rulings:**
+
+1. **H is not run.** A held-out test of a detector that gained nothing on its development set measures nothing and would spend the held-out animal.
+   - The frozen parameter set is void.
+   - The template detector stays out of `gated_selection`. No stored train changes, B t01 included.
+   - H remains unspent for a future design.
+
+2. **The diagnostic pass is approved: one Drive pass with no round open, recording everything.**
+   - **For every channel that yields no train:** the size of the clean set before and after the non-suspect filter, the seed route ((b) or (c)), and the intervals of the seed subtrains against the autocorrelation RR. This tests the hypothesis that a split seed with irregular extras leaves no interval within 10% of the reference.
+   - **For every train that fails the veto:** classify each harmed injection as lost (no beat within 2 ms of the true R), moved (a beat within 2–20 ms), or captured (the transient itself accepted). Report it per channel.
+
+3. **Measure, don't adopt: tagging beats near real transients instead of vetoing the channel.** GapAfter now lets HRV exclude intervals, so a beat near a known transient can be tagged instead of trusted. In that case the measure of harm that matters is wrong intervals that are not tagged.
+   - **Tagging rule** (fixed now): every beat within ±20 ms of a non-cardiac common-mode event found by `find_events` gets both adjacent intervals tagged.
+   - **The injection must be realistic:** a common-mode transient on all nine channels at the recording's own amplitude, so `find_events` can find it, with injections drawn at random times.
+   - **Untagged harm:** the fraction of injections that change the train without the changed interval being tagged.
+   - **Tagging cost:** the fraction of intervals tagged by the recording's own real events.
+   - **Report per channel**, for task 05, findpeaks and the template trains, with the count gate alongside.
+   - Do not adopt anything. A veto redefined as "untagged harm ≤ 1%, tagged fraction ≤ 5%" would be a ruling made after seeing these numbers, so it needs Andrea's decision, with both numbers on the table.
+
+4. **Her findpeaks floor extras are for Andrea to act on.** Up to 14% of accepted intervals are false short intervals, which inflate RMSSD and SDNN in any HRV already computed from those channels.
+   - Possible interim fixes in her own code: a spacing floor relative to the median RR instead of 100 ms, or a prominence floor. Either changes her outputs.
+   - This is her decision. Nothing is changed.
+
+5. **Ratified:** the GapAfter implementation and its proofs; the generator carrying the nargin fix; explicit option parsing; and the finding that the earlier fix was a hand edit.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
