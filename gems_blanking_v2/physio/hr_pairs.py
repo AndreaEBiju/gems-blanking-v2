@@ -57,6 +57,7 @@ from scipy.signal import butter, sosfiltfilt
 
 from gems_blanking_v2.derive.cm_events import Events, find_events
 from gems_blanking_v2.derive.derivations import build_derivations
+from gems_blanking_v2.derive.stomach_alt import notch
 from gems_blanking_v2.physio import hr_channel as hc
 from gems_blanking_v2.physio.rpeaks import (
     DETECT_BAND_HZ,
@@ -90,12 +91,14 @@ __all__ = [
     "gate_half",
     "ground_gains",
     "half_split",
+    "hum_locked",
     "inject_median_pattern",
     "inject_real_patterns",
     "lead_signal",
     "morphology_check",
     "pair_candidates",
     "rate_check",
+    "reference_rate",
     "refined_autocorr_rate",
     "resolve_disagreement",
     "select",
@@ -143,6 +146,12 @@ more than this ((max - min) / median) is unassessable - nothing to judge against
 RATE_MIN_ASSESSABLE: Final = 0.5
 """(a): assessable minutes must be at least this fraction of the minutes with any clear
 reference, or the recording is unassessable (no gain)."""
+MAINS_HZ: Final = 60.0
+"""Ruling 2026-10-02 (d) 1: the rate references are notched at this and its harmonics up
+to the autocorrelation band's upper edge before rectification."""
+HUM_LOCK_BPM: Final = 0.3
+"""A reference minute within this of 7200 / m bpm (an autocorrelation lag of m / 120 s - the
+period grid of rectified 60 Hz) is hum-locked and not clear."""
 QRS_HALF_S: Final = 0.020
 """Template windows for :func:`resolve_disagreement`: +/- this around a beat."""
 
@@ -501,15 +510,19 @@ def half_split(rec: Recording, *, seed: int = 0) -> HalfSplit:
 # ---------------------------------------------------------------------------
 
 
-def refined_autocorr_rate(x: npt.ArrayLike, fs: float) -> tuple[F64, F64]:
+def refined_autocorr_rate(x: npt.ArrayLike, fs: float,
+                          notch_hz: tuple[float, ...] = ()) -> tuple[F64, F64]:
     """:func:`hr_channel.autocorr_rate` with a parabolic sub-lag refinement of its peak.
 
     The same signal, windows, lag range and clarity rule - so the same minutes are clear
     and NaN - but the rate comes from the vertex of the parabola through the peak lag and
     its two neighbours. For the cross-check's references only (ruling 2026-10-02 2); the
-    count gate keeps :func:`hr_channel.autocorr_rate` unchanged.
+    count gate keeps :func:`hr_channel.autocorr_rate` unchanged. ``notch_hz``: zero-phase
+    notches applied after decimation, before the band-pass and the rectification.
     """
     y, fd = hc._decimate_to(np.asarray(x, dtype=np.float64), fs, hc._AC_TARGET_HZ)
+    if notch_hz:
+        y = notch(y, fd, notch_hz)
     sos = butter(4, hc.AC_BAND_HZ, btype="bandpass", fs=fd, output="sos")
     r = np.abs(sosfiltfilt(sos, y))
     w = int(round(hc.AC_WINDOW_S * fd))
@@ -537,6 +550,33 @@ def refined_autocorr_rate(x: npt.ArrayLike, fs: float) -> tuple[F64, F64]:
     return np.asarray(starts, dtype=np.float64), np.asarray(bpm, dtype=np.float64)
 
 
+def hum_locked(bpm: npt.ArrayLike) -> npt.NDArray[np.bool_]:
+    """Per rate, whether it sits within :data:`HUM_LOCK_BPM` of 7200 / m for an integer m.
+
+    Rectified 60 Hz repeats every 1/120 s, so its autocorrelation peaks at lags m / 120 s -
+    rates of 7200 / m bpm (m = 15, 17, 18, 20 measured on animal A's stomach references:
+    480, 423.5, 400, 360). NaN is not locked.
+    """
+    b = np.asarray(bpm, dtype=np.float64)
+    out = np.zeros(b.shape, dtype=bool)
+    ok = np.isfinite(b) & (b > 0)
+    m = np.round(7200.0 / b[ok])
+    out[ok] = (m >= 1) & (np.abs(b[ok] - 7200.0 / np.maximum(m, 1)) <= HUM_LOCK_BPM)
+    return out
+
+
+def reference_rate(x: npt.ArrayLike, fs: float) -> tuple[F64, F64]:
+    """Return a cross-check rate reference: mains-notched, refined, hum-locked minutes unclear.
+
+    Ruling 2026-10-02 (d) 1: :func:`refined_autocorr_rate` with notches at
+    :data:`MAINS_HZ` and every harmonic up to the autocorrelation band's upper edge, then
+    any minute :func:`hum_locked` is set to NaN. The lead and the count gate do not use it.
+    """
+    harmonics = tuple(MAINS_HZ * k for k in range(1, int(hc.AC_BAND_HZ[1] // MAINS_HZ) + 1))
+    starts, bpm = refined_autocorr_rate(x, fs, notch_hz=harmonics)
+    return starts, np.where(hum_locked(bpm), np.nan, bpm)
+
+
 @dataclass(frozen=True)
 class RateCheck:
     """(a): the lead's per-minute rate against references that do not use it."""
@@ -555,7 +595,7 @@ def rate_check(beats_s: npt.ArrayLike, rec: Recording, lead: PairLead,
                detached: frozenset[str] = frozenset()) -> RateCheck:
     """Per minute, the lead's rate against the median clear reference.
 
-    References: :func:`refined_autocorr_rate` on every raw channel of a site the lead
+    References: :func:`reference_rate` on every raw channel of a site the lead
     does not use (a left-right pair uses both necks, so the stomach contacts) and on
     ``stomach_ref``. A minute with a clear reference is ASSESSABLE when its clear
     references agree among themselves within :data:`RATE_REF_SPREAD`; there the lead
@@ -582,7 +622,7 @@ def rate_check(beats_s: npt.ArrayLike, rec: Recording, lead: PairLead,
     rates = []
     starts0: F64 | None = None
     for _name, x in refs:
-        starts, bpm = refined_autocorr_rate(x, fs)
+        starts, bpm = reference_rate(x, fs)
         if starts0 is None:
             starts0 = starts
         assert np.array_equal(starts, starts0), "references share one minute grid"

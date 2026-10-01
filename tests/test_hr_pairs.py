@@ -66,14 +66,25 @@ def test_a_lead_is_the_difference_and_the_recording_is_not_written(rig) -> None:
 
 def _events(rows: list[list[float]], cm: list[float], names: tuple[str, ...]) -> Events:
     k = len(rows)
-    return Events(t_s=np.linspace(1.0, 2.0, k), cm_amp_uv=np.asarray(cm, float),
-                  channel_amp_uv=np.asarray(rows, float), width_s=np.full(k, 0.001), channels=names)
+    return Events(
+        t_s=np.linspace(1.0, 2.0, k),
+        cm_amp_uv=np.asarray(cm, float),
+        channel_amp_uv=np.asarray(rows, float),
+        width_s=np.full(k, 0.001),
+        channels=names,
+    )
 
 
 def _flat(n_ch: int, dur_s: float = 30.0) -> Recording:
     chans = [ChannelInfo(i, f"C{i}", "nerve", "L", i + 1, None, "independent") for i in range(n_ch)]
-    return Recording(fs=FS, data=np.zeros((int(dur_s * FS), n_ch)), channels=chans, animal="SYNTH",
-                     session="s", path=None)
+    return Recording(
+        fs=FS,
+        data=np.zeros((int(dur_s * FS), n_ch)),
+        channels=chans,
+        animal="SYNTH",
+        session="s",
+        path=None,
+    )
 
 
 def test_patterns_are_signed_relative_gains_and_a_zero_median_event_has_none() -> None:
@@ -161,18 +172,34 @@ def test_the_second_half_never_changes_the_choice_only_the_verdict(rig) -> None:
     data = np.array(w.rec.data)
     silent = {"R": 0.0, "L": 0.0, "stomach": 0.0}
     no_heart = make_cross_site_heart(FS, 130.0, site_gain=silent, seed=8)
-    data[n:] = no_heart.rec.data[n:2 * n]  # the second half keeps the ground, not the heart
+    data[n:] = no_heart.rec.data[n : 2 * n]  # the second half keeps the ground, not the heart
     bad = hp.half_split(replace(w.rec, data=data))
     assert bad.chosen_pair is not None and r.chosen_pair is not None
-    assert (bad.chosen_pair.lead, bad.chosen_pair.detector, bad.chosen_pair.snr) == \
-        (r.chosen_pair.lead, r.chosen_pair.detector, r.chosen_pair.snr)
+    assert (bad.chosen_pair.lead, bad.chosen_pair.detector, bad.chosen_pair.snr) == (
+        r.chosen_pair.lead,
+        r.chosen_pair.detector,
+        r.chosen_pair.snr,
+    )
     assert bad.second_pair is not None and not bad.second_pair.passes and not bad.gained
 
 
-def _gate(snr: float, *, count: bool = True, plaus: bool = True, real: float = 0.0,
-          median: float = 0.0, name: str = "x") -> hp.LeadGate:
-    cg = hc.CountGate(minutes=1, clear_minutes=1, fraction_within=1.0 if count else 0.0,
-                      median_abs_dev=0.0, assessable=True, passes=count)
+def _gate(
+    snr: float,
+    *,
+    count: bool = True,
+    plaus: bool = True,
+    real: float = 0.0,
+    median: float = 0.0,
+    name: str = "x",
+) -> hp.LeadGate:
+    cg = hc.CountGate(
+        minutes=1,
+        clear_minutes=1,
+        fraction_within=1.0 if count else 0.0,
+        median_abs_dev=0.0,
+        assessable=True,
+        passes=count,
+    )
     harm = {"real": real, "median": median}
     return hp.LeadGate(name, "task05", np.zeros(0), snr, cg, 0.0, 0.0, plaus, harm)
 
@@ -185,8 +212,11 @@ def test_selection_is_the_best_passing_snr_and_the_veto_binding_is_the_real_patt
 
 
 def test_with_none_passing_the_least_harm_is_judged_and_with_no_count_nothing() -> None:
-    rows = [_gate(90.0, real=0.05, name="a"), _gate(10.0, real=0.02, name="b"),
-            _gate(99.0, count=False, name="c")]
+    rows = [
+        _gate(90.0, real=0.05, name="a"),
+        _gate(10.0, real=0.02, name="b"),
+        _gate(99.0, count=False, name="c"),
+    ]
     assert hp.select(rows).lead == "b"
     assert hp.select([_gate(99.0, count=False), _gate(80.0, plaus=False)]) is None
 
@@ -200,8 +230,9 @@ def test_the_veto_threshold_is_inclusive_at_one_percent() -> None:
 
 @pytest.fixture(scope="module")
 def open_rig() -> CrossSiteSynth:
-    return make_cross_site_heart(FS, 65.0, transients_per_s=2.0, open_contact="LVN3",
-                                 site_gain=STRONG_STOMACH, seed=7)
+    return make_cross_site_heart(
+        FS, 65.0, transients_per_s=2.0, open_contact="LVN3", site_gain=STRONG_STOMACH, seed=7
+    )
 
 
 def _keep_all(ev: Events) -> npt.NDArray[np.bool_]:
@@ -227,6 +258,7 @@ def test_detachment_is_g_below_two_tenths_or_agreement_below_three_quarters() ->
     def rows(col3: list[float]) -> list[list[float]]:
         # C1 just above |g| 0.2, C2 just below
         return [[1.0, 1.0, 1.0, 0.21, 0.19, col3[k]] for k in range(n)]
+
     ev = _events(rows(_sign_column(n, 10)), [1.0] * n, names)  # C3: 30 / 40 = 0.75 agree
     assert hp.detached_contacts(ev, np.ones(n, bool)) == frozenset({"C2"})
     ev = _events(rows(_sign_column(n, 11)), [1.0] * n, names)  # C3: 29 / 40, under three quarters
@@ -248,7 +280,8 @@ def _fixed_rates(monkeypatch: pytest.MonkeyPatch, per_ref: list[list[float]]) ->
 
     def fake(_x: object, _fs: float) -> tuple[F64, F64]:
         return starts, np.asarray(next(calls), float)
-    monkeypatch.setattr(hp, "refined_autocorr_rate", fake)
+
+    monkeypatch.setattr(hp, "reference_rate", fake)
 
 
 def _train(bpm_per_minute: list[float]) -> F64:
@@ -299,7 +332,8 @@ def test_the_true_beats_agree_with_a_clear_stomach_reference(short_rig) -> None:
 
 
 def test_five_percent_off_the_reference_agrees_and_just_over_does_not(
-    monkeypatch: pytest.MonkeyPatch, short_rig: CrossSiteSynth,
+    monkeypatch: pytest.MonkeyPatch,
+    short_rig: CrossSiteSynth,
 ) -> None:
     p = hp.pair_candidates(short_rig.rec)[0]
     _fixed_rates(monkeypatch, [[400.0]] * 4)
@@ -308,7 +342,8 @@ def test_five_percent_off_the_reference_agrees_and_just_over_does_not(
 
 
 def test_ninety_five_percent_of_assessable_minutes_must_agree(
-    monkeypatch: pytest.MonkeyPatch, short_rig: CrossSiteSynth,
+    monkeypatch: pytest.MonkeyPatch,
+    short_rig: CrossSiteSynth,
 ) -> None:
     p = hp.pair_candidates(short_rig.rec)[0]
     _fixed_rates(monkeypatch, [[400.0] * 20] * 4)
@@ -317,7 +352,8 @@ def test_ninety_five_percent_of_assessable_minutes_must_agree(
 
 
 def test_a_minute_whose_references_disagree_by_over_five_percent_is_not_judged(
-    monkeypatch: pytest.MonkeyPatch, short_rig: CrossSiteSynth,
+    monkeypatch: pytest.MonkeyPatch,
+    short_rig: CrossSiteSynth,
 ) -> None:
     p = hp.pair_candidates(short_rig.rec)[0]
     # minute 2: references 400 and 424 differ by 5.8% of their median (412) - unassessable
@@ -330,7 +366,8 @@ def test_a_minute_whose_references_disagree_by_over_five_percent_is_not_judged(
 
 
 def test_too_few_assessable_minutes_is_unassessable_and_never_passes(
-    monkeypatch: pytest.MonkeyPatch, short_rig: CrossSiteSynth,
+    monkeypatch: pytest.MonkeyPatch,
+    short_rig: CrossSiteSynth,
 ) -> None:
     p = hp.pair_candidates(short_rig.rec)[0]
     # 1 of 3 minutes assessable (< half): unassessable although that minute agrees
@@ -348,8 +385,15 @@ def test_too_few_assessable_minutes_is_unassessable_and_never_passes(
 
 
 def test_a_lead_locked_on_another_periodic_source_fools_its_own_gate_not_the_cross_check() -> None:
-    w = make_cross_site_heart(FS, 65.0, transients_per_s=0.5, periodic_uv=300.0,
-                              periodic_rr_s=0.125, site_gain=STRONG_STOMACH, seed=6)
+    w = make_cross_site_heart(
+        FS,
+        65.0,
+        transients_per_s=0.5,
+        periodic_uv=300.0,
+        periodic_rr_s=0.125,
+        site_gain=STRONG_STOMACH,
+        seed=6,
+    )
     p = next(p for p in hp.pair_candidates(w.rec) if p.name == "LVN1-RVN1")
     x = hp.lead_signal(w.rec, p)
     beats = np.asarray(detect_rpeaks(x, FS).t_s, float)
@@ -450,6 +494,7 @@ def test_fewer_than_four_contacts_or_one_site_is_unassessable(short_rig) -> None
     def only(keep: set[str]) -> hp.MorphologyCheck:
         out = frozenset(names - keep)
         return hp.morphology_check(short_rig.beats_s, short_rig.rec, detached=out)
+
     three = only({"LVN1", "RVN1", "ANT1"})  # three contacts, three sites: too few contacts
     assert not three.failing and not three.assessable and not three.passes
     assert not only({"LVN1", "LVN2", "LVN3"}).assessable  # one site
@@ -458,8 +503,9 @@ def test_fewer_than_four_contacts_or_one_site_is_unassessable(short_rig) -> None
     src = next(c for c in short_rig.rec.channels if c.name == "LVN2")
     data = np.column_stack([short_rig.rec.data, short_rig.rec.data[:, src.index]])
     four = replace(short_rig.rec, data=data, channels=[*short_rig.rec.channels, lvn4])
-    rest = frozenset(c.name for c in four.channels
-                     if c.cuff_id != "L" and c.role in ("nerve", "stomach"))
+    rest = frozenset(
+        c.name for c in four.channels if c.cuff_id != "L" and c.role in ("nerve", "stomach")
+    )
     one_site = hp.morphology_check(short_rig.beats_s, four, detached=rest)
     assert len(one_site.snr) == 4 and not one_site.failing and not one_site.assessable
     four_two = only({"LVN1", "LVN2", "RVN1", "RVN2"})  # the floor exactly: 4 contacts, 2 sites
@@ -487,3 +533,52 @@ def test_the_protocol_never_chooses_a_detached_contact() -> None:
 
 def test_hr_pairs_is_outside_the_generation_hash() -> None:
     assert "gems_blanking_v2.physio.hr_pairs" not in chain.generation_modules()
+
+
+# --- mains-locked references (ruling 2026-10-02 (d)) -----------------------------------------
+
+
+@pytest.fixture(scope="module")
+def hum_rhythm() -> tuple[F64, float]:
+    """Build a 372.7 bpm rhythm under 60 Hz mains with harmonics, as on animal A's stomach."""
+    t = np.arange(int(185 * FS)) / FS
+    rr = 0.161
+    x = np.zeros_like(t)
+    for b in np.arange(0.1, 184.9, rr):
+        near = np.abs(t - b) < 0.012
+        x[near] += 40.0 * np.exp(-0.5 * ((t[near] - b) / 0.002) ** 2)
+    x += 300.0 * np.sin(2 * np.pi * 60.0 * t) + 90.0 * np.sin(2 * np.pi * 120.0 * t + 0.3)
+    x += 60.0 * np.sin(2 * np.pi * 180.0 * t)
+    x += np.random.default_rng(5).normal(0.0, 2.0, t.size)
+    return x, 60.0 / rr
+
+
+def test_rectified_hum_locks_the_unnotched_reference_onto_the_120th_grid(hum_rhythm) -> None:  # noqa: ANN001
+    x, _true = hum_rhythm
+    _s, raw = hp.refined_autocorr_rate(x, FS)
+    clear = np.isfinite(raw)
+    assert clear.sum() >= 2 and hp.hum_locked(raw[clear]).all()  # the fixture reproduces the defect
+    _s, gate = hc.autocorr_rate(x, FS)
+    assert np.array_equal(np.isfinite(gate), clear)  # the count gate's own rate is unchanged
+
+
+def test_the_notched_reference_finds_the_rhythm_and_never_the_grid(hum_rhythm) -> None:  # noqa: ANN001
+    x, true = hum_rhythm
+    _s, ref = hp.reference_rate(x, FS)
+    ok = np.isfinite(ref)
+    assert ok.any() and not hp.hum_locked(ref).any()
+    assert np.all(np.abs(ref[ok] - true) / true < 0.01)
+
+
+def test_a_reference_minute_on_the_mains_grid_is_not_clear(monkeypatch: pytest.MonkeyPatch) -> None:
+    starts = np.arange(6) * 60.0
+    rates = np.array([400.0, 372.7, 360.2, 400.29, 400.31, np.nan])  # 7200/18 = 400, 7200/20 = 360
+
+    def fake(_x: object, _fs: float, notch_hz: tuple[float, ...] = ()) -> tuple[F64, F64]:
+        assert notch_hz == (60.0, 120.0)  # mains and its harmonic below the 150 Hz band edge
+        return starts, rates
+
+    monkeypatch.setattr(hp, "refined_autocorr_rate", fake)
+    _s, ref = hp.reference_rate(np.zeros(10), FS)
+    assert np.isnan(ref[[0, 2, 3, 5]]).all()  # within 0.3 bpm of 7200/m: hum-locked
+    assert ref[1] == 372.7 and ref[4] == 400.31
