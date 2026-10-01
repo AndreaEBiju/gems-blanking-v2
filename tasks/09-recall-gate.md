@@ -1315,6 +1315,45 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
 
 4. **A note for task 18:** contacts with g near 0 (A t04 LVN3, B t03 2_2 LVN3) are not seeing the shared ground. They are likely open or detached, and must not be used for conduction velocity.
 
+### RULING 2026-10-02 — the cross-check, corrected on development data before H
+
+**Measured (pairs-only, commit `775a809`, A/B only):** under ruling (d) 2 as written, only A t01 es1 keeps its gain. The breakdown:
+- **(a) A t01 1_2 and B t01 fail on reference quantisation.** The stomach references' autocorrelation steps by about 6% at these rates, and the median of two split references lands between steps.
+- **(b) B t01 and B t03 2_2 miss 99% narrowly:** 99.2% and 99.1% of beats fall within 3 ms (between-lead fiducial jitter). B t02 1_3 passed with a spread of ±0.7 ms.
+- **(b) A t05 is a genuine disagreement:** about 21% of beats on each side are unmatched within 20 ms, though per-minute counts agree. Its "vetted" L_T itself fails the real-pattern veto (0.04).
+- **(c) A t04 fails only on the detached LVN3** (SNR 5.4 against a shuffle maximum of 16.4). Every healthy contact shows the QRS at 93–227.
+- **B t03 2_2's chosen pair uses the detached LVN3.**
+
+**Changing the check now is allowed.** It is part of the design and H is unspent. But A/B results under the corrected check are no longer evidence; H is.
+
+**The corrections are physical ones, not looser thresholds:**
+
+1. **Detached contacts.** A contact is detached if its first-half |g| < 0.2 or its sign agreement is < 0.75. This rule comes from the ground-signal physics, not from the cross-check.
+   - A pair containing a detached contact is **not a candidate**.
+   - **(c)** requires the QRS on every non-detached contact, with at least 4 non-detached contacts on at least 2 sites. Fewer than that means unassessable, so no gain.
+
+2. **(a) Measure the reference better rather than widening the tolerance.**
+   - Cross-check references use parabolic sub-lag refinement of the autocorrelation peak. The count gate itself is unchanged.
+   - A minute whose clear references disagree among themselves by > 5% is unassessable, since there is nothing to judge against.
+   - **Pass:** agreement within 5% in ≥ 95% of assessable minutes, where assessable minutes are at least half of the minutes with any clear reference. Otherwise the recording is unassessable, so no gain.
+
+3. **(b) Identity is the question, not fiducial precision.** The veto already judges precision.
+   - Match beats within **5 ms** after the constant offset, which is far below half an RR, so a wrong beat cannot match. Require ≥ 99% matched **in both directions**.
+   - Report the SD of the matched differences; it is not a gate.
+   - **A reference that fails the binding real-pattern veto is not a valid timing reference,** so (b) does not apply.
+   - **But two trains that disagree by more than 5% of beats** (unmatched within 20 ms, either direction) mean at least one is wrong. Neither is trusted until a beat-by-beat check resolves which one carries the QRS: for each unmatched beat, the template correlation on the non-detached raw contacts.
+   - Until then **A t05 gains nothing.** Report the resolution.
+
+4. **The real-pattern veto is the binding veto for every source.**
+   - When the lead is adopted, `gated_selection` re-vets every candidate source (task 05, findpeaks and the lead) under it, and every changed recording is appended as a routing change with a full recompute.
+   - Report now, without writing anything, which stored HRV-grade trains fail it (A t05 L_T is one).
+
+5. **Order:**
+   - Re-run the A/B cross-check under corrections 1–3, with the candidate list cut by correction 1.
+   - Report it as development data only.
+   - Commit the corrected module, with tests and mutants, and record the frozen design.
+   - **H runs once, after Andrea says "done" on round 7.**
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
