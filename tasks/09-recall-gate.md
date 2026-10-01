@@ -1272,6 +1272,13 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
 
 4. **The round-record note is confirmed.** Add the `notes` entry to `change_2de52b5d2537d0b2_to_628d2a28cd1f5ed5.json`, written atomically, as proposed.
 
+**Amendments to ruling (c), 2026-10-01 (applied by the build):**
+1. **The binding veto, for every lead, is the real-pattern injection:** each transient carries one real non-cardiac event's gain pattern and amplitude. The median-g injection is circular for the weighted lead (w·g = 0 cancels it by construction), so it is reported only.
+2. **Half-split protocol.** Everything is estimated and chosen on the first half: event classes, g, h, Σ, w, the best lead and the best single channel. The second half judges only those choices.
+   - A recording gains a train only if the chosen lead passes on the second half and the chosen single channel does not.
+   - Report how many candidates passed on the first half.
+   - Second-half per-minute weights may use that minute's own g, since labels play no part. Drift is tested out of sample.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
