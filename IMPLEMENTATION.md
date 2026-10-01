@@ -4927,6 +4927,42 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
    - Report how many candidates passed on the first half.
    - Second-half per-minute weights may use that minute's own g, since labels play no part. Drift is tested out of sample.
 
+### RULING 2026-10-01 (d) — the cross-site lead works on A/B; freeze a pairs-only design, cross-check it, then H once
+
+**Measured (half-split protocol, 10 A/B recordings; H unspent; nothing written to the store):**
+- **A t01, A t01 1_2 and A t04, which have no single-channel HRV-grade train, each gain one on the held-out half** from a left−right neck contact pair (A t01 via the per-minute weighted lead). The harm is 0.000 under both injections.
+- **A t05's gain is real:** its stored L_T fails the real-pattern veto on the second half (0.04).
+- **B t01 and B t03 2_2's "gains" are selection artifacts:** SNR picked a raw contact over an L_T that also passed.
+- **A t02 and B t03 es2 fail** the second half's count gate (0.889 and 0.80), not the veto.
+- **g is 0.96–1.05 on every contact**, with 99–100% sign agreement, and does not drift: the first-half w leaks ≤ 0.04 on the second half. Every chosen pair is left−right neck; none involves the stomach.
+- **The weighted lead is fragile:**
+  - It could not be estimated in A t01 1_2 (28 clean beats for h) or in B t03 es2 (no quiet samples for Σ, at about 31 events/s).
+  - Σ rests on only 1.2–2.1 quiet seconds in four recordings.
+  - Where h came from a non-passing train, it can point along g (A t04 cos −0.99).
+- **Contacts carrying almost no ground signal:** A t04 LVN3 (g −0.03) and B t03 2_2 LVN3. Contact-health observations, relevant to task 18.
+
+**Rulings:**
+
+1. **The design frozen for H is pairs only.**
+   - **Candidates:** the 9 left−right neck contact differences in both orientations (18), each with task 05 and findpeaks.
+   - **Not in the design:** the weighted lead, cross-site pairs involving the stomach, and the template detector.
+   - **Why:** pairs carried the substantive result, need neither h nor Σ, and fewer candidates means less selection inflation. Restricting the candidates is a design decision made on development data, with H unspent.
+   - **No Σ floor is set**, since the weighted lead is out.
+   - **Report from the existing records (no re-run):** whether pairs-only still gives A t01, A t01 1_2, A t04 and A t05 a train under the same half-split selection.
+
+2. **An independent count cross-check is required before H**, as the build proposed. A lead locked on another periodic source would pass its own count gate. Run it on every recording, against references that do not use the lead:
+   - **(a) Rate:** per minute, the lead's beat rate against the autocorrelation rate of each other site's raw channels and of stomach_ref, wherever that minute is clear. The lead passes if it agrees within 5% with the median clear reference in ≥ 95% of minutes that have one.
+   - **(b) Timing, where a vetted train exists** (A t05, B recordings): ≥ 99% of the lead's beats within 2 ms of the vetted beats, plus a constant offset, which is reported.
+   - **(c) Morphology:** the lead's beat-locked template on each raw contact must show the QRS (template SNR on the raw contacts above that contact's own noise-shuffled template).
+   - A recording keeps its gain only if (a) and (c) pass, and (b) where applicable.
+
+3. **Freeze, then H once.**
+   - Commit the pairs-only module with tests and mutants, outside the hash. Record the commit, the candidate list, the selection rule, the half-split protocol, the binding real-pattern veto and the cross-check.
+   - Run H once, on every H recording in rounds 3–6, H t05 2_1 sr included. Report it per recording with all checks. If it fails, report the failure and do not tune.
+   - **Adoption is a separate ruling after H.** If adopted, the lead enters `gated_selection` as an additional candidate source, and each recording that gains a train is appended as a routing change with a full recompute.
+
+4. **A note for task 18:** contacts with g near 0 (A t04 LVN3, B t03 2_2 LVN3) are not seeing the shared ground. They are likely open or detached, and must not be used for conduction velocity.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
