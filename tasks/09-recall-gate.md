@@ -1230,6 +1230,15 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
   - Decided now, before its effect is known. It holds even though it may reclassify s3#m7 and s3#m13, which are in that recording.
 - **Report the gate twice,** on table `2de52b5d` (as built) and on the corrected table, with every mark that changes class and why. The corrected table governs.
 
+**Applied 2026-10-01 (corrected table `628d2a28`):**
+- **All three hum recordings take the all-inputs notch.** mmc Jaccard between ANT1-only and all inputs: 0.72 (es2), 0.58 (3_1), 0.31 (ms3).
+- **Pooled gate: 242/245, lower bound 0.967. Not cleared.**
+  - On `2de52b5d` as built it was 238/239 (0.9803).
+  - The difference is s3#m7 and s3#m13, which become target misses through mmc damage on the notched stomach_ref.
+  - Their `not_target` closure stands as Andrea's classification. The scores stand (closure rule 2).
+- **About 141 more target marks** with no new target miss are needed (386 at 3 misses).
+- **slow_wave is not immune to the notch.** In B t03 3_1 it removed slow_wave damage from s4#m6 and s4#m7. Ruling (c) 5's "slow_wave untouched" holds only for the first three recordings; the all-inputs comparison stays the mechanical rule.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
