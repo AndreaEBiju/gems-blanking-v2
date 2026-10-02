@@ -5175,6 +5175,44 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
 3. **Mask-grade pairs need the cross-check.** A pair establishes that it is cardiac only through (a) and (c). A mask-grade pair (used for peri-R, where the veto is not required) must therefore pass (a) and (c).
    - Re-check A t02 and A t01 3_2 sr. If either fails, its peri-R route reverts. That is a routing change, with the recompute.
 
+### RULING 2026-10-02 (g) — per-minute storage: reading A with a majority rule 2; the trailing minute; rejected minutes reach Andrea as blanked time
+
+**Measured (gems `175a76d`, development only, nothing appended):**
+- **Andrea's windowing, read from `processing_new`:** HR uses 60 s windows (the longest clean stretch); beat counts and HRV use 20 s windows (count rate kept if ≥ 50% of the window is valid); all are centred with a 1 s step. There is no 60-minute HR window.
+- **Under reading A** (the literal reading of (f) 2): 18 of 19 incumbents keep their trains, and five stim/recovery recordings gain pair trains (11–18 of 19 minutes valid). B t01 3_1 loses its incumbent: rule 2 against a pair failing (a) is unresolved, since both trains' unmatched beats carry the QRS (0.72 vs 0.85).
+- **Under reading B** (pairs must also pass (a) over the recording), those five recordings store nothing.
+- **The trailing partial minute** (about 49 s) is never assessed, so its beats are removed even from trains that pass end to end.
+- **`HR_BR_HRVAnalysis_beats.m` uses `gapAfter` only for RR intervals.** A removed minute reads as clean time with no beats, so HR and counts across it read low.
+- **Both mask-grade pairs fail (a) by one minute each** (A t01 3_2 sr minute 14: +6.1%; A t02 minute 8: −5.1%). Their peri-R routes revert.
+
+**Rulings:**
+
+1. **Reading A stands.** In per-minute storage a pair is eligible on the recording-level gates (veto with precision, plausibility, morphology (c), timing (b) where it applies). Per-minute (a) removes the minutes it fails.
+   - **Why:** every minute that is kept has its rate confirmed against independent references, and (c) confirms the QRS across the recording. Identity is established for exactly the minutes stored.
+   - Item 3's requirement that mask-grade pairs pass (a) over the recording stays. A mask covers the whole recording and has no per-minute gaps.
+
+2. **Rule 2 needs a clear winner.** Train X wins over train Y only if X's unmatched beats carry the QRS in a majority (> 0.5) and Y's in a minority (< 0.5).
+   - **Otherwise the comparison is ambiguous.** An incumbent stays. With no incumbent, neither train is stored, and the recording is reported.
+   - **Effect:** A t05 (0.974 vs 0.002) and A t01 es1 (0.867 vs 0.022) are unchanged. B t01 3_1 (0.72 vs 0.85) keeps its incumbent. B t03 3_1 (pair 0.88 vs L_T 0.32) goes to the pair.
+   - This tightens the rule. The ruled cases already met it.
+
+3. **The trailing partial minute** is assessed with the same tests if it is ≥ 30 s long, with the count test scaled to its duration. Otherwise it is a tagged gap.
+
+4. **Andrea, 2026-10-02: add `BlankSpans`.** `HR_BR_HRVAnalysis_beats.m` gets an optional input `'BlankSpans'`: an N×2 list of [start stop] times read from the beats file's new `blankSpans` field.
+   - Those spans are merged into her blank mask, so the 60 s HR and 20 s count/HRV windows treat rejected minutes exactly as artifact blanking.
+   - `gapAfter` stays for RR.
+   - With `'BlankSpans'` absent, outputs are identical (re-run the 9/9 identity proof).
+   - Add a test: a stored train with a removed minute gives the same HR in windows away from the span, and treats windows across it by her ≥ 50%-valid rule.
+   - `HR_BR_HRVAnalysis_new.m` stays untouched, and processing_new stays local and uncommitted.
+
+5. **Then append as one routing change from `4055cdce`:**
+   - per-minute storage under rulings 1–3 for every recording;
+   - the two mask-grade reverts (A t01 3_2 sr, A t02);
+   - peri-R recomputed from any changed train;
+   - the full recompute with all three numbers.
+   
+   Report: per recording, valid minutes, longest run, and Andrea's passing 60 s HR and 20 s count windows with `BlankSpans` applied. Push after verification.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
