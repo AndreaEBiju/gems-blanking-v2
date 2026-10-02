@@ -5213,6 +5213,17 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
    
    Report: per recording, valid minutes, longest run, and Andrea's passing 60 s HR and 20 s count windows with `BlankSpans` applied. Push after verification.
 
+**Applied 2026-10-02 (table `6fac53ee`, gems `21d82a9`):**
+- **Pooled gate 277/281 (lower bound 0.966), not cleared.** Excluded = target 307/311; raw 328/332; chance margin +0.151.
+- Per-minute storage gives HR to five stim/recovery recordings that had none (12–19 of 20 minutes valid). Andrea's MATLAB matches the emulated window counts on four files.
+- **Ratified interpretations:**
+  - `blankSpans` is stored as 1-based inclusive sample indices (her `blankIdx` convention).
+  - Peri-R stays placed by whole-recording trains only.
+  - A mark within 0.2 s of a rejected HR span is excluded for HR.
+  - Rule 2's majority test applies in both choosers.
+- **Seed `perir.py`'s chance-loss sampler,** so that its exposure numbers reproduce. No routing field depends on them.
+- **For Andrea (her code, her decision):** `processing_new` drops beats within 0.75 s of any blank but counts that time as valid, so count rates read slightly low next to every blank. Fixing it means excluding the edge-buffer time from valid seconds too.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
