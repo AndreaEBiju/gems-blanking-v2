@@ -23,6 +23,7 @@ OUTSIDE THE GENERATION HASH: the detection chain detects beats on ``R_T``
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Final
 
@@ -51,6 +52,10 @@ __all__ = [
     "AC_BPM",
     "CARRIES_QRS",
     "DERIVED_CANDIDATES",
+    "HUM_LOCK_BPM",
+    "HUM_LOCK_MINUTES",
+    "MAINS_HZ",
+    "MAX_INJECTIONS",
     "PROVISIONAL_AC_MIN_PEAK",
     "PROVISIONAL_MAX_COUNT_DEV",
     "PROVISIONAL_MAX_TRANSIENT_HARM",
@@ -62,8 +67,12 @@ __all__ = [
     "count_gate",
     "findpeaks_replica",
     "gated_selection",
+    "harm_is_settled",
     "hr_candidates",
+    "hum_grid",
+    "hum_locked_persistent",
     "implausible_fraction",
+    "mains_harmonics",
     "peri_r_train",
     "pick_train",
     "transient_harm",
@@ -252,6 +261,57 @@ FINDPEAKS_EDGE_S: Final = 0.75
 DETECTORS: Final[tuple[str, str]] = ("task05", "findpeaks")
 
 
+MAINS_HZ: Final = 60.0
+"""Ruling 2026-10-02 (d)/(e): every autocorrelation input - the count gate's and the
+cross-check references' - is notched at this and its harmonics up to the band's upper edge
+(:func:`mains_harmonics`) before rectification, or rectified mains repeats every 1/120 s and
+the autocorrelation locks onto lags m / 120 s (7200 / m bpm)."""
+HUM_LOCK_BPM: Final = 0.3
+HUM_LOCK_MINUTES: Final = 3
+"""Ruling 2026-10-02 (e) 2: a minute is hum-locked only when its rate sits within
+:data:`HUM_LOCK_BPM` of the SAME 7200 / m value for at least this many consecutive clear
+minutes - a mains lock holds to +/-0.2 bpm for minutes; a heart rarely stays within 0.6 bpm
+for three. Hum-locked minutes are not clear."""
+
+
+def mains_harmonics() -> tuple[float, ...]:
+    """Return :data:`MAINS_HZ` and its harmonics up to :data:`AC_BAND_HZ`'s upper edge."""
+    return tuple(MAINS_HZ * k for k in range(1, int(AC_BAND_HZ[1] // MAINS_HZ) + 1))
+
+
+def hum_grid(bpm: npt.ArrayLike) -> npt.NDArray[np.int64]:
+    """Per rate, the m of the 7200 / m value it sits within :data:`HUM_LOCK_BPM` of; 0 if none."""
+    b = np.asarray(bpm, dtype=np.float64)
+    out = np.zeros(b.shape, dtype=np.int64)
+    ok = np.isfinite(b) & (b > 0)
+    m = np.maximum(np.round(7200.0 / b[ok]), 1).astype(np.int64)
+    hit = np.abs(b[ok] - 7200.0 / m) <= HUM_LOCK_BPM
+    out[np.flatnonzero(ok)[hit]] = m[hit]
+    return out
+
+
+def hum_locked_persistent(bpm: npt.ArrayLike) -> npt.NDArray[np.bool_]:
+    """Return, per minute, whether it sits in a persistent mains lock.
+
+    A lock is a run of >= :data:`HUM_LOCK_MINUTES` consecutive clear minutes all on the same
+    7200 / m value (:func:`hum_grid`); an unclear minute breaks a run.
+    """
+    g = hum_grid(bpm)
+    out = np.zeros(g.shape, dtype=bool)
+    i = 0
+    while i < g.size:
+        if g[i] == 0:
+            i += 1
+            continue
+        j = i
+        while j + 1 < g.size and g[j + 1] == g[i]:
+            j += 1
+        if j - i + 1 >= HUM_LOCK_MINUTES:
+            out[i:j + 1] = True
+        i = j + 1
+    return out
+
+
 def _decimate_to(x: F64, fs: float, target_hz: float) -> tuple[F64, float]:
     """Decimate (FIR, zero phase) in stages of at most 13 toward ``target_hz``."""
     y = np.asarray(x, dtype=np.float64)
@@ -273,9 +333,18 @@ def autocorr_rate(x: npt.ArrayLike, fs: float) -> tuple[F64, F64]:
     gives the rate. The nearest lag (~1 ms steps) is within 0.5% at 550 bpm, a tenth
     of :data:`PROVISIONAL_MAX_COUNT_DEV`, so there is no sub-lag refinement. ``bpm``
     is NaN where the minute is not clear (:data:`PROVISIONAL_AC_MIN_PEAK`, interior
-    local maximum). A trailing partial minute is not assessed.
+    local maximum) or hum-locked (:func:`hum_locked_persistent` on the parabola-refined
+    peak - an integer lag sits up to ~1.5 bpm off 7200 / m even when locked, so the lock
+    test cannot read the unrefined rate; the returned rate stays unrefined). A trailing
+    partial minute is not assessed.
+
+    Ruling 2026-10-02 (e) 1: the input is notched at :func:`mains_harmonics` after
+    decimation, before the band-pass and rectification - for every source.
     """
+    from gems_blanking_v2.derive.stomach_alt import notch  # noqa: PLC0415
+
     y, fd = _decimate_to(np.asarray(x, dtype=np.float64), fs, _AC_TARGET_HZ)
+    y = notch(y, fd, mains_harmonics())
     sos = butter(4, AC_BAND_HZ, btype="bandpass", fs=fd, output="sos")
     r = np.abs(sosfiltfilt(sos, y))
     w = int(round(AC_WINDOW_S * fd))
@@ -283,22 +352,31 @@ def autocorr_rate(x: npt.ArrayLike, fs: float) -> tuple[F64, F64]:
     lag_hi = int(np.ceil(60.0 / AC_BPM[0] * fd))
     starts: list[float] = []
     bpm: list[float] = []
+    fine: list[float] = []  # the parabola-refined rate, for the lock test only
     for m in range(int(r.size / fd // AC_WINDOW_S)):
         a = int(round(m * AC_WINDOW_S * fd))
         if a + w > r.size:
             break
         seg = r[a:a + w] - r[a:a + w].mean()
         ac = np.fft.irfft(np.abs(np.fft.rfft(seg, n=2 * w)) ** 2)[:w]
-        rate = float("nan")
+        rate = refined = float("nan")
         if ac[0] > 0:
             ac = ac / ac[0]
             k = lag_lo + int(np.argmax(ac[lag_lo:lag_hi + 1]))
             if (lag_lo < k < lag_hi and ac[k] >= PROVISIONAL_AC_MIN_PEAK
                     and ac[k] >= ac[k - 1] and ac[k] >= ac[k + 1]):
                 rate = 60.0 * fd / k
+                den = ac[k - 1] - 2.0 * ac[k] + ac[k + 1]
+                shift = 0.5 * (ac[k - 1] - ac[k + 1]) / den if den < 0 else 0.0
+                refined = 60.0 * fd / (k + shift)
         starts.append(m * AC_WINDOW_S)
         bpm.append(rate)
-    return np.asarray(starts, dtype=np.float64), np.asarray(bpm, dtype=np.float64)
+        fine.append(refined)
+    out = np.asarray(bpm, dtype=np.float64)
+    # the lock test reads the refined peak: an integer-lag rate sits up to ~1.5 bpm off 7200/m
+    # even when locked, so the +/-0.3 bpm test would miss it; the gate's rate stays unrefined
+    locked = hum_locked_persistent(np.asarray(fine, dtype=np.float64))
+    return np.asarray(starts, dtype=np.float64), np.where(locked, np.nan, out)
 
 
 @dataclass(frozen=True)
@@ -396,6 +474,8 @@ class TrainGate:
     """Task 05's unrecovered gaps ``(beat before, beat after)``; findpeaks reports none."""
     note: str = ""
     """Why this row was stored, when the choice was not the plain best-SNR one."""
+    n_injections: int = N_INJECTIONS
+    """How many real-pattern injections ``transient_harm`` rests on (ruling 2026-10-02 (e) 3)."""
 
     @property
     def gap_after(self) -> npt.NDArray[np.bool_]:
@@ -405,6 +485,66 @@ class TrainGate:
         if starts.size == 0:
             return np.zeros(b.size, dtype=bool)
         return np.asarray(np.isclose(b[:, None], starts[None, :], rtol=0.0, atol=1e-9).any(axis=1))
+
+
+MAX_INJECTIONS: Final = 2000
+"""Ruling 2026-10-02 (e) 3: the most injections a veto decision may take."""
+VETO_CONFIDENCE: Final = 0.95
+
+
+def harm_is_settled(hits: int, n: int) -> bool:
+    """Whether the one-sided 95% interval of ``hits / n`` excludes the veto threshold.
+
+    At or under the threshold, the Clopper-Pearson one-sided upper bound must be under it;
+    over it, the one-sided lower bound must be over it. (0 hits in 200 is NOT settled:
+    the upper bound is 0.0149.)
+    """
+    from scipy.stats import beta  # noqa: PLC0415
+
+    est = hits / n
+    if est <= PROVISIONAL_MAX_TRANSIENT_HARM:
+        upper = 1.0 if hits >= n else float(beta.ppf(VETO_CONFIDENCE, hits + 1, n - hits))
+        return upper < PROVISIONAL_MAX_TRANSIENT_HARM
+    lower = 0.0 if hits <= 0 else float(beta.ppf(1.0 - VETO_CONFIDENCE, hits, n - hits + 1))
+    return lower > PROVISIONAL_MAX_TRANSIENT_HARM
+
+
+Block = Callable[[int], tuple[F64, Callable[["TrainGate"], F64]]]
+"""``k -> (block k's injection times, each row's injected signal)``."""
+
+
+def _refine_harm(rows: list[TrainGate], block: Block, fs: float) -> list[TrainGate]:
+    """Add injection blocks until every veto decision that matters is settled.
+
+    Rows that pass the count gate and plausibility, and whose harm is not settled
+    (:func:`harm_is_settled`), get further blocks of :data:`N_INJECTIONS` (``block(k)``
+    returns block k's injection times and each row's injected signal) until settled or
+    at :data:`MAX_INJECTIONS`; the decision is then the estimate against the threshold.
+    Rows failing the count gate or plausibility fail whatever the veto, and keep 200.
+    """
+    hits = {i: round(r.transient_harm * r.n_injections) for i, r in enumerate(rows)
+            if np.isfinite(r.transient_harm)}
+    n = {i: rows[i].n_injections for i in hits}
+    need = [i for i in hits if rows[i].count.passes and rows[i].plausible
+            and not harm_is_settled(hits[i], n[i])]
+    k = 1
+    while need:
+        times, signal = block(k)
+        for i in need:
+            r = rows[i]
+            hits[i] += _harmed(r.beats_s, _detect(r.detector, signal(r), fs), times)
+            n[i] += N_INJECTIONS
+        need = [i for i in need if n[i] < MAX_INJECTIONS and not harm_is_settled(hits[i], n[i])]
+        k += 1
+    out = list(rows)
+    for i, h in hits.items():
+        if n[i] != rows[i].n_injections:
+            r = rows[i]
+            harm = h / n[i]
+            out[i] = replace(r, transient_harm=harm, n_injections=n[i],
+                             passes=bool(r.count.passes and r.plausible
+                                         and harm <= PROVISIONAL_MAX_TRANSIENT_HARM))
+    return out
 
 
 CARRIES_QRS: Final = 0.5
@@ -477,7 +617,7 @@ def _gate_row(name: str, det: str, x: F64, x_real: F64 | None, x_med: F64 | None
                      source=source, harm_median=harm_m, gaps_s=gaps)
 
 
-def gated_selection(
+def gated_selection(  # noqa: PLR0915 - one pass over every source, in the ruled order
     rec: Recording, events: Events, *, seed: int = 0, incumbent: tuple[str, str] | None = None,
     pairs: bool = True,
 ) -> tuple[TrainGate | None, list[TrainGate]]:
@@ -531,26 +671,41 @@ def gated_selection(
                            t05[c.name] if det == "task05" else None, "channel")
                  for det in DETECTORS]
     detached: frozenset[str] = frozenset()
+    leads: dict[str, hp.PairLead] = {}
     if pairs:
         detached = hp.detached_contacts(events, keep)
         acs: dict[frozenset[str], tuple[F64, F64]] = {}
         for p in hp.pair_candidates(rec, detached):
+            leads[p.name] = p
             x = hp.lead_signal(rec, p)
             xr = hp.lead_signal(real, p) if real is not None else None
             xm = hp.lead_signal(med, p) if med is not None else None
             key = frozenset((p.plus, p.minus))
             if key not in acs:
                 acs[key] = autocorr_rate(x, fs)
-            for det in DETECTORS:
-                row = _gate_row(p.name, det, x, xr, xm, times, fs, acs[key], None, "pair")
-                if row.passes:
-                    a = hp.rate_check(row.beats_s, rec, p, detached)
-                    m = hp.morphology_check(row.beats_s, rec, detached=detached)
-                    failed = [n for n, ok in (("rate", a.passes), ("morphology", m.passes))
-                              if not ok]
-                    row = replace(row, passes=not failed,
-                                  cross_check="+".join(failed) if failed else "pass")
-                rows.append(row)
+            rows += [_gate_row(p.name, det, x, xr, xm, times, fs, acs[key], None, "pair")
+                     for det in DETECTORS]
+    if real is not None:  # veto precision (ruling 2026-10-02 (e) 3)
+
+        def block(k: int) -> tuple[F64, Callable[[TrainGate], F64]]:
+            rk, tk = hp.inject_real_patterns(rec, events, keep, seed=seed + k)
+            ck = hr_candidates(rk)
+            col = {c.name: c.index for c in ck.channels}
+
+            def signal(r: TrainGate) -> F64:
+                if r.source == "pair":
+                    return hp.lead_signal(rk, leads[r.channel])
+                return np.asarray(ck.data[:, col[r.channel]], dtype=np.float64)
+            return tk, signal
+        rows = _refine_harm(rows, block, fs)
+    for i, row in enumerate(rows):  # the cross-check runs on pair rows that pass the gates
+        if row.source == "pair" and row.passes:
+            p = leads[row.channel]
+            a = hp.rate_check(row.beats_s, rec, p, detached)
+            m = hp.morphology_check(row.beats_s, rec, detached=detached)
+            failed = [n for n, ok in (("rate", a.passes), ("morphology", m.passes)) if not ok]
+            rows[i] = replace(row, passes=not failed,
+                              cross_check="+".join(failed) if failed else "pass")
     return _choose(rows, rec, detached, incumbent), rows
 
 

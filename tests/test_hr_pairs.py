@@ -302,7 +302,10 @@ def short_rig() -> CrossSiteSynth:
 
 def test_refinement_keeps_the_clear_minutes_and_lands_nearer_the_true_rate() -> None:
     t = np.arange(int(185 * FS)) / FS
-    rr = 152.5 / (FS / 24)  # a lag of 152.5 samples at the autocorrelation's ~1017 Hz
+    # a lag of 155.5 samples at the autocorrelation's ~1017 Hz (392.5 bpm): half a step off an
+    # integer lag, and off the 7200/m mains grid - a constant rate ON the grid for 3 minutes is,
+    # by ruling 2026-10-02 (e) 2, indistinguishable from a mains lock (152.5 gave 400.2 bpm)
+    rr = 155.5 / (FS / 24)
     x = np.zeros_like(t)
     for b in np.arange(0.1, 184.9, rr):
         near = np.abs(t - b) < 0.01
@@ -558,8 +561,9 @@ def test_rectified_hum_locks_the_unnotched_reference_onto_the_120th_grid(hum_rhy
     _s, raw = hp.refined_autocorr_rate(x, FS)
     clear = np.isfinite(raw)
     assert clear.sum() >= 2 and hp.hum_locked(raw[clear]).all()  # the fixture reproduces the defect
-    _s, gate = hc.autocorr_rate(x, FS)
-    assert np.array_equal(np.isfinite(gate), clear)  # the count gate's own rate is unchanged
+    _s, gate = hc.autocorr_rate(x, FS)  # ruling 2026-10-02 (e) 1: the count gate is notched too
+    ok = np.isfinite(gate)
+    assert ok.any() and np.all(np.abs(gate[ok] - _true) / _true < 0.01)  # the rhythm, not mains
 
 
 def test_the_notched_reference_finds_the_rhythm_and_never_the_grid(hum_rhythm) -> None:  # noqa: ANN001
@@ -570,9 +574,12 @@ def test_the_notched_reference_finds_the_rhythm_and_never_the_grid(hum_rhythm) -
     assert np.all(np.abs(ref[ok] - true) / true < 0.01)
 
 
-def test_a_reference_minute_on_the_mains_grid_is_not_clear(monkeypatch: pytest.MonkeyPatch) -> None:
-    starts = np.arange(6) * 60.0
-    rates = np.array([400.0, 372.7, 360.2, 400.29, 400.31, np.nan])  # 7200/18 = 400, 7200/20 = 360
+def test_only_a_persistent_lock_makes_a_reference_minute_unclear(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    starts = np.arange(8) * 60.0
+    # three minutes on 7200/18 = 400 are a lock; a single 360.06 (the heart at 360) is not
+    rates = np.array([400.0, 400.1, 399.9, 372.7, 360.06, 361.0, np.nan, 400.0])
 
     def fake(_x: object, _fs: float, notch_hz: tuple[float, ...] = ()) -> tuple[F64, F64]:
         assert notch_hz == (60.0, 120.0)  # mains and its harmonic below the 150 Hz band edge
@@ -580,5 +587,5 @@ def test_a_reference_minute_on_the_mains_grid_is_not_clear(monkeypatch: pytest.M
 
     monkeypatch.setattr(hp, "refined_autocorr_rate", fake)
     _s, ref = hp.reference_rate(np.zeros(10), FS)
-    assert np.isnan(ref[[0, 2, 3, 5]]).all()  # within 0.3 bpm of 7200/m: hum-locked
-    assert ref[1] == 372.7 and ref[4] == 400.31
+    assert np.isnan(ref[:3]).all()
+    assert ref[3] == 372.7 and ref[4] == 360.06 and ref[7] == 400.0

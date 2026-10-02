@@ -204,3 +204,12 @@ def test_gated_selection_leaves_out_the_pairs_of_a_detached_contact() -> None:
     pairs = [r for r in rows if r.source == "pair"]
     assert pairs and not any("LVN3" in r.channel for r in pairs)
     assert len(pairs) == 2 * 12
+
+
+def test_a_stored_train_settled_its_veto_with_more_than_two_hundred_injections(selection) -> None:  # noqa: ANN001
+    best, rows = selection
+    assert best is not None and best.n_injections >= 400  # 0 hits in 200 is not settled
+    for r in rows:
+        if r.count.passes and r.plausible and np.isfinite(r.transient_harm):
+            hits = round(r.transient_harm * r.n_injections)
+            assert hc.harm_is_settled(hits, r.n_injections) or r.n_injections == hc.MAX_INJECTIONS

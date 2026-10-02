@@ -146,12 +146,9 @@ more than this ((max - min) / median) is unassessable - nothing to judge against
 RATE_MIN_ASSESSABLE: Final = 0.5
 """(a): assessable minutes must be at least this fraction of the minutes with any clear
 reference, or the recording is unassessable (no gain)."""
-MAINS_HZ: Final = 60.0
-"""Ruling 2026-10-02 (d) 1: the rate references are notched at this and its harmonics up
-to the autocorrelation band's upper edge before rectification."""
-HUM_LOCK_BPM: Final = 0.3
-"""A reference minute within this of 7200 / m bpm (an autocorrelation lag of m / 120 s - the
-period grid of rectified 60 Hz) is hum-locked and not clear."""
+MAINS_HZ: Final = hc.MAINS_HZ
+HUM_LOCK_BPM: Final = hc.HUM_LOCK_BPM
+"""Defined once, in ``hr_channel`` (the count gate shares them)."""
 QRS_HALF_S: Final = 0.020
 """Template windows for :func:`resolve_disagreement`: +/- this around a beat."""
 
@@ -551,7 +548,10 @@ def refined_autocorr_rate(x: npt.ArrayLike, fs: float,
 
 
 def hum_locked(bpm: npt.ArrayLike) -> npt.NDArray[np.bool_]:
-    """Per rate, whether it sits within :data:`HUM_LOCK_BPM` of 7200 / m for an integer m.
+    """Per rate, whether it sits within :data:`HUM_LOCK_BPM` of 7200 / m - single minutes.
+
+    A DIAGNOSTIC since ruling 2026-10-02 (e) 2: a single minute on the grid is often the heart
+    itself; the lock that makes a minute unclear is :func:`hr_channel.hum_locked_persistent`.
 
     Rectified 60 Hz repeats every 1/120 s, so its autocorrelation peaks at lags m / 120 s -
     rates of 7200 / m bpm (m = 15, 17, 18, 20 measured on animal A's stomach references:
@@ -568,13 +568,13 @@ def hum_locked(bpm: npt.ArrayLike) -> npt.NDArray[np.bool_]:
 def reference_rate(x: npt.ArrayLike, fs: float) -> tuple[F64, F64]:
     """Return a cross-check rate reference: mains-notched, refined, hum-locked minutes unclear.
 
-    Ruling 2026-10-02 (d) 1: :func:`refined_autocorr_rate` with notches at
-    :data:`MAINS_HZ` and every harmonic up to the autocorrelation band's upper edge, then
-    any minute :func:`hum_locked` is set to NaN. The lead and the count gate do not use it.
+    Ruling 2026-10-02 (d) 1 / (e) 2: :func:`refined_autocorr_rate` with notches at
+    :func:`hr_channel.mains_harmonics`, then every minute in a persistent lock
+    (:func:`hr_channel.hum_locked_persistent`) is set to NaN. A single grid minute is not a
+    lock. The count gate has its own (unrefined) notched rate, :func:`hr_channel.autocorr_rate`.
     """
-    harmonics = tuple(MAINS_HZ * k for k in range(1, int(hc.AC_BAND_HZ[1] // MAINS_HZ) + 1))
-    starts, bpm = refined_autocorr_rate(x, fs, notch_hz=harmonics)
-    return starts, np.where(hum_locked(bpm), np.nan, bpm)
+    starts, bpm = refined_autocorr_rate(x, fs, notch_hz=hc.mains_harmonics())
+    return starts, np.where(hc.hum_locked_persistent(bpm), np.nan, bpm)
 
 
 @dataclass(frozen=True)
