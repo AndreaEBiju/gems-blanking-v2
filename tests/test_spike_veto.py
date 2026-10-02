@@ -136,3 +136,43 @@ def test_a_cuff_distrusted_for_every_consumer_is_distrusted_for_spikes() -> None
 
     for key, why in DISTRUSTED_CUFFS.items():
         assert spike_trusted(*key) == (False, why)
+
+
+# --- chance_times: a keyed stream per (recording, cuff) ---------------------------------
+
+PINNED = [0.012851447728, 0.358977739408, 0.370734777879]
+
+
+def test_the_same_key_gives_the_same_times_and_another_key_does_not() -> None:
+    from gems_blanking_v2.derive.spike_veto import chance_times  # noqa: PLC0415
+
+    a = chance_times(600.0, "gems_a_rec", "L")
+    np.testing.assert_array_equal(a, chance_times(600.0, "gems_a_rec", "L"))
+    assert a.shape == (20000,) and a.min() >= 0.0 and a.max() < 600.0
+    assert not np.array_equal(a, chance_times(600.0, "gems_a_rec", "R"))
+    assert not np.array_equal(a, chance_times(600.0, "gems_b_rec", "L"))
+    # the parts are delimited: ("ab", "c") is not ("a", "bc")
+    assert not np.array_equal(chance_times(1.0, "ab", "c"), chance_times(1.0, "a", "bc"))
+
+
+def test_a_cuffs_times_do_not_depend_on_what_was_sampled_before() -> None:
+    from gems_blanking_v2.derive.spike_veto import chance_times  # noqa: PLC0415
+
+    alone = chance_times(600.0, "rec", "R")
+    _ = chance_times(600.0, "rec", "L")  # another cuff drawn first, or not at all
+    _ = chance_times(1200.0, "other", "L", n=5)
+    np.testing.assert_array_equal(alone, chance_times(600.0, "rec", "R"))
+
+
+def test_the_stream_is_pinned_across_runs_and_machines() -> None:
+    from gems_blanking_v2.derive.spike_veto import chance_times  # noqa: PLC0415
+
+    # SHA-256 of b"rec\0R\0" -> seed; a salted hash() or a changed derivation moves this
+    assert chance_times(1.0, "rec", "R", n=3).round(12).tolist() == PINNED
+
+
+def test_a_keyless_call_is_refused() -> None:
+    from gems_blanking_v2.derive.spike_veto import chance_times  # noqa: PLC0415
+
+    with pytest.raises(ValueError, match="needs a key"):
+        chance_times(1.0)

@@ -26,6 +26,7 @@ OUTSIDE THE GENERATION HASH: nothing that decides a candidate imports it.
 
 from __future__ import annotations
 
+import hashlib
 import math
 from collections.abc import Mapping
 from typing import Final
@@ -48,6 +49,7 @@ __all__ = [
     "W_STEP_S",
     "calibrate_theta",
     "chance_loss",
+    "chance_times",
     "core_half_width",
     "over_theta",
     "reference_sigma",
@@ -181,6 +183,23 @@ def calibrate_theta(
     rng = np.random.default_rng(seed)
     t = rng.uniform(window_s[0] + w_s, window_s[1] - w_s, n)
     return float(np.quantile(_peaks_at(ref_sigma, t, w_s, fs), 1.0 - target))
+
+
+def chance_times(dur_s: float, *key: str, n: int = 20000) -> F64:
+    """Return ``n`` uniform random times in ``[0, dur_s)`` from a stream of their own.
+
+    The seed is the first 8 bytes of SHA-256 over the ``key`` parts (each NUL-terminated),
+    never Python's salted ``hash()``: the same key - e.g. ``(recording_id, cuff)`` - gives the
+    same times on every run and machine, whatever else was sampled before it. A sampler
+    shared across cuffs does not: removing one cuff's draws shifts every later cuff's
+    (found 2026-10-02, when two peri-R reverts moved seven other cuffs' exposure numbers).
+    """
+    if not key:
+        msg = "chance_times needs a key: a shared stream is what this replaces"
+        raise ValueError(msg)
+    digest = hashlib.sha256(b"".join(k.encode("utf-8") + b"\0" for k in key)).digest()
+    rng = np.random.default_rng(int.from_bytes(digest[:8], "big"))
+    return np.asarray(rng.uniform(0.0, dur_s, n), dtype=np.float64)
 
 
 def chance_loss(
