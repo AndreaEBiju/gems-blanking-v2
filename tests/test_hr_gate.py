@@ -151,8 +151,13 @@ def test_a_stored_train_passed_every_gate_and_counts_the_true_beats(rig) -> None
 
 def test_a_train_the_autocorrelation_disagrees_with_is_never_stored(rig, monkeypatch) -> None:  # noqa: ANN001
     w, ev = rig
-    real = hc.autocorr_rate
-    monkeypatch.setattr(hc, "autocorr_rate", lambda x, fs: (real(x, fs)[0], real(x, fs)[1] * 2))
+    real = hc.autocorr_windows
+
+    def doubled(x, fs):  # noqa: ANN001, ANN202
+        starts, durs, bpm = real(x, fs)
+        return starts, durs, bpm * 2
+
+    monkeypatch.setattr(hc, "autocorr_windows", doubled)
     best, rows = gated_selection(w.rec, ev)
     assert best is None
     assert not any(r.count.passes for r in rows)

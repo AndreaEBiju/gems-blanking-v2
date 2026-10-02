@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 import numpy as np
 import pytest
 from gems_blanking_v2.detect import chain
-from gems_blanking_v2.emit.hr_beats import read_hr_beats, to_heartlocs, write_hr_beats
+from gems_blanking_v2.emit.hr_beats import (
+    read_blank_spans,
+    read_hr_beats,
+    to_blank_spans,
+    to_heartlocs,
+    write_hr_beats,
+)
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from scipy.io import loadmat
@@ -118,3 +125,51 @@ def test_gap_tags_ride_along_without_changing_what_her_function_reads(tmp_path) 
     assert read_gap_after(tagged).tolist() == [False, True, False]
     with pytest.raises(ValueError, match="entries for 3 beats"):
         write_hr_beats(tmp_path / "c_beats.mat", b, gap_after=[True], **kw)
+
+
+# --- blankSpans (ruling 2026-10-02 (g) 4) ----------------------------------------------
+
+
+def test_a_one_sample_blank_span_is_her_five_five() -> None:
+    sp = to_blank_spans([[4 / FS, 5 / FS]], FS, 0.0, 100)
+    assert sp.shape == (1, 2) and sp.tolist() == [[5.0, 5.0]]  # 1-based inclusive, as blankIdx
+    off = to_blank_spans([[132.0 + 4 / FS, 132.0 + 6 / FS]], FS, 132.0, 100)
+    assert off.tolist() == [[5.0, 6.0]]
+
+
+def test_blank_spans_are_clipped_to_the_epoch_and_empty_ones_dropped() -> None:
+    sp = to_blank_spans([[-1.0, 2 / FS], [3 / FS, 3.2 / FS], [98 / FS, 1.0]], FS, 0.0, 100)
+    assert sp.tolist() == [[1.0, 2.0], [99.0, 100.0]]
+    with pytest.raises(ValueError, match="must not overlap"):
+        to_blank_spans([[0.0, 10 / FS], [5 / FS, 20 / FS]], FS, 0.0, 100)
+
+
+@given(st.lists(st.integers(1, 40), min_size=2, max_size=12), st.integers(0, 5000))
+@settings(max_examples=60, deadline=None)
+def test_blank_spans_round_trip_through_the_file(steps: list[int], offset: int) -> None:
+    edges = np.cumsum(steps)  # sample boundaries, strictly increasing
+    pairs = edges[: 2 * (edges.size // 2)].reshape(-1, 2)  # [k0, k1) half-open, disjoint
+    start = offset / FS
+    spans = np.column_stack([pairs[:, 0] / FS + start, pairs[:, 1] / FS + start])
+    n = int(edges.max()) + 5
+    with tempfile.TemporaryDirectory() as d:
+        p = write_hr_beats(Path(d) / "b.mat", [start], fs=FS, epoch_start_s=start, n_samples=n,
+                           channel="x", source="t", blank_spans_s=spans)
+        stored = loadmat(p)["blankSpans"]
+        np.testing.assert_array_equal(stored, np.column_stack([pairs[:, 0] + 1, pairs[:, 1]]))
+        np.testing.assert_allclose(read_blank_spans(p), spans, rtol=0.0, atol=1e-9)
+
+
+def test_a_beat_inside_a_blank_span_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="inside a blank span"):
+        write_hr_beats(tmp_path / "b.mat", [10 / FS], fs=FS, epoch_start_s=0.0, n_samples=100,
+                       channel="x", source="t", blank_spans_s=[[10 / FS, 11 / FS]])
+    # a span's edges are not inside it: [10/fs, 11/fs) is the one sample 11 (1-based)
+    write_hr_beats(tmp_path / "b.mat", [9 / FS, 11 / FS], fs=FS, epoch_start_s=0.0,
+                   n_samples=100, channel="x", source="t", blank_spans_s=[[10 / FS, 11 / FS]])
+
+
+def test_without_blank_spans_the_file_has_no_field(tmp_path: Path) -> None:
+    p = write_hr_beats(tmp_path / "b.mat", [4 / FS], fs=FS, epoch_start_s=0.0, n_samples=100,
+                       channel="x", source="t")
+    assert "blankSpans" not in loadmat(p) and read_blank_spans(p) is None

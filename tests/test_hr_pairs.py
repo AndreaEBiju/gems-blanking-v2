@@ -278,10 +278,10 @@ def _fixed_rates(monkeypatch: pytest.MonkeyPatch, per_ref: list[list[float]]) ->
     calls = iter(per_ref * 10)
     starts = np.arange(len(per_ref[0]), dtype=float) * hc.AC_WINDOW_S
 
-    def fake(_x: object, _fs: float) -> tuple[F64, F64]:
-        return starts, np.asarray(next(calls), float)
+    def fake(_x: object, _fs: float) -> tuple[F64, F64, F64]:
+        return starts, np.full(starts.size, hc.AC_WINDOW_S), np.asarray(next(calls), float)
 
-    monkeypatch.setattr(hp, "reference_rate", fake)
+    monkeypatch.setattr(hp, "reference_windows", fake)
 
 
 def _train(bpm_per_minute: list[float]) -> F64:
@@ -381,6 +381,25 @@ def test_the_failing_assessable_minutes_are_listed_and_no_other(
     assert rc.bad_minutes_s == (w,) and rc.minutes_assessable == 3
     refs = hp.rate_references(short_rig.rec, p)  # precomputed references give the same answer
     assert hp.rate_check(_train([400.0, 300.0, 300.0, 400.0]), short_rig.rec, p, refs=refs) == rc
+
+
+def test_a_partial_window_is_judged_per_minute_but_not_in_the_recording_level_result(
+    monkeypatch: pytest.MonkeyPatch,
+    short_rig: CrossSiteSynth,
+) -> None:
+    p = hp.pair_candidates(short_rig.rec)[0]
+    starts, durs = np.array([0.0, 60.0, 120.0]), np.array([60.0, 60.0, 40.0])
+
+    def fake(_x: object, _fs: float) -> tuple[F64, F64, F64]:
+        return starts, durs, np.array([400.0, 400.0, 400.0])
+
+    monkeypatch.setattr(hp, "reference_windows", fake)
+    off = np.concatenate([_train([400.0, 400.0]), 120.0 + (np.arange(300) + 0.5) * 40.0 / 300])
+    rc = hp.rate_check(off, short_rig.rec, p)  # 450 bpm in the 40 s window
+    assert rc.bad_minutes_s == (120.0,)
+    assert rc.minutes == 2 and rc.minutes_assessable == 2 and rc.passes  # full minutes only
+    ok = np.concatenate([_train([400.0, 400.0]), 120.0 + (np.arange(267) + 0.5) * 40.0 / 267])
+    assert hp.rate_check(ok, short_rig.rec, p).bad_minutes_s == ()  # scaled: 400.5 bpm
 
 
 def test_too_few_assessable_minutes_is_unassessable_and_never_passes(

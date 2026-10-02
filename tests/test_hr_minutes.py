@@ -284,15 +284,15 @@ def unclear():  # noqa: ANN201
     test_hr_adopt), so only the per-minute plumbing decides what is stored.
     """
     rig = make_cross_site_heart(FS, 65.0, transients_per_s=2.0, site_gain=STRONG_STOMACH, seed=31)
-    real_ac = hc.autocorr_rate
+    real_ac = hc.autocorr_windows
 
     def ac(x, fs):  # noqa: ANN001, ANN202
-        starts, bpm = real_ac(x, fs)
-        return starts, np.where(starts > 0, np.nan, bpm)
+        starts, durs, bpm = real_ac(x, fs)
+        return starts, durs, np.where(starts > 0, np.nan, bpm)
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(hc, "AC_WINDOW_S", SHORT_W)
-        mp.setattr(hc, "autocorr_rate", ac)
+        mp.setattr(hc, "autocorr_windows", ac)
         out = hc.gated_selection(rig.rec, find_events(rig.rec), per_minute=True)
     return rig, out
 
@@ -326,18 +326,18 @@ def test_per_minute_eligibility_is_the_recording_level_gates(unclear) -> None:  
 
 def test_a_pair_minute_failing_the_rate_check_is_removed_inside_the_selection() -> None:
     rig = make_cross_site_heart(FS, 65.0, transients_per_s=2.0, site_gain=STRONG_STOMACH, seed=31)
-    real_ac, real_rc = hc.autocorr_rate, hp.rate_check
+    real_ac, real_rc = hc.autocorr_windows, hp.rate_check
 
     def ac(x, fs):  # noqa: ANN001, ANN202
-        starts, bpm = real_ac(x, fs)
-        return starts, np.where(starts > 0, np.nan, bpm)
+        starts, durs, bpm = real_ac(x, fs)
+        return starts, durs, np.where(starts > 0, np.nan, bpm)
 
     def rc(*a, **k):  # noqa: ANN002, ANN003, ANN202 - (a) fails exactly in the one clear minute
         return replace(real_rc(*a, **k), bad_minutes_s=(0.0,))
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(hc, "AC_WINDOW_S", SHORT_W)
-        mp.setattr(hc, "autocorr_rate", ac)
+        mp.setattr(hc, "autocorr_windows", ac)
         mp.setattr(hp, "rate_check", rc)
         best, rows = hc.gated_selection(rig.rec, find_events(rig.rec), per_minute=True)
     pairs = [r for r in rows if r.source == "pair" and r.rate_ok is not None]
@@ -347,20 +347,164 @@ def test_a_pair_minute_failing_the_rate_check_is_removed_inside_the_selection() 
 
 def test_a_pair_failing_morphology_is_not_eligible_for_per_minute_storage() -> None:
     rig = make_cross_site_heart(FS, 65.0, transients_per_s=2.0, site_gain=STRONG_STOMACH, seed=31)
-    real_ac, real_mc = hc.autocorr_rate, hp.morphology_check
+    real_ac, real_mc = hc.autocorr_windows, hp.morphology_check
 
     def ac(x, fs):  # noqa: ANN001, ANN202
-        starts, bpm = real_ac(x, fs)
-        return starts, np.where(starts > 0, np.nan, bpm)
+        starts, durs, bpm = real_ac(x, fs)
+        return starts, durs, np.where(starts > 0, np.nan, bpm)
 
     def mc(*a, **k):  # noqa: ANN002, ANN003, ANN202 - (c) fails for every pair
         return replace(real_mc(*a, **k), passes=False)
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(hc, "AC_WINDOW_S", SHORT_W)
-        mp.setattr(hc, "autocorr_rate", ac)
+        mp.setattr(hc, "autocorr_windows", ac)
         mp.setattr(hp, "morphology_check", mc)
         best, rows = hc.gated_selection(rig.rec, find_events(rig.rec), per_minute=True)
     vetted = [r for r in rows if r.source == "pair" and r.morphology_ok is False]
     assert vetted and not any(r.eligible for r in vetted)
     assert best is None or best.source == "channel"
+
+
+
+# --- ruling 2026-10-02 (g) 2: rule 2 needs a clear winner ---------------------------------
+
+
+@pytest.mark.parametrize(
+    ("pq", "oq", "win"),
+    [
+        (0.6, 0.4, "pair"),
+        (0.4, 0.6, "other"),
+        (0.5, 0.4, None),
+        (0.6, 0.5, None),
+        (0.72, 0.85, None),
+        (0.88, 0.32, "pair"),
+        (0.974, 0.002, "pair"),
+        (0.1, 0.2, None),
+        (0.5, 0.6, None),  # 0.5 is not a minority
+        (0.4, 0.5, None),  # 0.5 is not a majority
+    ],
+)
+def test_a_winner_needs_a_majority_against_a_minority(
+    pq: float, oq: float, win: str | None
+) -> None:
+    assert hc.rule2_winner(pq, oq) == win
+
+
+def _ambiguous(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        hp, "timing_check", lambda _p, _c: SimpleNamespace(disagree=True, offset_s=0.0)
+    )
+    monkeypatch.setattr(
+        hp,
+        "resolve_disagreement",
+        lambda *_a, **_k: SimpleNamespace(lead_unmatched_qrs=0.72, other_unmatched_qrs=0.85),
+    )
+
+
+def test_ambiguous_rule_2_keeps_an_eligible_incumbent(monkeypatch: pytest.MonkeyPatch) -> None:
+    _ambiguous(monkeypatch)
+    b = _beats([400.0] * 2)
+    rows = [
+        _row(b, [True, True], name="L_T", snr=5.0),
+        _row(b, [True, True], name="P-Q", source="pair", snr=9.0),
+    ]
+    best = _choose(rows, incumbent=("L_T", "findpeaks"))
+    assert best is not None and best.channel == "L_T"
+    assert best.note.endswith("ambiguous: the incumbent stays")
+    assert _choose(rows) is None  # no incumbent: neither is stored
+
+
+def test_ambiguous_rule_2_keeps_the_incumbent_in_whole_recording_mode_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ambiguous(monkeypatch)
+    b = _beats([400.0])
+    chan = replace(_row(b, [True], name="L_T", snr=5.0), passes=True)
+    pair = replace(_row(b, [True], name="P-Q", source="pair", snr=9.0), passes=True)
+    kept = hc._choose([chan, pair], None, frozenset(), ("L_T", "findpeaks"))  # type: ignore[arg-type]
+    assert kept is not None and kept.channel == "L_T" and "incumbent stays" in kept.note
+    assert hc._choose([chan, pair], None, frozenset(), None) is None  # type: ignore[arg-type]
+
+
+# --- ruling 2026-10-02 (g) 3: the trailing partial window ----------------------------------
+
+
+def _pulses(dur_s: float, rr: float, seed: int = 1) -> F64:
+    t = np.arange(int(dur_s * FS)) / FS
+    x = np.zeros_like(t)
+    for b in np.arange(0.1, dur_s - 0.1, rr):
+        near = np.abs(t - b) < 0.01
+        x[near] += 100.0 * np.exp(-0.5 * ((t[near] - b) / 0.002) ** 2)
+    return x + np.random.default_rng(seed).normal(0.0, 2.0, x.size)
+
+
+def test_a_trailing_remainder_of_thirty_seconds_or_more_is_one_more_window() -> None:
+    rr = 155.5 / (FS / 24)  # 392.5 bpm, off the mains grid
+    x = _pulses(95.0, rr)
+    starts, durs, bpm = hc.autocorr_windows(x, FS)
+    assert starts.tolist() == [0.0, 60.0] and durs[0] == W
+    assert durs[1] == pytest.approx(35.0, abs=1e-3)
+    assert np.all(np.abs(bpm - 60.0 / rr) / (60.0 / rr) < 0.01)
+    s0, _b0 = hc.autocorr_rate(x, FS)
+    assert s0.tolist() == [0.0]  # the count gate's grid is unchanged
+    starts, _d, _b = hc.autocorr_windows(_pulses(85.0, rr), FS)
+    assert starts.tolist() == [0.0]  # 25 s: never assessed
+
+
+def test_the_partial_window_joins_the_lock_test_but_cannot_change_a_full_minute() -> None:
+    fine = np.array([380.0, 400.0, 400.1, 400.0])  # two full minutes on 7200/18, then a partial
+    durs = np.array([W, W, W, 40.0])
+    assert hc._locked(fine, durs).tolist() == [False, False, False, True]
+    assert not hc.hum_locked_persistent(fine[:3]).any()
+
+
+def test_the_partial_count_is_scaled_to_its_duration() -> None:
+    starts, durs, bpm = np.array([0.0, W]), np.array([W, 40.0]), np.array([400.0, 400.0])
+    ok = np.concatenate([_beats([400.0]), W + (np.arange(267) + 0.5) * 40.0 / 267])  # 400.5
+    off = np.concatenate([_beats([400.0]), W + (np.arange(290) + 0.5) * 40.0 / 290])  # 435
+    assert hc.minute_validity(ok, starts, bpm, durs=durs).tolist() == [True, True]
+    assert hc.minute_validity(off, starts, bpm, durs=durs).tolist() == [True, False]
+    # unscaled, 267 beats in a "minute" would read 267 bpm and fail
+    assert hc.minute_validity(ok, starts, bpm).tolist() == [True, False]
+
+
+def test_a_valid_partial_window_keeps_its_beats_and_blank_spans_cover_the_rest() -> None:
+    b = np.concatenate([
+        _beats([400.0] * 2),
+        2 * W + (np.arange(267) + 0.5) * 40.0 / 267,
+        [2 * W + 45.0],  # past the partial window (a 175 s file)
+    ])
+    row = replace(
+        _row(b, [False, True, True], name="x"),
+        minute_s=(0.0, W, 2 * W),
+        minute_dur_s=(W, W, 40.0),
+    )
+    out = hc.minute_gapped(row)
+    assert out.beats_s.min() >= W and out.beats_s.max() < 2 * W + 40.0
+    assert np.count_nonzero(out.beats_s >= 2 * W) == 267
+    assert hc.blank_spans_s(row, 175.0) == ((0.0, W), (2 * W + 40.0, 175.0))
+    whole = _row(b, [True, True], name="y")  # no partial assessed: its time is blank
+    assert hc.blank_spans_s(whole, 175.0) == ((2 * W, 175.0),)
+    assert hc.blank_spans_s(_row(b, [True, False, True]), 3 * W) == ((W, 2 * W),)
+
+
+def test_the_gate_row_records_the_partial_window_and_the_count_gate_ignores_it() -> None:
+    rig = make_cross_site_heart(FS, 95.0, transients_per_s=0.5, site_gain=STRONG_STOMACH, seed=5)
+    p = next(p for p in hp.pair_candidates(rig.rec) if p.name == "RVN1-LVN1")
+    x = hp.lead_signal(rig.rec, p)
+    ac = hc.autocorr_windows(x, FS)
+    r = hc._gate_row(p.name, "findpeaks", x, None, None, np.zeros(0), FS, ac, None, "pair")
+    assert r.minute_s == (0.0, W) and r.minute_dur_s[1] == pytest.approx(35.0, abs=1e-3)
+    assert r.count.minutes == 1  # the count gate reads the full minute only
+    assert r.valid == (True, True)
+
+
+def test_the_rate_references_gain_the_same_trailing_window() -> None:
+    rr = 155.5 / (FS / 24)
+    x = _pulses(95.0, rr)
+    starts, durs, bpm = hp.reference_windows(x, FS)
+    assert starts.tolist() == [0.0, 60.0] and durs[1] == pytest.approx(35.0, abs=1e-3)
+    assert np.all(np.abs(bpm - 60.0 / rr) / (60.0 / rr) < 0.001)  # refined
+    s0, b0 = hp.reference_rate(x, FS)
+    assert s0.tolist() == [0.0] and b0[0] == bpm[0]  # the full minute is reference_rate's

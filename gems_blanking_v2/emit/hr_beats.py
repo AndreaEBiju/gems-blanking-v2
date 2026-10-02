@@ -19,6 +19,14 @@ else. They are written by :func:`write_mask_beats` under a different file name
 ``heartlocs``), so her function, which loads ``heartlocs``, refuses such a file with
 ``badBeatsFile`` even if it is handed one.
 
+Ruling 2026-10-02 (g) 4: per-minute storage removes the beats of rejected minutes, and
+``blankSpans`` carries those spans to her function's optional ``'BlankSpans'`` input, which
+merges them into her blank mask exactly as artifact blanking (``blankIdx``). Same
+convention as ``blankIdx``: an N x 2 array of 1-BASED INCLUSIVE sample indices
+``[start stop]`` into the epoch. Our half-open ``[a, b)`` seconds become
+``[round((a - epoch) * fs) + 1, round((b - epoch) * fs)]`` - so ``[4/fs, 5/fs)``, one
+sample, is ``[5 5]`` (invariant 15).
+
 OUTSIDE THE GENERATION HASH.
 """
 
@@ -32,9 +40,11 @@ from scipy.io import loadmat, savemat
 
 __all__ = [
     "MASK_BEATS_SUFFIX",
+    "read_blank_spans",
     "read_gap_after",
     "read_hr_beats",
     "read_mask_beats",
+    "to_blank_spans",
     "to_heartlocs",
     "write_hr_beats",
     "write_mask_beats",
@@ -64,9 +74,28 @@ def to_heartlocs(beats_s: npt.ArrayLike, fs: float, epoch_start_s: float, n_samp
     return (k + 1).astype(np.float64).reshape(-1, 1)
 
 
+def to_blank_spans(spans_s: npt.ArrayLike, fs: float, epoch_start_s: float,
+                   n_samples: int) -> F64:
+    """Return her ``blankSpans``: half-open ``[a, b)`` s -> N x 2 1-based inclusive samples.
+
+    Clipped to the epoch; a span shorter than one sample after rounding is dropped. Raises
+    for overlapping or unsorted spans.
+    """
+    sp = np.asarray(spans_s, dtype=np.float64).reshape(-1, 2)
+    k0 = np.clip(np.round((sp[:, 0] - epoch_start_s) * fs).astype(np.int64), 0, n_samples)
+    k1 = np.clip(np.round((sp[:, 1] - epoch_start_s) * fs).astype(np.int64), 0, n_samples)
+    keep = k1 > k0
+    k0, k1 = k0[keep], k1[keep]
+    if k0.size > 1 and np.any(k0[1:] < k1[:-1]):
+        msg = "blank spans must be sorted and must not overlap"
+        raise ValueError(msg)
+    return np.column_stack([k0 + 1, k1]).astype(np.float64).reshape(-1, 2)
+
+
 def write_hr_beats(
     path: Path, beats_s: npt.ArrayLike, *, fs: float, epoch_start_s: float, n_samples: int,
     channel: str, source: str, gap_after: npt.ArrayLike | None = None,
+    blank_spans_s: npt.ArrayLike | None = None,
 ) -> Path:
     """Write the beats file her ``HR_BR_HRVAnalysis_beats`` reads (a fully vetted train).
 
@@ -76,6 +105,10 @@ def write_hr_beats(
     ``heartlocs`` and ``fs``, so its outputs do not change; using the tags is Andrea's
     decision. A single dropped beat reads as one ~2 RR interval, inside her [100, 500] ms
     range, so without the tags HRV would take it as real.
+
+    ``blank_spans_s`` (ruling 2026-10-02 (g) 4): half-open ``[a, b)`` s on the recording's
+    timeline, stored as ``blankSpans`` (:func:`to_blank_spans`). No stored beat may fall in
+    one - a rejected minute's beats are removed, never left to look valid.
     """
     if Path(path).name.endswith(MASK_BEATS_SUFFIX):
         msg = f"{Path(path).name} is a mask-grade name; HRV beats must not carry it"
@@ -90,6 +123,15 @@ def write_hr_beats(
             raise ValueError(msg)
         order = np.argsort(np.asarray(beats_s, dtype=np.float64), kind="stable")
         doc["gapAfter"] = raw[order].reshape(-1, 1)
+    if blank_spans_s is not None:
+        spans = to_blank_spans(blank_spans_s, fs, epoch_start_s, n_samples)
+        locs = heartlocs.ravel()
+        inside = ((locs[:, None] >= spans[None, :, 0])
+                  & (locs[:, None] <= spans[None, :, 1])).any(axis=1)
+        if inside.any():
+            msg = f"{int(inside.sum())} stored beat(s) fall inside a blank span"
+            raise ValueError(msg)
+        doc["blankSpans"] = spans
     savemat(path, doc, do_compression=False)
     return path
 
@@ -100,6 +142,17 @@ def read_gap_after(path: Path) -> npt.NDArray[np.bool_] | None:
     if "gapAfter" not in m:
         return None
     return np.asarray(m["gapAfter"], dtype=bool).ravel()
+
+
+def read_blank_spans(path: Path) -> F64 | None:
+    """Return the file's blank spans as half-open ``[a, b)`` s on the epoch's timeline, or None."""
+    m = loadmat(path)
+    if "blankSpans" not in m:
+        return None
+    sp = np.asarray(m["blankSpans"], dtype=np.float64).reshape(-1, 2)
+    fs = float(np.asarray(m["fs"]).squeeze())
+    start = float(np.asarray(m.get("epochStart_s", 0.0)).squeeze())
+    return np.column_stack([(sp[:, 0] - 1.0) / fs + start, sp[:, 1] / fs + start])
 
 
 def read_hr_beats(path: Path) -> tuple[F64, float]:

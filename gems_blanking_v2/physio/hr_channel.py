@@ -56,13 +56,16 @@ __all__ = [
     "HUM_LOCK_MINUTES",
     "MAINS_HZ",
     "MAX_INJECTIONS",
+    "PARTIAL_MIN_S",
     "PROVISIONAL_AC_MIN_PEAK",
     "PROVISIONAL_MAX_COUNT_DEV",
     "PROVISIONAL_MAX_TRANSIENT_HARM",
     "CountGate",
     "TrainGate",
     "autocorr_rate",
+    "autocorr_windows",
     "best_hr_channel",
+    "blank_spans_s",
     "cm_gains",
     "count_gate",
     "findpeaks_replica",
@@ -77,6 +80,7 @@ __all__ = [
     "minute_validity",
     "peri_r_train",
     "pick_train",
+    "rule2_winner",
     "transient_harm",
 ]
 
@@ -327,6 +331,84 @@ def _decimate_to(x: F64, fs: float, target_hz: float) -> tuple[F64, float]:
     return y, fs
 
 
+PARTIAL_MIN_S: Final = 30.0
+"""Ruling 2026-10-02 (g) 3: a trailing partial window at least this long is assessed with
+the same tests (the count scaled to its duration); a shorter one is never assessed, and its
+time is a tagged gap."""
+
+
+def _ac_peak(seg: F64, fd: float, lag_lo: int, lag_hi: int) -> tuple[float, float]:
+    """``(rate, parabola-refined rate)`` bpm of one window's autocorrelation; NaN if unclear."""
+    w = seg.size
+    seg = seg - seg.mean()
+    ac = np.fft.irfft(np.abs(np.fft.rfft(seg, n=2 * w)) ** 2)[:w]
+    rate = refined = float("nan")
+    if ac[0] > 0 and lag_hi + 1 < w:
+        ac = ac / ac[0]
+        k = lag_lo + int(np.argmax(ac[lag_lo:lag_hi + 1]))
+        if (lag_lo < k < lag_hi and ac[k] >= PROVISIONAL_AC_MIN_PEAK
+                and ac[k] >= ac[k - 1] and ac[k] >= ac[k + 1]):
+            rate = 60.0 * fd / k
+            den = ac[k - 1] - 2.0 * ac[k] + ac[k + 1]
+            shift = 0.5 * (ac[k - 1] - ac[k + 1]) / den if den < 0 else 0.0
+            refined = 60.0 * fd / (k + shift)
+    return rate, refined
+
+
+def _ac_windows(x: npt.ArrayLike, fs: float, notch_hz: tuple[float, ...],
+                partial: bool) -> tuple[F64, F64, F64, F64]:
+    """Return ``(starts s, durations s, rate, refined rate)`` per window - the one site.
+
+    Decimate; notch at ``notch_hz`` (none if empty); 10-150 Hz band-pass; rectify. Windows
+    are the full :data:`AC_WINDOW_S` minutes from 0 and, with ``partial``, the trailing
+    remainder when it is at least :data:`PARTIAL_MIN_S` long. No hum lock is applied here.
+    """
+    from gems_blanking_v2.derive.stomach_alt import notch  # noqa: PLC0415
+
+    xa = np.asarray(x, dtype=np.float64)
+    y, fd = _decimate_to(xa, fs, _AC_TARGET_HZ)
+    if notch_hz:
+        y = notch(y, fd, notch_hz)
+    sos = butter(4, AC_BAND_HZ, btype="bandpass", fs=fd, output="sos")
+    r = np.abs(sosfiltfilt(sos, y))
+    w = int(round(AC_WINDOW_S * fd))
+    lag_lo = int(np.floor(60.0 / AC_BPM[1] * fd))
+    lag_hi = int(np.ceil(60.0 / AC_BPM[0] * fd))
+    spans: list[tuple[int, int, float, float]] = []
+    for m in range(int(r.size / fd // AC_WINDOW_S)):
+        a = int(round(m * AC_WINDOW_S * fd))
+        if a + w > r.size:
+            break
+        spans.append((a, a + w, m * AC_WINDOW_S, AC_WINDOW_S))
+    if partial:
+        start = len(spans) * AC_WINDOW_S
+        a = int(round(start * fd))
+        dur = xa.size / fs - start
+        if dur >= PARTIAL_MIN_S and a < r.size:
+            spans.append((a, r.size, start, dur))
+    rates = [_ac_peak(r[a:b], fd, lag_lo, lag_hi) for a, b, _s, _d in spans]
+    return (np.asarray([sp[2] for sp in spans], dtype=np.float64),
+            np.asarray([sp[3] for sp in spans], dtype=np.float64),
+            np.asarray([q[0] for q in rates], dtype=np.float64),
+            np.asarray([q[1] for q in rates], dtype=np.float64))
+
+
+def _locked(refined: F64, durs: F64) -> npt.NDArray[np.bool_]:
+    """Return the persistent lock (:func:`hum_locked_persistent`) per window.
+
+    Full minutes are judged among themselves, exactly as without a partial window; a
+    trailing partial window joins the run test as one more window and cannot change a full
+    minute's decision.
+    """
+    full = durs == AC_WINDOW_S
+    n_full = int(full.sum())
+    out = np.zeros(refined.size, dtype=bool)
+    out[:n_full] = hum_locked_persistent(refined[:n_full])
+    if refined.size > n_full:
+        out[n_full:] = hum_locked_persistent(refined)[n_full:]
+    return out
+
+
 def autocorr_rate(x: npt.ArrayLike, fs: float) -> tuple[F64, F64]:
     """Return ``(minute start times s, bpm)`` from the rectified 10-150 Hz autocorrelation.
 
@@ -338,47 +420,25 @@ def autocorr_rate(x: npt.ArrayLike, fs: float) -> tuple[F64, F64]:
     local maximum) or hum-locked (:func:`hum_locked_persistent` on the parabola-refined
     peak - an integer lag sits up to ~1.5 bpm off 7200 / m even when locked, so the lock
     test cannot read the unrefined rate; the returned rate stays unrefined). A trailing
-    partial minute is not assessed.
+    partial minute is not assessed (the count gate's grid; :func:`autocorr_windows` adds it).
 
     Ruling 2026-10-02 (e) 1: the input is notched at :func:`mains_harmonics` after
     decimation, before the band-pass and rectification - for every source.
     """
-    from gems_blanking_v2.derive.stomach_alt import notch  # noqa: PLC0415
+    starts, durs, rate, fine = _ac_windows(x, fs, mains_harmonics(), partial=False)
+    return starts, np.where(_locked(fine, durs), np.nan, rate)
 
-    y, fd = _decimate_to(np.asarray(x, dtype=np.float64), fs, _AC_TARGET_HZ)
-    y = notch(y, fd, mains_harmonics())
-    sos = butter(4, AC_BAND_HZ, btype="bandpass", fs=fd, output="sos")
-    r = np.abs(sosfiltfilt(sos, y))
-    w = int(round(AC_WINDOW_S * fd))
-    lag_lo = int(np.floor(60.0 / AC_BPM[1] * fd))
-    lag_hi = int(np.ceil(60.0 / AC_BPM[0] * fd))
-    starts: list[float] = []
-    bpm: list[float] = []
-    fine: list[float] = []  # the parabola-refined rate, for the lock test only
-    for m in range(int(r.size / fd // AC_WINDOW_S)):
-        a = int(round(m * AC_WINDOW_S * fd))
-        if a + w > r.size:
-            break
-        seg = r[a:a + w] - r[a:a + w].mean()
-        ac = np.fft.irfft(np.abs(np.fft.rfft(seg, n=2 * w)) ** 2)[:w]
-        rate = refined = float("nan")
-        if ac[0] > 0:
-            ac = ac / ac[0]
-            k = lag_lo + int(np.argmax(ac[lag_lo:lag_hi + 1]))
-            if (lag_lo < k < lag_hi and ac[k] >= PROVISIONAL_AC_MIN_PEAK
-                    and ac[k] >= ac[k - 1] and ac[k] >= ac[k + 1]):
-                rate = 60.0 * fd / k
-                den = ac[k - 1] - 2.0 * ac[k] + ac[k + 1]
-                shift = 0.5 * (ac[k - 1] - ac[k + 1]) / den if den < 0 else 0.0
-                refined = 60.0 * fd / (k + shift)
-        starts.append(m * AC_WINDOW_S)
-        bpm.append(rate)
-        fine.append(refined)
-    out = np.asarray(bpm, dtype=np.float64)
-    # the lock test reads the refined peak: an integer-lag rate sits up to ~1.5 bpm off 7200/m
-    # even when locked, so the +/-0.3 bpm test would miss it; the gate's rate stays unrefined
-    locked = hum_locked_persistent(np.asarray(fine, dtype=np.float64))
-    return np.asarray(starts, dtype=np.float64), np.where(locked, np.nan, out)
+
+def autocorr_windows(x: npt.ArrayLike, fs: float) -> tuple[F64, F64, F64]:
+    """Return ``(starts s, durations s, bpm)``: :func:`autocorr_rate` plus the trailing window.
+
+    Ruling 2026-10-02 (g) 3: the full minutes are exactly :func:`autocorr_rate`'s; a trailing
+    remainder of at least :data:`PARTIAL_MIN_S` is one more window, judged by the same
+    clarity and lock tests. Per-minute validity reads this; the count gate reads only the
+    full minutes.
+    """
+    starts, durs, rate, fine = _ac_windows(x, fs, mains_harmonics(), partial=True)
+    return starts, durs, np.where(_locked(fine, durs), np.nan, rate)
 
 
 @dataclass(frozen=True)
@@ -420,17 +480,22 @@ def count_gate(beats_s: npt.ArrayLike, starts: F64, bpm: F64) -> CountGate:
 
 
 def minute_validity(beats_s: npt.ArrayLike, starts: F64, bpm: F64,
-                    bad_minutes_s: npt.ArrayLike = ()) -> npt.NDArray[np.bool_]:
+                    bad_minutes_s: npt.ArrayLike = (),
+                    durs: npt.ArrayLike | None = None) -> npt.NDArray[np.bool_]:
     """Per minute, whether it is valid (ruling 2026-10-02 (f) 2).
 
     Valid: clear (``bpm`` finite - :func:`autocorr_rate` already NaNs a hum-locked minute),
-    beats in ``[start, start + AC_WINDOW_S)`` within :data:`PROVISIONAL_MAX_COUNT_DEV` of
-    the minute's rate (:func:`count_gate`'s own test), and the start not in
-    ``bad_minutes_s`` (a pair's assessable minutes where cross-check (a) disagrees).
+    beats in ``[start, start + duration)`` within :data:`PROVISIONAL_MAX_COUNT_DEV` of
+    the minute's rate (:func:`count_gate`'s own test, the count scaled to the window's
+    duration - ruling (g) 3), and the start not in ``bad_minutes_s`` (a pair's assessable
+    minutes where cross-check (a) disagrees). ``durs``: per window; :data:`AC_WINDOW_S`
+    when omitted.
     """
     b = np.sort(np.asarray(beats_s, dtype=np.float64))
-    per_min = np.array([np.count_nonzero((b >= s) & (b < s + AC_WINDOW_S)) for s in starts],
-                       dtype=np.float64) * 60.0 / AC_WINDOW_S
+    d = (np.full(starts.size, AC_WINDOW_S) if durs is None
+         else np.asarray(durs, dtype=np.float64))
+    per_min = np.array([np.count_nonzero((b >= s) & (b < s + w))
+                        for s, w in zip(starts, d, strict=True)], dtype=np.float64) * 60.0 / d
     with np.errstate(invalid="ignore"):
         within = np.abs(per_min - bpm) <= PROVISIONAL_MAX_COUNT_DEV * bpm
     return np.asarray(np.isfinite(bpm) & within & ~_listed(starts, bad_minutes_s))
@@ -448,8 +513,9 @@ def minute_gapped(row: TrainGate) -> TrainGate:
     """Return ``row`` with every beat outside its valid minutes removed, as tagged gaps.
 
     Ruling 2026-10-02 (f) 2: wrong beats are never left in place to look valid to
-    Andrea's window rule. A beat is kept when it lies in a valid minute of
-    ``row.minute_s`` (a trailing partial minute is never assessed, so never kept). Gaps:
+    Andrea's window rule. A beat is kept when it lies in a valid window of
+    ``row.minute_s`` (a trailing remainder shorter than :data:`PARTIAL_MIN_S` is never
+    assessed, so never kept - ruling (g) 3). Gaps:
     between two kept beats with an invalid minute between them, and task 05's own gaps
     whose first beat is kept; each is ``(beat before, beat after)``, so :attr:`gap_after`
     marks the beat before.
@@ -459,9 +525,8 @@ def minute_gapped(row: TrainGate) -> TrainGate:
     valid = np.asarray(row.valid, dtype=bool)
     if starts.size == 0:
         return replace(row, beats_s=b[:0], gaps_s=())
+    keep = _in_window(starts, _durations(row), b, valid)
     m = np.searchsorted(starts, b, side="right") - 1
-    inside = (m >= 0) & (b < starts[np.clip(m, 0, None)] + AC_WINDOW_S)
-    keep = inside & valid[np.clip(m, 0, None)]
     kb, km = b[keep], m[keep]
     old = np.asarray([g[0] for g in row.gaps_s], dtype=np.float64)
     gaps = []
@@ -471,6 +536,46 @@ def minute_gapped(row: TrainGate) -> TrainGate:
         if jump or tagged:
             gaps.append((float(kb[i]), float(kb[i + 1])))
     return replace(row, beats_s=kb, gaps_s=tuple(gaps))
+
+
+def _durations(row: TrainGate) -> F64:
+    """``row``'s window durations; every window :data:`AC_WINDOW_S` when none are recorded."""
+    if len(row.minute_dur_s) == len(row.minute_s):
+        return np.asarray(row.minute_dur_s, dtype=np.float64)
+    return np.full(len(row.minute_s), AC_WINDOW_S)
+
+
+def _in_window(starts: F64, durs: F64, t: F64,
+               flag: npt.NDArray[np.bool_]) -> npt.NDArray[np.bool_]:
+    """Per time, whether it lies in a window ``[start, start + duration)`` flagged in ``flag``."""
+    if starts.size == 0:
+        return np.zeros(t.size, dtype=bool)
+    m = np.searchsorted(starts, t, side="right") - 1
+    mc = np.clip(m, 0, None)
+    return np.asarray((m >= 0) & (t < starts[mc] + durs[mc]) & flag[mc])
+
+
+def blank_spans_s(row: TrainGate, dur_s: float) -> tuple[tuple[float, float], ...]:
+    """Return the spans of ``[0, dur_s)`` outside ``row``'s valid windows, merged, in s.
+
+    Ruling 2026-10-02 (g) 4: what Andrea's ``BlankSpans`` blanks - every rejected window and
+    any time no window assesses (a trailing remainder shorter than :data:`PARTIAL_MIN_S`).
+    Half-open ``[a, b)``, on the train's timeline.
+    """
+    starts = np.asarray(row.minute_s, dtype=np.float64)
+    durs = _durations(row)
+    valid = np.asarray(row.valid, dtype=bool)
+    good = sorted((float(a), float(a + d))
+                  for a, d, v in zip(starts, durs, valid, strict=True) if v)
+    out: list[tuple[float, float]] = []
+    t = 0.0
+    for a, b in good:
+        if a > t:
+            out.append((t, min(a, dur_s)))
+        t = max(t, b)
+    if t < dur_s:
+        out.append((t, dur_s))
+    return tuple((a, b) for a, b in out if b > a)
 
 
 def findpeaks_replica(x: npt.ArrayLike, fs: float) -> F64:
@@ -541,7 +646,10 @@ class TrainGate:
     precision, task 05 plausibility and, for a pair, morphology (c). Set only by
     ``gated_selection(per_minute=True)``; False otherwise."""
     minute_s: tuple[float, ...] = ()
-    """Start times of the minutes :func:`autocorr_rate` assessed (the count gate's grid)."""
+    """Start times of the windows :func:`autocorr_windows` assessed: the count gate's minutes
+    plus, when long enough, the trailing partial window (ruling (g) 3)."""
+    minute_dur_s: tuple[float, ...] = ()
+    """Each window's duration; :data:`AC_WINDOW_S` for every full minute."""
     valid: tuple[bool, ...] = ()
     """Per minute of ``minute_s``, :func:`minute_validity` - for a pair, with (a)'s failing
     minutes removed once the cross-check has run."""
@@ -634,10 +742,20 @@ def _refine_harm(rows: list[TrainGate], block: Block, fs: float, *,
 
 
 CARRIES_QRS: Final = 0.5
-"""Rule 2 of ruling 2026-10-02 (c): of the two trains' beats unmatched within 20 ms, the
-train whose unmatched beats reach the QRS-correlation floor in at least this fraction
-wins - when the other's do not. Both or neither: unresolved, neither is stored. Measured
-on A t05: the lead 0.974, its L_T 0.013."""
+"""Rule 2 of ruling 2026-10-02 (c), tightened by (g) 2: of the two trains' beats unmatched
+within 20 ms, train X wins over Y only when X's unmatched beats reach the QRS-correlation
+floor in a MAJORITY (> this) and Y's in a minority (< this) - :func:`rule2_winner`.
+Otherwise the comparison is ambiguous: an incumbent stays; with none, neither is stored.
+Measured on A t05: the lead 0.974, its L_T 0.013."""
+
+
+def rule2_winner(pair_qrs: float, other_qrs: float) -> str | None:
+    """Return ``"pair"`` / ``"other"`` for a clear winner (:data:`CARRIES_QRS`), else None."""
+    if pair_qrs > CARRIES_QRS > other_qrs:
+        return "pair"
+    if other_qrs > CARRIES_QRS > pair_qrs:
+        return "other"
+    return None
 
 
 def _inject(rec: Recording, events: Events, keep: npt.NDArray[np.bool_],
@@ -673,9 +791,15 @@ def _detect(det: str, x: F64, fs: float) -> F64:
 
 
 def _gate_row(name: str, det: str, x: F64, x_real: F64 | None, x_med: F64 | None, times: F64,
-              fs: float, ac: tuple[F64, F64], t05: BeatTrain | None, source: str) -> TrainGate:
-    """Gate one train: count, plausibility, and the real-pattern veto (binding)."""
-    starts, bpm = ac
+              fs: float, ac: tuple[F64, F64, F64], t05: BeatTrain | None,
+              source: str) -> TrainGate:
+    """Gate one train: count, plausibility, and the real-pattern veto (binding).
+
+    ``ac``: :func:`autocorr_windows` - the count gate reads its full minutes only.
+    """
+    starts_w, durs, bpm_w = ac
+    full = durs == AC_WINDOW_S
+    starts, bpm = starts_w[full], bpm_w[full]
     if det == "task05":
         tr = t05 if t05 is not None else detect_rpeaks(x, fs)
         beats = np.asarray(tr.t_s, dtype=np.float64)
@@ -701,8 +825,10 @@ def _gate_row(name: str, det: str, x: F64, x_real: F64 | None, x_med: F64 | None
                      passes=bool(cg.passes and plausible
                                  and harm <= PROVISIONAL_MAX_TRANSIENT_HARM),
                      source=source, harm_median=harm_m, gaps_s=gaps,
-                     minute_s=tuple(float(t) for t in starts),
-                     valid=tuple(bool(v) for v in minute_validity(beats, starts, bpm)))
+                     minute_s=tuple(float(t) for t in starts_w),
+                     minute_dur_s=tuple(float(d) for d in durs),
+                     valid=tuple(bool(v) for v in minute_validity(beats, starts_w, bpm_w,
+                                                                  durs=durs)))
 
 
 def gated_selection(  # noqa: PLR0915 - one pass over every source, in the ruled order
@@ -768,7 +894,7 @@ def gated_selection(  # noqa: PLR0915 - one pass over every source, in the ruled
         x = np.asarray(cand.data[:, c.index], dtype=np.float64)
         xr = None if cand_r is None else np.asarray(cand_r.data[:, c.index], dtype=np.float64)
         xm = None if cand_m is None else np.asarray(cand_m.data[:, c.index], dtype=np.float64)
-        ac = autocorr_rate(x, fs)
+        ac = autocorr_windows(x, fs)
         rows += [_gate_row(c.name, det, x, xr, xm, times, fs, ac,
                            t05[c.name] if det == "task05" else None, "channel")
                  for det in DETECTORS]
@@ -776,7 +902,7 @@ def gated_selection(  # noqa: PLR0915 - one pass over every source, in the ruled
     leads: dict[str, hp.PairLead] = {}
     if pairs:
         detached = hp.detached_contacts(events, keep)
-        acs: dict[frozenset[str], tuple[F64, F64]] = {}
+        acs: dict[frozenset[str], tuple[F64, F64, F64]] = {}
         for p in hp.pair_candidates(rec, detached):
             leads[p.name] = p
             x = hp.lead_signal(rec, p)
@@ -784,7 +910,7 @@ def gated_selection(  # noqa: PLR0915 - one pass over every source, in the ruled
             xm = hp.lead_signal(med, p) if med is not None else None
             key = frozenset((p.plus, p.minus))
             if key not in acs:
-                acs[key] = autocorr_rate(x, fs)
+                acs[key] = autocorr_windows(x, fs)
             rows += [_gate_row(p.name, det, x, xr, xm, times, fs, acs[key], None, "pair")
                      for det in DETECTORS]
     if real is not None:  # veto precision (ruling 2026-10-02 (e) 3)
@@ -843,6 +969,7 @@ def _choose(rows: list[TrainGate], rec: Recording, detached: frozenset[str],  # 
     if incumbent is not None:
         chosen = next((r for r in channel
                        if (r.channel, r.detector) == incumbent and r.passes), None)
+    is_incumbent = chosen is not None
     if chosen is None:
         chosen = pick_train(channel)
     if chosen is None:
@@ -859,19 +986,20 @@ def _choose(rows: list[TrainGate], rec: Recording, detached: frozenset[str],  # 
     pq, cq = res.lead_unmatched_qrs, res.other_unmatched_qrs
     why = (f"rule 2: {best_pair.channel} {best_pair.detector} vs {chosen.channel} "
            f"{chosen.detector} disagree; unmatched beats carrying the QRS {pq:.3f} vs {cq:.3f}")
-    if pq >= CARRIES_QRS > cq:
+    win = rule2_winner(pq, cq)
+    if win == "pair":
         return replace(best_pair, note=why + " - the pair replaces it")
-    if cq >= CARRIES_QRS > pq:
+    if win == "other":
         return replace(chosen, note=why + " - the channel train stays")
-    return None  # unresolved: neither train is trusted
+    if is_incumbent:
+        return replace(chosen, note=why + " - ambiguous: the incumbent stays")
+    return None  # ambiguous with no incumbent: neither train is stored
 
 
 def _in_minutes(row: TrainGate, minutes: npt.NDArray[np.bool_]) -> F64:
     """``row``'s beats that lie in the minutes flagged in ``minutes`` (its own grid)."""
     b = np.sort(row.beats_s)
-    starts = np.asarray(row.minute_s, dtype=np.float64)
-    m = np.searchsorted(starts, b, side="right") - 1
-    ok = (m >= 0) & (b < starts[np.clip(m, 0, None)] + AC_WINDOW_S) & minutes[np.clip(m, 0, None)]
+    ok = _in_window(np.asarray(row.minute_s, dtype=np.float64), _durations(row), b, minutes)
     return np.asarray(b[ok], dtype=np.float64)
 
 
@@ -889,6 +1017,7 @@ def _choose_minutes(rows: list[TrainGate], rec: Recording, detached: frozenset[s
     chosen = None
     if incumbent is not None:
         chosen = next((r for r in ok if (r.channel, r.detector) == incumbent), None)
+    is_incumbent = chosen is not None
     why = "per minute: the incumbent, still eligible"
     if chosen is None:
         chosen = max(ok, key=rank)
@@ -908,12 +1037,15 @@ def _choose_minutes(rows: list[TrainGate], rec: Recording, detached: frozenset[s
                 why = (f"rule 2 on {int(both.sum())} shared valid minutes: {pair.channel} "
                        f"{pair.detector} vs {chan.channel} {chan.detector} disagree; unmatched "
                        f"beats carrying the QRS {pq:.3f} vs {cq:.3f}")
-                if pq >= CARRIES_QRS > cq:
+                win = rule2_winner(pq, cq)
+                if win == "pair":
                     chosen, why = pair, why + " - the pair is stored"
-                elif cq >= CARRIES_QRS > pq:
+                elif win == "other":
                     chosen, why = chan, why + " - the channel train is stored"
+                elif is_incumbent:
+                    why += " - ambiguous: the incumbent stays"
                 else:
-                    return None  # unresolved: neither train is trusted
+                    return None  # ambiguous with no incumbent: neither train is stored
     return minute_gapped(replace(chosen, note=why))
 
 

@@ -53,11 +53,9 @@ from typing import Final
 
 import numpy as np
 import numpy.typing as npt
-from scipy.signal import butter, sosfiltfilt
 
 from gems_blanking_v2.derive.cm_events import Events, find_events
 from gems_blanking_v2.derive.derivations import build_derivations
-from gems_blanking_v2.derive.stomach_alt import notch
 from gems_blanking_v2.physio import hr_channel as hc
 from gems_blanking_v2.physio.rpeaks import (
     DETECT_BAND_HZ,
@@ -100,6 +98,7 @@ __all__ = [
     "rate_check",
     "rate_references",
     "reference_rate",
+    "reference_windows",
     "refined_autocorr_rate",
     "resolve_disagreement",
     "select",
@@ -518,34 +517,8 @@ def refined_autocorr_rate(x: npt.ArrayLike, fs: float,
     count gate keeps :func:`hr_channel.autocorr_rate` unchanged. ``notch_hz``: zero-phase
     notches applied after decimation, before the band-pass and the rectification.
     """
-    y, fd = hc._decimate_to(np.asarray(x, dtype=np.float64), fs, hc._AC_TARGET_HZ)
-    if notch_hz:
-        y = notch(y, fd, notch_hz)
-    sos = butter(4, hc.AC_BAND_HZ, btype="bandpass", fs=fd, output="sos")
-    r = np.abs(sosfiltfilt(sos, y))
-    w = int(round(hc.AC_WINDOW_S * fd))
-    lag_lo = int(np.floor(60.0 / hc.AC_BPM[1] * fd))
-    lag_hi = int(np.ceil(60.0 / hc.AC_BPM[0] * fd))
-    starts: list[float] = []
-    bpm: list[float] = []
-    for m in range(int(r.size / fd // hc.AC_WINDOW_S)):
-        a = int(round(m * hc.AC_WINDOW_S * fd))
-        if a + w > r.size:
-            break
-        seg = r[a:a + w] - r[a:a + w].mean()
-        ac = np.fft.irfft(np.abs(np.fft.rfft(seg, n=2 * w)) ** 2)[:w]
-        rate = float("nan")
-        if ac[0] > 0:
-            ac = ac / ac[0]
-            k = lag_lo + int(np.argmax(ac[lag_lo:lag_hi + 1]))
-            if (lag_lo < k < lag_hi and ac[k] >= hc.PROVISIONAL_AC_MIN_PEAK
-                    and ac[k] >= ac[k - 1] and ac[k] >= ac[k + 1]):
-                den = ac[k - 1] - 2.0 * ac[k] + ac[k + 1]
-                delta = 0.5 * (ac[k - 1] - ac[k + 1]) / den if den < 0 else 0.0
-                rate = 60.0 * fd / (k + delta)
-        starts.append(m * hc.AC_WINDOW_S)
-        bpm.append(rate)
-    return np.asarray(starts, dtype=np.float64), np.asarray(bpm, dtype=np.float64)
+    starts, _durs, _rate, fine = hc._ac_windows(x, fs, notch_hz, partial=False)
+    return starts, fine
 
 
 def hum_locked(bpm: npt.ArrayLike) -> npt.NDArray[np.bool_]:
@@ -578,6 +551,17 @@ def reference_rate(x: npt.ArrayLike, fs: float) -> tuple[F64, F64]:
     return starts, np.where(hc.hum_locked_persistent(bpm), np.nan, bpm)
 
 
+def reference_windows(x: npt.ArrayLike, fs: float) -> tuple[F64, F64, F64]:
+    """Return ``(starts s, durations s, bpm)``: :func:`reference_rate` plus the trailing window.
+
+    Ruling 2026-10-02 (g) 3: the full minutes are exactly :func:`reference_rate`'s; a trailing
+    remainder of at least ``hr_channel.PARTIAL_MIN_S`` is one more window, refined, notched
+    and lock-tested the same way (``hr_channel._locked``).
+    """
+    starts, durs, _rate, fine = hc._ac_windows(x, fs, hc.mains_harmonics(), partial=True)
+    return starts, durs, np.where(hc._locked(fine, durs), np.nan, fine)
+
+
 @dataclass(frozen=True)
 class RateCheck:
     """(a): the lead's per-minute rate against references that do not use it."""
@@ -595,8 +579,9 @@ class RateCheck:
     of ruling 2026-10-02 (f) 2 (a minute that is not assessable is never listed)."""
 
 
-References = tuple[tuple[str, ...], F64, F64]
-"""``(names, minute starts s, rates (n_references x n_minutes) bpm)`` for :func:`rate_check`."""
+References = tuple[tuple[str, ...], F64, F64, F64]
+"""``(names, window starts s, window durations s, rates (n_references x n_windows) bpm)`` for
+:func:`rate_check`."""
 
 
 def rate_references(rec: Recording, lead: PairLead,
@@ -617,16 +602,17 @@ def rate_references(rec: Recording, lead: PairLead,
         refs.append(("stomach_ref", np.asarray(signals["stomach_ref"], dtype=np.float64)))
     rates = []
     starts0: F64 | None = None
+    durs0: F64 = np.zeros(0)
     for _name, x in refs:
-        starts, bpm = reference_rate(x, fs)
+        starts, durs, bpm = reference_windows(x, fs)
         if starts0 is None:
-            starts0 = starts
+            starts0, durs0 = starts, durs
         assert np.array_equal(starts, starts0), "references share one minute grid"
         rates.append(bpm)
     names = tuple(n for n, _x in refs)
     if starts0 is None or starts0.size == 0:
-        return names, np.zeros(0), np.zeros((len(names), 0))
-    return names, starts0, np.vstack(rates)
+        return names, np.zeros(0), np.zeros(0), np.zeros((len(names), 0))
+    return names, starts0, durs0, np.vstack(rates)
 
 
 def rate_check(beats_s: npt.ArrayLike, rec: Recording, lead: PairLead,
@@ -650,28 +636,37 @@ def rate_check(beats_s: npt.ArrayLike, rec: Recording, lead: PairLead,
     ``stomach_ref`` stays: it is a derived signal, not a contact.
 
     ``refs``: :func:`rate_references` for this lead, when already computed.
+
+    Ruling 2026-10-02 (g) 3: a trailing partial window (:func:`reference_windows`) is judged
+    the same way, its count scaled to its duration, and can be listed in ``bad_minutes_s``;
+    the recording-level result - the one a mask-grade pair must pass - reads the full
+    minutes only, exactly as before.
     """
-    names, starts0, stack = rate_references(rec, lead, detached) if refs is None else refs
-    if starts0.size == 0:
+    names, starts0, durs0, stack = rate_references(rec, lead, detached) if refs is None else refs
+    full = durs0 == hc.AC_WINDOW_S
+    if not full.any():
         return RateCheck(names, 0, 0, 0, 0.0, assessable=False, passes=False)
-    any_clear = np.flatnonzero(np.isfinite(stack).any(axis=0))
+    clear = np.isfinite(stack).any(axis=0)
+    any_clear = np.flatnonzero(clear & full)
     b = np.sort(np.asarray(beats_s, dtype=np.float64))
     ok = []
     bad: list[float] = []
-    for i in any_clear:
+    for i in np.flatnonzero(clear):
         col = stack[:, i][np.isfinite(stack[:, i])]
         ref = float(np.median(col))
         if (col.max() - col.min()) > RATE_REF_SPREAD * ref:
             continue  # the references disagree: nothing to judge against
-        s = starts0[i]
-        per_min = np.count_nonzero((b >= s) & (b < s + hc.AC_WINDOW_S)) * 60.0 / hc.AC_WINDOW_S
-        ok.append(abs(per_min - ref) <= RATE_TOL * ref)
-        if not ok[-1]:
+        s, d = starts0[i], durs0[i]
+        per_min = np.count_nonzero((b >= s) & (b < s + d)) * 60.0 / d
+        agree = abs(per_min - ref) <= RATE_TOL * ref
+        if full[i]:
+            ok.append(agree)
+        if not agree:
             bad.append(float(s))
     n_any = int(any_clear.size)
     assessable = bool(n_any > 0 and len(ok) >= RATE_MIN_ASSESSABLE * n_any)
     frac = float(np.mean(ok)) if ok else 0.0
-    return RateCheck(names, int(starts0.size), n_any, len(ok), frac, assessable=assessable,
+    return RateCheck(names, int(full.sum()), n_any, len(ok), frac, assessable=assessable,
                      passes=bool(assessable and frac >= RATE_PASS_FRACTION),
                      bad_minutes_s=tuple(bad))
 

@@ -63,7 +63,7 @@ def test_the_real_pattern_veto_is_binding_for_every_source(rig) -> None:  # noqa
     for t0 in times:  # a large sharp transient between beats: it is captured as a beat
         k = int(round((t0 + 0.07) * FS))
         hit[k - 30 : k + 30] += 5000.0 * np.exp(-0.5 * (np.arange(-30, 30) / 10.0) ** 2)
-    ac = hc.autocorr_rate(x, FS)
+    ac = hc.autocorr_windows(x, FS)
     real_bad = hc._gate_row(p.name, "task05", x, hit, x, times, FS, ac, None, "pair")
     median_bad = hc._gate_row(p.name, "task05", x, x, hit, times, FS, ac, None, "pair")
     assert real_bad.count.passes and real_bad.plausible  # only the veto can decide
