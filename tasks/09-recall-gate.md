@@ -1466,6 +1466,42 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
 
 6. **Then append and recompute** as ruled, and push `c7358cc` or its fix.
 
+### RULING 2026-10-02 (e) — mains in the count gate; the guard becomes a persistence test; veto precision near threshold
+
+**Measured (gems `c7358cc` + `d203469`, held locally; nothing appended):**
+- **The notch fixes the references.** Animal A's stomach references track the lead within about 1%.
+- **The ±0.3 bpm guard discards true heart readings** that happen to sit on the 7200/m grid (A t01 es1 minute 11 at 360; A t04 minute 1 at 379), and that alone costs both gains.
+- **The count gate itself can lock onto mains.** In B t02 3_3 three passing pairs have their own autocorrelation on the grid in 5–13 minutes, while the heart runs at about 311 bpm. Scattered single grid minutes elsewhere are consistent with the heart sitting at a grid rate.
+- **H t01 es2:** its pair failed the veto on H's held-out half (0.03) but passes over the full region (≤ 0.01), with 200 injections in each case.
+- **Item 4:** stim/recovery HR is lost mainly to the 20-minute count gate. The first 2 minutes of recovery give a passing train in all 8 recordings.
+- **Item 5:** no extension. On a ±30 s local baseline only s5#m5 crosses `z_enter`, the misses do not separate from the covered targets, and the pooled chance margin would fall from +0.149 to +0.108.
+
+**Rulings:**
+
+1. **The count gate gets the same mains fix as the references.** Its autocorrelation input is notched at 60 Hz and its harmonics up to the band edge before rectification, for every candidate source.
+   - A gate whose reference measures mains does not measure the heart. This is the same defect, so it gets the same fix. The gate's thresholds (0.05, 95%) are unchanged.
+   - Re-gate every stored train and candidate. Report every change in either direction. An incumbent that fails after the fix goes through `gated_selection` as usual.
+
+2. **The ±0.3 guard is replaced by a persistence test** for references and for the count gate.
+   - A minute is hum-locked only if the rate sits within ±0.3 bpm of the **same** 7200/m value for ≥ 3 consecutive clear minutes. Such minutes are treated as not clear.
+   - **Why:** a mains lock is constant to ±0.2 bpm for minutes, as measured, while a real heart rarely holds within 0.6 bpm for 3 minutes. A single-minute coincidence is not a lock.
+   - The fixed guard was part of a defect fix, not of the frozen design. It is replaced because of its own measured false positives.
+   - Keep reporting single-minute grid coincidences as a diagnostic, not a gate.
+
+3. **The veto's precision near the threshold.** The veto estimates a fraction from 200 injections, which is too few at 0.01: 2 hits against 6 is within noise.
+   - Rule, applied to every source, stored or candidate: if the one-sided 95% interval of the harm estimate contains 0.01, add injections in blocks of 200, up to 2,000, until it does not. Then decide on the estimate.
+   - The threshold is unchanged. Report every decision this changes, including A t05 L_T, B t03 2_2 L_T, B t03 es2 L_T and H t01 es2.
+   - **H t01 es2 is then decided by the full-region estimate**, like any other recording. Its H result stays recorded as "failed on the held-out half", and a later storage is not counted as H evidence.
+
+4. **The hum/mmc miss class is closed as `accepted_limitation`** ("below threshold on every detection signal under global and local baselines; damage only to mmc in hum recordings; no generator feature recovers it without large cost"). Its misses keep counting.
+
+5. **Re-run in this order:**
+   - (i) the A/B and H cross-checks;
+   - (ii) the full-region adoption pass under rulings 1–3;
+   - (iii) item 4 (stim epoch against the recovery windows), because the count-gate fix may change it.
+   
+   Report the changes. If no other stop condition arises, append, recompute and push. The stim/recovery question goes to Andrea with the re-run item 4 numbers.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
