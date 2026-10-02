@@ -1502,6 +1502,31 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
    
    Report the changes. If no other stop condition arises, append, recompute and push. The stim/recovery question goes to Andrea with the re-run item 4 numbers.
 
+### RULING 2026-10-02 (f) — adoption ratified; HR stored per minute so Andrea's windowing applies; mask-grade pairs need the cross-check
+
+**Measured:** the adoption is appended as table `4055cdce`, with 13 entries changed. **Pooled gate 272/276 (0.966), not cleared**; excluded = target 318/322; raw 328/332; chance margin +0.147.
+- All seven ruled gains hold. Three held-out recordings were appended mechanically.
+- Veto precision resolved every threshold case.
+- **Stim/recovery:** the full 20-minute recovery stores a train in 3 of 8 recordings, and the first 2 minutes do in 7 of 8. What fails is the whole-recording count gate, not stimulation.
+
+**Andrea, 2026-10-02:** her analyses (`processing_new`) already work in windows and keep a window when less than 50% of it is blanked. *(She wrote "60 min windows". The build must read `processing_new` and record the exact window length and rule it uses for HR/HRV.)* Nothing is wrong with that approach. It fails here only because our storage rule is whole-recording: one bad stretch means no train at all, so her window rule never gets to act.
+
+**Rulings:**
+
+1. **The adoption is ratified,** as are the lock test reading the refined peak, the persistence limitation (minutes are lost, never wrong), and the s5#m5 closure (s3#m7 and s3#m13 keep their earlier `not_target` closures).
+
+2. **HR storage becomes per minute, so that her windowing does the rest.** This supersedes the addendum's "no valid-minutes storage without a ruling".
+   - **A train is eligible** if it passes the recording-level gates: the transient veto with precision, task 05 plausibility, and for pairs the cross-check's morphology (c) and timing (b) where it applies.
+   - **Each minute is valid** only if it is clear and the train's beats are within 5% of the minute's autocorrelation rate (the count gate's own test, now applied per minute). For pairs, the minute must also pass (a) where it is assessable.
+   - **Minutes that are not valid become tagged gaps.** Their beats are removed, and `gapAfter` marks the boundaries. Wrong beats are never left in place to look valid to the window rule.
+   - **Store the train with the most valid minutes** (ties go to template SNR). Incumbent preference and rule 2 still apply among trains that pass the recording-level gates.
+   - **Report per recording:** valid minutes and longest valid run, and how many of her analysis windows would then pass her < 50%-blanked rule. This is the number that matters to her.
+   - Recordings that already pass end to end keep their trains; their invalid minutes, if any, become gaps.
+   - **Development first.** Run on the A/B and H stim/recovery and baseline recordings, report, and then append as routing changes with the full recompute. Nothing is appended before I see the report.
+
+3. **Mask-grade pairs need the cross-check.** A pair establishes that it is cardiac only through (a) and (c). A mask-grade pair (used for peri-R, where the veto is not required) must therefore pass (a) and (c).
+   - Re-check A t02 and A t01 3_2 sr. If either fails, its peri-R route reverts. That is a routing change, with the recompute.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
