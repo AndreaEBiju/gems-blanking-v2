@@ -73,6 +73,8 @@ __all__ = [
     "hum_locked_persistent",
     "implausible_fraction",
     "mains_harmonics",
+    "minute_gapped",
+    "minute_validity",
     "peri_r_train",
     "pick_train",
     "transient_harm",
@@ -417,6 +419,60 @@ def count_gate(beats_s: npt.ArrayLike, starts: F64, bpm: F64) -> CountGate:
                      passes=bool(assessable and frac >= COUNT_PASS_FRACTION))
 
 
+def minute_validity(beats_s: npt.ArrayLike, starts: F64, bpm: F64,
+                    bad_minutes_s: npt.ArrayLike = ()) -> npt.NDArray[np.bool_]:
+    """Per minute, whether it is valid (ruling 2026-10-02 (f) 2).
+
+    Valid: clear (``bpm`` finite - :func:`autocorr_rate` already NaNs a hum-locked minute),
+    beats in ``[start, start + AC_WINDOW_S)`` within :data:`PROVISIONAL_MAX_COUNT_DEV` of
+    the minute's rate (:func:`count_gate`'s own test), and the start not in
+    ``bad_minutes_s`` (a pair's assessable minutes where cross-check (a) disagrees).
+    """
+    b = np.sort(np.asarray(beats_s, dtype=np.float64))
+    per_min = np.array([np.count_nonzero((b >= s) & (b < s + AC_WINDOW_S)) for s in starts],
+                       dtype=np.float64) * 60.0 / AC_WINDOW_S
+    with np.errstate(invalid="ignore"):
+        within = np.abs(per_min - bpm) <= PROVISIONAL_MAX_COUNT_DEV * bpm
+    return np.asarray(np.isfinite(bpm) & within & ~_listed(starts, bad_minutes_s))
+
+
+def _listed(starts: F64, minutes_s: npt.ArrayLike) -> npt.NDArray[np.bool_]:
+    """Per start, whether it is one of ``minutes_s`` (one minute grid, so 1 us is exact)."""
+    bad = np.asarray(minutes_s, dtype=np.float64)
+    if bad.size == 0:
+        return np.zeros(starts.size, dtype=bool)
+    return np.asarray(np.isclose(starts[:, None], bad[None, :], rtol=0.0, atol=1e-6).any(axis=1))
+
+
+def minute_gapped(row: TrainGate) -> TrainGate:
+    """Return ``row`` with every beat outside its valid minutes removed, as tagged gaps.
+
+    Ruling 2026-10-02 (f) 2: wrong beats are never left in place to look valid to
+    Andrea's window rule. A beat is kept when it lies in a valid minute of
+    ``row.minute_s`` (a trailing partial minute is never assessed, so never kept). Gaps:
+    between two kept beats with an invalid minute between them, and task 05's own gaps
+    whose first beat is kept; each is ``(beat before, beat after)``, so :attr:`gap_after`
+    marks the beat before.
+    """
+    b = np.sort(row.beats_s)
+    starts = np.asarray(row.minute_s, dtype=np.float64)
+    valid = np.asarray(row.valid, dtype=bool)
+    if starts.size == 0:
+        return replace(row, beats_s=b[:0], gaps_s=())
+    m = np.searchsorted(starts, b, side="right") - 1
+    inside = (m >= 0) & (b < starts[np.clip(m, 0, None)] + AC_WINDOW_S)
+    keep = inside & valid[np.clip(m, 0, None)]
+    kb, km = b[keep], m[keep]
+    old = np.asarray([g[0] for g in row.gaps_s], dtype=np.float64)
+    gaps = []
+    for i in range(kb.size - 1):
+        jump = km[i + 1] - km[i] > 1
+        tagged = old.size > 0 and bool(np.isclose(kb[i], old, rtol=0.0, atol=1e-9).any())
+        if jump or tagged:
+            gaps.append((float(kb[i]), float(kb[i + 1])))
+    return replace(row, beats_s=kb, gaps_s=tuple(gaps))
+
+
 def findpeaks_replica(x: npt.ArrayLike, fs: float) -> F64:
     """Return the beats (s) of Andrea's ``findpeaks`` in ``HR_BR_HRVAnalysis_new``.
 
@@ -476,6 +532,33 @@ class TrainGate:
     """Why this row was stored, when the choice was not the plain best-SNR one."""
     n_injections: int = N_INJECTIONS
     """How many real-pattern injections ``transient_harm`` rests on (ruling 2026-10-02 (e) 3)."""
+    rate_ok: bool | None = None
+    """Pair rows: cross-check (a) over the recording; None where it was not run."""
+    morphology_ok: bool | None = None
+    """Pair rows: cross-check (c); None where it was not run."""
+    eligible: bool = False
+    """Ruling 2026-10-02 (f) 2: passes the recording-level gates - the transient veto with
+    precision, task 05 plausibility and, for a pair, morphology (c). Set only by
+    ``gated_selection(per_minute=True)``; False otherwise."""
+    minute_s: tuple[float, ...] = ()
+    """Start times of the minutes :func:`autocorr_rate` assessed (the count gate's grid)."""
+    valid: tuple[bool, ...] = ()
+    """Per minute of ``minute_s``, :func:`minute_validity` - for a pair, with (a)'s failing
+    minutes removed once the cross-check has run."""
+
+    @property
+    def n_valid(self) -> int:
+        """How many minutes are valid."""
+        return int(sum(self.valid))
+
+    @property
+    def longest_valid_run(self) -> int:
+        """The longest run of consecutive valid minutes."""
+        best = run = 0
+        for v in self.valid:
+            run = run + 1 if v else 0
+            best = max(best, run)
+        return best
 
     @property
     def gap_after(self) -> npt.NDArray[np.bool_]:
@@ -513,7 +596,8 @@ Block = Callable[[int], tuple[F64, Callable[["TrainGate"], F64]]]
 """``k -> (block k's injection times, each row's injected signal)``."""
 
 
-def _refine_harm(rows: list[TrainGate], block: Block, fs: float) -> list[TrainGate]:
+def _refine_harm(rows: list[TrainGate], block: Block, fs: float, *,
+                 need_count: bool = True) -> list[TrainGate]:
     """Add injection blocks until every veto decision that matters is settled.
 
     Rows that pass the count gate and plausibility, and whose harm is not settled
@@ -521,11 +605,13 @@ def _refine_harm(rows: list[TrainGate], block: Block, fs: float) -> list[TrainGa
     returns block k's injection times and each row's injected signal) until settled or
     at :data:`MAX_INJECTIONS`; the decision is then the estimate against the threshold.
     Rows failing the count gate or plausibility fail whatever the veto, and keep 200.
+    With ``need_count=False`` (per-minute storage, ruling 2026-10-02 (f) 2, where the
+    count gate is not a recording-level gate) plausibility alone decides who needs it.
     """
     hits = {i: round(r.transient_harm * r.n_injections) for i, r in enumerate(rows)
             if np.isfinite(r.transient_harm)}
     n = {i: rows[i].n_injections for i in hits}
-    need = [i for i in hits if rows[i].count.passes and rows[i].plausible
+    need = [i for i in hits if (rows[i].count.passes or not need_count) and rows[i].plausible
             and not harm_is_settled(hits[i], n[i])]
     k = 1
     while need:
@@ -614,12 +700,14 @@ def _gate_row(name: str, det: str, x: F64, x_real: F64 | None, x_med: F64 | None
                      rescue_rate=float(rescue), plausible=plausible,
                      passes=bool(cg.passes and plausible
                                  and harm <= PROVISIONAL_MAX_TRANSIENT_HARM),
-                     source=source, harm_median=harm_m, gaps_s=gaps)
+                     source=source, harm_median=harm_m, gaps_s=gaps,
+                     minute_s=tuple(float(t) for t in starts),
+                     valid=tuple(bool(v) for v in minute_validity(beats, starts, bpm)))
 
 
 def gated_selection(  # noqa: PLR0915 - one pass over every source, in the ruled order
     rec: Recording, events: Events, *, seed: int = 0, incumbent: tuple[str, str] | None = None,
-    pairs: bool = True,
+    pairs: bool = True, per_minute: bool = False,
 ) -> tuple[TrainGate | None, list[TrainGate]]:
     """Return ``(stored, every train's gates)`` - ``stored`` is None if nothing passes.
 
@@ -639,6 +727,20 @@ def gated_selection(  # noqa: PLR0915 - one pass over every source, in the ruled
     channel train is chosen and a pair passes, a disagreement on more than 5% of beats
     is resolved beat by beat (``hr_pairs.resolve_disagreement``) and the train that
     carries the QRS (:data:`CARRIES_QRS`) is stored; unresolved, nothing is.
+
+    The cross-check runs on every pair row that passes the count gate and plausibility,
+    whatever its veto: a mask-grade pair (:func:`peri_r_train`) must pass (a) and (c)
+    too (ruling 2026-10-02 (f) 3).
+
+    ``per_minute`` (ruling 2026-10-02 (f) 2): the count gate leaves the recording-level
+    gates. A row is ``eligible`` when it passes the veto (with precision, for every
+    plausible row), plausibility and, for a pair, (c); each minute is valid by
+    :func:`minute_validity` - for a pair, also not failing (a) where (a) is assessable.
+    Stored (:func:`_choose_minutes`): the incumbent when eligible, else the eligible row
+    with the most valid minutes (ties: template SNR), then rule 2 between it and the best
+    eligible row of the other source, on the minutes valid in both; the stored train is
+    :func:`minute_gapped`. Timing (b) enters only through rule 2: it applies where an
+    eligible train of the other source exists to compare with.
     """
     # imported here: hr_pairs imports this module
     from gems_blanking_v2.physio import hr_pairs as hp  # noqa: PLC0415
@@ -697,15 +799,36 @@ def gated_selection(  # noqa: PLR0915 - one pass over every source, in the ruled
                     return hp.lead_signal(rk, leads[r.channel])
                 return np.asarray(ck.data[:, col[r.channel]], dtype=np.float64)
             return tk, signal
-        rows = _refine_harm(rows, block, fs)
-    for i, row in enumerate(rows):  # the cross-check runs on pair rows that pass the gates
-        if row.source == "pair" and row.passes:
-            p = leads[row.channel]
-            a = hp.rate_check(row.beats_s, rec, p, detached)
-            m = hp.morphology_check(row.beats_s, rec, detached=detached)
-            failed = [n for n, ok in (("rate", a.passes), ("morphology", m.passes)) if not ok]
-            rows[i] = replace(row, passes=not failed,
-                              cross_check="+".join(failed) if failed else "pass")
+        rows = _refine_harm(rows, block, fs, need_count=not per_minute)
+
+    def veto_ok(r: TrainGate) -> bool:
+        return bool(np.isfinite(r.transient_harm)
+                    and r.transient_harm <= PROVISIONAL_MAX_TRANSIENT_HARM)
+    cuff = {c.name: c.cuff_id for c in rec.channels}
+    refs: dict[frozenset[str | None], hp.References] = {}
+    for i, row in enumerate(rows):  # the cross-check: every pair a stored or mask train could be
+        if row.source != "pair" or not row.plausible:
+            continue
+        if not (row.count.passes or (per_minute and veto_ok(row))):
+            continue
+        p = leads[row.channel]
+        cuffs = frozenset((cuff[p.plus], cuff[p.minus]))
+        if cuffs not in refs:
+            refs[cuffs] = hp.rate_references(rec, p, detached)
+        a = hp.rate_check(row.beats_s, rec, p, detached, refs=refs[cuffs])
+        m = hp.morphology_check(row.beats_s, rec, detached=detached)
+        failed = [n for n, ok in (("rate", a.passes), ("morphology", m.passes)) if not ok]
+        minute_s = np.asarray(row.minute_s, dtype=np.float64)
+        keep = np.asarray(row.valid, dtype=bool) & ~_listed(minute_s, a.bad_minutes_s)
+        valid = tuple(bool(v) for v in keep)
+        rows[i] = replace(row, passes=row.passes and not failed,
+                          cross_check="+".join(failed) if failed else "pass",
+                          rate_ok=a.passes, morphology_ok=m.passes, valid=valid)
+    if per_minute:
+        rows = [replace(r, eligible=bool(r.plausible and veto_ok(r) and np.isfinite(r.snr)
+                                         and (r.source == "channel" or r.morphology_ok is True)))
+                for r in rows]
+        return _choose_minutes(rows, rec, detached, incumbent), rows
     return _choose(rows, rec, detached, incumbent), rows
 
 
@@ -743,6 +866,57 @@ def _choose(rows: list[TrainGate], rec: Recording, detached: frozenset[str],  # 
     return None  # unresolved: neither train is trusted
 
 
+def _in_minutes(row: TrainGate, minutes: npt.NDArray[np.bool_]) -> F64:
+    """``row``'s beats that lie in the minutes flagged in ``minutes`` (its own grid)."""
+    b = np.sort(row.beats_s)
+    starts = np.asarray(row.minute_s, dtype=np.float64)
+    m = np.searchsorted(starts, b, side="right") - 1
+    ok = (m >= 0) & (b < starts[np.clip(m, 0, None)] + AC_WINDOW_S) & minutes[np.clip(m, 0, None)]
+    return np.asarray(b[ok], dtype=np.float64)
+
+
+def _choose_minutes(rows: list[TrainGate], rec: Recording, detached: frozenset[str],
+                    incumbent: tuple[str, str] | None) -> TrainGate | None:
+    """Per-minute storage (ruling 2026-10-02 (f) 2; see :func:`gated_selection`)."""
+    from gems_blanking_v2.physio import hr_pairs as hp  # noqa: PLC0415
+
+    ok = [r for r in rows if r.eligible and r.n_valid > 0]
+    if not ok:
+        return None
+
+    def rank(r: TrainGate) -> tuple[int, float, float]:
+        return (r.n_valid, r.snr, -r.count.median_abs_dev)
+    chosen = None
+    if incumbent is not None:
+        chosen = next((r for r in ok if (r.channel, r.detector) == incumbent), None)
+    why = "per minute: the incumbent, still eligible"
+    if chosen is None:
+        chosen = max(ok, key=rank)
+        why = f"per minute: most valid minutes ({chosen.n_valid} of {len(chosen.valid)})"
+    others = [r for r in ok if r.source != chosen.source]
+    if others:
+        other = max(others, key=rank)
+        pair, chan = (chosen, other) if chosen.source == "pair" else (other, chosen)
+        assert len(pair.valid) == len(chan.valid), "every row shares one minute grid"
+        both = np.asarray(pair.valid, dtype=bool) & np.asarray(chan.valid, dtype=bool)
+        pb, cb = _in_minutes(pair, both), _in_minutes(chan, both)
+        if pb.size and cb.size:
+            t = hp.timing_check(pb, cb)
+            if t.disagree:
+                res = hp.resolve_disagreement(pb, cb, rec, detached=detached, offset_s=t.offset_s)
+                pq, cq = res.lead_unmatched_qrs, res.other_unmatched_qrs
+                why = (f"rule 2 on {int(both.sum())} shared valid minutes: {pair.channel} "
+                       f"{pair.detector} vs {chan.channel} {chan.detector} disagree; unmatched "
+                       f"beats carrying the QRS {pq:.3f} vs {cq:.3f}")
+                if pq >= CARRIES_QRS > cq:
+                    chosen, why = pair, why + " - the pair is stored"
+                elif cq >= CARRIES_QRS > pq:
+                    chosen, why = chan, why + " - the channel train is stored"
+                else:
+                    return None  # unresolved: neither train is trusted
+    return minute_gapped(replace(chosen, note=why))
+
+
 def pick_train(rows: list[TrainGate]) -> TrainGate | None:
     """Return the passing train with the best template SNR, or None if none passes.
 
@@ -763,11 +937,16 @@ def peri_r_train(rows: list[TrainGate]) -> tuple[TrainGate | None, str]:
     gate and task 05's plausibility gates, whatever their transient harm - grade
     ``"mask"``, for the mask only. ``(None, "none")`` when no train passes the count
     gate: the recording gets no peri-R route.
+
+    Ruling 2026-10-02 (f) 3: a pair establishes that it is cardiac only through
+    cross-check (a) and (c), so a mask-grade pair must pass both (``rate_ok`` and
+    ``morphology_ok``; not run counts as failing).
     """
     vetted = pick_train(rows)
     if vetted is not None:
         return vetted, "hrv"
-    ok = [r for r in rows if r.count.passes and r.plausible and np.isfinite(r.snr)]
+    ok = [r for r in rows if r.count.passes and r.plausible and np.isfinite(r.snr)
+          and (r.source != "pair" or (r.rate_ok is True and r.morphology_ok is True))]
     if not ok:
         return None, "none"
     return max(ok, key=lambda r: (r.snr, -r.count.median_abs_dev)), "mask"

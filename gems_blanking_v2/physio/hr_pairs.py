@@ -98,6 +98,7 @@ __all__ = [
     "morphology_check",
     "pair_candidates",
     "rate_check",
+    "rate_references",
     "reference_rate",
     "refined_autocorr_rate",
     "resolve_disagreement",
@@ -589,26 +590,21 @@ class RateCheck:
     fraction_within: float
     assessable: bool
     passes: bool
+    bad_minutes_s: tuple[float, ...] = ()
+    """Start times of the assessable minutes where the lead disagrees - the per-minute (a)
+    of ruling 2026-10-02 (f) 2 (a minute that is not assessable is never listed)."""
 
 
-def rate_check(beats_s: npt.ArrayLike, rec: Recording, lead: PairLead,
-               detached: frozenset[str] = frozenset()) -> RateCheck:
-    """Per minute, the lead's rate against the median clear reference.
+References = tuple[tuple[str, ...], F64, F64]
+"""``(names, minute starts s, rates (n_references x n_minutes) bpm)`` for :func:`rate_check`."""
 
-    References: :func:`reference_rate` on every raw channel of a site the lead
-    does not use (a left-right pair uses both necks, so the stomach contacts) and on
-    ``stomach_ref``. A minute with a clear reference is ASSESSABLE when its clear
-    references agree among themselves within :data:`RATE_REF_SPREAD`; there the lead
-    agrees when its beats per minute are within :data:`RATE_TOL` of their median. The
-    recording is assessable when assessable minutes are at least
-    :data:`RATE_MIN_ASSESSABLE` of the minutes with any clear reference, and passes when
-    it is assessable and at least :data:`RATE_PASS_FRACTION` of assessable minutes agree.
-    Unassessable never passes.
 
-    POST-H AMENDMENT (ruling 2026-10-02 (c) 3): a ``detached`` contact is not a
-    reference - a contact that does not see the shared ground is not a physiological
-    reference, as it is left out of (c). Decided after H; it changes no H outcome.
-    ``stomach_ref`` stays: it is a derived signal, not a contact.
+def rate_references(rec: Recording, lead: PairLead,
+                    detached: frozenset[str] = frozenset()) -> References:
+    """Return the references :func:`rate_check` judges ``lead`` against (see there).
+
+    They depend on the lead only through the cuffs it uses, so one result serves every
+    lead on the same cuffs.
     """
     fs = float(rec.fs)
     used = {c.cuff_id for c in rec.channels if c.name in (lead.plus, lead.minus)}
@@ -629,11 +625,39 @@ def rate_check(beats_s: npt.ArrayLike, rec: Recording, lead: PairLead,
         rates.append(bpm)
     names = tuple(n for n, _x in refs)
     if starts0 is None or starts0.size == 0:
+        return names, np.zeros(0), np.zeros((len(names), 0))
+    return names, starts0, np.vstack(rates)
+
+
+def rate_check(beats_s: npt.ArrayLike, rec: Recording, lead: PairLead,
+               detached: frozenset[str] = frozenset(), *,
+               refs: References | None = None) -> RateCheck:
+    """Per minute, the lead's rate against the median clear reference.
+
+    References: :func:`reference_rate` on every raw channel of a site the lead
+    does not use (a left-right pair uses both necks, so the stomach contacts) and on
+    ``stomach_ref``. A minute with a clear reference is ASSESSABLE when its clear
+    references agree among themselves within :data:`RATE_REF_SPREAD`; there the lead
+    agrees when its beats per minute are within :data:`RATE_TOL` of their median. The
+    recording is assessable when assessable minutes are at least
+    :data:`RATE_MIN_ASSESSABLE` of the minutes with any clear reference, and passes when
+    it is assessable and at least :data:`RATE_PASS_FRACTION` of assessable minutes agree.
+    Unassessable never passes.
+
+    POST-H AMENDMENT (ruling 2026-10-02 (c) 3): a ``detached`` contact is not a
+    reference - a contact that does not see the shared ground is not a physiological
+    reference, as it is left out of (c). Decided after H; it changes no H outcome.
+    ``stomach_ref`` stays: it is a derived signal, not a contact.
+
+    ``refs``: :func:`rate_references` for this lead, when already computed.
+    """
+    names, starts0, stack = rate_references(rec, lead, detached) if refs is None else refs
+    if starts0.size == 0:
         return RateCheck(names, 0, 0, 0, 0.0, assessable=False, passes=False)
-    stack = np.vstack(rates)
     any_clear = np.flatnonzero(np.isfinite(stack).any(axis=0))
     b = np.sort(np.asarray(beats_s, dtype=np.float64))
     ok = []
+    bad: list[float] = []
     for i in any_clear:
         col = stack[:, i][np.isfinite(stack[:, i])]
         ref = float(np.median(col))
@@ -642,11 +666,14 @@ def rate_check(beats_s: npt.ArrayLike, rec: Recording, lead: PairLead,
         s = starts0[i]
         per_min = np.count_nonzero((b >= s) & (b < s + hc.AC_WINDOW_S)) * 60.0 / hc.AC_WINDOW_S
         ok.append(abs(per_min - ref) <= RATE_TOL * ref)
+        if not ok[-1]:
+            bad.append(float(s))
     n_any = int(any_clear.size)
     assessable = bool(n_any > 0 and len(ok) >= RATE_MIN_ASSESSABLE * n_any)
     frac = float(np.mean(ok)) if ok else 0.0
     return RateCheck(names, int(starts0.size), n_any, len(ok), frac, assessable=assessable,
-                     passes=bool(assessable and frac >= RATE_PASS_FRACTION))
+                     passes=bool(assessable and frac >= RATE_PASS_FRACTION),
+                     bad_minutes_s=tuple(bad))
 
 
 @dataclass(frozen=True)

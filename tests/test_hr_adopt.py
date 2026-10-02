@@ -44,7 +44,10 @@ def test_every_pair_row_faces_the_same_gates_and_the_cross_check(selection) -> N
             r.count.passes and r.plausible and r.transient_harm <= hc.PROVISIONAL_MAX_TRANSIENT_HARM
         )
         assert r.passes == (gates and r.cross_check == "pass")
-        assert (r.cross_check == "") == (not gates)  # the cross-check runs only behind the gates
+        # it runs behind count + plausibility, whatever the veto: a mask-grade pair needs it
+        # too (ruling 2026-10-02 (f) 3)
+        assert (r.cross_check == "") == (not (r.count.passes and r.plausible))
+        assert (r.rate_ok is None) == (r.cross_check == "")
 
 
 def test_without_the_pairs_source_nothing_is_stored_on_this_rig(rig) -> None:  # noqa: ANN001

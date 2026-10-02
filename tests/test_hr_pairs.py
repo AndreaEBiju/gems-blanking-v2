@@ -368,6 +368,21 @@ def test_a_minute_whose_references_disagree_by_over_five_percent_is_not_judged(
     assert hp.rate_check(_train([400.0, 400.0]), short_rig.rec, p).minutes_assessable == 2
 
 
+def test_the_failing_assessable_minutes_are_listed_and_no_other(
+    monkeypatch: pytest.MonkeyPatch,
+    short_rig: CrossSiteSynth,
+) -> None:
+    p = hp.pair_candidates(short_rig.rec)[0]
+    # minute 1 disagrees; minute 2 is unassessable (references 400 / 450) though the lead is off
+    _fixed_rates(monkeypatch, [[400.0, 400.0, 400.0, 400.0], [400.0, 400.0, 450.0, 400.0],
+                               [np.nan] * 4, [np.nan] * 4])
+    rc = hp.rate_check(_train([400.0, 300.0, 300.0, 400.0]), short_rig.rec, p)
+    w = hc.AC_WINDOW_S
+    assert rc.bad_minutes_s == (w,) and rc.minutes_assessable == 3
+    refs = hp.rate_references(short_rig.rec, p)  # precomputed references give the same answer
+    assert hp.rate_check(_train([400.0, 300.0, 300.0, 400.0]), short_rig.rec, p, refs=refs) == rc
+
+
 def test_too_few_assessable_minutes_is_unassessable_and_never_passes(
     monkeypatch: pytest.MonkeyPatch,
     short_rig: CrossSiteSynth,
