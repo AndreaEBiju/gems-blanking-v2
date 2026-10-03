@@ -258,3 +258,86 @@ def test_a_round_appends_and_records_old_hash_new_hash_and_the_check(tmp_path: P
     assert set(read_routing(store, new_h)["entries"]) == {"gems_x_1", "gems_x_2", "gems_x_3"}
     with pytest.raises(ValueError, match="already routed"):
         append_for_round(store, "plan_r7", new_h, {"gems_x_1": _new_entry()}, "round 7")
+
+
+# --- ruling 2026-10-03: per-minute cuff trust ---------------------------------------------
+
+_PM_HR = {"channel": "LVN1-RVN2", "detector": "findpeaks", "n_beats": 6633, "source": "pair",
+          "storage": "per_minute", "valid_windows": [18, 20],
+          "blank_s": [[120.0, 180.0], [600.0, 660.0]]}
+_WHOLE = {"channel": "L_T", "detector": "task05", "n_beats": 3400}
+_SV = {"route": "uncorrected", "w_s": 0.0015, "theta_sigma": 6.2}
+
+
+def _pm_entry(spike: dict, hr: dict | None = None) -> dict:
+    return {"spike": {"L": spike}, "hr": _PM_HR if hr is None else hr, "stomach_ref": {}}
+
+
+def test_a_hump_only_cuff_is_recognised_and_any_other_reason_is_not() -> None:
+    from gems_blanking_v2.emit.routing import HUMP_REASON, hump_only  # noqa: PLC0415
+
+    assert hump_only({"route": "distrusted", "why": HUMP_REASON})
+    iii = "veto verification (iii) fails: an event core survives"
+    assert not hump_only({"route": "distrusted", "why": f"{iii}; {HUMP_REASON}"})
+    assert not hump_only({"route": "distrusted", "why": "veto verification (ii) fails"})
+    assert not hump_only({"route": "uncorrected"})
+    assert not hump_only({"route": "uncorrected", "why": HUMP_REASON})  # a trusted cuff
+    assert not hump_only({"route": "distrusted", "why": ""})
+
+
+def test_the_per_minute_cuff_entry_carries_the_train_s_blank_spans_and_validates() -> None:
+    from gems_blanking_v2.emit.routing import per_minute_cuff_entry, validate_entry  # noqa: PLC0415
+
+    with_mask = per_minute_cuff_entry(_SV, _PM_HR, [2.0, 6.0])
+    assert with_mask == {"route": "uncorrected", "veto": {"w_s": 0.0015, "theta_sigma": 6.2},
+                         "peri_r_ms": [2.0, 6.0], "peri_r_beats": "per_minute",
+                         "distrusted_spans": [[120.0, 180.0], [600.0, 660.0]]}
+    no_core = per_minute_cuff_entry({"route": "scalar"}, _PM_HR, None)
+    assert no_core == {"route": "scalar", "distrusted_spans": [[120.0, 180.0], [600.0, 660.0]]}
+    for e in (with_mask, no_core):
+        validate_entry("gems_x_3", _pm_entry(e))
+
+
+def test_per_minute_cuff_trust_needs_a_per_minute_train_and_a_readable_route() -> None:
+    from gems_blanking_v2.emit.routing import per_minute_cuff_entry  # noqa: PLC0415
+
+    with pytest.raises(ValueError, match="needs a per-minute HR train"):
+        per_minute_cuff_entry(_SV, _WHOLE, None)
+    with pytest.raises(ValueError, match="not one the spike consumer reads"):
+        per_minute_cuff_entry({"route": "distrusted"}, _PM_HR, None)
+
+
+_BLANK = _PM_HR["blank_s"]
+_PMB = "must be the per-minute HR"
+
+
+@pytest.mark.parametrize(("spike", "hr", "match"), [
+    ({"route": "distrusted", "why": "x", "distrusted_spans": _BLANK}, None, "trusted elsewhere"),
+    ({"route": "uncorrected", "distrusted_spans": [[120.0, 180.0]]}, None, _PMB),
+    ({"route": "uncorrected", "distrusted_spans": _BLANK}, {**_WHOLE, "blank_s": _BLANK}, _PMB),
+    ({"route": "uncorrected", "peri_r_ms": [2.0, 6.0], "peri_r_beats": "per_minute"}, _WHOLE,
+     "needs a per-minute HR train"),
+    ({"route": "uncorrected", "peri_r_ms": [2.0, 6.0], "peri_r_beats": "whole"}, None,
+     "is not one of"),
+])
+def test_inconsistent_per_minute_cuff_entries_are_refused(
+    spike: dict, hr: dict | None, match: str
+) -> None:
+    from gems_blanking_v2.emit.routing import validate_entry  # noqa: PLC0415
+
+    with pytest.raises(ValueError, match=match):
+        validate_entry("gems_x_3", _pm_entry(spike, hr))
+
+
+def test_distrusted_spans_must_be_sorted_disjoint_and_non_empty() -> None:
+    from gems_blanking_v2.emit.routing import validate_entry  # noqa: PLC0415
+
+    unsorted, overlapping = [[600.0, 660.0], [120.0, 180.0]], [[120.0, 180.0], [170.0, 200.0]]
+    for bad in ([[180.0, 120.0]], unsorted, overlapping):
+        hr = {**_PM_HR, "blank_s": bad}
+        with pytest.raises(ValueError, match="sorted, disjoint"):
+            validate_entry("gems_x_3", _pm_entry({"route": "uncorrected", "distrusted_spans": bad},
+                                                 hr))
+    touching = [[120.0, 180.0], [180.0, 200.0]]  # half-open spans may touch
+    validate_entry("gems_x_3", _pm_entry({"route": "uncorrected", "distrusted_spans": touching},
+                                         {**_PM_HR, "blank_s": touching}))

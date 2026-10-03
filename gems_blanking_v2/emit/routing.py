@@ -10,9 +10,17 @@ Per recording (keys are recording ids)::
     spike:       {cuff: {route: multi | scalar | uncorrected | distrusted,
                          why?: str,                     # distrusted only
                          veto?: {w_s, theta_sigma},     # the cuff has a core
-                         peri_r_ms?: [a, b], peri_r_beats?: hrv | mask,
-                         peri_r_narrow_ms?: [[a, b], ...]}}   # ruling (d) 3
-    hr:          {channel, detector, n_beats} | {none: str}
+                         peri_r_ms?: [a, b], peri_r_beats?: hrv | mask | per_minute,
+                         peri_r_narrow_ms?: [[a, b], ...],    # ruling (d) 3
+                         distrusted_spans?: [[a, b], ...]}}   # ruling 2026-10-03
+    hr:          {channel, detector, n_beats, source?,
+                  storage?: per_minute, valid_windows?, blank_s?: [[a, b], ...]} | {none: str}
+
+**Per-minute cuff trust (ruling 2026-10-03):** where the HR train is per-minute only, a cuff
+distrusted solely for :data:`HUMP_REASON` is trusted in the train's valid minutes and
+distrusted in its rejected ones: ``distrusted_spans`` is the HR entry's ``blank_s`` (half-open,
+region-relative s - the blankSpans convention), and a peri-R extent in the valid minutes uses
+``peri_r_beats: per_minute`` (the per-minute train). Built only by :func:`per_minute_cuff_entry`.
     stomach_ref: {notch_hz: [...], contacts: [...]} | {}   # {} = the derivation as-is
 
 **Schema 2 (ruling 2026-09-30 (d) 2):** the table is per-recording entries, each hashed
@@ -34,7 +42,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Final
 
@@ -43,6 +51,8 @@ from gems_blanking_v2.io.store import GemsStore, atomic_write_text
 __all__ = [
     "CONVENTIONS",
     "GATE_CONVENTION",
+    "HUMP_REASON",
+    "PERI_R_GRADES",
     "SPIKE_ROUTES",
     "append_entries",
     "append_for_round",
@@ -52,6 +62,8 @@ __all__ = [
     "damage_path",
     "entry_hash",
     "excluded_inputs",
+    "hump_only",
+    "per_minute_cuff_entry",
     "read_damage",
     "read_routing",
     "routing_check_path",
@@ -65,6 +77,10 @@ __all__ = [
 ]
 
 SPIKE_ROUTES: Final[tuple[str, ...]] = ("multi", "scalar", "uncorrected", "distrusted")
+PERI_R_GRADES: Final[tuple[str, ...]] = ("hrv", "mask", "per_minute")
+"""Which beats place a cuff's peri-R mask: the whole-recording train, a mask-grade train, or
+(ruling 2026-10-03) the per-minute train, in its valid minutes only."""
+HUMP_REASON: Final = "QRS hump and no count-gated train (addendum to ruling (c) 1)"
 CONVENTIONS: Final[tuple[str, ...]] = ("run", "excluded_is_target")
 GATE_CONVENTION: Final = "run"
 """Ruling (d) 1: the gate counts only consumers that run."""
@@ -98,10 +114,73 @@ def validate_entry(rid: str, entry: Mapping[str, Any]) -> None:
         if has_extent != ("peri_r_beats" in s):
             msg = f"{rid} {cuff}: peri_r_beats goes with a peri-R extent, and only with one"
             raise ValueError(msg)
+        if "peri_r_beats" in s and s["peri_r_beats"] not in PERI_R_GRADES:
+            msg = f"{rid} {cuff}: peri_r_beats {s['peri_r_beats']!r} is not one of {PERI_R_GRADES}"
+            raise ValueError(msg)
+        per_minute_hr = entry["hr"].get("storage") == "per_minute"
+        if s.get("peri_r_beats") == "per_minute" and not per_minute_hr:
+            msg = f"{rid} {cuff}: a per_minute peri-R needs a per-minute HR train"
+            raise ValueError(msg)
+        if "distrusted_spans" in s:
+            if s["route"] == "distrusted":
+                msg = (f"{rid} {cuff}: distrusted_spans belong to a cuff trusted elsewhere, "
+                       "not a distrusted one")
+                raise ValueError(msg)
+            if not per_minute_hr or s["distrusted_spans"] != entry["hr"].get("blank_s"):
+                msg = (f"{rid} {cuff}: distrusted_spans must be the per-minute HR train's blank_s "
+                       "(ruling 2026-10-03: the cuff is distrusted where no R reference exists)")
+                raise ValueError(msg)
+            _check_spans(rid, cuff, s["distrusted_spans"])
     hr = entry["hr"]
     if ("none" in hr) == ("channel" in hr):
         msg = f"{rid}: hr names either a stored train or why there is none"
         raise ValueError(msg)
+
+
+def _check_spans(rid: str, cuff: str, spans: Sequence[Sequence[float]]) -> None:
+    """Half-open ``[a, b)`` spans, each a < b, sorted and disjoint."""
+    prev = float("-inf")
+    for sp in spans:
+        if len(sp) != 2 or not (sp[0] < sp[1]) or sp[0] < prev:  # noqa: PLR2004
+            msg = (f"{rid} {cuff}: distrusted_spans must be sorted, disjoint [a, b) with a < b: "
+                   f"{spans}")
+            raise ValueError(msg)
+        prev = sp[1]
+
+
+def hump_only(spike: Mapping[str, Any]) -> bool:
+    """Whether a cuff is distrusted for :data:`HUMP_REASON` and nothing else (ruling 2026-10-03)."""
+    if spike.get("route") != "distrusted":
+        return False
+    reasons = [r for r in str(spike.get("why", "")).split("; ") if r]
+    return bool(reasons) and all(r == HUMP_REASON for r in reasons)
+
+
+def per_minute_cuff_entry(sv_cuff: Mapping[str, Any], hr: Mapping[str, Any],
+                          extent_ms: Sequence[float] | None = None) -> dict[str, Any]:
+    """Return the entry of a cuff trusted in a per-minute train's valid minutes (ruling 2026-10-03).
+
+    ``sv_cuff``: the cuff's frozen route and veto (``route``; ``w_s`` and ``theta_sigma`` where
+    it has a core). ``extent_ms``: the peri-R extent measured on valid-minute spikes by the
+    peri-R rule, or None where there is no significant core (then no mask). The cuff is
+    distrusted in ``hr["blank_s"]``. Raises unless ``hr`` is a per-minute train and the route is
+    one the spike consumer reads.
+    """
+    if hr.get("storage") != "per_minute" or "blank_s" not in hr:
+        msg = "per-minute cuff trust needs a per-minute HR train with its blank_s"
+        raise ValueError(msg)
+    route = sv_cuff.get("route")
+    if route not in SPIKE_ROUTES or route == "distrusted":
+        msg = f"route {route!r} is not one the spike consumer reads"
+        raise ValueError(msg)
+    entry: dict[str, Any] = {"route": route}
+    if sv_cuff.get("w_s"):
+        entry["veto"] = {"w_s": sv_cuff["w_s"], "theta_sigma": sv_cuff["theta_sigma"]}
+    if extent_ms is not None:
+        entry["peri_r_ms"] = [float(x) for x in extent_ms]
+        entry["peri_r_beats"] = "per_minute"
+    entry["distrusted_spans"] = [[float(a), float(b)] for a, b in hr["blank_s"]]
+    return entry
 
 
 def _entries(table: Mapping[str, Any]) -> Mapping[str, Any]:
