@@ -5224,6 +5224,15 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
 - **Seed `perir.py`'s chance-loss sampler,** so that its exposure numbers reproduce. No routing field depends on them.
 - **For Andrea (her code, her decision):** `processing_new` drops beats within 0.75 s of any blank but counts that time as valid, so count rates read slightly low next to every blank. Fixing it means excluding the edge-buffer time from valid seconds too.
 
+**Round 8, 2026-10-03 (table `6e3af8a7`):** 57/58 raw.
+- **Pooled gate 322/326 (lower bound 0.972), not cleared.** Excluded = target 364/369; raw 385/390; pooled chance margin +0.133. The round-8 margin alone is −0.020, which is descriptive only.
+- At 4 target misses the gate needs 456 target marks: about 130 more with no new target miss.
+- **The miss s1#m7** (H t06 2_1 sr, z 2.97 on L_T 300–3000) is below tolerance under `run`: its only consumers are excluded (distrusted L cuff; a rejected HR minute). It counts under the other two conventions.
+  - **Closure:** Andrea classifies it from its miss page. If she would blank it, it closes as `accepted_limitation` ("threshold class; below tolerance under the gate convention"). If not, `not_target`. Round 9 may be drawn once it is closed.
+- **Measure, don't build: peri-R from per-minute trains.** Peri-R is placed by whole-recording trains only, so cuffs with a QRS hump in recordings that have only a per-minute train stay distrusted (B t01 es1 R, H t06 L).
+  - The candidate rule: place the peri-R mask from the per-minute train in its valid minutes, and distrust the cuff only in the invalid minutes, so the cuff's exposure is excluded there.
+  - Report the spike-consumer time this would recover, pooled, and which marks would change class. Do not adopt it.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
