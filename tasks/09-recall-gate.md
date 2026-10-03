@@ -1585,6 +1585,30 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
   - The candidate rule: place the peri-R mask from the per-minute train in its valid minutes, and distrust the cuff only in the invalid minutes, so the cuff's exposure is excluded there.
   - Report the spike-consumer time this would recover, pooled, and which marks would change class. Do not adopt it.
 
+### RULING 2026-10-03 — peri-R from per-minute trains is adopted; per-minute cuff distrust
+
+**Measured (development, `peri_pm.json`):**
+- Four cuffs are distrusted only for "QRS hump, no count-gated train" in recordings that now have a per-minute train: A t02 L, H t01 3_3 sr L, H t03 ms2 sr L, H t06 2_1 sr L. B t01 es1 sr R also fails check (iii) and stays distrusted.
+- Measured by `perir.py`'s own rule on valid-minute spikes:
+  - **A t02 L gets an extent of [2.0, 6.0] ms** (×2.35, p 7e-5, on 87 spikes).
+  - **The other three have no R-locked core** (p 0.49, 0.79 and 0.007, all above the 1e-3 bar).
+- **Recovered:** 3,975 of 4,755 cuff-seconds (84%).
+- **No class changes under `run`.** Ten marks go target → below under `excluded_is_target` (H t01 3_3 sr ×2, H t06 2_1 sr ×8).
+
+**Rulings:**
+
+1. **Adopted.** Where a recording has only a per-minute HR train, a cuff distrusted solely for "QRS hump, no count-gated train" is:
+   - **trusted in that train's valid minutes**, with a peri-R extent measured on valid-minute spikes by `perir.py`'s rule (no extent if there is no significant core);
+   - **distrusted in its invalid minutes.** The spike consumer's exposure excludes them, and rates are divided by valid time.
+   - Any other distrust reason, such as check (iii), still distrusts the whole cuff.
+   - **Why:** this is the same logic as per-minute HR storage. A cuff is judged where its R reference exists, and excluded where it does not.
+
+2. **Routing representation:** the cuff entry carries `distrusted_spans` (region-relative, the same convention as HR `blankSpans`). When task 13 is built, those spans become part of the spike consumer's mask for that cuff.
+
+3. **Append as a routing change from `6e3af8a7`, and recompute every pooled mark** (three numbers, class changes listed). The expected effect: no `run` change, and the 10 `excluded_is_target` changes above. A different result is a stop condition.
+
+4. **Seed** the chance-loss sampler here too, as for `perir.py`.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
