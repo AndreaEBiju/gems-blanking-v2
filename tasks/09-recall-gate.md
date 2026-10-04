@@ -1609,6 +1609,15 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
 
 4. **Seed** the chance-loss sampler here too, as for `perir.py`.
 
+**Round 9, 2026-10-04 (table `599adefe`; 2026-10-03 change appended first as `9a1218e2`, as expected):** 43/44 raw.
+- **Pooled gate 360/364 (lower bound 0.975), not cleared.** Excluded = target 392/397; raw 428/434; pooled chance margin +0.123.
+- At 4 target misses the gate needs 456 target marks: about 92 more with no new target miss.
+- **The miss s1#m9** (H t03 2_3 bl; z 2.69 in 100–300 Hz on ANT2) is below tolerance under **both** conventions: no consumer, running or excluded, is harmed.
+
+**Standing rule (2026-10-04):** a miss that is below tolerance under both `run` and `excluded_is_target` is closed by the build as `accepted_limitation`, with the reason "below every consumer's tolerance under both conventions; threshold class", and Andrea is told. She may override it with `not_target`.
+- A miss that is a target under either convention still goes to Andrea for classification before it is closed.
+- Applied now to s1#m9.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
