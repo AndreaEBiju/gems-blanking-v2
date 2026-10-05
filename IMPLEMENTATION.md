@@ -5266,6 +5266,31 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
 - A miss that is a target under either convention still goes to Andrea for classification before it is closed.
 - Applied now to s1#m9.
 
+### RULING 2026-10-05 — round 10; the mmc damage test is not a harm test; detached contacts out of task 18 mechanically
+
+**Measured (round 10 on `a2790057`):**
+- 50/59 raw. **Pooled gate 401/406 (lower bound 0.974), not cleared.** Excluded = target 439/452; raw 478/493.
+- **New gate miss: s2#m12** (B t01 1_1 bl), a target only through "mmc damaged".
+- The eight s2 misses are closed as `accepted_limitation`, in Andrea's words: "All are LVN3 pops". s3#m16 is closed under the standing rule.
+- **The mmc damage test flags the heartbeat and chance:**
+  - s2#m12's flag is the QRS on `stomach_ref` (4.06 σ against the 3 σ bar; the mark sits on a beat; correlation 0.966 with the average beat).
+  - On 300 beat-centred and 300 random 41 ms windows, away from marks: B t01 1_1 bl flags 49% of beats and 16% at random; four other recordings flag 6–18% at random.
+- **B t01 1_1 bl LVN3 is detached:** g 0.076, sign agreement 0.51. The other contacts are healthy.
+- **Brief marks (< 50 ms):** 18 of 493. Only s2#m12 is a target under `run`. Half of the covered brief marks are covered only by overlap.
+
+**Rulings:**
+
+1. **The mmc test is not a harm test.** It asks whether `stomach_ref` exceeds 3 σ inside the mark. That is an amplitude test, and it fires on the QRS and, for short windows, on 6–18% of random times. A 41 ms deviation cannot change an analysis that works over minutes. Every other consumer test asks whether the consumer's own output changes (spike counts, the beat train, slow-wave peaks). This one does not, which breaks the principle of 2026-09-29: "decide by consumer harm".
+   - **Proposed replacement, measure only:** an operational mmc test. Blank the mark exactly as the pipeline would, run the mmc consumer with and without the blank on the mark's surrounding window, and count the mark as damaging if the mmc output changes beyond the consumer's own resolution. The build proposes that resolution from mmc's code, and it is fixed before computing.
+   - **Report:** every pooled mark's class under the current test and under the operational one; the gate under both; and the operational test's false-flag rate on random windows. That rate should be about zero.
+   - **No change is adopted.** The damage rule was approved by Andrea, so replacing part of it is her decision, made with both numbers in front of her.
+
+2. **Detached contacts are excluded from task 18 mechanically:** any contact the detached rule (first-half |g| < 0.2 or sign agreement < 0.75) flags **in that recording**. A t04 LVN3 and B t01 1_1 bl LVN3 are the cases so far. This replaces the hand-kept list.
+
+3. **No brief-event fast path.** Brief marks are 18 of 493, and the only brief gate target is the QRS-flagged s2#m12. The recurring brief misses are LVN3 pops on a detached contact that no running consumer reads. The class stays `accepted_limitation`.
+
+4. **Round 11 may be drawn.** At 5 target misses the gate needs 523 target marks: about 117 more with no new target miss.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
