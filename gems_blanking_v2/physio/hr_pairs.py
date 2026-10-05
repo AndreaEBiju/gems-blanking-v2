@@ -94,6 +94,7 @@ __all__ = [
     "inject_real_patterns",
     "lead_signal",
     "morphology_check",
+    "noncardiac_events",
     "pair_candidates",
     "rate_check",
     "rate_references",
@@ -366,8 +367,14 @@ class _Half:
     times: F64
 
 
-def _prepare_half(rec: Recording, seed: int) -> _Half:
-    """Events, the non-cardiac selection (as ``gated_selection``) and both injections."""
+def noncardiac_events(rec: Recording) -> tuple[Events, npt.NDArray[np.bool_]]:
+    """Return ``(events, non-cardiac selection)`` as ``gated_selection`` takes them.
+
+    The common-mode events of ``rec`` and, per event, whether it is clear of task 05's beats
+    on the top-ranked HR candidate - the pool the ground gains (:func:`ground_gains`) and so
+    the detached rule (:func:`detached_contacts`) are measured on. One construction site:
+    the half-split protocol and task 18's contact exclusion both call it.
+    """
     ev = find_events(rec)
     cand = hc.hr_candidates(rec)
     t05 = {c.name: detect_rpeaks(np.asarray(cand.data[:, c.index], dtype=np.float64), float(rec.fs))
@@ -376,7 +383,12 @@ def _prepare_half(rec: Recording, seed: int) -> _Half:
         first, _t = rank_hr_channels(cand, t05)
     except ValueError:
         first = max(t05, key=lambda k: t05[k].n_beats)
-    keep = hc._noncardiac(ev, t05[first].t_s)
+    return ev, hc._noncardiac(ev, t05[first].t_s)
+
+
+def _prepare_half(rec: Recording, seed: int) -> _Half:
+    """Events, the non-cardiac selection (as ``gated_selection``) and both injections."""
+    ev, keep = noncardiac_events(rec)
     if not (keep & np.isfinite(event_patterns(ev)).all(axis=1)).any():
         # nothing to inject: the veto cannot be measured, so no lead can pass it (harm NaN)
         return _Half(rec, ev, keep, {}, np.zeros(0))
