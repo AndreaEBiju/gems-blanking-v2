@@ -1643,6 +1643,33 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
 
 4. **Round 11 may be drawn.** At 5 target misses the gate needs 523 target marks: about 117 more with no new target miss.
 
+### RULING 2026-10-06 — rounds 11–12; the mmc question closed for the gate; findings for task 13
+
+**Measured:**
+- **Round 11:** 24/24, no misses.
+- **Round 12, on table `22e0366b`:** 59/60 raw. **Pooled gate 479/484, one-sided lower bound 0.9784, not cleared.** About 39 more covered targets are needed with no new target miss, so round 13 is needed.
+- **s2 of round 12** was committed before marking was complete. It was revealed 31 s after commit and is scored as committed, with a write-once span note.
+- **The miss s4#m4** (H t01 ms1 bl) is below tolerance under `run` and a target under `excluded_is_target`. It goes to Andrea.
+- **Operational mmc test:**
+  - Blanking any window perturbs mmc's output for about ±15 s. Its 30 s moving threshold re-centres, and events appear and disappear outside the blank.
+  - The false-flag rate on random windows is 93–96% at every shift tolerance, and pooled marks are flagged at the same 93%. No resolution separates marks from random windows.
+- **`extract_mmc.m` reads ANT1–3 directly,** not `stomach_ref` as the spec states.
+
+**Rulings:**
+
+1. **The operational mmc tests are rejected.** They measure how blanking disturbs mmc, not harm done by the mark.
+
+2. **The gate keeps the current mmc test** (the 3 σ amplitude test on `stomach_ref`). It is recorded honestly as an **amplitude proxy, not a harm test**.
+   - It over-flags (about 43% of random windows), which makes marks targets more often. That keeps more marks in the gate's denominator, the conservative direction, so it cannot make the gate easier to pass.
+   - It is kept unchanged so that the rule is not altered while the gate is being decided.
+   - A relative test (a mark against equal-length random blanks in the same recording) is deferred, not built.
+
+3. **Findings carried to task 13 and to Andrea's downstream processing:**
+   - **mmc must not be fed naive NaN blanks.** Any blank shifts its events for about ±15 s, because the 30 s moving threshold re-centres. Task 13's mmc extent has to handle this: hold the threshold across blanks, or report the mmc output inside ±15 s of a blank as not measured.
+   - **mmc's real input is ANT1–3.** The hum-notch routing for mmc applies to ANT1–3 in hum recordings, not to `stomach_ref`. Correct the consumer table in the spec.
+
+4. **Round 13** is drawn after Andrea closes s4#m4.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
