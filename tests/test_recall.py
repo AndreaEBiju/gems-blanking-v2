@@ -34,9 +34,11 @@ from gems_blanking_v2.detect.recall import (
     poisson_binomial_95,
     pooled_gate,
     record_generator_change,
+    record_span_note,
     score_round,
     score_stored_round,
     span_bootstrap,
+    span_note_path,
     write_budget,
 )
 from gems_blanking_v2.io.store import GemsStore
@@ -696,3 +698,81 @@ def test_a_budget_on_too_few_recordings_or_another_generator_does_not_count(
 
 def test_the_budget_threshold_is_the_declared_one() -> None:
     assert CANDIDATE_BUDGET == 3000
+
+
+# --- span notes (ruling 2026-10-06, round 12 s2) ---------------------------------
+
+NOTE = ("s2 committed before marking was complete (Andrea, 2026-10-06); scored as committed; "
+        "unmarked remainder not audited")
+AT = datetime(2026, 10, 6, 12, 0, tzinfo=UTC)
+
+
+def _reveal_time(store: GemsStore, plan_id: str, k: int, when: str) -> Path:
+    """Add the reveal time the window writes to span k's record; return the record path."""
+    d = store.audit_dir("J", f"blk{k}_20260916T030321Z")
+    p = d / f"{plan_id}_s{k + 1}_plan.json"
+    rec = json.loads(p.read_text(encoding="utf-8"))
+    rec["reveal"] = {**rec.get("reveal", {}), "revealed_at": when}
+    p.write_text(json.dumps(rec), encoding="utf-8")
+    return p
+
+
+def test_a_span_note_records_commit_and_reveal_times_and_touches_nothing(tmp_path: Path) -> None:
+    store = GemsStore.initialise(tmp_path / "gems")
+    _write_round(store, PID, [[[210, 211]], [[250, 252]]], revealed=CANDS,
+                 committed_at=["2026-10-06T01:00:00+00:00", "2026-10-06T01:05:00+00:00"])
+    rec = _reveal_time(store, PID, 1, "2026-10-06T01:05:02+00:00")
+    d = store.audit_dir("J", "blk1_20260916T030321Z")
+    before = {p.name: p.read_bytes() for p in d.iterdir()}
+    path = record_span_note(store, PID, 2, note=NOTE, by="Andrea", at=AT)
+    assert path == span_note_path(store, PID)
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    assert doc == {f"{PID}_s2": {"note": NOTE, "by": "Andrea", "at": AT.isoformat(),
+                                 "committed_at": "2026-10-06T01:05:00+00:00",
+                                 "revealed_at": "2026-10-06T01:05:02+00:00"}}
+    assert {p.name: p.read_bytes() for p in d.iterdir()} == before  # marks and record untouched
+    assert rec.is_file()
+
+
+def test_a_span_without_a_reveal_time_has_no_reveal_key(tmp_path: Path) -> None:
+    store = GemsStore.initialise(tmp_path / "gems")
+    _write_round(store, PID, [[[210, 211]], [[250, 252]]])  # no committed_at, no reveal
+    doc = json.loads(record_span_note(store, PID, 1, note=NOTE, by="Andrea", at=AT)
+                     .read_text(encoding="utf-8"))
+    assert set(doc[f"{PID}_s1"]) == {"note", "by", "at"}  # missing is absent, never null
+
+
+def test_a_span_note_is_refused_when_it_cannot_be_right(tmp_path: Path) -> None:
+    store = GemsStore.initialise(tmp_path / "gems")
+    _write_round(store, PID, [[[210, 211]], [[250, 252]]], commit=1)
+    with pytest.raises(ValueError, match="not committed"):
+        record_span_note(store, PID, 2, note=NOTE, by="Andrea", at=AT)
+    with pytest.raises(ValueError, match="spans 1-2, not 3"):
+        record_span_note(store, PID, 3, note=NOTE, by="Andrea", at=AT)
+    with pytest.raises(ValueError, match="spans 1-2, not 0"):
+        record_span_note(store, PID, 0, note=NOTE, by="Andrea", at=AT)
+    with pytest.raises(ValueError, match="needs text"):
+        record_span_note(store, PID, 1, note="  ", by="Andrea", at=AT)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        record_span_note(store, PID, 1, note=NOTE, by="Andrea", at=datetime(2026, 10, 6))
+    with pytest.raises(ValueError, match="no audit plan"):
+        record_span_note(store, "plan_20260101T000000Z_00000001", 1, note=NOTE, by="A", at=AT)
+    record_span_note(store, PID, 1, note=NOTE, by="Andrea", at=AT)
+    with pytest.raises(ValueError, match="written once"):
+        record_span_note(store, PID, 1, note="another", by="Andrea", at=AT)
+    doc = json.loads(span_note_path(store, PID).read_text(encoding="utf-8"))
+    assert doc[f"{PID}_s1"]["note"] == NOTE
+
+
+def test_the_score_carries_the_span_notes_and_is_otherwise_unchanged(tmp_path: Path) -> None:
+    store = GemsStore.initialise(tmp_path / "gems")
+    _write_round(store, PID, [[[210, 211], [230, 231]], [[250, 252]]], revealed=CANDS)
+    plain = score_stored_round(store, PID, _reveal_with(CANDS), write=False)
+    assert "span_notes" not in plain.provenance
+    record_span_note(store, PID, 2, note=NOTE, by="Andrea", at=AT)
+    noted = score_stored_round(store, PID, _reveal_with(CANDS), write=False)
+    assert noted.provenance["span_notes"][f"{PID}_s2"]["note"] == NOTE
+    assert dict(noted.statistics()) == dict(plain.statistics())  # recall over marks, unmoved
+    score_stored_round(store, PID, _reveal_with(CANDS))
+    on_disk = json.loads(store.audit_score_path(PID).read_text(encoding="utf-8"))
+    assert on_disk["provenance"]["span_notes"][f"{PID}_s2"]["by"] == "Andrea"

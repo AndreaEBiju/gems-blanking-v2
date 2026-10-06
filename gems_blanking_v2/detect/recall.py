@@ -137,12 +137,14 @@ __all__ = [
     "record_generator_change",
     "record_miss_closure",
     "record_miss_fixes",
+    "record_span_note",
     "score_marks",
     "score_round",
     "score_stored_round",
     "source_sha256",
     "span_bootstrap",
     "span_id",
+    "span_note_path",
     "three_numbers",
     "write_budget",
 ]
@@ -1165,6 +1167,7 @@ def score_stored_round(
     score = score_round(plan_id, inputs, seed=plan.get("seed"), provenance={
         "plan_created_at": plan.get("created_at"),
         **({"labelled_at": labelled.isoformat()} if labelled else {}),
+        **({"span_notes": n} if (n := _read_json(span_note_path(store, plan_id))) else {}),
         "scored_at": datetime.now(UTC).isoformat(),
         "generator": generator,
         "reveal_digests": digest_state,
@@ -1306,6 +1309,61 @@ def record_classification(
         raise ValueError(msg)
     entry[question] = {"classification": classification, "words": words, "by": by,
                        "at": at.isoformat()}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, json.dumps(doc, indent=1, sort_keys=True, ensure_ascii=True) + "\n")
+    return path
+
+
+def span_note_path(store: GemsStore, plan_id: str) -> Path:
+    """Where a round's span notes live: beside its score, never in the marks."""
+    return store.audit_score_path(plan_id).with_name(f"{plan_id}_span_notes.json")
+
+
+def record_span_note(
+    store: GemsStore, plan_id: str, span_no: int, *, note: str, by: str, at: datetime,
+) -> Path:
+    """Record a note about one committed span of a round, beside its score.
+
+    For a span whose commit needs explaining without changing it - e.g. committed
+    before marking was complete (ruling 2026-10-06, round 12 s2): the marks were
+    frozen before the reveal and stay valid blind evidence; the note says what the
+    record alone cannot. The marks file and the span record are never edited. The
+    entry carries the commit time and, when the span record has one, the reveal time,
+    read from the store rather than typed. Written once per span; the scorer copies
+    the notes into the score's provenance (``span_notes``). Raises ``ValueError`` for
+    a span number outside the plan, an uncommitted span, an empty note, a naive time,
+    or a span already noted.
+    """
+    if at.tzinfo is None:
+        msg = "the note time must be timezone-aware (invariant 31)"
+        raise ValueError(msg)
+    if not note.strip():
+        msg = "a span note needs text"
+        raise ValueError(msg)
+    plan = _read_json(store.audit_plan_path(plan_id))
+    if plan is None:
+        msg = f"no audit plan {plan_id!r} in the store"
+        raise ValueError(msg)
+    if not 1 <= span_no <= len(plan["spans"]):
+        msg = f"{plan_id} has spans 1-{len(plan['spans'])}, not {span_no}"
+        raise ValueError(msg)
+    sp = plan["spans"][span_no - 1]
+    sid = span_id(plan, span_no - 1)
+    folder = store.audit_dir(sp["animal"], sp["recording_id"])
+    marks = _read_json(folder / f"{sid}_blind_marks.json")
+    if marks is None:
+        msg = f"{sid} is not committed; a span note is for a committed span"
+        raise ValueError(msg)
+    record = _read_json(folder / f"{sid}_plan.json") or {}
+    path = span_note_path(store, plan_id)
+    doc = _read_json(path) or {}
+    if sid in doc:
+        msg = f"{sid} already has a note; a span note is written once"
+        raise ValueError(msg)
+    revealed_at = (record.get("reveal") or {}).get("revealed_at")
+    doc[sid] = {"note": note, "by": by, "at": at.isoformat(),
+                **({"committed_at": marks["committed_at"]} if marks.get("committed_at") else {}),
+                **({"revealed_at": revealed_at} if revealed_at else {})}
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, json.dumps(doc, indent=1, sort_keys=True, ensure_ascii=True) + "\n")
     return path
