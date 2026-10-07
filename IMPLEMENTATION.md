@@ -5632,6 +5632,84 @@ Andrea's confirmation now covers only the animal-alias table. The label-group ta
 3. **The data-driven check of (i) item 4 runs in three steps:** tier 1; tier 1 + 2a; tier 1 + 2a + 2b. Each step is kept only if it does not lower audit-span F1 by ≥ 0.02 with a 95% CI excluding 0, relative to the previous step. Mode choice uses the largest kept set, under (i)'s ranking-agreement condition.
 4. **Andrea's alias confirmation is still pending.** It changes only the animal column, so no recompute.
 
+### RULING 2026-10-08 — task 12 trainer; hash freeze; overnight load after the session limit
+
+**1. `retrain.py` cannot be reused for training.** Task 12 says to import `GEMSBlanking:detector/retrain.py` wholesale. But it cannot read the per-core feature table, and it trains unlabelled windows as negatives. That breaks invariant 9 (`unjudged` is not `negative`), and invariants outrank reuse instructions.
+- **The build's own trainer stands:** LightGBM on judged cores only, with `unsure` and `unjudged` excluded.
+- An adapter cannot fix the label semantics without changing `retrain.py`, and GEMSBlanking is not modified or pushed (standing constraint).
+- **Reuse what carries no label semantics:** `retrain.py`'s LightGBM parameter defaults as the starting parameters, `review.py` (SHAP HTMLs), `heldout_eval.py` metrics where they accept our tables, `animal_id.py`, and the provenance/registry machinery.
+- **Hyperparameters:** fixed parameters for the provisional runs. For final training, tuning (optuna, as in `hyperopt_worker.py`) is allowed only **nested inside** each LOAO training fold, never on the held-out animal. R9 thresholds are unchanged.
+- Record the deviation from task 12's reuse list in the run record.
+
+**2. The generation hash is frozen at `0133349b3ebeff80` until the build is accepted.**
+- Edits to hash-scope files, docstrings included, are collected in a deferred list and not applied.
+- **R8 and `constants.py`:** report whether its 300–5000 value is read by any code on the detection path.
+  - **If read:** the gate (table `64c2e1ea`) was measured with it, so it stays for detection. The consumer-side and feature code use 300–3000 per R8.
+  - **If not read:** it is a stale constant, added to the deferred list.
+  Changing detection would need a new gate run, which is out of scope before quals.
+
+**3. Overnight load.** The session limit was hit at night: three builders plus a reviewer on every commit used the usage budget faster than the hardware's capacity suggested.
+- **From now on, one builder runs at a time, in this priority:**
+  1. the Change 1 screen (task 16);
+  2. provisional training plus the (j) tier check;
+  3. the (d)–(g) measurement;
+  4. tasks 13–15.
+- The independent reviewer runs **once per merge** (a batch of commits), not per commit.
+- Detached jobs (Night 1, the inventory, measurement runs) are unaffected.
+
+### RULING 2026-10-08 (b) — night results: the cohort shortcut, task 12 questions, cardiac and mains findings
+
+**Measured overnight (build, 2026-10-08):**
+- **Night 1:** 182 of 195 jobs produced output (265,989 cores). Of the 13 failures, 12 recordings have no unblanked signal anywhere, and 1 (`mdur_loll_MS1_stim_recovery`) has a non-standard name.
+- **JEL vs J:** old-cohort JEL was filed as "J", colliding with new-cohort test animal J. Fixed: animals are keyed `cohort:animal` everywhere (loader, runner, registry).
+- **Merged and pushed:**
+  - tasks 10–15, 12A and 19 to gems main (`4c58e87`);
+  - the Change 1 screen, Shift+drag widening and prefetch to detector-pyqt main.
+  - Hash unchanged.
+- **Labelling set A:** 418 items (300 old-cohort random cores; 59 new-cohort train from A/B/H; 59 new-cohort test from I/J/K), plus a hum add-on queue (47 rows in the dry run).
+- **Cohort shortcut:** the provisional pooled model learns "old cohort means motion", because old-cohort labels are positives only.
+  - The cohorts remain separable at AUC 0.98–1.00 on every reasonable feature set.
+  - With old rows in training, 56–100% of unjudged old cores are called motion; without them, 6–47%.
+  - `power_rel_spread` depends on channel count, which breaks invariant 10.
+  - P1 (computing features on a common signal set) costs no F1.
+- **Cardiac (Builder 3):**
+  - Only (A) removes real leak. (B) and (C) leave 29–91% of it, because they are anchored to stored R marks that jitter 0.25–0.39 ms, while (A) realigns each beat.
+  - The colleague's beat detector agrees with Andrea's trains on ≤ 11% of beats.
+- **Mains (Builder 3):**
+  - Andrea's 60 Hz notch changes no spike detection.
+  - The colleague's cleaner helps the spike consumer on hum recordings, but lowers injected-spike recovery by 10–19% on A's left-cuff controls.
+- **Spike-consumer settling:** 5.1 ms, against the spec's 30–50 ms. The spec figure came from the old 100 Hz high-pass.
+- **Line-noise inventory:** the proposed 0.10 line-ratio cut marks 57% of recordings as affected.
+
+**Rulings:**
+
+1. **The cohort shortcut. Old-cohort rows train only alongside old-cohort negatives judged by Andrea.**
+   - **(a) Adopt P1:** compute features on the common signal set. **Fix `power_rel_spread`** and any other feature that depends on channel count (invariant 10).
+   - **(b) Until set A is labelled,** old-cohort rows stay out of training; provisional runs are new-cohort only.
+   - **(c) After set A,** the 300 random old cores are an unbiased sample with both classes, and they enter training.
+     - The positives-only old marks enter only with **prior-corrected weights**: the old-cohort positive weight is set so the effective old-cohort motion rate equals the rate estimated from set A's random old sample (with its CI).
+     - The (j) nested tier check applies, scored on new-cohort audit spans.
+   - **(d) Acceptance check for the shortcut:** a cohort-identification probe on the model's out-of-fold scores. For cores judged physiology, the median P(motion) must not differ between cohorts by > 0.10. Report it per mode.
+2. **Task 12 questions:**
+   - **"C beats B":** C must beat B at B's best adaptation weight, where that weight is chosen by inner validation on training folds, never on the test fold. R9's margin and CI rule applies.
+   - **"Folds with fewer than 20 positives":** per fold as the protocol defines it. That is the held-out animal for LOAO, and the held-out recording group for within-animal splits.
+   - **Mode A calibration** must use zero target labels: calibrate on other animals' out-of-fold predictions.
+   - **R1 and the registry:** R1 binds evaluation. An adapted model for I/J/K may be registered **only** if trained on adaptation labels kept separate from the evaluation labels, with a flag that it is never used to score I/J/K evaluation spans.
+   - **Renamed blocks:** the folder name is authoritative (Andrea's convention), so the I/J/K check by folder animal stands.
+3. **Spike-consumer settling: the measured 5.1 ms stands.** Correct the spec expectation.
+4. **The `mdur_loll_MS1_stim_recovery` name:** extend the name pattern to cover it, and replay that one job.
+5. **Cardiac:**
+   - **(B) and (C) must realign each beat** (±0.5 ms sub-sample cross-correlation to their own local template) before they are compared. The comparison is otherwise unfair to them.
+   - Then report the operating rule (the most adaptive setting with injected-spike recovery ≥ 0.9 at jitter ≥ 1 ms), residual leak on detached and stomach channels, and the (e) leak/neural classification per component, run on the unsubtracted signal.
+   - **The colleague's beat detector is dropped.** Beats come from Andrea's count-gated trains only, and cuffs without one keep their current distrust.
+   - Adoption remains Andrea's decision.
+6. **Mains: not adopted globally.**
+   - Report the "with fixes" variant of (d) (replica subtracted from the unfiltered signal, candidate-core weighting, any-frequency lines, 3000 Hz cap) if it has not been run. The 10–19% recovery loss on clean controls may come from the missing fixes.
+   - A per-cuff use is considered only under a criterion fixed before results: injected-spike recovery not reduced by > 2%.
+   - Adoption remains Andrea's decision.
+7. **Line-noise thresholds:** not fixed yet. Report the distribution of line ratio per channel and minute (histogram, per animal) and the share of minutes whose mains-locked spike fraction exceeds chance at α = 0.01 with family correction. The threshold for item 4 of (c) is ruled after that is seen. "Affected" at 57% is not a blanking decision, since line noise never blanks.
+8. **Labelling:** set A plus the hum add-on is ready for Andrea after the alias check. The I/J/K test items in set A are evaluation-only (R1).
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
