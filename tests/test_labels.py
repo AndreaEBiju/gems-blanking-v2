@@ -152,6 +152,17 @@ def test_an_unknown_tier_label_raises() -> None:
         lb.training_rows(_old_rows(), old_tiers={"o1": "1"}, keep_tiers=("2",))
 
 
+def test_the_test_set_is_new_cohort_ijk_only_and_letters_are_cohort_qualified() -> None:
+    # old-cohort JEL is "J" too: it is training data, a different rat from new-cohort J
+    row = ("o1", "J", "old", 0, 1, "motion", "inherited", "mark_overlap", "train", "human")
+    old_j = pd.DataFrame([row], columns=list(lb.LABEL_COLUMNS))
+    assert lb.training_rows(old_j, old_tiers={"o1": "1"})["recording"].tolist() == ["o1"]
+    new_j = old_j.assign(cohort="new", recording="n1")
+    assert lb.training_rows(new_j).empty  # new-cohort J never trains, even marked train
+    assert lb.is_test_animal("new", "J") and not lb.is_test_animal("old", "J")
+    assert lb.animal_key("old", "J") != lb.animal_key("new", "J")
+
+
 def test_model_labels_need_an_explicit_opt_in() -> None:
     t = _table()
     t.loc[0, "label_source"] = "model"

@@ -47,6 +47,8 @@ __all__ = [
     "AliasRow",
     "BlankmotionLabels",
     "alias_table",
+    "animal_key",
+    "is_test_animal",
     "judge_core",
     "read_blankmotion_labels",
     "recording_label_source",
@@ -71,7 +73,23 @@ and not grid-locked; 2b undecidable, admitted on the date route only. Anything e
 excluded. The training check adds them in this order, one step at a time."""
 
 TEST_ANIMALS: Final[frozenset[str]] = frozenset({"I", "J", "K"})
-"""The prospective test set (ruling 2026-10-07 (b) R1): never in training."""
+"""The prospective test set (ruling 2026-10-07 (b) R1): NEW-cohort animals I, J and K, never
+in training. Letters are reused across cohorts - the old cohort's JEL is also "J" - so the set
+applies to ``cohort == "new"`` only; see :func:`is_test_animal` and :func:`animal_key`."""
+
+
+def is_test_animal(cohort: str, animal: str) -> bool:
+    """Whether (cohort, animal) is in R1's prospective test set: new-cohort I, J, K only."""
+    return cohort == "new" and animal in TEST_ANIMALS
+
+
+def animal_key(cohort: str, animal: str) -> str:
+    """Return the animal's identity for grouping (LOAO folds, per-animal models): ``cohort:animal``.
+
+    The two cohorts are different rats that reuse letters (old JEL and new J are both "J");
+    grouping on the bare letter would put two animals in one fold.
+    """
+    return f"{cohort}:{animal}"
 
 LABEL_COLUMNS: Final[tuple[str, ...]] = (
     "recording", "animal", "cohort", "start_s", "stop_s", "judgement", "source",
@@ -268,7 +286,7 @@ def training_rows(table: pd.DataFrame, *, allow_model_labels: bool = False,
     ok_src = {"human"} | ({"model", "mixed"} if allow_model_labels else set())
     keep = (table["judgement"].isin(["motion", *NEGATIVE_JUDGEMENTS])
             & (table["label_set"] == "train")
-            & ~table["animal"].isin(TEST_ANIMALS)
+            & ~(table["cohort"].eq("new") & table["animal"].isin(TEST_ANIMALS))
             & table["label_source"].isin(ok_src))
     allowed = set(keep_tiers)
     unknown = allowed - set(OLD_TIERS)
