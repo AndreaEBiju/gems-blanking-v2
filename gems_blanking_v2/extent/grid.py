@@ -19,7 +19,10 @@ import numpy.typing as npt
 
 from gems_blanking_v2.constants import GRID_S
 
-__all__ = ["frame_sample_bounds", "n_grid_frames", "to_matlab_inclusive"]
+__all__ = ["T0_TOLERANCE_S", "frame_sample_bounds", "n_grid_frames", "to_matlab_inclusive"]
+
+T0_TOLERANCE_S = 1e-9
+"""Two time origins closer than this are the same origin (float noise only)."""
 
 
 def frame_sample_bounds(i0: int, i1: int, fs: float, grid_s: float = GRID_S) -> tuple[int, int]:
