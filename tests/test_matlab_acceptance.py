@@ -82,7 +82,9 @@ def test_matlab_step1_bandpass_honours_the_emitted_masks(tmp_path: Path) -> None
                           routing_hash="test", created_at="2026-10-08T05:00:00+00:00",
                           recording="synthetic")
     medians = {f"{c}|{s}|{b}": 0.3 for c, s, b in masks}  # the real gate path (it holds)
-    mask_file = write_mask_file(tmp_path / "synthetic_masks.mat", masks, prov, fs=FS,
+    reads = {"spikes": ("L_T",), "slow_wave": ("ANT1",), "mmc": ("ANT1",)}
+    mask_file = write_mask_file(tmp_path / "synthetic_masks.mat", masks, prov, signals=reads,
+                                fs=FS,
                                 n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
                                 animal_median=medians,
                                 release="synthetic acceptance test: the slow_wave span "

@@ -67,7 +67,8 @@ def _matlab_spans(invalid: Bool, fs: float, n_samples: int, grid_s: float, what:
 
 
 def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
-                    provenance: MaskProvenance | None, *, fs: float, n_samples: int,
+                    provenance: MaskProvenance | None, *, signals: Mapping[str, Sequence[str]],
+                    fs: float, n_samples: int,
                     epoch_start_s: float, min_retention: float,
                     animal_median: Mapping[str, float | None],
                     decisions: Iterable[RouteDecision] = (),
@@ -76,8 +77,14 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
                     events: Sequence[Mapping[str, Any]] = ()) -> Path:
     """Write the masks as MATLAB blank spans with their provenance and QC gate.
 
-    Refuses: provenance that does not name a model; a held recording (gate computed here,
-    from ``masks``) without a non-blank ``release``; a mask whose grid does not start at
+    ``signals`` maps each consumer to the signals it reads in this recording (as for
+    ``build_masks``); the masks must cover exactly those consumer x signal pairs (velocity
+    excepted while task 18 is out), so the gate cannot be passed by leaving an
+    over-blanked consumer out.
+
+    Refuses: provenance that does not name a model; masks that do not cover ``signals``;
+    a held recording (gate computed here, from ``masks``) without a non-blank
+    ``release``; a mask whose grid does not start at
     ``epoch_start_s`` or does not have ``floor(n_samples / fs / grid)`` frames. Every
     numeric array is checked for exact-zero runs (invariant 1).
     """
@@ -85,6 +92,12 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
         msg = "a mask file must carry provenance naming its model (task 15); none given"
         raise ProvenanceError(msg)
     provenance.validate()
+    want_keys = {(c, s) for c, names in signals.items() if c != "velocity" for s in names}
+    have_keys = {(c, s) for c, s, _b in masks if c != "velocity"}
+    if want_keys != have_keys:
+        msg = (f"masks do not cover what this recording reads: missing "
+               f"{sorted(want_keys - have_keys)}, unexpected {sorted(have_keys - want_keys)}")
+        raise ValueError(msg)
     gate = emit_gate(masks, min_retention=min_retention, animal_median=animal_median,
                      decisions=decisions, hum_features=hum_features)
     if release is not None and not release.strip():
@@ -117,7 +130,9 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
                                 "blank_held": gate.blank_held,
                                 "min_retention": gate.min_retention,
                                 "medians_used": dict(gate.medians_used),
-                                "notes": list(gate.notes)}
+                                "notes": list(gate.notes),
+                                "top_routes": [list(t) for t in gate.top_routes],
+                                "hum_features": dict(gate.hum_features)}
     if release:
         gate_doc["release"] = release
     doc["provenance_json"] = provenance.to_json()
@@ -125,7 +140,8 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
                                     allow_nan=False)
     doc["retention_json"] = json.dumps(retention, sort_keys=True, ensure_ascii=True,
                                        allow_nan=False)
-    doc["gate_json"] = json.dumps(gate_doc, sort_keys=True, ensure_ascii=True)
+    doc["gate_json"] = json.dumps(gate_doc, sort_keys=True, ensure_ascii=True,
+                                  allow_nan=False)
     doc["fs"] = float(fs)
     doc["epochStart_s"] = float(epoch_start_s)
     doc["nSamples"] = float(n_samples)
