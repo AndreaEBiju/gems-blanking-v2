@@ -64,7 +64,7 @@ from gems_blanking_v2.model.evaluate import (
     require_run_record,
     scores,
 )
-from gems_blanking_v2.model.labels import animal_key, is_test_animal
+from gems_blanking_v2.model.labels import OLD_TIERS, animal_key, is_test_animal
 from gems_blanking_v2.model.provenance import build_provenance, corpus_composition
 from gems_blanking_v2.model.registry import (
     ModelSpec,
@@ -87,6 +87,7 @@ from gems_blanking_v2.types import TrainingMode
 __all__ = [
     "UNKNOWN_ANIMAL",
     "Fold",
+    "LabelOptIns",
     "ModeRefusedError",
     "ModeRun",
     "Refusal",
@@ -100,6 +101,7 @@ __all__ = [
     "per_animal_folds",
     "prepare_table",
     "read_renames",
+    "refuse_test_rows",
     "run_modes",
 ]
 
@@ -128,6 +130,53 @@ class ModeRefusedError(ValueError):
         self.mode = mode
         self.target = target
         self.reason = reason
+
+
+@dataclass(frozen=True)
+class LabelOptIns:
+    """The label opt-ins a registering pass trained under (recorded in provenance).
+
+    ``allow_model_labels`` must be a real ``bool``; when False every training row must
+    have ``label_source == "human"``. ``keep_tiers`` are the old-cohort tiers admitted
+    (drawn from :data:`~gems_blanking_v2.model.labels.OLD_TIERS`); every old-cohort
+    recording in the table must carry one of them. :meth:`check` enforces both against
+    the table actually trained on.
+    """
+
+    allow_model_labels: bool
+    keep_tiers: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        """Refuse a non-bool flag and any tier outside OLD_TIERS."""
+        flag: object = self.allow_model_labels  # typed bool; checked because it is data
+        if not isinstance(flag, bool):
+            msg = f"allow_model_labels must be a bool, got {flag!r}"
+            raise TypeError(msg)
+        bad = sorted(set(self.keep_tiers) - set(OLD_TIERS))
+        if bad:
+            msg = f"keep_tiers must be drawn from {OLD_TIERS}, got {bad}"
+            raise ValueError(msg)
+
+    def check(self, table: pd.DataFrame, old_tiers: Mapping[str, str] | None) -> None:
+        """Raise unless ``table`` is consistent with these opt-ins."""
+        if not self.allow_model_labels:
+            src = sorted(set(table["label_source"].astype(str)) - {"human"}) if (
+                "label_source" in table.columns) else ["(no label_source column)"]
+            if src:
+                msg = f"allow_model_labels is False but the table has label_source {src}"
+                raise ValueError(msg)
+        old = table.loc[table["cohort"] == "old", "recording"].astype(str).unique()
+        tiers = {(old_tiers or {}).get(r) for r in old}
+        outside = sorted(map(str, tiers - set(self.keep_tiers)))
+        if outside:
+            msg = (f"old-cohort recordings at tier(s) {outside} are outside keep_tiers "
+                   f"{list(self.keep_tiers)}")
+            raise ValueError(msg)
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the provenance record."""
+        return {"allow_model_labels": self.allow_model_labels,
+                "keep_tiers": sorted(self.keep_tiers)}
 
 
 @dataclass(frozen=True)
@@ -199,7 +248,7 @@ def prepare_table(table: pd.DataFrame, *,
         if col not in table.columns:
             msg = f"table is missing required column {col!r}"
             raise ValueError(msg)
-    _refuse_test_rows(table)
+    refuse_test_rows(table)
     per_rec = table.groupby(table["recording"].astype(str))[["animal", "cohort"]].nunique()
     multi = per_rec[(per_rec > 1).any(axis=1)]
     if len(multi):
@@ -242,15 +291,18 @@ def prepare_table(table: pd.DataFrame, *,
     return out
 
 
-def _refuse_test_rows(table: pd.DataFrame) -> None:
-    """R1: no new-cohort I/J/K row and no row with label_set != 'train' may train."""
+def refuse_test_rows(table: pd.DataFrame, *, context: str = "training") -> None:
+    """R1: no new-cohort I/J/K row and no row with label_set != 'train' may be used.
+
+    ``context`` names the use in the message ("training", "a SHAP review", ...).
+    """
     test = np.array([is_test_animal(c, a) for c, a in
                      zip(table["cohort"].astype(str), table["animal"].astype(str), strict=True)],
                     dtype=bool)
     not_train = (table["label_set"] != "train").to_numpy()
     if test.any() or not_train.any():
         msg = (f"{int(test.sum())} row(s) of the prospective test set (new-cohort I/J/K) and "
-               f"{int(not_train.sum())} row(s) with label_set != 'train' reached training; "
+               f"{int(not_train.sum())} row(s) with label_set != 'train' reached {context}; "
                "R1: they are never trained on and never scored")
         raise ValueError(msg)
 
@@ -568,7 +620,7 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
               rounds: int = NUM_BOOST_ROUND, adapt_rounds: int = ADAPT_ROUNDS,
               registry: Registry | None = None, user: str = "",
               old_tiers: Mapping[str, str] | None = None,
-              label_opt_ins: Mapping[str, object] | None = None) -> ModeRun:
+              label_opt_ins: LabelOptIns | None = None) -> ModeRun:
     """Train and score every requested mode for every target, in one pass.
 
     Requires an existing run record (R9 thresholds written before training). ``table``
@@ -589,7 +641,7 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
     learning-curve pass (``train_size``) never registers.
     """
     require_run_record(record_path)
-    _refuse_test_rows(table)
+    refuse_test_rows(table)
     _check_renames_recorded(table, record_path)
     if registry is not None:
         if not user:
@@ -603,11 +655,11 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
             msg = ("a registering pass trains all three modes over the full recorded w_adapt "
                    f"grid {list(W_ADAPT_GRID)} (task 12: train all three, always)")
             raise ValueError(msg)
-        if label_opt_ins is None or not {"allow_model_labels", "keep_tiers"} <= set(
-                label_opt_ins):
+        if not isinstance(label_opt_ins, LabelOptIns):
             msg = ("a registering pass records the label opt-ins it trained under: "
-                   "label_opt_ins={'allow_model_labels': ..., 'keep_tiers': [...]}")
+                   "label_opt_ins=LabelOptIns(allow_model_labels=..., keep_tiers=(...))")
             raise ValueError(msg)
+        label_opt_ins.check(table, old_tiers)
     if calibration not in (None, CALIBRATION_KIND):
         msg = f"calibration {calibration!r} is not the recorded kind {CALIBRATION_KIND!r}"
         raise ValueError(msg)
@@ -704,7 +756,7 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
             table, preds, y=y, w_all=w_all, train_on=train_on, priors=priors,
             modes=modes, targets=targets, w_adapt_grid=w_adapt_grid,
             adapt_rounds=adapt_rounds, record_path=record_path, registry=registry,
-            user=user, old_tiers=old_tiers, label_opt_ins=label_opt_ins or {},
+            user=user, old_tiers=old_tiers, label_opt_ins=label_opt_ins,
             refusals=refusals)
     return ModeRun(predictions=preds, refusals=tuple(refusals), corpus=pd.DataFrame(corpus),
                    registered=tuple(registered))
@@ -743,7 +795,7 @@ def _register_finals(table: pd.DataFrame, preds: pd.DataFrame, *,
                      w_adapt_grid: Sequence[float], adapt_rounds: int,
                      record_path: Path, registry: Registry, user: str,
                      old_tiers: Mapping[str, str] | None,
-                     label_opt_ins: Mapping[str, object],
+                     label_opt_ins: LabelOptIns | None,
                      refusals: list[Refusal]) -> list[str]:
     """Train, calibrate and register the final model of each evaluated mode."""
     run_id = str(json.loads(Path(record_path).read_text(encoding="utf-8"))["run_id"])
@@ -777,9 +829,8 @@ def _register_finals(table: pd.DataFrame, preds: pd.DataFrame, *,
                                     "kind": CALIBRATION_KIND, "fitted_on": fitted_on,
                                     "protocol": protocol, "targets": held_targets,
                                     "n_predictions": len(held)})
-        prov["label_opt_ins"] = {"allow_model_labels": bool(
-            label_opt_ins["allow_model_labels"]), "keep_tiers": sorted(
-            map(str, label_opt_ins["keep_tiers"]))}  # type: ignore[call-overload]
+        if label_opt_ins is not None:
+            prov["label_opt_ins"] = label_opt_ins.to_dict()
         prov["metric_basis"] = dict(METRIC_BASIS)
         if mode is TrainingMode.POOLED:
             prov["metrics_note"] = (
@@ -813,6 +864,9 @@ def _register_finals(table: pd.DataFrame, preds: pd.DataFrame, *,
                 held = preds[(preds["mode"] == str(TrainingMode.ADAPTED))
                              & (preds["target"] == target) & (preds["w_adapt"] == wa)]
                 if held.empty:
+                    refusals.append(Refusal(str(TrainingMode.ADAPTED), target,
+                                            f"no held-out predictions at w_adapt={wa:g}",
+                                            "final"))
                     continue
                 rows = np.concatenate([prior_rows, t_rows])
                 ww = np.concatenate([w_all[prior_rows], wa * w_all[t_rows]])

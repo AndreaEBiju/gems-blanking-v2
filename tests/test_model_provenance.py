@@ -18,13 +18,14 @@ from gems_blanking_v2.model import provenance as pv
 from gems_blanking_v2.model import registry as rg
 from gems_blanking_v2.model import shap_review as sr
 from gems_blanking_v2.model import train as tr
+from gems_blanking_v2.model.labels import NEGATIVE_JUDGEMENTS
 from gems_blanking_v2.types import TrainingMode
 
 from tests.conftest import make_feature_table
 
 THREADS = 2
 W = ev.W_ADAPT_GRID
-OPT_INS = {"allow_model_labels": False, "keep_tiers": ["1", "2a"]}
+OPT_INS = md.LabelOptIns(allow_model_labels=False, keep_tiers=("1", "2a"))
 
 
 @pytest.fixture(scope="module")
@@ -184,10 +185,61 @@ def test_registration_needs_a_user_and_a_full_calibrated_pass(tmp_path: Path) ->
                      **kw)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="label opt-ins"):
         md.run_modes(table, user="t", **kw)  # type: ignore[arg-type]
+    as_dict: object = {"allow_model_labels": False, "keep_tiers": ["1"]}  # not LabelOptIns
+    with pytest.raises(ValueError, match="label opt-ins"):
+        md.run_modes(table, user="t", label_opt_ins=as_dict, **kw)  # type: ignore[arg-type]
     plain = md.run_modes(table, targets=["new:A"], record_path=record, num_threads=THREADS,
                          modes=(TrainingMode.POOLED,), rounds=10)
     assert plain.registered == ()
     assert reg.specs() == []
+
+
+def test_label_opt_ins_are_checked_against_the_table(tmp_path: Path) -> None:
+    with pytest.raises(TypeError, match="must be a bool"):
+        md.LabelOptIns(allow_model_labels="no", keep_tiers=())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="drawn from"):
+        md.LabelOptIns(allow_model_labels=False, keep_tiers=("3",))
+    raw = make_feature_table({"new": ("A", "B"), "old": ("F",)}, n_recordings=2,
+                             cores_per_recording=10, seed=36)
+    old_recs = sorted(set(raw.loc[raw["cohort"] == "old", "recording"]))
+    tiers = {old_recs[0]: "1", old_recs[1]: "2b"}
+    t = md.prepare_table(raw)
+    ok = md.LabelOptIns(allow_model_labels=False, keep_tiers=("1", "2b"))
+    ok.check(t, tiers)
+    with pytest.raises(ValueError, match="outside keep_tiers"):
+        md.LabelOptIns(allow_model_labels=False, keep_tiers=("1",)).check(t, tiers)
+    with pytest.raises(ValueError, match="outside keep_tiers"):
+        ok.check(t, {old_recs[0]: "1"})  # an old recording with no tier
+    mixed = t.copy()
+    mixed.loc[mixed.index[0], "label_source"] = "model"
+    with pytest.raises(ValueError, match="label_source"):
+        ok.check(mixed, tiers)
+    md.LabelOptIns(allow_model_labels=True, keep_tiers=("1", "2b")).check(mixed, tiers)
+    record = ev.write_run_record(tmp_path / "r.json", run_id="r")
+    reg = rg.Registry(GemsStore.initialise(tmp_path / "gems"))
+    with pytest.raises(ValueError, match="outside keep_tiers"):
+        md.run_modes(t, targets=["new:A"], record_path=record, num_threads=THREADS,
+                     registry=reg, user="t", old_tiers=tiers,
+                     label_opt_ins=md.LabelOptIns(allow_model_labels=False, keep_tiers=("1",)))
+
+
+def test_a_final_model_that_cannot_be_fitted_records_a_refusal(tmp_path: Path) -> None:
+    raw = make_feature_table({"new": ("A", "B")}, n_recordings=3, cores_per_recording=30,
+                             seed=37)
+    b_recs = sorted(set(raw.loc[raw["animal"] == "B", "recording"]))
+    raw = raw[~raw["recording"].isin(b_recs[1:])]  # B keeps one recording: C and B refuse
+    t = md.prepare_table(raw)
+    record = ev.write_run_record(tmp_path / "r.json", run_id="r")
+    reg = rg.Registry(GemsStore.initialise(tmp_path / "gems"))
+    out = md.run_modes(t, targets=["new:A", "new:B"], record_path=record,
+                       num_threads=THREADS, rounds=10, adapt_rounds=5, registry=reg,
+                       user="t", label_opt_ins=md.LabelOptIns(False, ()))
+    final = {(r.mode, r.target) for r in out.refusals if r.fold == "final"}
+    assert ("per_animal", "new:B") in final
+    assert ("adapted", "new:B") in final
+    assert ("per_animal", "new:A") not in final
+    kinds = {(str(s.mode), s.animal) for s in reg.specs()}
+    assert ("per_animal", "new:B") not in kinds and ("per_animal", "new:A") in kinds
 
 
 def test_a_registered_model_is_applicable_and_runs(
@@ -228,7 +280,8 @@ def test_shap_review_html_reuses_detector_review(
     fs = dict.fromkeys(cores["recording"].astype(str), 24414.0625)
     p = reg.calibrator(pooled).apply(tr.predict_raw(reg.booster(pooled), cores[
         tr.feature_columns(cores)]))
-    n_dis = int(((cores["judgement"] == "physiology").to_numpy() & (p >= 0.5)).sum())
+    n_dis = int((cores["judgement"].isin(NEGATIVE_JUDGEMENTS).to_numpy()
+                 & (p >= 0.5)).sum())
     k = min(5, n_dis)
     assert k >= 1
     out = sr.write_shap_review(reg, pooled, cores, fs=fs, top_k=5, top_n=7)
@@ -272,11 +325,21 @@ def test_review_samples_convert_half_open_seconds_to_one_based_samples() -> None
     # context [8.0, 12.2) s = 0-based [8000, 12200) = 1-based inclusive [8001, 12200]
     assert sr.review_samples(10.0, 10.2, 1000.0) == (10101, 8001, 12200)
     assert sr.review_samples(0.5, 0.6, 1000.0)[1] == 1  # clipped at the first sample
+    # odd-length cores: the middle sample, never round-half-to-even of a midpoint
+    assert sr.review_samples(0.0, 0.003, 1000.0)[0] == 2  # samples 0,1,2 -> middle 1
+    assert sr.review_samples(5.0, 5.011, 1000.0)[0] == 5006  # 5000..5010 -> middle 5005
+    assert sr.review_samples(5.0, 5.012, 1000.0)[0] == 5007  # even: upper middle 5006
     fs = 24414.0625
     c, a, b = sr.review_samples(100.0, 100.5, fs)
-    assert (a - 1) / fs == pytest.approx(98.0, abs=1 / fs)
-    assert b / fs == pytest.approx(102.5, abs=1 / fs)
-    assert c == round(100.25 * fs) + 1
+    s0, s1 = round(100.0 * fs), round(100.5 * fs)
+    assert c == (s0 + s1) // 2 + 1
+    assert (a, b) == (s0 - round(2.0 * fs) + 1, s1 + round(2.0 * fs))
+    # on the 10 ms grid at 24414.0625 Hz exact half-sample midpoints occur
+    for k in range(1, 400):
+        lo, hi = 0.01 * k, 0.01 * k + 0.03
+        m0, m1 = round(lo * fs), round(hi * fs)
+        assert sr.review_samples(lo, hi, fs)[0] - 1 in range(m0, m1)
+        assert sr.review_samples(lo, hi, fs)[0] - 1 == (m0 + m1) // 2
 
 
 @pytest.mark.skipif(not _detector_review_available(), reason="GEMSBlanking not available")

@@ -36,7 +36,7 @@ from gems_blanking_v2.io.detector_core import import_detector_module
 from gems_blanking_v2.io.store import atomic_write_bytes, atomic_write_text
 from gems_blanking_v2.model.evaluate import DECISION_P
 from gems_blanking_v2.model.labels import NEGATIVE_JUDGEMENTS
-from gems_blanking_v2.model.modes import _refuse_test_rows
+from gems_blanking_v2.model.modes import refuse_test_rows
 from gems_blanking_v2.model.registry import ModelSpec, Registry
 from gems_blanking_v2.model.train import feature_columns, predict_raw
 
@@ -90,7 +90,7 @@ def write_shap_review(registry: Registry, spec: ModelSpec, cores: pd.DataFrame, 
     if bad:
         msg = f"cores with judgement {bad} are not judged; refused (invariant 9)"
         raise ValueError(msg)
-    _refuse_test_rows(cores)
+    refuse_test_rows(cores, context="a SHAP review")
     no_fs = sorted(set(cores["recording"].astype(str)) - set(fs))
     if no_fs:
         msg = f"no fs for recording(s) {no_fs[:5]}; it is read, never assumed"
@@ -118,9 +118,9 @@ def write_shap_review(registry: Registry, spec: ModelSpec, cores: pd.DataFrame, 
                      "table; the signal is not loaded here.</p>")
     shap_top = (review.compute_shap_for_windows(booster, x.iloc[idx], top_n=3)[0]
                 if len(idx) else [])
+    for stale in out_dir.parent.glob("shap.building-*"):  # left by a killed process
+        shutil.rmtree(stale, ignore_errors=True)
     build = out_dir.with_name(f"shap.building-{os.getpid()}")
-    if build.exists():
-        shutil.rmtree(build)
     build.mkdir(parents=True)
     try:
         tmp = build / (REVIEW_NAME + ".raw")
@@ -145,11 +145,16 @@ def write_shap_review(registry: Registry, spec: ModelSpec, cores: pd.DataFrame, 
 def review_samples(start_s: float, stop_s: float, fs: float) -> tuple[int, int, int]:
     """Our 0-based half-open ``[start_s, stop_s)`` as ``Disagreement``'s 1-based samples.
 
-    Returns ``(centre, context_start, context_end)``: the 1-based sample of the core's
-    centre, and the 1-based INCLUSIVE context ``[start - CONTEXT_S, stop + CONTEXT_S)``
-    (invariant 15: 0-based ``k`` is 1-based ``k + 1``; a half-open stop sample ``s`` is
-    the inclusive 1-based ``s``). The context start is clipped at sample 1.
+    The core is first put on the sample grid, ``s0 = round(start_s * fs)`` and
+    ``s1 = round(stop_s * fs)`` (0-based half-open ``[s0, s1)``). Returns
+    ``(centre, context_start, context_end)``: the 1-based sample of the core's middle
+    sample ``(s0 + s1) // 2`` (the upper middle of an even-length core), and the
+    1-based INCLUSIVE context: the core widened by ``CONTEXT_S`` on each side,
+    ``[s0 - c, s1 + c)`` with ``c = round(CONTEXT_S * fs)``, whose start is clipped at
+    sample 1 (invariant 15: 0-based ``k`` is 1-based ``k + 1``; a half-open stop ``s``
+    is the inclusive 1-based ``s``). Integer arithmetic only, so no round-half-to-even
+    on a midpoint can shift the centre.
     """
-    centre = round(0.5 * (start_s + stop_s) * fs) + 1
-    return (centre, max(1, round((start_s - CONTEXT_S) * fs) + 1),
-            round((stop_s + CONTEXT_S) * fs))
+    s0, s1 = round(start_s * fs), round(stop_s * fs)
+    c = round(CONTEXT_S * fs)
+    return ((s0 + s1) // 2 + 1, max(1, s0 - c + 1), s1 + c)
