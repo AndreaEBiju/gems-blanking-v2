@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 from pathlib import Path, PureWindowsPath
 
 import numpy as np
@@ -397,13 +399,50 @@ def test_the_deepest_shap_build_path_fits_under_a_windows_style_root(
     build = sr.build_dir(out_dir)
     host = build.name.removeprefix("shap.building-").rsplit("-", 1)[0]
     assert len(host) <= sr.HOST_CHARS
-    deepest = build / (sr.REVIEW_NAME + ".raw")
+    deepest = build / sr.DEEPEST_LEAF
+    assert len(sr.DEEPEST_LEAF) == len(f".{sr.TOP_FEATURES_NAME}.") + 8 + len(".tmp")
     assert store.check_path_length(deepest) is None
     assert len(str(deepest)) < 260
     long_store = GemsStore(PureWindowsPath("G:\\" + "x" * 200))  # type: ignore[arg-type]
     msg = long_store.check_path_length(sr.build_dir(long_store.model_dir("a" * 32) / "shap")
                                        / (sr.REVIEW_NAME + ".raw"))
     assert msg is not None and "Windows limit" in msg
+
+
+def test_the_deepest_leaf_bounds_the_real_atomic_write_temp_name(tmp_path: Path) -> None:
+    name = sr.TOP_FEATURES_NAME
+    fd, tmp = tempfile.mkstemp(dir=tmp_path, prefix=f".{name}.", suffix=".tmp")
+    os.close(fd)
+    assert len(Path(tmp).name) <= len(sr.DEEPEST_LEAF)
+
+
+def test_hosts_sharing_a_long_prefix_get_different_build_names(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    out_dir = Path("models") / ("a" * 32) / "shap"
+    names = set()
+    for host in ("Andrea-MacBook-Pro.local", "Andrea-MacBook-Pro-2.local", "x"):
+        monkeypatch.setattr("platform.node", lambda h=host: h)
+        part = sr.build_dir(out_dir).name.removeprefix("shap.building-").rsplit("-", 1)[0]
+        assert len(part) <= sr.HOST_CHARS
+        names.add(part)
+    assert len(names) == 3
+
+
+@pytest.mark.skipif(not _detector_review_available(), reason="GEMSBlanking not available")
+def test_an_over_long_build_path_fails_clearly_and_writes_nothing(
+        run: tuple[pd.DataFrame, md.ModeRun, rg.Registry, Path],
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    table, _o, reg, _r = run
+    target = [s for s in reg.specs() if s.mode is TrainingMode.ADAPTED][-1]
+    out_dir = reg.store.model_dir(target.model_id) / "shap"
+    limit = len(str(sr.build_dir(out_dir) / sr.DEEPEST_LEAF)) - 1  # one char too short
+    monkeypatch.setattr("gems_blanking_v2.io.store.WINDOWS_MAX_PATH", limit)
+    fs = dict.fromkeys(table["recording"].astype(str), 1000.0)
+    with pytest.raises(ValueError, match="Windows limit"):
+        sr.write_shap_review(reg, target, table, fs=fs, top_k=2)
+    mdir = reg.store.model_dir(target.model_id)
+    assert not (mdir / "shap").exists()
+    assert not list(mdir.glob("shap.building-*"))
 
 
 @pytest.mark.skipif(not _detector_review_available(), reason="GEMSBlanking not available")

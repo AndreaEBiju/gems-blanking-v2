@@ -22,6 +22,7 @@ Written into ``models/<id>/shap/`` once (a second write raises), atomically.
 
 from __future__ import annotations
 
+import hashlib
 import html
 import os
 import platform
@@ -41,9 +42,8 @@ from gems_blanking_v2.model.modes import refuse_test_rows
 from gems_blanking_v2.model.registry import ModelSpec, Registry
 from gems_blanking_v2.model.train import feature_columns, predict_raw
 
-__all__ = ["CONTEXT_S", "HOST_CHARS", "REVIEW_NAME", "TOP_FEATURES_NAME", "build_dir",
-           "review_samples",
-           "write_shap_review"]
+__all__ = ["CONTEXT_S", "DEEPEST_LEAF", "HOST_CHARS", "REVIEW_NAME", "TOP_FEATURES_NAME",
+           "build_dir", "review_samples", "write_shap_review"]
 
 REVIEW_NAME: Final = "review.html"
 TOP_FEATURES_NAME: Final = "top_features.html"
@@ -134,7 +134,7 @@ def write_shap_review(registry: Registry, spec: ModelSpec, cores: pd.DataFrame, 
                           _top_features_html(spec, booster.feature_name(), mean_abs, top_n,
                                              len(cores)))
 
-    too_long = registry.store.check_path_length(build_dir(out_dir) / (REVIEW_NAME + ".raw"))
+    too_long = registry.store.check_path_length(build_dir(out_dir) / DEEPEST_LEAF)
     if too_long:  # rule 5: fail with a clear message, not an OSError deep in a write
         raise ValueError(too_long)
     _publish(out_dir, write)
@@ -142,13 +142,33 @@ def write_shap_review(registry: Registry, spec: ModelSpec, cores: pd.DataFrame, 
 
 
 HOST_CHARS: Final = 15
-"""Host part of a build directory name, truncated (keeps the deepest path short, rule 5)."""
+"""Length of the host part of a build directory name (keeps the deepest path short)."""
+
+HOST_PREFIX: Final = 8
+"""Readable characters of the host name kept in the host part."""
+
+MKSTEMP_RANDOM_CHARS: Final = 8
+"""Length of the random part of a ``tempfile.mkstemp`` name (CPython's
+``_RandomNameSequence``); a test creates a real temp file and checks the bound."""
+
+DEEPEST_LEAF: Final = max(
+    [REVIEW_NAME + ".raw"]  # written by detector.review itself
+    + [f".{n}.{'x' * MKSTEMP_RANDOM_CHARS}.tmp"  # store.atomic_write_* temp files
+       for n in (REVIEW_NAME, TOP_FEATURES_NAME)], key=len)
+"""The longest file name the build directory ever holds - the one rule 5 is checked on."""
 
 
 def build_dir(out_dir: Path) -> Path:
-    """Return this process's own build directory: ``shap.building-<host>-<pid>``."""
-    host = safe_component(platform.node(), "host")[:HOST_CHARS].rstrip(". ") or "host"
-    return out_dir.with_name(f"shap.building-{host}-{os.getpid()}")
+    """Return this process's own build directory: ``shap.building-<host>-<pid>``.
+
+    The host part is ``HOST_PREFIX`` readable characters plus a SHA-256 digest of the
+    FULL host name, ``HOST_CHARS`` in all, so two hosts sharing a long prefix (two
+    ``<Name>-MacBook-Pro.local``) never share a build directory name (invariant 27).
+    """
+    full = platform.node() or "host"
+    digest = hashlib.sha256(full.encode("utf-8")).hexdigest()[:HOST_CHARS - HOST_PREFIX - 1]
+    readable = safe_component(full, "host")[:HOST_PREFIX].rstrip(". ") or "host"
+    return out_dir.with_name(f"shap.building-{readable}-{digest}-{os.getpid()}")
 
 
 def _publish(out_dir: Path, write: Callable[[Path], None]) -> None:
