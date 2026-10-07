@@ -1764,6 +1764,44 @@ def make_hr_trouble(  # noqa: PLR0912, PLR0915 - one knob per measured failure m
 
 
 # ---------------------------------------------------------------------------
+# task 13: one beat's fiducial moved by a known amount
+# ---------------------------------------------------------------------------
+
+
+class FiducialShift(NamedTuple):
+    """Return of :func:`make_fiducial_shift`."""
+
+    contaminated: F64
+    """The ECG with one beat's QRS moved by ``shift_s``, microvolts."""
+    reference: F64
+    """The same ECG, noise included, with that beat where it belongs."""
+    beat_s: float
+    """The moved beat's true time, seconds."""
+
+
+def make_fiducial_shift(fs: float, dur_s: float, *, beat_index: int, shift_s: float,
+                        amp_uv: float = 60.0, seed: int = 0) -> FiducialShift:
+    """Return a :func:`make_ecg` train in which ONE beat's QRS is moved by ``shift_s``.
+
+    The displacement is fractional (the kernel is resampled by linear interpolation), so
+    a 0.05 ms shift at 24.4 kHz is 1.22 samples, not rounded to one. Everything else -
+    the other beats and the noise - is identical in both returned signals, so the only
+    difference a detector can see is that one fiducial.
+    """
+    ref = make_ecg(fs, dur_s, amp_uv=amp_uv, seed=seed)
+    kernel = make_qrs(fs)
+    half = kernel.size // 2
+    t_s = float(ref.beats_s[beat_index])
+    centre = int(round(t_s * fs))
+    lo = centre - half
+    k = np.arange(kernel.size, dtype=np.float64)
+    moved = np.interp(k - shift_s * fs, k, kernel, left=0.0, right=0.0)
+    sig = ref.signal.copy()
+    sig[lo:lo + kernel.size] += amp_uv * (moved - kernel)
+    return FiducialShift(sig, ref.signal, t_s)
+
+
+# ---------------------------------------------------------------------------
 # task 12: synthetic core-feature tables with known ground truth
 # ---------------------------------------------------------------------------
 
