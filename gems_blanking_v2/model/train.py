@@ -180,8 +180,8 @@ class OldRowsRefusedError(ValueError):
 
 
 MIN_SET_A_OLD_NEGATIVES: Final = 20
-"""Fewest set-A old negatives with which old-cohort rows may train (PROPOSED, a question
-for Andrea): the bar R9 sets for a deciding fold's positives, applied to the only source
+"""Fewest set-A old negatives with which old-cohort rows may train (confirmed by Andrea
+2026-10-07): the bar R9 sets for a deciding fold's positives, applied to the only source
 of old negatives. Below it the old motion rate's CI is too wide to weight anything."""
 
 PRIOR_CI_RESAMPLES: Final = 1000
@@ -192,7 +192,8 @@ MARKED_BASES: Final[frozenset[str]] = frozenset({"mark_overlap", "adjudication_c
 an adjudication contradicted. Every other old core of the population is unmarked."""
 
 RATE_ESTIMATOR_NOTE: Final = (
-    "estimator per review 2026-10-07: marks counted as motion (R3); flagged for Andrea. "
+    "estimator per review 2026-10-07: marks counted as motion (R3); confirmed by Andrea "
+    "2026-10-07. "
     "rate = f_marked + (1 - f_marked) * r_unmarked: f_marked = marked share of the old cores "
     "Night 1 produced in the admitted tiers; r_unmarked = set A's random old sample's motion "
     "rate (unsure excluded) per animal, re-weighted by each animal's share of unmarked cores "

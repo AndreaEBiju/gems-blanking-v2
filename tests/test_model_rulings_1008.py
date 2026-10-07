@@ -778,7 +778,7 @@ def test_the_combined_rate_undoes_the_per_animal_floor_and_counts_marks() -> Non
     assert abs(est.r_unmarked - raw) > 0.1  # the unweighted draw is badly off here
     assert est.ci[0] < est.rate < est.ci[1]
     d = est.to_dict()
-    assert d["f_marked"] == est.f_marked and "flagged for Andrea" in d["note"]
+    assert d["f_marked"] == est.f_marked and "confirmed by Andrea 2026-10-07" in d["note"]
     json.dumps(d, allow_nan=False)
 
 
