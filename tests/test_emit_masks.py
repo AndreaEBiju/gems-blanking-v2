@@ -12,7 +12,6 @@ import numpy as np
 import pytest
 from gems_blanking_v2.detect import chain
 from gems_blanking_v2.emit import handoff as ho
-from gems_blanking_v2.emit import line_distrust as ld
 from gems_blanking_v2.emit import masks as mk
 from gems_blanking_v2.emit import qc
 from gems_blanking_v2.emit.line_distrust import LineDistrustRecord
@@ -24,7 +23,7 @@ from gems_blanking_v2.io.nan_interop import assert_no_zero_runs, find_zero_runs
 from gems_blanking_v2.types import Candidate, Event
 from scipy.io import loadmat
 
-from tests.conftest import make_band_z, make_mains_spike_t
+from tests.conftest import make_band_z, make_line_distrust, make_mains_spike_t
 
 FS = 24414.0625
 DUR_S = 60.0
@@ -63,8 +62,7 @@ def _prov() -> MaskProvenance:
 def _ld(t0: float = 0.0, n_samples: int = N_SAMPLES) -> LineDistrustRecord:
     """Return the spike consumer's line-distrust record for the synthetic recording."""
     t = make_mains_spike_t(FS, n_samples / FS, seed=21).signal[:n_samples]
-    return ld.cuff_minute_distrust({"L_T": t}, FS, recording="rec1", epoch_start_s=t0,
-                                   family="recording")
+    return make_line_distrust({"L_T": t}, FS, recording="rec1", epoch_start_s=t0)
 
 
 def test_emit_is_outside_the_generation_hash() -> None:

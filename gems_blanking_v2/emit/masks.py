@@ -27,8 +27,10 @@ Rules applied:
   ``distrusted``) gets a wholly invalid spike mask - for the spike consumer only.
 * **Line noise never enters a mask.** The spike consumer's per-minute distrust for
   mains-locked spikes (ruling 2026-10-07 (c) item 4, decided by the test of RULING
-  2026-10-08 (d) 2) is its own record (``emit.line_distrust``), carried beside the spike
-  mask in the handoff and never merged into it.
+  2026-10-08 (d) 2) is its own record (``emit.line_distrust``), never a mask span, so the
+  motion accounting and the gates never see it. It is NaN in the spike consumer's input
+  only ((e) Q2): the handoff adds it to ``blank_spikes_*`` and ``line_distrust.spike_input``
+  to the Python-side input.
 * **R6**: mmc output within +/-15 s of any of its blanks is "not measured"; those spans
   are written beside the mmc masks (``notmeasured_mmc_<signal>``), not into them.
 * **The MATLAB file** is written by ``emit.handoff.write_mask_file``, which computes

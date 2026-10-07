@@ -131,9 +131,10 @@ LINE_NOISE_ACTIONS: Final[Mapping[str, str]] = {
 
 The spike consumer's action is ``line_distrust_record``, not decided per core: RULING
 2026-10-08 (d) 2 decides it per cuff-minute by the mains-lock test on T
-(``emit.line_distrust``), and it is carried beside the spike mask, never in it. It is
-deliberately NOT ``per_minute_cuff_distrust``, which is ruling 2026-10-03's mask reason
-for spans that ARE merged into the spike mask. This map is code, not routing-table data,
+(``emit.line_distrust``); it is its own record, made NaN in the spike consumer's input
+by the handoff ((e) Q2), never a mask span. It is deliberately NOT
+``per_minute_cuff_distrust``, which is ruling 2026-10-03's mask reason for spans that
+ARE spike-mask spans. This map is code, not routing-table data,
 so the frozen routing table's hash does not cover it."""
 
 

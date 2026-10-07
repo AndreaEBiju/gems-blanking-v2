@@ -12,17 +12,20 @@ the epoch, via ``extent.grid`` - invariant 15) per mask key, never a merged one,
 ``notmeasured_mmc_<signal>`` (R6), ``provenance_json``, ``events_json``,
 ``retention_json`` and ``gate_json``. Provenance that does not name a model is refused.
 
-**Spike-consumer line distrust (RULING 2026-10-08 (d) 2)** travels BESIDE the spike
-masks, never inside them: ``distrust_spikes_<cuff>_T`` (N x 2, the same 1-based inclusive
-epoch samples) per spike signal, and ``linedistrust_json`` (the whole
-:class:`~gems_blanking_v2.emit.line_distrust.LineDistrustRecord`: every cuff-minute's
-counts, p-value and decision). ``blank_spikes_*`` stays the motion (and ruled cuff) mask;
-this rule writes nothing into it. ``line_distrust`` is a required argument: a recording
-whose spike consumer reads anything must carry a record covering exactly those signals,
-and one that reads nothing passes ``None``. The record's provenance is copied into
-``provenance_json`` (``spike_line_distrust``) here, from the record itself, and its cost
-(``emit.qc.spike_time_lost``: per cuff, the spike mask's blank beside the line distrust;
-ruling (d) 3) into ``gate_json`` as ``spike_time_lost`` - reported, never gating.
+**Spike-consumer line distrust (RULINGS 2026-10-08 (d) 2, (e) Q2).** Distrusted minutes
+are NaN in the spike consumer's input only: ``blank_spikes_<cuff>_T`` is the union of the
+spike consumer's motion mask and its distrusted minutes (one consumer, two reasons - no
+other consumer's spans change, invariant 2), so ``step1_bandpass`` (``isnan`` only) drops
+them. The accounting keeps them apart: ``distrust_spikes_<cuff>_T`` carries the
+distrusted minutes alone, ``linedistrust_json`` the whole
+:class:`~gems_blanking_v2.emit.line_distrust.LineDistrustRecord`, ``retention_json`` and
+the 20% / 3x hold read the motion masks only ((e) Q2b), and ``gate_json`` reports
+``spike_time_lost`` per cuff (motion blank, distrust, overlap counted once) plus
+``line_distrust_listed``: cuffs whose distrusted time exceeds 50%, listed for Andrea,
+never held. ``line_distrust`` is a required argument: a recording whose spike consumer
+reads anything must carry a record covering exactly those signals, and one that reads
+nothing passes ``None``. The record's provenance is copied into ``provenance_json``
+(``spike_line_distrust``) from the record itself.
 
 OUTSIDE THE GENERATION HASH.
 """
@@ -42,7 +45,7 @@ from scipy.io import savemat
 from gems_blanking_v2.emit.line_distrust import LineDistrustRecord
 from gems_blanking_v2.emit.masks import ConsumerMask, MaskKey, mask_sample_spans, mmc_not_measured
 from gems_blanking_v2.emit.provenance import MaskProvenance, ProvenanceError
-from gems_blanking_v2.emit.qc import emit_gate, spike_time_lost
+from gems_blanking_v2.emit.qc import emit_gate, line_distrust_listed, spike_time_lost
 from gems_blanking_v2.extent.grid import T0_TOLERANCE_S, n_grid_frames, to_matlab_inclusive
 from gems_blanking_v2.extent.routing import RouteDecision
 from gems_blanking_v2.extent.tolerance import (
@@ -73,8 +76,21 @@ def _matlab_name(prefix: str, consumer: str, signal: str) -> str:
     return name
 
 
-def _matlab_spans(invalid: Bool, fs: float, n_samples: int, grid_s: float, what: str) -> F64:
-    spans = mask_sample_spans(invalid, fs, n_samples, grid_s)
+def _union(spans: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Sorted, disjoint union of half-open sample spans (touching spans join)."""
+    out: list[tuple[int, int]] = []
+    for a, b in sorted(s for s in spans if s[1] > s[0]):
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
+def _matlab_spans(invalid: Bool, fs: float, n_samples: int, grid_s: float, what: str,
+                  extra: Sequence[tuple[int, int]] = ()) -> F64:
+    """Return the invalid runs (plus ``extra`` spans, same consumer) as MATLAB spans."""
+    spans = _union([*mask_sample_spans(invalid, fs, n_samples, grid_s), *extra])
     if not spans:
         return np.zeros((0, 2), dtype=np.float64)
     out = to_matlab_inclusive([a for a, _ in spans], [b for _, b in spans])
@@ -218,9 +234,12 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
         if m.invalid.size != want:
             msg = f"{consumer}/{signal}: {m.invalid.size} frames for an epoch of {want}"
             raise ValueError(msg)
+        distrusted = (line_distrust.sample_spans(signal)
+                      if consumer == "spikes" and line_distrust is not None else [])
         doc[_matlab_name("blank", consumer, signal)] = _matlab_spans(
-            m.invalid, fs, n_samples, m.grid_s, f"blank spans {consumer}/{signal}")
-        retention[f"{consumer}|{signal}|{band}"] = m.retention
+            m.invalid, fs, n_samples, m.grid_s, f"blank spans {consumer}/{signal}",
+            extra=distrusted)
+        retention[f"{consumer}|{signal}|{band}"] = m.retention  # motion only ((e) Q2b)
     for sig, frames in sorted(mmc_not_measured(masks).items()):
         doc[_matlab_name("notmeasured", "mmc", sig)] = _matlab_spans(
             frames, fs, n_samples, masks[("mmc", sig, extent_consumers()["mmc"].band)].grid_s,
@@ -236,6 +255,7 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
                                 "hum_features": dict(gate.hum_features)}
     if lost is not None:
         gate_doc["spike_time_lost"] = lost
+        gate_doc["line_distrust_listed"] = line_distrust_listed(lost)
     if release:
         gate_doc["release"] = release
     doc["provenance_json"] = provenance.to_json()

@@ -1,4 +1,4 @@
-"""RULING 2026-10-08 (d) 2: per-cuff-minute spike-consumer distrust for mains-locked spikes."""
+"""RULINGS 2026-10-08 (d) 2 and (e) Q1-Q5: spike-consumer distrust for mains-locked spikes."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from gems_blanking_v2.acceptance import report as ar
+from gems_blanking_v2.constants import GRID_S
 from gems_blanking_v2.derive.derivations import tripole
 from gems_blanking_v2.detect import chain
 from gems_blanking_v2.emit import handoff as ho
@@ -23,6 +24,8 @@ from hypothesis import strategies as st
 from scipy.io import loadmat
 
 from tests.conftest import (
+    all_valid_spike_mask,
+    make_line_distrust,
     make_mains_spike_contacts,
     make_mains_spike_t,
     make_spike_pair,
@@ -46,6 +49,18 @@ def _status(rec: ld.LineDistrustRecord, sig: str) -> dict[int, str]:
     return {r.test.minute: r.test.status for r in rec.minutes if r.test.signal == sig}
 
 
+def _row(rec: ld.LineDistrustRecord, sig: str, minute: int) -> ld.MinuteTest:
+    (t,) = [r.test for r in rec.minutes if r.test.signal == sig and r.test.minute == minute]
+    return t
+
+
+def _motion(sig: str, n: int, spans: tuple[tuple[float, float], ...] = (), *,
+            t0: float = 0.0) -> mk.ConsumerMask:
+    frames = n_grid_frames(n, FS)
+    return mk.ConsumerMask("spikes", sig, "300-3000",
+                           mk.mask_frames(spans, frames, t0_s=t0), GRID_S, t0)
+
+
 def _prov(recording: str = "rec1", **kw: object) -> MaskProvenance:
     base: dict[str, object] = {
         "model": MODEL, "thresholds": {"source": "test"}, "reference_values": {"none": 0},
@@ -63,9 +78,16 @@ def _rows(ps: dict[int, float], sig: str = "L_T") -> tuple[ld.MinuteTest, ...]:
         if math.isnan(p):
             out.append(ld.MinuteTest(sig, m, 60.0 * m, 60.0 * (m + 1), "untested_few_spikes", 4))
         else:
-            out.append(ld.MinuteTest(sig, m, 60.0 * m, 60.0 * (m + 1), "tested", 500, 40, 0.05,
-                                     p))
+            out.append(ld.MinuteTest(sig, m, 60.0 * m, 60.0 * (m + 1), "tested", 500, 499, 40,
+                                     0.05, p, 60.0))
     return tuple(out)
+
+
+def _decide(rows: tuple[ld.MinuteTest, ...], *, recording: str = "rec1", n: int = N60,
+            t0: float = 0.0, table: ld.AnimalPTable | None = None) -> ld.LineDistrustRecord:
+    table = table or ld.AnimalPTable.from_tests("new:A", {recording: rows})
+    return ld.decide(rows, recording=recording, fs=FS, epoch_start_s=t0, n_samples=n,
+                     family=table)
 
 
 def test_line_distrust_is_outside_the_generation_hash() -> None:
@@ -78,93 +100,124 @@ def test_line_distrust_is_outside_the_generation_hash() -> None:
 
 
 def test_planted_locked_minutes_are_exactly_the_distrusted_ones() -> None:
-    """Two cuffs, 6 minutes: a 60 Hz-locked train in some minutes, Poisson elsewhere."""
     left = make_mains_spike_t(FS, 360.0, locked_minutes=(1, 4), seed=1)
     right = make_mains_spike_t(FS, 360.0, locked_minutes=(2,), seed=2)
-    rec = ld.cuff_minute_distrust({"L_T": left.signal, "R_T": right.signal}, FS,
-                                  recording="rec1", epoch_start_s=0.0, family="recording")
-    assert _distrusted(rec, "L_T") == {1, 4}
-    assert _distrusted(rec, "R_T") == {2}
+    rec = make_line_distrust({"L_T": left.signal, "R_T": right.signal}, FS, recording="rec1")
+    assert _distrusted(rec, "L_T") == {1, 4} and _distrusted(rec, "R_T") == {2}
     assert set(_status(rec, "L_T").values()) == {"tested"}
-    assert rec.family == {"kind": "recording", "size": 12}
+    assert rec.family["kind"] == "animal_x_cohort" and rec.family["size"] == 12
     assert rec.distrusted_spans("L_T") == [(60.0, 120.0), (240.0, 300.0)]
 
 
 def test_the_lock_test_is_calibrated_under_a_poisson_null_and_sees_a_locked_train() -> None:
-    """Under the null, p is roughly uniform; with a locked train it is vanishing."""
-    null = [ld.lock_test(make_spike_times(60.0, rate_hz=20.0, seed=s)).p for s in range(200)]
+    null = [ld.lock_test([make_spike_times(60.0, rate_hz=20.0, seed=s)]).p for s in range(200)]
     assert 0.0 < float(np.mean(np.asarray(null) < 0.05)) <= 0.10
     assert float(np.mean(np.asarray(null) < 0.01)) <= 0.03
-    locked = ld.lock_test(make_spike_times(60.0, rate_hz=20.0, locked_keep=0.2, seed=7))
+    locked = ld.lock_test([make_spike_times(60.0, rate_hz=20.0, locked_keep=0.2, seed=7)])
     assert locked.p < 1e-12 and locked.k_locked > 100
 
 
 def test_fewer_than_ten_spikes_is_untested_and_never_distrusted() -> None:
-    nine = np.arange(9) / 60.0 + 1.0  # perfectly locked, but only nine spikes
-    assert not ld.lock_test(nine).tested and math.isnan(ld.lock_test(nine).p)
-    ten = np.arange(10) / 60.0 + 1.0
-    st10 = ld.lock_test(ten)
-    assert st10.tested and st10.k_locked == 9 and st10.p < 1e-6
-    assert st10.p == pytest.approx(st10.p0 ** 9, rel=1e-9)  # P(X >= 9 | 9, p0): all locked
+    nine = np.arange(9) / 60.0 + 1.0
+    assert not ld.lock_test([nine]).tested
+    ten = ld.lock_test([np.arange(10) / 60.0 + 1.0])
+    assert ten.tested and (ten.m_intervals, ten.k_locked) == (9, 9)
+    assert ten.p == pytest.approx(ten.p0 ** 9, rel=1e-9)  # P(X >= 9 | 9, p0)
     sig = make_mains_spike_t(FS, 180.0, locked_minutes=(2,), sparse_minutes=(1,), seed=5)
-    rec = ld.cuff_minute_distrust({"L_T": sig.signal}, FS, recording="r", epoch_start_s=0.0,
-                                  family="recording")
-    (m1,) = [r for r in rec.minutes if r.test.minute == 1]
-    assert m1.test.status == "untested_few_spikes" and m1.test.n_spikes is not None
-    assert m1.test.n_spikes < ld.MIN_SPIKES and not m1.distrusted
-    assert rec.family["size"] == 2  # the untested minute is not in the Holm family
+    rec = make_line_distrust({"L_T": sig.signal}, FS, recording="r")
+    m1 = _row(rec, "L_T", 1)
+    assert m1.status == "untested_few_spikes" and m1.n_spikes is not None
+    assert m1.n_spikes < ld.MIN_SPIKES and 1 not in _distrusted(rec, "L_T")
+    assert rec.family["size"] == 2
     with pytest.raises(ValueError, match="untested"):
-        ld.MinuteResult(m1.test, distrusted=True)
+        ld.MinuteResult(m1, distrusted=True)
 
 
-def test_stim_minutes_are_never_tested() -> None:
-    """Recovery epoch from 150 s: minutes 0-1 are stim (absent), minute 2 straddles."""
-    full = make_mains_spike_t(FS, 360.0, locked_minutes=(0, 1, 2, 4), seed=4)
-    k0 = int(round(150.0 * FS))
-    view = full.signal[k0:]
-    view.flags.writeable = False  # a loader's read-only view (invariant 17)
-    rec = ld.cuff_minute_distrust({"L_T": view}, FS, recording="r", epoch_start_s=150.0,
-                                  family="recording")
-    status = _status(rec, "L_T")
-    assert 0 not in status and 1 not in status
-    assert status[2] == "not_assessable_epoch_edge"
-    assert {m for m, s in status.items() if s == "tested"} == {3, 4, 5}
-    assert _distrusted(rec, "L_T") == {4}
-    (m2,) = [r.test for r in rec.minutes if r.test.minute == 2]
-    assert (m2.start_s, m2.stop_s) == (150.0, 180.0)
+def test_q3_the_boundary_minute_is_tested_when_its_in_epoch_part_reaches_30_s() -> None:
+    full = make_mains_spike_t(FS, 360.0, locked_minutes=(0, 1, 2, 4), seed=4).signal
+    for t0, edge, want in ((150.0, "tested", {2, 4}), (155.0, "not_assessable_short", {4})):
+        view = full[int(round(t0 * FS)):]
+        view.flags.writeable = False  # a loader's read-only view (invariant 17)
+        rec = make_line_distrust({"L_T": view}, FS, recording="r", epoch_start_s=t0)
+        status = _status(rec, "L_T")
+        assert 0 not in status and 1 not in status  # stim minutes: not in the epoch at all
+        assert status[2] == edge and _distrusted(rec, "L_T") == want
+        assert (_row(rec, "L_T", 2).start_s, _row(rec, "L_T", 2).stop_s) == (t0, 180.0)
 
 
 def test_the_rule_runs_on_t_not_on_the_contacts() -> None:
-    """A common-mode locked train on all three contacts cancels in T: not distrusted."""
     v1, v2, v3 = make_mains_spike_contacts(FS, 180.0, locked_minutes=(1,), seed=5)
     k0, k1 = int(round(60.0 * FS)), int(round(120.0 * FS))
-    on_contact = ld.lock_test(ld.detect_spikes(v1[k0:k1], FS))  # the fixture is locked there
-    assert on_contact.p < 1e-12
-    rec = ld.cuff_minute_distrust({"L_T": tripole(v1, v2, v3)}, FS, recording="r",
-                                  epoch_start_s=0.0, family="recording")
+    assert ld.lock_test([ld.detect_spikes(v1[k0:k1], FS)]).p < 1e-12  # fixture is locked
+    rec = make_line_distrust({"L_T": tripole(v1, v2, v3)}, FS, recording="r")
     assert _distrusted(rec, "L_T") == set()
     assert set(_status(rec, "L_T").values()) == {"tested"}
     for name in ("L_V1", "RVN1", "T"):
         with pytest.raises(ValueError, match="never on a contact"):
-            ld.minute_tests({name: v1}, FS, epoch_start_s=0.0)
+            ld.minute_tests({name: v1}, FS, epoch_start_s=0.0,
+                            motion={name: _motion(name, v1.size)})
 
 
-def test_non_finite_flat_and_short_minutes_are_untested() -> None:
-    sig = make_mains_spike_t(FS, 145.0, seed=6).signal.copy()
-    sig[int(10 * FS)] = np.nan
-    sig[int(60 * FS):int(120 * FS)] = 5.0
-    rec = ld.cuff_minute_distrust({"L_T": sig}, FS, recording="r", epoch_start_s=0.0,
-                                  family="recording")
-    assert _status(rec, "L_T") == {0: "untested_non_finite", 1: "untested_no_signal",
-                                   2: "not_assessable_short"}
-    assert rec.family["size"] == 0 and _distrusted(rec, "L_T") == set()
+def test_q4_gaps_flat_and_short_minutes() -> None:
+    sig = make_mains_spike_t(FS, 205.0, locked_minutes=(0,), seed=6).signal.copy()
+    sig[int(round(20.0 * FS)) + 3:int(round(30.0 * FS)) + 3] = np.nan  # 10 s gap, off-grid
+    sig[int(round(62.0 * FS)) + 3:int(round(97.0 * FS)) + 3] = np.nan  # 35 s gap
+    sig[int(round(120.0 * FS)) + 1:int(round(180.0 * FS)) - 1] = 5.0  # a raw sample at each edge
+    rec = make_line_distrust({"L_T": sig}, FS, recording="r")
+    assert _status(rec, "L_T") == {0: "tested", 1: "untested_short_valid",
+                                   2: "untested_no_signal", 3: "not_assessable_short"}
+    m0, m1 = _row(rec, "L_T", 0), _row(rec, "L_T", 1)
+    assert m0.valid_s == pytest.approx(50.0, abs=1e-3) and m1.valid_s == pytest.approx(25.0,
+                                                                                      abs=1e-3)
+    assert _distrusted(rec, "L_T") == {0}  # 50 s of finite stretches are tested
+    # an interval across the gap is not an interval: two stretches, one interval each fewer
+    assert m0.m_intervals == m0.n_spikes - 2
+
+
+def test_q4_intervals_across_a_gap_do_not_count_and_the_rate_pools_stretches() -> None:
+    p60 = 1.0 / 60.0
+    a = 1.0 + np.array([0.0, 0.05, 0.12, 0.2, 0.31, 0.4])
+    b = a[-1] + p60 + np.array([0.0, 0.07, 0.2, 0.26, 0.33, 0.5])  # first b is 1/60 after a
+    st_ = ld.lock_test([a, b])
+    assert (st_.n_spikes, st_.m_intervals, st_.k_locked) == (12, 10, 0)
+    joined = ld.lock_test([np.concatenate([a, b])])
+    assert (joined.m_intervals, joined.k_locked) == (11, 1)  # what the gap rule prevents
+    lam = 12 / ((a[-1] - a[0]) + (b[-1] - b[0]))
+    p0 = sum(math.exp(-lam * (per - 0.001)) - math.exp(-lam * (per + 0.001))
+             for per in (p60, 1.0 / 30.0))
+    assert st_.p0 == pytest.approx(p0, rel=1e-12)
+    single = ld.lock_test([a, b, np.array([5.0])])  # a one-spike stretch: no interval, no rate
+    assert single.n_spikes == 13 and single.m_intervals == 10
+    assert single.p0 == pytest.approx(p0, rel=1e-12)
+
+
+def test_q5_spikes_under_the_motion_mask_are_not_read() -> None:
+    sig = make_mains_spike_t(FS, 180.0, locked_spans_s=((62.0, 88.0),), seed=15).signal
+    plain = make_line_distrust({"L_T": sig}, FS, recording="r")
+    assert _distrusted(plain, "L_T") == {1}
+    motion = {"L_T": _motion("L_T", sig.size, ((61.0, 89.0),))}
+    rec = make_line_distrust({"L_T": sig}, FS, recording="r", motion=motion)
+    m1 = _row(rec, "L_T", 1)
+    assert m1.status == "tested" and _distrusted(rec, "L_T") == set()
+    assert m1.valid_s == pytest.approx(32.0, abs=0.02)
+    assert m1.n_spikes is not None and m1.n_spikes < _row(plain, "L_T", 1).n_spikes  # type: ignore[operator]
+
+
+def test_the_motion_masks_must_be_the_spike_consumers_own_on_this_epoch() -> None:
+    x = make_mains_spike_t(FS, 60.0, seed=16).signal
+    good = _motion("L_T", x.size)
+    for bad in ({}, {"L_T": _motion("R_T", x.size)},
+                {"L_T": mk.ConsumerMask("mmc", "L_T", "2-50", good.invalid, GRID_S, 0.0)},
+                {"L_T": _motion("L_T", x.size, t0=1.0)},
+                {"L_T": _motion("L_T", x.size // 2)}):
+        with pytest.raises(ValueError, match="motion mask"):
+            ld.minute_tests({"L_T": x}, FS, epoch_start_s=0.0, motion=bad)
 
 
 def test_holm_steps_down_and_stops() -> None:
     assert ld.holm_reject([0.001, 0.004, 0.02, 0.5], 0.01).tolist() == [True, False, False,
                                                                         False]
     assert ld.holm_reject([0.006, 0.0001, 0.001], 0.01).tolist() == [True, True, True]
-    # the first failure stops it: 0.0045 <= 0.01/2 and 0.0099 <= 0.01/1, but 0.004 > 0.01/3
     assert ld.holm_reject([0.004, 0.0045, 0.0099], 0.01).tolist() == [False, False, False]
     assert ld.holm_reject([0.25, 0.9, 0.9, 0.9], 1.0)[0]  # p == alpha / M is rejected
     assert not ld.holm_reject([0.26, 0.9, 0.9, 0.9], 1.0)[0]
@@ -173,64 +226,90 @@ def test_holm_steps_down_and_stops() -> None:
 
 
 # ---------------------------------------------------------------------------
-# the family
+# Q1: the family is the animal x cohort's
 # ---------------------------------------------------------------------------
 
 
-def test_the_family_argument_is_required_and_named() -> None:
-    sig = {"L_T": make_mains_spike_t(FS, 60.0, seed=8).signal}
-    with pytest.raises(TypeError, match="family"):
-        ld.cuff_minute_distrust(sig, FS, recording="r", epoch_start_s=0.0)  # type: ignore[call-arg]
+def test_the_family_is_required_and_is_the_animal_table() -> None:
     with pytest.raises(TypeError, match="family"):
         ld.decide(_rows({0: 0.001}), recording="r", fs=FS, epoch_start_s=0.0,  # type: ignore[call-arg]
                   n_samples=N60)
-    for bad in ("animal", None, {"kind": "recording"}):
-        with pytest.raises(ValueError, match="family must be"):
+    for bad in ("recording", "animal", None):
+        with pytest.raises(TypeError, match="animal x cohort"):
             ld.decide(_rows({0: 0.001}), recording="r", fs=FS, epoch_start_s=0.0,
                       n_samples=N60, family=bad)  # type: ignore[arg-type]
+    for key in ("A", "new:", ":A", "new:A:x"):
+        with pytest.raises(ValueError, match="cohort:animal"):
+            ld.AnimalPTable(key, {})
+    assert ld.AnimalPTable("old:J", {}).animal_key == "old:J"
 
 
-def test_the_family_decides_the_correction() -> None:
-    """A p of 0.005 survives Holm alone, but not in an animal family of eleven."""
+def test_the_animal_family_decides_the_correction() -> None:
+    """A p of 0.005 survives Holm in a family of one, but not in the animal's eleven."""
     mine = _rows({0: 0.005})
-    rec = ld.decide(mine, recording="r1", fs=FS, epoch_start_s=0.0, n_samples=N60,
-                    family="recording")
-    assert _distrusted(rec, "L_T") == {0}
+    assert _distrusted(_decide(mine, recording="r1"), "L_T") == {0}
     others = {f"r{i}": _rows({0: 0.5}) for i in range(2, 12)}
     table = ld.AnimalPTable.from_tests("new:A", {"r1": mine, **others})
-    rec = ld.decide(mine, recording="r1", fs=FS, epoch_start_s=0.0, n_samples=N60,
-                    family=table)
+    rec = _decide(mine, recording="r1", table=table)
     assert _distrusted(rec, "L_T") == set()
-    assert rec.family == {"kind": "animal", "animal": "new:A", "size": 11,
+    assert rec.family == {"kind": "animal_x_cohort", "animal_key": "new:A", "size": 11,
                           "sha256": table.sha256}
 
 
-def test_the_two_pass_animal_family_on_signals() -> None:
+def test_decide_animal_runs_every_recording_first() -> None:
     r1 = make_mains_spike_t(FS, 180.0, locked_minutes=(1,), seed=9).signal
     r2 = make_mains_spike_t(FS, 180.0, seed=10).signal
-    t1 = ld.minute_tests({"L_T": r1}, FS, epoch_start_s=0.0)
-    t2 = ld.minute_tests({"L_T": r2}, FS, epoch_start_s=0.0)
-    table = ld.AnimalPTable.from_tests("new:A", {"r1": t1, "r2": t2})
+    passes = {rid: ld.pass1({"L_T": x}, FS, epoch_start_s=0.0,
+                            motion={"L_T": _motion("L_T", x.size)})
+              for rid, x in (("r1", r1), ("r2", r2))}
+    table, recs = ld.decide_animal("new:A", passes)
+    assert set(recs) == {"r1", "r2"} and len(table.pvalues) == 6
+    assert _distrusted(recs["r1"], "L_T") == {1} and _distrusted(recs["r2"], "L_T") == set()
+    assert recs["r1"].family == recs["r2"].family and recs["r1"].family["size"] == 6
     assert ld.AnimalPTable.from_json(table.to_json()) == table
-    rec = ld.cuff_minute_distrust({"L_T": r1}, FS, recording="r1", epoch_start_s=0.0,
-                                  family=ld.AnimalPTable.from_json(table.to_json()))
-    assert _distrusted(rec, "L_T") == {1} and rec.family["size"] == 6
-    n = r1.size
-    # a table that does not hold exactly this recording's tests refuses
-    missing = ld.AnimalPTable.from_tests("new:A", {"r2": t2})
+    t1 = passes["r1"].tests
+    missing = ld.AnimalPTable.from_tests("new:A", {"r2": passes["r2"].tests})
     altered = ld.AnimalPTable("new:A", {**table.pvalues, ("r1", "L_T", 0): 0.123})
     for bad in (missing, altered):
         with pytest.raises(ValueError, match="did not test the same thing"):
-            ld.decide(t1, recording="r1", fs=FS, epoch_start_s=0.0, n_samples=n, family=bad)
+            _decide(t1, recording="r1", n=r1.size, table=bad)
     cleaned = ld.AnimalPTable.from_tests("new:A", {"r1": t1}, cleaner="some_cleaner")
     with pytest.raises(ValueError, match="cleaner"):
-        ld.decide(t1, recording="r1", fs=FS, epoch_start_s=0.0, n_samples=n, family=cleaned)
-    with pytest.raises(ValueError, match="empty"):
-        ld.AnimalPTable("new:A", {})
+        _decide(t1, recording="r1", n=r1.size, table=cleaned)
+
+
+def test_the_two_pass_match_tolerates_float_noise_only() -> None:
+    mine = _rows({0: 0.001, 1: 0.5})
+    table = ld.AnimalPTable.from_tests("new:A", {"r1": mine, "r2": _rows({0: 0.5})})
+
+    def _with(scale: float) -> ld.AnimalPTable:
+        pv = dict(table.pvalues)
+        pv[("r1", "L_T", 0)] *= scale
+        return ld.AnimalPTable("new:A", pv)
+
+    n = math.ceil(120.0 * FS)
+    assert _distrusted(_decide(mine, recording="r1", n=n, table=_with(1 + 1e-14)), "L_T") == {0}
+    with pytest.raises(ValueError, match="did not test the same thing"):
+        _decide(mine, recording="r1", n=n, table=_with(1 + 1e-9))
+
+
+def test_decide_refuses_impossible_inputs() -> None:
+    with pytest.raises(ValueError, match="cannot carry"):
+        ld.decide(_rows({0: 0.5}), recording="rec1", fs=2000.0, epoch_start_s=0.0,
+                  n_samples=120000, family=ld.AnimalPTable("new:A", {("rec1", "L_T", 0): 0.5}))
+    with pytest.raises(ValueError, match="must hold samples"):
+        _decide((), n=0)
+    with pytest.raises(ValueError, match="appears twice"):
+        _decide(_rows({0: 0.5}) * 2, table=ld.AnimalPTable.from_tests(
+            "new:A", {"rec1": _rows({0: 0.5})}))
+    with pytest.raises(ValueError, match="not inside the epoch"):
+        _decide(_rows({0: 0.5, 1: 0.5}))
+    with pytest.raises(ValueError, match="not inside the epoch"):
+        _decide(_rows({0: 0.5}), t0=30.0)
 
 
 # ---------------------------------------------------------------------------
-# the cleaner hook (ruling (d) 3)
+# the cleaner hook
 # ---------------------------------------------------------------------------
 
 
@@ -251,61 +330,39 @@ def test_a_cleaner_re_runs_the_test_and_minutes_regain_trust() -> None:
     raw = make_mains_spike_t(FS, 180.0, locked_minutes=(1,), seed=11).signal
     raw.flags.writeable = False
     clean = make_mains_spike_t(FS, 180.0, seed=12).signal
-    before = ld.cuff_minute_distrust({"L_T": raw}, FS, recording="r", epoch_start_s=0.0,
-                                     family="recording")
+    before = make_line_distrust({"L_T": raw}, FS, recording="r")
     assert _distrusted(before, "L_T") == {1} and "cleaner" not in before.provenance
     cleaner = _Replace("hum_bug_v5_fixed", clean)
-    after = ld.cuff_minute_distrust({"L_T": raw}, FS, recording="r", epoch_start_s=0.0,
-                                    family="recording", cleaner=cleaner)
-    assert _distrusted(after, "L_T") == set()
-    assert after.provenance["cleaner"] == "hum_bug_v5_fixed" and cleaner.saw_copy
+    p = ld.pass1({"L_T": raw}, FS, epoch_start_s=0.0, motion={"L_T": _motion("L_T", raw.size)},
+                 cleaner=cleaner)
+    _table, recs = ld.decide_animal("new:A", {"r": p})
+    assert _distrusted(recs["r"], "L_T") == set() and cleaner.saw_copy
+    assert recs["r"].provenance["cleaner"] == "hum_bug_v5_fixed"
+    with pytest.raises(ValueError, match="different cleaners"):
+        ld.decide_animal("new:A", {"r": p, "s": ld.pass1(
+            {"L_T": raw}, FS, epoch_start_s=0.0, motion={"L_T": _motion("L_T", raw.size)})})
 
 
 # ---------------------------------------------------------------------------
-# the record, the handoff, QC, provenance
+# Q2 / Q2b: NaN in the spike input only; the hold is motion's; the cost table
 # ---------------------------------------------------------------------------
 
 N3 = math.ceil(180.0 * FS)  # the epoch holds all three whole minutes
 N3_FRAMES = n_grid_frames(N3, FS)
 
 
-def _spike_mask(spans: list[tuple[float, float]]) -> dict[mk.MaskKey, mk.ConsumerMask]:
+def _masks3(spike_spans: list[tuple[float, float]], slow: tuple[float, float] = (100.0, 101.0)
+            ) -> dict[mk.MaskKey, mk.ConsumerMask]:
     reads = {k: v for k, v in READS.items() if k != "velocity"}
-    return mk.build_masks(reads, [mk.MaskSpan("spikes", "L_T", a, b, "in_band_eng")
-                                  for a, b in spans], n_frames=N3_FRAMES, t0_s=0.0)
+    spans = [mk.MaskSpan("spikes", "L_T", a, b, "in_band_eng") for a, b in spike_spans]
+    spans += [mk.MaskSpan("slow_wave", "ANT1", *slow, "in_band_x"),
+              mk.MaskSpan("mmc", "ANT1", *slow, "in_band_x")]
+    return mk.build_masks(reads, spans, n_frames=N3_FRAMES, t0_s=0.0)
 
 
-def _rec3(recording: str = "rec1") -> ld.LineDistrustRecord:
-    return ld.decide(_rows({0: 0.5, 1: 1e-9, 2: math.nan}), recording=recording, fs=FS,
-                     epoch_start_s=0.0, n_samples=N3, family="recording")
-
-
-def test_qc_reports_spike_time_lost_beside_the_mask() -> None:
-    masks = _spike_mask([(10.0, 20.0), (70.0, 75.0)])
-    lost = qc.spike_time_lost(masks, _rec3())
-    row = lost["L_T"]
-    epoch_s = N3_FRAMES * 0.01  # whole 10 ms frames of the 180 s epoch
-    assert row["epoch_s"] == pytest.approx(epoch_s)
-    assert row["mask_blank_s"] == pytest.approx(15.0)  # [10, 20) + [70, 75)
-    assert row["line_distrust_s"] == pytest.approx(60.0)  # minute 1
-    assert row["line_distrust_only_s"] == pytest.approx(55.0)  # minute 1 less [70, 75)
-    assert row["total_lost_s"] == pytest.approx(70.0)  # [10, 20) + [60, 120)
-    assert row["mask_blank_frac"] == pytest.approx(15.0 / epoch_s)
-    assert row["line_distrust_frac"] == pytest.approx(60.0 / epoch_s)
-    assert row["line_distrust_only_frac"] == pytest.approx(55.0 / epoch_s)
-    assert row["total_lost_frac"] == pytest.approx(70.0 / epoch_s)
-    assert (row["minutes_tested"], row["minutes_untested"], row["minutes_distrusted"]) == (
-        2, 1, 1)
-    # line distrust is not blank: the gates see the mask alone
-    retention = qc.retention_by_key(masks)["spikes|L_T|300-3000"]
-    assert retention == pytest.approx(1 - 15.0 / epoch_s)
-    report = qc.QcReport("rec1", 0, {}, {}, retention_flagged=False, held=False,
-                         spike_time_lost=lost)
-    assert json.loads(report.to_json())["spike_time_lost"]["L_T"]["minutes_distrusted"] == 1
-    with pytest.raises(ValueError, match="covers"):
-        qc.spike_time_lost(masks, ld.decide(_rows({0: 0.5}, "R_T"), recording="rec1", fs=FS,
-                                            epoch_start_s=0.0, n_samples=N3,
-                                            family="recording"))
+def _rec3(recording: str = "rec1", ps: dict[int, float] | None = None
+          ) -> ld.LineDistrustRecord:
+    return _decide(_rows(ps or {0: 0.5, 1: 1e-9, 2: math.nan}), recording=recording, n=N3)
 
 
 def _write(tmp_path: Path, masks: dict[mk.MaskKey, mk.ConsumerMask],
@@ -316,43 +373,85 @@ def _write(tmp_path: Path, masks: dict[mk.MaskKey, mk.ConsumerMask],
                               animal_median={}, line_distrust=line)
 
 
-def test_the_handoff_carries_the_distrust_beside_never_inside_the_mask(tmp_path: Path) -> None:
-    masks = _spike_mask([(10.0, 20.0)])
+def test_qc_reports_spike_time_lost_beside_the_mask() -> None:
+    masks = _masks3([(10.0, 20.0), (70.0, 75.0)])
+    row = qc.spike_time_lost(masks, _rec3())["L_T"]
+    epoch_s = N3_FRAMES * 0.01
+    assert row["epoch_s"] == pytest.approx(epoch_s)
+    assert row["mask_blank_s"] == pytest.approx(15.0)
+    assert row["line_distrust_s"] == pytest.approx(60.0)
+    assert row["line_distrust_only_s"] == pytest.approx(55.0)
+    assert row["total_lost_s"] == pytest.approx(70.0)  # the overlap [70, 75) counted once
+    assert row["line_distrust_frac"] == pytest.approx(60.0 / epoch_s)
+    assert (row["minutes_tested"], row["minutes_untested"], row["minutes_distrusted"]) == (
+        2, 1, 1)
+    assert qc.retention_by_key(masks)["spikes|L_T|300-3000"] == pytest.approx(
+        1 - 15.0 / epoch_s)
+
+
+def test_q2_distrusted_minutes_are_nan_in_the_spike_input_only(tmp_path: Path) -> None:
+    masks = _masks3([(10.0, 20.0), (119.5, 125.0)])
     line = _rec3()
-    path = _write(tmp_path, masks, line)
-    m = loadmat(path)
-    blank = m["blank_spikes_L_T"]
-    k0, k1 = mk.mask_sample_spans(masks[("spikes", "L_T", "300-3000")].invalid, FS, N3)[0]
-    assert blank.tolist() == [[k0 + 1, k1]]  # the motion span only: nothing from the rule
+    m = loadmat(_write(tmp_path, masks, line))
+    without = loadmat(_write(tmp_path, masks, _rec3(ps={0: 0.5, 1: 0.5, 2: math.nan}),
+                             name="none.mat"))
     d0, d1 = int(round(60.0 * FS)), int(round(120.0 * FS))
+    motion = masks[("spikes", "L_T", "300-3000")]
+    runs = mk.mask_sample_spans(motion.invalid, FS, N3)
+    # blank_spikes = motion U distrust (the [119.5, 125) blank joins the distrusted minute)
+    assert m["blank_spikes_L_T"].tolist() == to_matlab_inclusive(
+        [runs[0][0], d0], [runs[0][1], runs[1][1]]).tolist()
+    assert without["blank_spikes_L_T"].tolist() == to_matlab_inclusive(
+        [a for a, _ in runs], [b for _, b in runs]).tolist()
     assert m["distrust_spikes_L_T"].tolist() == to_matlab_inclusive([d0], [d1]).tolist()
+    for name in ("blank_slow_wave_ANT1", "blank_mmc_ANT1", "blank_hrv_RVN2",
+                 "notmeasured_mmc_ANT1"):  # no other consumer changes (invariant 2)
+        assert np.array_equal(m[name], without[name]), name
     for name, value in m.items():
         if name.startswith("__") or value.dtype.kind == "U":
             continue
         assert_no_zero_runs(np.asarray(value, dtype=np.float64).ravel(), what=name)
-    assert ld.LineDistrustRecord.from_json(str(m["linedistrust_json"][0])) == line
-    # NaN lands on the motion frames only: the distrusted minute stays finite in the mask
-    x = make_mains_spike_t(FS, 180.0, seed=13).signal
-    y = mk.apply_mask(x, FS, masks[("spikes", "L_T", "300-3000")].invalid)
-    assert np.isfinite(y[d0:d1]).all() and np.isnan(y[k0:k1]).all()
-    assert not np.isnan(y[k1 + int(0.1 * FS):]).any()
-    # and the motion mask never accepts a line-noise span
+    assert json.loads(str(m["retention_json"][0]))["spikes|L_T|300-3000"] == pytest.approx(
+        motion.retention)  # accounting stays motion's
+    # the Python twin: NaN on motion and on the distrusted minute, finite and nonzero elsewhere
+    x = make_mains_spike_t(FS, 180.0 + 1e-4, seed=13).signal[:N3]
+    y = ld.spike_input(x, FS, motion, line)
+    assert np.isnan(y[d0:d1]).all() and np.isnan(y[runs[0][0]:runs[0][1]]).all()
+    lo, hi = runs[0][1] + int(0.01 * FS), d0 - int(0.01 * FS)
+    assert np.array_equal(y[lo:hi], x[lo:hi]) and not (y[np.isfinite(y)] == 0).any()
+    blank = np.zeros(N3, dtype=bool)
+    for a, b in m["blank_spikes_L_T"].astype(int).tolist():
+        blank[a - 1:b] = True
+    assert np.array_equal(np.isnan(y), blank)  # Python input == what MATLAB is told
+    assert line.recording == "rec1" and ld.LineDistrustRecord.from_json(
+        str(m["linedistrust_json"][0])) == line
     with pytest.raises(ValueError, match="line-noise span"):
         mk.build_masks({"spikes": ("L_T",)},
                        [mk.MaskSpan("spikes", "L_T", 60.0, 120.0, "line_noise_cuff_minute")],
                        n_frames=N3_FRAMES, t0_s=0.0)
 
 
+def test_q2b_distrust_never_holds_and_over_half_is_listed(tmp_path: Path) -> None:
+    masks = _masks3([(10.0, 11.0)])
+    heavy = _rec3(ps={0: 1e-9, 1: 1e-9, 2: 0.5})  # 120 of 180 s distrusted
+    g = json.loads(str(loadmat(_write(tmp_path, masks, heavy))["gate_json"][0]))
+    assert g["held"] is False and not g["reasons"]
+    assert g["line_distrust_listed"] == {"L_T": pytest.approx(120.0 / (N3_FRAMES * 0.01))}
+    assert g["spike_time_lost"]["L_T"]["total_lost_s"] == pytest.approx(120.0)
+    light = json.loads(str(loadmat(_write(tmp_path, masks, _rec3(), name="l.mat"))
+                           ["gate_json"][0]))
+    assert light["line_distrust_listed"] == {}  # 60 of 180 s: reported, not listed
+    assert qc.line_distrust_listed({"L_T": {"line_distrust_frac": 0.5}}) == {}  # > 50% only
+
+
 def test_the_handoff_refuses_a_missing_or_mismatched_record(tmp_path: Path) -> None:
-    masks = _spike_mask([])
+    masks = _masks3([])
     with pytest.raises(ValueError, match="must carry its line-distrust record"):
         _write(tmp_path, masks, None)
     with pytest.raises(ValueError, match="covers"):
-        _write(tmp_path, masks, ld.decide(_rows({0: 0.5}, "R_T"), recording="rec1", fs=FS,
-                                          epoch_start_s=0.0, n_samples=N3, family="recording"))
+        _write(tmp_path, masks, _decide(_rows({0: 0.5}, "R_T"), n=N3))
     with pytest.raises(ValueError, match="samples from"):
-        _write(tmp_path, masks, ld.decide(_rows({1: 0.5}), recording="rec1", fs=FS,
-                                          epoch_start_s=60.0, n_samples=N3, family="recording"))
+        _write(tmp_path, masks, _decide(_rows({1: 0.5}), n=N3, t0=60.0))
     with pytest.raises(ValueError, match="is for 'other'"):
         _write(tmp_path, masks, _rec3("other"))
     with pytest.raises(ProvenanceError, match="different spike line-distrust rule"):
@@ -367,24 +466,22 @@ def test_the_handoff_refuses_a_missing_or_mismatched_record(tmp_path: Path) -> N
     assert not [p for p in tmp_path.iterdir() if p.name != "ok.mat"]
 
 
-def test_provenance_records_the_rule_and_round_trips(tmp_path: Path) -> None:
+def test_provenance_records_the_rules_and_round_trips(tmp_path: Path) -> None:
     line = _rec3()
-    path = _write(tmp_path, _spike_mask([]), line)
-    prov = MaskProvenance.from_json(str(loadmat(path)["provenance_json"][0]))
+    prov = MaskProvenance.from_json(str(loadmat(_write(tmp_path, _masks3([]), line))
+                                        ["provenance_json"][0]))
     sld = prov.spike_line_distrust
-    assert sld["rule"] == "RULING 2026-10-08 (d) item 2" and sld["alpha"] == 0.01
-    assert sld["family"] == {"kind": "recording", "size": 2}
-    assert sld["test_version"] == ld.TEST_VERSION and sld["consumer"] == "spikes"
-    assert "cleaner" not in sld
+    assert sld["rule"] == "RULING 2026-10-08 (d) item 2; (e) Q1-Q5" and sld["alpha"] == 0.01
+    assert sld["test_version"] == "mains_lock_binom_v2" == ld.TEST_VERSION
+    assert sld["family"]["kind"] == "animal_x_cohort" and sld["family"]["size"] == 2
     par = sld["parameters"]
-    assert par["signal"] == "T" and par["input"] == "raw, unmasked"
-    assert par["band_hz"] == [300.0, 3000.0] and par["filter"]["order"] == 4
-    assert par["spike_threshold_sigma"] == 4.5 and par["refractory_s"] == 0.001
-    assert par["lock_periods_s"] == [1 / 60, 1 / 30] and par["lock_tolerance_s"] == 0.001
-    assert par["min_spikes"] == 10 and par["correction"] == "holm"
+    assert par["signal"] == "T" and par["min_valid_s"] == 30.0
+    assert par["filter"]["span"] == "stretch" and par["filter"]["min_stretch_samples"] == 28
+    assert "across a gap" in par["intervals"] and "motion" in par["motion"]
+    assert par["lock_periods_s"] == [1 / 60, 1 / 30] and par["refractory_s"] == 0.001
+    assert "cleaner" not in sld
     assert MaskProvenance.from_json(prov.to_json()) == prov
-    # the writer's copy and the record agree, so passing it in explicitly is accepted
-    again = _write(tmp_path, _spike_mask([]), line, prov=_prov(spike_line_distrust=sld),
+    again = _write(tmp_path, _masks3([]), line, prov=_prov(spike_line_distrust=sld),
                    name="again.mat")
     assert MaskProvenance.from_json(str(loadmat(again)["provenance_json"][0])) == prov
 
@@ -399,25 +496,26 @@ def test_the_record_round_trips_exactly(ps: list[float | None], cleaner: str | N
                                         t0: float) -> None:
     rows = []
     for m, p in enumerate(ps):
+        a, b = t0 + 60.0 * m, t0 + 60.0 * m + 60.0
         if p is None:
-            rows.append(ld.MinuteTest("R_T", m, t0 + 60.0 * m, t0 + 60.0 * m + 60.0,
-                                      "untested_few_spikes", 3))
+            rows.append(ld.MinuteTest("R_T", m, a, b, "untested_short_valid", valid_s=12.5))
         else:
-            rows.append(ld.MinuteTest("R_T", m, t0 + 60.0 * m, t0 + 60.0 * m + 60.0, "tested",
-                                      200, 7, 0.04, p))
-    n = math.ceil(60.0 * len(ps) * FS) + 1  # an epoch holding every row
-    rec = ld.decide(tuple(rows), recording="r" + chr(0x2028) + "x", fs=FS, epoch_start_s=t0,
-                    n_samples=n, family="recording", cleaner=cleaner)
+            rows.append(ld.MinuteTest("R_T", m, a, b, "tested", 200, 198, 7, 0.04, p, 59.5))
+    rid = "r" + chr(0x2028) + "x"
+    table = ld.AnimalPTable.from_tests("old:J", {rid: rows}, cleaner=cleaner)
+    rec = ld.decide(tuple(rows), recording=rid, fs=FS, epoch_start_s=t0,
+                    n_samples=math.ceil(60.0 * len(ps) * FS) + 1, family=table, cleaner=cleaner)
     text = rec.to_json()
     assert text.isascii() and "NaN" not in text and "null" not in text
     assert ld.LineDistrustRecord.from_json(text) == rec
     assert ld.LineDistrustRecord.from_json(text).to_json() == text
+    assert ld.AnimalPTable.from_json(table.to_json()) == table
 
 
 def test_untested_rows_equal_their_copies_whatever_nan_object_they_hold() -> None:
-    a = ld.MinuteTest("L_T", 0, 0.0, 60.0, "untested_few_spikes", 3, None, float("nan"),
-                      float("nan"))
-    assert a == ld.MinuteTest("L_T", 0, 0.0, 60.0, "untested_few_spikes", 3)
+    a = ld.MinuteTest("L_T", 0, 0.0, 60.0, "untested_few_spikes", 3, 2, None, float("nan"),
+                      float("nan"), float("nan"))
+    assert a == ld.MinuteTest("L_T", 0, 0.0, 60.0, "untested_few_spikes", 3, 2)
 
 
 def test_a_record_missing_a_required_field_raises_naming_it() -> None:
@@ -433,32 +531,34 @@ def test_a_record_missing_a_required_field_raises_naming_it() -> None:
     doc["provenance"]["parameters"]["refractory_s"] = 0.002
     with pytest.raises(ValueError, match="other test parameters"):
         ld.LineDistrustRecord.from_json(json.dumps(doc))
+    doc = json.loads(_rec3().to_json())
+    doc["provenance"]["family"]["kind"] = "recording"
+    with pytest.raises(ValueError, match="animal_x_cohort"):
+        ld.LineDistrustRecord.from_json(json.dumps(doc))
 
 
 # ---------------------------------------------------------------------------
-# review fixes: golden statistic, refractory, raw T, decide's checks, cost table
+# golden statistic, refractory, raw T, cost table, motion accounting
 # ---------------------------------------------------------------------------
 
 
 def test_the_lock_statistic_matches_a_hand_made_train_exactly() -> None:
-    """Golden values: k, p0 and p against closed forms computed here, independently.
+    """Golden values for one stretch: k, p0 and p against closed forms computed here.
 
-    Intervals (s): 1/30 x3 and 1/60 + 0.9 ms x2 are locked; 1/60 + 1.001 ms (just over the
-    1 ms tolerance), 1/60 + 1.5 ms x2 and 1/60 - 1.2 ms are not; plus four unlocked
-    fillers. (An interval EXACTLY 1 ms off is float-fragile after a cumulative sum, so the
-    boundary is probed at +/-1 us of it.)
+    1/30 x3 and 1/60 + 0.9 ms x2 are locked; 1/60 + 1.001 ms, 1/60 + 1.5 ms x2 and
+    1/60 - 1.2 ms are not; four unlocked fillers. (Exactly 1 ms off is float-fragile after
+    a cumulative sum, so the boundary is probed at +/-1 us of it.)
     """
     p60, p30 = 1.0 / 60.0, 1.0 / 30.0
     locked = [p30, p30, p30, p60 + 0.0009, p60 + 0.0009]
     unlocked = [p60 + 0.001001, p60 + 0.0015, p60 + 0.0015, p60 - 0.0012,
                 0.05, 0.07, 0.11, 0.2]
     t = 1.0 + np.concatenate([[0.0], np.cumsum(locked + unlocked)])
-    st_ = ld.lock_test(t)
+    st_ = ld.lock_test([t])
     n, m, k = t.size, t.size - 1, len(locked)
-    assert (st_.n_spikes, st_.k_locked) == (n, k)
+    assert (st_.n_spikes, st_.m_intervals, st_.k_locked) == (n, m, k)
     lam = n / (t[-1] - t[0])
-    tau = 0.001
-    p0 = sum(math.exp(-lam * (per - tau)) - math.exp(-lam * (per + tau)) for per in (p60, p30))
+    p0 = sum(math.exp(-lam * (per - 0.001)) - math.exp(-lam * (per + 0.001)) for per in (p60, p30))
     assert st_.p0 == pytest.approx(p0, rel=1e-12)
     p = sum(math.comb(m, j) * p0 ** j * (1 - p0) ** (m - j) for j in range(k, m + 1))
     assert st_.p == pytest.approx(p, rel=1e-9)
@@ -470,88 +570,49 @@ def test_the_refractory_keeps_a_peak_exactly_one_refractory_later(offset: int, k
     gap = int(0.001 * FS)
     x, k1, k2 = make_spike_pair(FS, 60.0, gap_samples=gap + offset, seed=0)
     k = np.round(ld.detect_spikes(x, FS) * FS).astype(int)
-    near = k[(k > k1 - 100) & (k < k2 + 100)].tolist()
-    assert near == [k1, k2][:kept]
+    assert k[(k > k1 - 100) & (k < k2 + 100)].tolist() == [k1, k2][:kept]
 
 
 def test_masked_t_is_refused_and_a_raw_gap_is_not() -> None:
     raw = make_mains_spike_t(FS, 120.0, seed=14).signal
     invalid = mk.mask_frames([(10.0, 10.5), (70.0, 72.0)], n_grid_frames(raw.size, FS),
                              t0_s=0.0)
-    masked = mk.apply_mask(raw, FS, invalid)
+    motion = {"L_T": all_valid_spike_mask("L_T", FS, raw.size)}
     with pytest.raises(ValueError, match="looks masked"):
-        ld.minute_tests({"L_T": masked}, FS, epoch_start_s=0.0)
+        ld.minute_tests({"L_T": mk.apply_mask(raw, FS, invalid)}, FS, epoch_start_s=0.0,
+                        motion=motion)
     gap = raw.copy()
     gap[1234567:1240000] = np.nan  # an acquisition gap: not on the 10 ms grid
-    tests = ld.minute_tests({"L_T": gap}, FS, epoch_start_s=0.0)
-    assert [t.status for t in tests] == ["untested_non_finite", "tested", "not_assessable_short"]
+    tests = ld.minute_tests({"L_T": gap}, FS, epoch_start_s=0.0, motion=motion)
+    assert [t.status for t in tests] == ["tested", "tested", "not_assessable_short"]
 
 
-def test_decide_refuses_impossible_inputs() -> None:
-    with pytest.raises(ValueError, match="cannot carry"):
-        ld.decide(_rows({0: 0.5}), recording="r", fs=2000.0, epoch_start_s=0.0,
-                  n_samples=120000, family="recording")
-    with pytest.raises(ValueError, match="must hold samples"):
-        ld.decide((), recording="r", fs=FS, epoch_start_s=0.0, n_samples=0,
-                  family="recording")
-    with pytest.raises(ValueError, match="appears twice"):
-        ld.decide(_rows({0: 0.5}) * 2, recording="r", fs=FS, epoch_start_s=0.0,
-                  n_samples=N60, family="recording")
-    with pytest.raises(ValueError, match="not inside the epoch"):
-        ld.decide(_rows({0: 0.5, 1: 0.5}), recording="r", fs=FS, epoch_start_s=0.0,
-                  n_samples=N60, family="recording")
-    with pytest.raises(ValueError, match="not inside the epoch"):
-        ld.decide(_rows({0: 0.5}), recording="r", fs=FS, epoch_start_s=30.0,
-                  n_samples=N60, family="recording")
-
-
-def test_the_two_pass_match_tolerates_float_noise_only() -> None:
-    mine = _rows({0: 0.001, 1: 0.5})
-    others = {"r2": _rows({0: 0.5}), "r3": _rows({0: 0.5})}
-    table = ld.AnimalPTable.from_tests("new:A", {"r1": mine, **others})
-    n = N3
-
-    def _with(scale: float) -> ld.AnimalPTable:
-        pv = dict(table.pvalues)
-        pv[("r1", "L_T", 0)] *= scale
-        return ld.AnimalPTable("new:A", pv)
-
-    rec = ld.decide(mine, recording="r1", fs=FS, epoch_start_s=0.0, n_samples=n,
-                    family=_with(1.0 + 1e-14))
-    assert _distrusted(rec, "L_T") == {0}
-    with pytest.raises(ValueError, match="did not test the same thing"):
-        ld.decide(mine, recording="r1", fs=FS, epoch_start_s=0.0, n_samples=n,
-                  family=_with(1.0 + 1e-9))
-
-
-def test_the_handoff_reports_the_cost_in_gate_json(tmp_path: Path) -> None:
-    masks = _spike_mask([(10.0, 20.0), (70.0, 75.0)])
-    line = _rec3()
-    g = json.loads(str(loadmat(_write(tmp_path, masks, line))["gate_json"][0]))
-    assert g["spike_time_lost"] == json.loads(json.dumps(qc.spike_time_lost(masks, line)))
-    assert g["spike_time_lost"]["L_T"]["line_distrust_only_s"] == pytest.approx(55.0)
-    assert g["held"] is False  # reported, never gating
+def test_q2_another_consumer_reading_the_same_signal_keeps_its_own_spans(tmp_path: Path
+                                                                         ) -> None:
+    """HR on L_T here: only the spike consumer's spans take the distrusted minutes."""
+    reads = {**{k: v for k, v in READS.items() if k != "velocity"},
+             "hrv": ("L_T",), "breathing": ("L_T",)}
+    masks = mk.build_masks(reads, [mk.MaskSpan("spikes", "L_T", 10.0, 11.0, "in_band_eng")],
+                           n_frames=N3_FRAMES, t0_s=0.0)
+    m = loadmat(_write(tmp_path, masks, _rec3(), signals={**reads, "velocity": ()}))
+    assert m["blank_hrv_L_T"].size == 0 and m["blank_breathing_L_T"].size == 0
+    assert m["blank_spikes_L_T"].shape == (2, 2)  # the motion span and the distrusted minute
 
 
 def test_the_cost_table_sums_per_animal_and_cuff() -> None:
-    a1 = qc.spike_time_lost(_spike_mask([(10.0, 20.0), (70.0, 75.0)]), _rec3())
-    a2 = qc.spike_time_lost(_spike_mask([(0.0, 30.0)]),
-                            ld.decide(_rows({0: 0.5, 1: 0.5, 2: 0.5}), recording="rec2",
-                                      fs=FS, epoch_start_s=0.0, n_samples=N3,
-                                      family="recording"))
-    b1 = qc.spike_time_lost(_spike_mask([]), _rec3())
+    a1 = qc.spike_time_lost(_masks3([(10.0, 20.0), (70.0, 75.0)]), _rec3())
+    a2 = qc.spike_time_lost(_masks3([(0.0, 30.0)]), _rec3("rec2", {0: 0.5, 1: 0.5, 2: 0.5}))
+    b1 = qc.spike_time_lost(_masks3([]), _rec3())
     table = qc.spike_time_lost_by_animal([("new:A", "rec1", a1), ("new:A", "rec2", a2),
                                           ("new:B", "rec1", b1)])
     a = table["new:A"]["L_T"]
     epoch = 2 * N3_FRAMES * 0.01
     assert a["n_recordings"] == 2 and a["epoch_s"] == pytest.approx(epoch)
-    assert a["mask_blank_s"] == pytest.approx(15.0 + 30.0)
+    assert a["mask_blank_s"] == pytest.approx(45.0)
     assert a["line_distrust_s"] == pytest.approx(60.0)
-    assert a["total_lost_s"] == pytest.approx(70.0 + 30.0)
-    assert a["line_distrust_frac"] == pytest.approx(60.0 / epoch)  # time-weighted
-    assert a["mask_blank_frac"] == pytest.approx(45.0 / epoch)
+    assert a["total_lost_s"] == pytest.approx(100.0)
+    assert a["line_distrust_frac"] == pytest.approx(60.0 / epoch)
     assert (a["minutes_tested"], a["minutes_untested"], a["minutes_distrusted"]) == (5, 1, 1)
-    assert table["new:B"]["L_T"]["mask_blank_s"] == 0.0
     assert table["new:B"]["L_T"]["line_distrust_s"] == pytest.approx(60.0)
     with pytest.raises(ValueError, match="given twice"):
         qc.spike_time_lost_by_animal([("new:A", "rec1", a1), ("new:A", "rec1", a1)])

@@ -21,7 +21,7 @@ from gems_blanking_v2.io.registry_log import RegistryAction, RegistryEvent
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from tests.conftest import make_confound_rows, make_eng
+from tests.conftest import make_confound_rows, make_eng, make_line_distrust
 
 FS = 2000.0
 DUR_S = 60.0
@@ -462,8 +462,7 @@ def _eng_t() -> np.ndarray:
 
 def _ld(name: str) -> ld.LineDistrustRecord:
     """Return the line-distrust record for the handoff, tested on a synthetic raw T."""
-    return ld.cuff_minute_distrust({"L_T": _eng_t()}, FS_HANDOFF, recording=name,
-                                   epoch_start_s=0.0, family="recording")
+    return make_line_distrust({"L_T": _eng_t()}, FS_HANDOFF, recording=name)
 
 
 def _write(folder: Path, name: str, model: dict[str, str], routing: str = "64c2e1ea") -> Path:
