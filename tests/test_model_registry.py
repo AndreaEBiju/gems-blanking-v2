@@ -51,7 +51,8 @@ def _register(reg: rg.Registry, booster: lgb.Booster, mode: TrainingMode,
               corpus: str = "c0") -> rg.ModelSpec:
     raw = tr.predict_raw(booster, _TABLE[_FEATS])
     cal = Calibrator.fit(raw, _TABLE["y"])
-    mid = rg.model_content_id(booster, cal, mode=mode, animal=animal, corpus_hash=corpus)
+    mid = rg.model_content_id(booster, cal, mode=mode, animal=animal, corpus_hash=corpus,
+                              w_adapt=3.0 if mode is TrainingMode.ADAPTED else None)
     spec = rg.ModelSpec(mode=mode, animal=animal, version="0.1.0", corpus_hash=corpus,
                         calibrator=rg.calibrator_relpath(mid),
                         trained_at=datetime(2026, 10, 7, 4, 0, tzinfo=UTC),
@@ -103,10 +104,12 @@ def test_old_and_new_cohort_letters_never_share_a_model(
     assert {s.model_id for s in rg.list_applicable(rec_a, reg, cohort="old")} == {
         old_a.model_id}
     with pytest.raises(rg.NotApplicableError, match="not applicable to new:A"):
-        rg.run_inference(rec_a, old_a, reg, cohort="new", cores=_TABLE, chosen_by="t")
-    assert len(rg.resolve_batch([rec_a], {"old:A": old_a}, reg, cohort="old")) == 1
+        rg.run_inference(rec_a, old_a, reg, cohort="new", cores=_TABLE, chosen_by="t",
+                         evaluation=False)
+    assert len(rg.resolve_batch([rec_a], {"old:A": old_a}, reg, cohort="old",
+                                evaluation=False)) == 1
     with pytest.raises(rg.NotApplicableError, match="not applicable"):
-        rg.resolve_batch([rec_a], {"new:A": old_a}, reg, cohort="new")
+        rg.resolve_batch([rec_a], {"new:A": old_a}, reg, cohort="new", evaluation=False)
     with pytest.raises(ValueError, match="cohort must be"):
         rg.list_applicable(rec_a, reg, cohort="A")
     # old J (JEL) vs new J (a test animal): only a POOLED model may score new J
@@ -149,11 +152,11 @@ def test_run_inference_refuses_a_model_that_is_not_applicable(
     per_b = _register(reg, booster, TrainingMode.PER_ANIMAL, "new:B")
     with pytest.raises(rg.NotApplicableError, match="not applicable to new:A"):
         rg.run_inference(_rec(recording, "A"), per_b, reg, cohort="new", cores=_TABLE,
-                         chosen_by="t")
+                         chosen_by="t", evaluation=False)
     unregistered = dataclasses.replace(per_b, corpus_hash="other")
     with pytest.raises(rg.NotApplicableError):
         rg.run_inference(_rec(recording, "B"), unregistered, reg, cohort="new", cores=_TABLE,
-                         chosen_by="t")
+                         chosen_by="t", evaluation=False)
 
 
 def test_inference_entry_points_have_no_default_model() -> None:
@@ -168,7 +171,7 @@ def test_run_inference_scores_with_the_chosen_calibrated_model(
         reg: rg.Registry, booster: lgb.Booster, recording: Recording) -> None:
     spec = _register(reg, booster, TrainingMode.PER_ANIMAL, "new:A")
     res = rg.run_inference(_rec(recording, "A"), spec, reg, cohort="new", cores=_TABLE,
-                           chosen_by="andrea")
+                           chosen_by="andrea", evaluation=False)
     raw = tr.predict_raw(booster, _TABLE[_FEATS])
     assert np.allclose(res.raw, raw)
     assert np.allclose(res.p_motion, reg.calibrator(spec).apply(raw))
@@ -194,7 +197,7 @@ def test_an_unvalidated_model_is_selectable_and_flagged(
     assert spec.unvalidated
     assert spec in rg.list_applicable(_rec(recording, "A"), reg, cohort="new")
     res = rg.run_inference(_rec(recording, "A"), spec, reg, cohort="new", cores=_TABLE,
-                           chosen_by="t")
+                           chosen_by="t", evaluation=False)
     assert res.provenance["unvalidated"] is True
     train_only = dataclasses.replace(spec, metrics={"train": {"f1": 1.0}})
     assert train_only.unvalidated
@@ -283,13 +286,16 @@ def test_batch_needs_one_choice_per_animal_and_flags_mixed_modes(
     per_b = _register(reg, booster, TrainingMode.PER_ANIMAL, "new:B")
     recs = [_rec(recording, "A"), _rec(recording, "B")]
     with pytest.raises(rg.NotApplicableError, match="no model chosen"):
-        rg.resolve_batch(recs, {"new:A": pooled}, reg, cohort="new")
-    table = rg.resolve_batch(recs, {"new:A": pooled, "new:B": per_b}, reg, cohort="new")
+        rg.resolve_batch(recs, {"new:A": pooled}, reg, cohort="new", evaluation=False)
+    table = rg.resolve_batch(recs, {"new:A": pooled, "new:B": per_b}, reg, cohort="new",
+                             evaluation=False)
     assert table["mixed_modes"].all()
     assert list(table["mode"]) == ["pooled", "per_animal"]
     with pytest.raises(rg.NotApplicableError, match="not applicable"):
-        rg.resolve_batch(recs, {"new:A": per_b, "new:B": per_b}, reg, cohort="new")
-    same = rg.resolve_batch(recs, {"new:A": pooled, "new:B": pooled}, reg, cohort="new")
+        rg.resolve_batch(recs, {"new:A": per_b, "new:B": per_b}, reg, cohort="new",
+                         evaluation=False)
+    same = rg.resolve_batch(recs, {"new:A": pooled, "new:B": pooled}, reg, cohort="new",
+                            evaluation=False)
     assert not same["mixed_modes"].any()
 
 

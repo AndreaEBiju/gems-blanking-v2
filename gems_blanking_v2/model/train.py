@@ -1,13 +1,12 @@
 """Task 12: the binary LightGBM classifier (``y = 1`` for motion) on core features.
 
-* **Native missing values (ruling (b) R2).** Features absent for a cohort (the
-  common-mode family on the 5-channel old cohort) stay ``nan``; LightGBM routes them
-  natively. Nothing is imputed.
-* **Fixed hyperparameters.** :data:`FIXED_PARAMS` is used for every mode, so "the same
-  hyperparameter search" (task 12) holds trivially. No search is run in this build
-  (``optuna`` is not installed); the values are recorded in every provenance record.
-  They differ from GEMSBlanking's window-level ``DEFAULT_HPARAMS`` (``min_data_in_leaf
-  = 100`` suits 10^5 windows, not a few hundred cores per animal).
+* **Native missing values (ruling (b) R2).** A feature whose input is absent stays
+  ``nan``; LightGBM routes it natively. Nothing is imputed.
+* **Fixed hyperparameters (RULING 2026-10-08 item 1).** :data:`FIXED_PARAMS` is
+  ``retrain.py``'s LightGBM defaults (:mod:`~gems_blanking_v2.model.params`) and is used
+  for every mode, so "the same hyperparameter search" (task 12) holds. Tuning is allowed
+  only nested inside a training fold and is off by default
+  (:mod:`~gems_blanking_v2.model.tuning`); the values used are in the run record.
 * **Leakage check.** :func:`check_leakage` refuses any feature that identifies the
   recording - a deliberately leaky "recording index" is the test - and the only columns
   ever trained on are :data:`~gems_blanking_v2.detect.features.FEATURE_NAMES`.
@@ -22,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import math
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Final
 
 import lightgbm as lgb
@@ -32,6 +32,8 @@ import pandas as pd
 from gems_blanking_v2.detect.features import FEATURE_NAMES
 from gems_blanking_v2.io.detector_core import import_detector_module
 from gems_blanking_v2.model.evaluate import W_ADAPT_GRID
+from gems_blanking_v2.model.labels import SET_A_BASIS
+from gems_blanking_v2.model.params import ADAPT_ROUNDS, FIXED_PARAMS, NUM_BOOST_ROUND
 
 __all__ = [
     "ADAPT_ROUNDS",
@@ -39,44 +41,21 @@ __all__ = [
     "NUM_BOOST_ROUND",
     "W_ADAPT_GRID",
     "LeakyFeatureError",
+    "OldRowsRefusedError",
+    "PriorCorrection",
     "check_leakage",
     "corpus_hash",
     "event_id",
     "feature_columns",
     "fit",
     "predict_raw",
+    "prior_correction",
+    "prior_weights",
     "sample_weights",
     "shap_top_features",
 ]
 
 F64 = npt.NDArray[np.float64]
-
-FIXED_PARAMS: Final[Mapping[str, Any]] = {
-    "objective": "binary",
-    "learning_rate": 0.05,
-    "num_leaves": 15,
-    "min_data_in_leaf": 10,
-    "feature_fraction": 0.8,
-    "bagging_fraction": 0.8,
-    "bagging_freq": 1,
-    "lambda_l2": 1.0,
-    "verbosity": -1,
-    "seed": 42,
-    "deterministic": True,
-    "force_row_wise": True,
-    "use_missing": True,
-    "zero_as_missing": False,
-}
-"""LightGBM parameters for every mode. ``use_missing`` keeps ``nan`` native (R2);
-``zero_as_missing`` is off because a feature value of exactly 0 is a value."""
-
-NUM_BOOST_ROUND: Final = 300
-"""Boosting rounds for a model trained from scratch (no early stopping: no inner
-validation split is carved out of corpora this small)."""
-
-ADAPT_ROUNDS: Final = 100
-"""Extra rounds when mode B continues a pooled model with ``init_model``."""
-
 
 W_VIDEO: Final = 3.0
 """Up-weight of ``provenance == 'video_assisted'`` positives."""
@@ -167,6 +146,106 @@ def sample_weights(table: pd.DataFrame, *, w_video: float = W_VIDEO) -> F64:
         m = (table["provenance"] == "video_assisted").to_numpy() & (table["y"] == 1).to_numpy()
         w[m] = w_video
     return w
+
+
+class OldRowsRefusedError(ValueError):
+    """Old-cohort rows reached training without set A's judged old negatives."""
+
+
+PRIOR_CI_RESAMPLES: Final = 1000
+"""Cluster-bootstrap resamples (by recording) for the CI of set A's old motion rate."""
+
+
+@dataclass(frozen=True)
+class PriorCorrection:
+    """The prior-corrected weight of old-cohort positives (ruling 2026-10-08 (b) 1(c)).
+
+    The old marks are positives only, so taken at face value they make the old cohort
+    look nearly all motion and teach "old cohort means motion". Set A's random old sample
+    is unbiased and holds both classes: its motion rate ``rate`` (``k_set_a / n_set_a``)
+    estimates the old cohort's. Every old-cohort POSITIVE row (set A's and the marks)
+    gets weight ``w_pos``, chosen so the effective old-cohort motion rate of the training
+    corpus, ``w_pos * n_pos / (w_pos * n_pos + n_neg)``, equals ``rate``; set A's
+    negatives keep weight 1. ``ci`` is the 95% cluster-bootstrap interval of ``rate``
+    (resampling recordings, R9's old-cohort cluster) and ``w_pos_ci`` the weights at its
+    ends - carried into provenance.
+    """
+
+    n_set_a: int
+    k_set_a: int
+    n_marks: int
+    rate: float
+    ci: tuple[float, float]
+    w_pos: float
+    w_pos_ci: tuple[float, float]
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON form for provenance (a value that is undefined is absent)."""
+        out: dict[str, Any] = {
+            "rule": "ruling 2026-10-08 (b) item 1(c): effective old motion rate = set A's",
+            "n_set_a": self.n_set_a, "k_set_a": self.k_set_a, "n_marks": self.n_marks,
+            "rate": self.rate, "w_pos": self.w_pos}
+        if all(map(math.isfinite, self.ci)):
+            out["rate_ci95"] = list(self.ci)
+            out["w_pos_at_ci"] = list(self.w_pos_ci)
+        return out
+
+
+def _w_pos(rate: float, n_pos: int, n_neg: int) -> float:
+    """Weight on each old positive so that w * n_pos / (w * n_pos + n_neg) == rate."""
+    if n_pos == 0 or rate <= 0:
+        return 0.0
+    if rate >= 1:
+        return math.inf
+    return rate * n_neg / ((1 - rate) * n_pos)
+
+
+def prior_correction(table: pd.DataFrame, *, seed: int = 0) -> PriorCorrection | None:
+    """Return the old-cohort correction of a TRAINING corpus, or ``None`` without old rows.
+
+    Raises :class:`OldRowsRefusedError` when old rows are present but set A's judged old
+    negatives are not (ruling (b) item 1(b): old rows train only alongside them).
+    """
+    old = (table["cohort"] == "old").to_numpy()
+    if not old.any():
+        return None
+    set_a = old & (table["basis"] == SET_A_BASIS).to_numpy()
+    y = table["y"].to_numpy().astype(np.int8)
+    n_a, k_a = int(set_a.sum()), int(y[set_a].sum())
+    if n_a - k_a == 0:
+        msg = (f"{int(old.sum())} old-cohort row(s) reached training without set A's judged "
+               f"old negatives ({n_a} set-A rows, {n_a - k_a} negative); ruling 2026-10-08 (b) "
+               "item 1(b): old-cohort rows train only alongside old negatives judged by "
+               "Andrea - provisional runs are new-cohort only")
+        raise OldRowsRefusedError(msg)
+    marks = old & ~set_a
+    if (y[marks] != 1).any():
+        msg = "an old-cohort row outside set A is not a positive; old marks are positives only"
+        raise ValueError(msg)
+    n_pos, n_neg = int(y[old].sum()), n_a - k_a
+    rate = k_a / n_a
+    rec = table["recording"].astype(str).to_numpy()[set_a]
+    codes, uniq = pd.factorize(pd.Series(rec), sort=True)
+    kk = np.bincount(codes, weights=y[set_a].astype(np.float64), minlength=len(uniq))
+    nn = np.bincount(codes, minlength=len(uniq)).astype(np.float64)
+    rng = np.random.default_rng(seed)
+    draw = rng.integers(0, len(uniq), size=(PRIOR_CI_RESAMPLES, len(uniq)))
+    rates = kk[draw].sum(axis=1) / nn[draw].sum(axis=1)
+    lo, hi = (float(v) for v in np.quantile(rates, [0.025, 0.975]))
+    return PriorCorrection(n_set_a=n_a, k_set_a=k_a, n_marks=int(marks.sum()), rate=rate,
+                           ci=(lo, hi), w_pos=_w_pos(rate, n_pos, n_neg),
+                           w_pos_ci=(_w_pos(lo, n_pos, n_neg), _w_pos(hi, n_pos, n_neg)))
+
+
+def prior_weights(table: pd.DataFrame, *, seed: int = 0
+                  ) -> tuple[F64, PriorCorrection | None]:
+    """Per-row multipliers of a training corpus: ``w_pos`` on old positives, 1 elsewhere."""
+    corr = prior_correction(table, seed=seed)
+    w = np.ones(len(table), dtype=np.float64)
+    if corr is not None:
+        pos_old = (table["cohort"] == "old").to_numpy() & (table["y"] == 1).to_numpy()
+        w[pos_old] = corr.w_pos
+    return w, corr
 
 
 def fit(x: pd.DataFrame, y: npt.ArrayLike, w: npt.ArrayLike | None = None, *,

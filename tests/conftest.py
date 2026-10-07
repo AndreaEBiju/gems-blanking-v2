@@ -1851,6 +1851,8 @@ def make_feature_table(
     prevalence: float = 0.3,
     separation: float = 1.5,
     animal_shift: float = 0.0,
+    set_a_per_recording: int = 0,
+    set_a_prevalence: float = 0.3,
     seed: int = 0,
 ) -> pd.DataFrame:
     """Build a labelled core table: task 10's label columns, ``span_id``, features, ``y``.
@@ -1863,8 +1865,14 @@ def make_feature_table(
     so a test needing negatives uses the new cohort). Both cohorts carry every feature
     (the common signal set, ruling 2026-10-08 (b) P1). Recording names follow each
     cohort's convention, so the animal letter can be read from them.
+
+    ``set_a_per_recording`` adds, to every old-cohort recording, that many cores judged
+    by Andrea in set A's random old sample (``basis == SET_A_BASIS``, both classes at
+    ``set_a_prevalence``; ruling 2026-10-08 (b) item 1(c)) - the old-negative source
+    without which no old-cohort row may train.
     """
     from gems_blanking_v2.detect.features import FEATURE_NAMES  # noqa: PLC0415
+    from gems_blanking_v2.model.labels import SET_A_BASIS  # noqa: PLC0415
 
     rng = np.random.default_rng(seed)
     rows: list[dict[str, object]] = []
@@ -1879,11 +1887,15 @@ def make_feature_table(
                 else:
                     rec = f"E1000_{_OLD_TOKENS.get(letter, letter)}_E1000_bl_13{r:02d}"
                     span = None
-                for k in range(cores_per_recording):
+                n_set_a = set_a_per_recording if cohort == "old" else 0
+                for k in range(cores_per_recording + n_set_a):
                     draw = rng.random()
+                    set_a = k >= cores_per_recording
                     # R3: old-cohort marks are positives only - an unmatched old core is
-                    # unjudged, never a negative - so an old judged row is always motion.
-                    y = 1 if cohort == "old" else int(draw < prevalence)
+                    # unjudged, never a negative - so an old judged row is always motion,
+                    # except set A's random cores, which Andrea judged either way.
+                    y = (int(draw < set_a_prevalence) if set_a else 1 if cohort == "old"
+                         else int(draw < prevalence))
                     x = rng.normal(0.0, 1.0, len(FEATURE_NAMES)) + offset
                     x[sig_idx] += separation * y
                     row: dict[str, object] = dict(zip(FEATURE_NAMES, x.tolist(), strict=True))
@@ -1892,8 +1904,9 @@ def make_feature_table(
                         "recording": rec, "animal": letter, "cohort": cohort,
                         "start_s": t0, "stop_s": t0 + 0.2,
                         "judgement": "motion" if y else "physiology",
-                        "source": "human" if cohort == "new" else "inherited",
-                        "basis": "mark_overlap" if y else "exhaustive_span",
+                        "source": "human" if cohort == "new" or set_a else "inherited",
+                        "basis": SET_A_BASIS if set_a else "mark_overlap" if y
+                        else "exhaustive_span",
                         "label_set": "train", "label_source": "human", "span_id": span,
                         "y": y,
                     })

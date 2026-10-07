@@ -32,7 +32,7 @@ def record(tmp_path: Path) -> Path:
 @pytest.fixture
 def table() -> pd.DataFrame:
     raw = make_feature_table({"new": ("A", "B", "H"), "old": ("F",)}, n_recordings=3,
-                             cores_per_recording=50, seed=1)
+                             cores_per_recording=120, set_a_per_recording=10, seed=1)
     return md.prepare_table(raw)
 
 
@@ -361,13 +361,20 @@ def test_run_record_is_write_once_and_binding(tmp_path: Path) -> None:
                           ('"ece_bins": 10', '"ece_bins": 15', "ece_bins"),
                           ('"calibration": "isotonic"', '"calibration": "platt"', "calibration"),
                           ("30.0", "31.0", "w_adapt_grid"),
-                          ("at EVERY", "at ANY", "interpretations")):
+                          ('"min_data_in_leaf": 100', '"min_data_in_leaf": 10', "params"),
+                          ('"num_boost_round": 300', '"num_boost_round": 3000',
+                           "num_boost_round"),
+                          ("invariant 9", "invariant 8", "reuse"),
+                          ("never on the test fold", "on the test fold", "rules")):
         assert old in good, old
         p.write_text(good.replace(old, new), encoding="utf-8")
         with pytest.raises(ValueError, match=why):
             ev.require_run_record(p)
-    for key in ("verdict_rule", "small_fold_rule", "calibration"):
-        assert "INTERPRETATION" in json.loads(good)["interpretations"][key]
+    rules = json.loads(good)["rules"]
+    assert set(rules) == {"verdict_rule", "small_fold_rule", "calibration", "registry",
+                          "renames", "cohort"}
+    for key, text in rules.items():  # ruled, no longer interpretations awaiting an answer
+        assert "RULING 2026-10-08 (b)" in text and "INTERPRETATION" not in text, key
 
 
 def test_run_modes_refuses_a_protocol_off_the_record(table: pd.DataFrame,
@@ -409,15 +416,24 @@ def test_all_three_modes_score_the_same_rows(table: pd.DataFrame, record: Path) 
     summ = cmp.summarize(p, ev.R9_THRESHOLDS)
     assert (summ["f1"] > summ["f1_all_motion"]).all()  # separable synthetic data
     assert not run.refusals
-    # SMALL_FOLD_RULE: per-recording positives reported beside the per-animal rule
+    # mode B's inner-selected series scores the same rows, one chosen w per fold
+    for t in ("new:A", "new:B"):
+        sel = p[(p["target"] == t) & (p["mode"] == "adapted") & p["w_adapt"].isna()]
+        assert set(sel["row"]) == set(np.flatnonzero(table["animal_key"] == t))
+        assert (sel["w_rule"] == "inner_selected").all()
+        assert set(sel["w_chosen"]) <= {1.0, 10.0}
+        assert (sel.groupby("fold")["w_chosen"].nunique() == 1).all()
+    assert len(run.w_selection) == 2 * 3  # one per held-out recording per target
+    # SMALL_FOLD_RULE (ruling 2026-10-08 (b) item 2): per fold as the protocol defines it
     for _i, r in summ.iterrows():
-        g = p[(p["mode"] == r["mode"]) & (p["target"] == r["target"])
-              & ((p["w_adapt"] == r["w_adapt"]) | p["w_adapt"].isna())]
-        per = g.groupby("recording")["y"].sum()
-        assert r["n_heldout_recordings"] == len(per)
-        assert r["n_recordings_lt_min_pos"] == int((per < 20).sum())
-        assert r["min_pos_per_recording"] == int(per.min())
-    assert summ["ece_cal_uses_target_labels"].all()
+        g = cmp._sel(p, r["mode"], r["target"], r["w_adapt"])
+        per = g.groupby("fold")["y"].sum()
+        assert r["n_folds"] == len(per) == (1 if r["mode"] == "pooled" else 3)
+        assert r["n_deciding_folds"] == int((per >= 20).sum())
+        assert r["min_pos_per_fold"] == int(per.min())
+        assert r["deciding"] == (r["n_deciding_folds"] > 0)
+    # mode A is calibrated with zero target labels; B and C use the target's own
+    assert (summ["ece_cal_uses_target_labels"] == (summ["mode"] != "pooled")).all()
     # the corpus table counts a fold's TRAINING rows, never its held-out recording
     c = run.corpus.set_index(["mode", "target"])
     c_fold = md.per_animal_folds(table, "new:A")[0]
@@ -435,13 +451,29 @@ def test_the_generator_honours_r3_old_positives_only() -> None:
 
 
 def test_old_cohort_positives_only_are_refused_for_mode_c(record: Path) -> None:
-    raw = make_feature_table({"new": ("A", "B"), "old": ("F",)}, n_recordings=2,
-                             cores_per_recording=30, seed=4)
-    raw.loc[raw["cohort"] == "old", "y"] = 1
+    # set A's negatives exist for F; L has only its inherited marks (positives)
+    raw = make_feature_table({"new": ("A", "B"), "old": ("F", "L")}, n_recordings=2,
+                             cores_per_recording=30, set_a_per_recording=10, seed=4)
+    raw = raw[~((raw["animal"] == "L") & (raw["basis"] == lb.SET_A_BASIS))]
     t = md.prepare_table(raw)
-    run = md.run_modes(t, targets=["old:F"], record_path=record, num_threads=THREADS,
+    run = md.run_modes(t, targets=["old:L"], record_path=record, num_threads=THREADS,
                        modes=(TrainingMode.PER_ANIMAL,), rounds=10)
     assert [r.reason for r in run.refusals] == ["labels hold one class only ([1])"]
+
+
+def test_old_rows_never_train_without_set_a_negatives(record: Path) -> None:
+    raw = make_feature_table({"new": ("A", "B"), "old": ("F",)}, n_recordings=2,
+                             cores_per_recording=20, seed=4)
+    t = md.prepare_table(raw)
+    for targets in (["new:A"], ["old:F"]):
+        with pytest.raises(tr.OldRowsRefusedError, match=r"item 1\(b\)"):
+            md.run_modes(t, targets=targets, record_path=record, num_threads=THREADS,
+                         rounds=5, adapt_rounds=5, w_adapt_grid=(1.0,))
+    # new-cohort only: the provisional runs
+    new_only = md.prepare_table(raw[raw["cohort"] == "new"])
+    run = md.run_modes(new_only, targets=["new:A"], record_path=record, num_threads=THREADS,
+                       modes=(TrainingMode.POOLED,), rounds=5)
+    assert len(run.predictions) and not run.priors
 
 
 def test_adaptation_does_not_modify_the_pooled_model(table: pd.DataFrame) -> None:
@@ -458,6 +490,9 @@ def test_learning_curve_has_at_least_five_points_per_line(table: pd.DataFrame,
                                                           record: Path) -> None:
     sizes = cmp.curve_sizes(20, 300)
     assert len(sizes) >= cmp.MIN_CURVE_POINTS
+    # new cohort only: a subsample of a corpus with old rows can draw marks without set
+    # A's negatives, and such a fit is refused (ruling 2026-10-08 (b) item 1(b))
+    table = md.prepare_table(table[table["cohort"] == "new"])
     curve = md.learning_curve(table, targets=["new:A"], record_path=record,
                               num_threads=THREADS, sizes=sizes,
                               modes=tuple(TrainingMode), w_adapt_grid=(3.0,),
@@ -469,9 +504,9 @@ def test_learning_curve_has_at_least_five_points_per_line(table: pd.DataFrame,
     assert (b["n_adapt_events"] > 0).all()
     assert len(a) >= cmp.MIN_CURVE_POINTS
     c = curve[curve["line"] == "per_animal (LORO)"]
-    # per-animal folds hold 100 training events: larger points are withheld, not faked
+    # per-animal folds hold 240 training events: larger points are withheld, not faked
     assert len(c) > 0
-    assert (c["requested_size"] <= 100).all()
+    assert (c["requested_size"] <= 240).all()
     assert (c["n_train_events"] == c["requested_size"]).all()
     assert set(curve["protocol"]) == {"LOAO", "LOAO_ADAPT", "LORO"}
 
@@ -633,32 +668,31 @@ def test_cluster_ids_are_spans_in_the_new_cohort_and_recordings_in_the_old() -> 
 # ---------------------------------------------------------------------------
 
 
-def _bc(gains: list[float], los: list[float], n_pos: int,
-        ws: tuple[float, ...] = ev.W_ADAPT_GRID) -> pd.DataFrame:
-    """B-vs-C rows; the first two weights carry the given values, the rest a clear C win."""
-    k = len(ws)
-    g = (gains + [0.10] * k)[:k]
-    lo = (los + [0.05] * k)[:k]
-    return pd.DataFrame({"target": "new:A", "comparison": "B vs C", "w_a": list(ws),
-                         "n_pos": n_pos, "f1_b_minus_a": g, "lo": lo,
-                         "hi": [x + 0.05 for x in g]})
+def _bc(gain: float, lo: float, n_deciding: int, *, sweep: float = -0.5) -> pd.DataFrame:
+    """B-vs-C rows: the inner-selected row (gain, lo) and a swept row (``sweep``)."""
+    return pd.DataFrame({"target": "new:A", "comparison": "B vs C",
+                         "w_a": [float("nan"), 3.0], "b_weight": ["inner-selected", "w=3"],
+                         "decides": [True, False], "w_chosen_per_fold": ['{"3": 2}', ""],
+                         "n_deciding_folds": n_deciding, "f1_b_minus_a": [gain, sweep],
+                         "lo": [lo, sweep - 0.05], "hi": [gain + 0.05, sweep + 0.05]})
 
 
-def test_c_beats_b_only_by_the_r9_margin_at_every_weight() -> None:
+def test_c_beats_b_only_by_the_r9_margin_at_bs_inner_selected_weight() -> None:
     r9 = ev.R9_THRESHOLDS
-    (v,) = cmp.b_vs_c_verdict(_bc([0.05, 0.04], [0.01, 0.005], 50), r9)
+    (v,) = cmp.b_vs_c_verdict(_bc(0.05, 0.01, 2), r9)
     assert v.verdict == "C > B" and v.task11_investigation
-    (v,) = cmp.b_vs_c_verdict(_bc([0.05, 0.02], [0.01, 0.005], 50), r9)
-    assert v.verdict == "B >= C"  # under the margin at one weight
-    (v,) = cmp.b_vs_c_verdict(_bc([0.05, 0.04], [0.01, -0.001], 50), r9)
-    assert v.verdict == "B >= C"  # CI touches 0 at one weight
-    (v,) = cmp.b_vs_c_verdict(_bc([0.05, 0.04], [0.01, 0.005], 19), r9)
+    (v,) = cmp.b_vs_c_verdict(_bc(0.02, 0.01, 2), r9)
+    assert v.verdict == "B >= C"  # under the margin
+    (v,) = cmp.b_vs_c_verdict(_bc(0.05, -0.001, 2), r9)
+    assert v.verdict == "B >= C"  # CI touches 0
+    (v,) = cmp.b_vs_c_verdict(_bc(0.05, 0.01, 0), r9)
     assert not v.deciding and not v.task11_investigation
     assert v.verdict.startswith("not deciding")
-    for partial in ((30.0,), (1.0, 3.0, 10.0)):  # a winning sub-sweep decides nothing
-        (v,) = cmp.b_vs_c_verdict(_bc([0.2], [0.1], 50, ws=partial), r9)
-        assert v.verdict.startswith("incomplete sweep")
-        assert not v.deciding and not v.task11_investigation
+    # a swept weight never decides, whichever way it points
+    (v,) = cmp.b_vs_c_verdict(_bc(0.0, -0.02, 2, sweep=0.3), r9)
+    assert v.verdict == "B >= C" and "reported only" in v.detail
+    (v,) = cmp.b_vs_c_verdict(_bc(0.0, -0.02, 2).iloc[1:], r9)
+    assert v.verdict.startswith("no inner-selected B") and not v.deciding
 
 
 def test_tier_step_dropped_only_on_a_significant_fall() -> None:
@@ -685,6 +719,8 @@ def test_a_vs_c_is_never_a_comparison(table: pd.DataFrame, record: Path) -> None
     assert not ac["comparable"].iloc[0]
     assert ac[["f1_b_minus_a", "lo", "hi"]].isna().all(axis=None)
     assert set(m.loc[m["comparable"], "comparison"]) == {"A vs B", "B vs C"}
+    assert m.loc[m["decides"], ["comparison", "b_weight"]].values.tolist() == [
+        ["B vs C", "inner-selected"]]
 
 
 def test_comparison_artifact_is_written(table: pd.DataFrame, record: Path,
@@ -694,17 +730,26 @@ def test_comparison_artifact_is_written(table: pd.DataFrame, record: Path,
                        w_adapt_grid=(1.0,), rounds=30, adapt_rounds=10)
     summ = cmp.summarize(run.predictions, r9)
     matched = cmp.matched_protocol_table(run.predictions, r9)
-    curve = md.learning_curve(table, targets=["new:A"], record_path=record,
+    curve = md.learning_curve(md.prepare_table(table[table["cohort"] == "new"]),
+                              targets=["new:A"], record_path=record,
                               num_threads=THREADS, sizes=cmp.curve_sizes(20, 200),
                               modes=(TrainingMode.POOLED,), n_resamples=20)
+    probe = cmp.cohort_probe(run.predictions, table, r9)
     pq = cmp.write_comparison(tmp_path / "out", "t0", summary=summ, matched=matched,
                               verdicts=cmp.b_vs_c_verdict(matched, r9), corpus=run.corpus,
-                              preds=run.predictions, curve=curve, r9=r9)
+                              preds=run.predictions, curve=curve, r9=r9, probe=probe,
+                              small=cmp.small_fold_table(run.predictions, r9),
+                              w_selection=run.w_selection)
     back = pd.read_parquet(pq)
     assert set(back["mode"]) == {"pooled", "adapted", "per_animal"}
     md_text = (tmp_path / "out" / "comparison_t0.md").read_text(encoding="utf-8")
     assert "not comparable" in md_text
-    assert "ece_cal for mode A uses target labels" in md_text
+    assert "zero target labels" in md_text and "Cohort probe" in md_text
+    assert "inner-selected" in md_text
+    cmp.write_comparison(tmp_path / "out2", "t0", summary=summ, matched=matched, verdicts=[],
+                         corpus=run.corpus, preds=run.predictions)
+    assert "NOT COMPUTED" in (tmp_path / "out2" / "comparison_t0.md").read_text(
+        encoding="utf-8")
     assert (tmp_path / "out" / "curve_new_A.png").is_file()
     assert not list((tmp_path / "out").glob("*.tmp"))
     for bad in ("a:b", "x/y", "CON", "t0."):

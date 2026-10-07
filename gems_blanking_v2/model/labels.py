@@ -43,6 +43,7 @@ __all__ = [
     "LABEL_COLUMNS",
     "MOTION_OVERLAP",
     "OLD_TIERS",
+    "SET_A_BASIS",
     "TEST_ANIMALS",
     "AliasRow",
     "BlankmotionLabels",
@@ -101,6 +102,12 @@ judgement (``mark_overlap``, ``exhaustive_span``, ``adjudicated``, ``partial_ove
 
 NEGATIVE_JUDGEMENTS: Final[frozenset[str]] = frozenset({"physiology", "line_noise"})
 """Not motion. ``line_noise`` (ruling (c) item 3, key 4) counts as a negative."""
+
+SET_A_BASIS: Final = "set_a_random"
+"""``basis`` of an old-cohort core that Andrea judged in labelling set A's random old
+sample (ruling 2026-10-08 (b) item 1(c)): an unbiased draw of old cores with both classes,
+judged by a human - so neither inherited nor tiered. These rows are the old-cohort
+negative source without which no old-cohort row may train (item 1(b))."""
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +280,9 @@ def training_rows(table: pd.DataFrame, *, allow_model_labels: bool = False,
     Old-cohort rows (rulings 2026-10-07 (i), (j)) are kept only for recordings whose tier
     in ``old_tiers`` is one of ``keep_tiers`` (labels from :data:`OLD_TIERS`; default tier 1
     only). A recording absent from the map, or with any other label, is excluded - never
-    assumed certain. ``old_tiers=None`` keeps no old-cohort row.
+    assumed certain. ``old_tiers=None`` keeps no tiered old-cohort row. Set A's judged
+    random old cores (``basis == SET_A_BASIS``) are Andrea's own judgments, not inherited
+    marks, so the tier filter does not apply to them.
     Raises naming the column if a required column is missing.
     """
     missing = [c for c in LABEL_COLUMNS if c not in table.columns]
@@ -295,7 +304,7 @@ def training_rows(table: pd.DataFrame, *, allow_model_labels: bool = False,
         raise ValueError(msg)
     tiers = old_tiers or {}
     old_ok = table["recording"].map(lambda r: tiers.get(r) in allowed)
-    keep &= (table["cohort"] != "old") | old_ok
+    keep &= (table["cohort"] != "old") | old_ok | (table["basis"] == SET_A_BASIS)
     out = table.loc[keep].copy()
     out["y"] = (out["judgement"] == "motion").astype(np.int8)
     return out

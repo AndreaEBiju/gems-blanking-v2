@@ -33,15 +33,25 @@ import pandas as pd
 from scipy.special import expit
 from sklearn.isotonic import IsotonicRegression  # type: ignore[import-untyped]
 
+from gems_blanking_v2.io.detector_core import import_detector_module
 from gems_blanking_v2.io.store import atomic_write_text
+from gems_blanking_v2.model.params import (
+    ADAPT_ROUNDS,
+    FIXED_PARAMS,
+    NUM_BOOST_ROUND,
+    TASK12_REUSE,
+)
 
 __all__ = [
     "BASELINE_FEATURE",
     "CALIBRATION_KIND",
     "CALIBRATION_NOTE",
+    "COHORT_RULE",
     "DECISION_P",
     "ECE_BINS",
     "R9_THRESHOLDS",
+    "REGISTRY_RULE",
+    "RENAMES_RULE",
     "SMALL_FOLD_RULE",
     "VERDICT_RULE",
     "W_ADAPT_GRID",
@@ -53,6 +63,7 @@ __all__ = [
     "cluster_ids",
     "crossfit_calibrate",
     "ece",
+    "heldout_eval_metrics",
     "paired_diff_ci",
     "reliability_curve",
     "require_run_record",
@@ -85,25 +96,56 @@ CALIBRATION_KIND: Final = "isotonic"
 """The calibrator fitted per (mode, animal, ``w_adapt``) on held-out data."""
 
 VERDICT_RULE: Final = (
-    "INTERPRETATION (question for Andrea): C beats B only if F1(C)-F1(B) >= "
-    "c_beats_b_min_f1_gain with the paired cluster-bootstrap interval excluding 0, at EVERY "
-    "swept w_adapt; animals with fewer than min_positives_deciding positives never decide; "
-    "A vs C is never compared."
+    "RULING 2026-10-08 (b) item 2: C is compared with B at B's best adaptation weight, "
+    "chosen for each held-out recording by inner validation on that fold's training data "
+    "only (leave-one-adaptation-recording-out over the w_adapt grid; ties go to the smaller "
+    "w), never on the test fold. C beats B only if F1(C)-F1(B) >= c_beats_b_min_f1_gain with "
+    "the paired cluster-bootstrap interval excluding 0 (R9), on the deciding folds. The "
+    "per-w sweep is reported, never decides. A vs C is never compared."
 )
-"""How the B-vs-C verdict reads the ``w_adapt`` sweep."""
+"""How the B-vs-C verdict is decided."""
 
 SMALL_FOLD_RULE: Final = (
-    "INTERPRETATION: R9's '< 20 positives' is applied per animal (its held-out recordings "
-    "pooled), not per LORO recording; per-recording positive counts are reported beside it."
+    "RULING 2026-10-08 (b) item 2: '< 20 positives' is per fold as the protocol defines "
+    "it - the held-out animal for LOAO (mode A), the held-out recording for the within-"
+    "animal splits (modes B and C). A fold below it is reported separately and never "
+    "decides the mode."
 )
 """How R9's small-fold rule is applied."""
 
 CALIBRATION_NOTE: Final = (
-    "INTERPRETATION (question for Andrea): calibration is cross-fitted over the target's "
-    "own held-out clusters for EVERY mode, including A; mode A's ece_cal therefore uses "
-    "target labels and is not a zero-label figure."
+    "RULING 2026-10-08 (b) item 2: mode A is calibrated with zero target labels - the "
+    "calibrator of each target is fitted on the OTHER targets' out-of-fold LOAO "
+    "predictions. Modes B and C are cross-fitted over the target's own held-out clusters "
+    "(their protocols use target labels by design)."
 )
-"""What ``ece_cal`` means for mode A."""
+"""What ``p_cal`` and ``ece_cal`` mean per mode."""
+
+REGISTRY_RULE: Final = (
+    "RULING 2026-10-08 (b) item 2: an ADAPTED model of new-cohort I, J or K may be "
+    "registered only if trained on adaptation labels (label_set 'adapt') kept separate "
+    "from, and never overlapping in time, the evaluation labels; it carries "
+    "never_scores_evaluation_spans, and run_inference / resolve_batch refuse it on "
+    "evaluation spans. No other model of I, J or K may exist."
+)
+"""When a model of a prospective test animal may exist (R1 binds evaluation)."""
+
+RENAMES_RULE: Final = (
+    "RULING 2026-10-08 (b) item 2: for a renamed block the folder name is authoritative "
+    "(Andrea's convention), so the I/J/K check by folder animal stands; acknowledged "
+    "renames are declared in the rename record."
+)
+"""Renamed blocks: no change, recorded."""
+
+COHORT_RULE: Final = (
+    "RULING 2026-10-08 (b) item 1: old-cohort rows train only alongside old-cohort "
+    "negatives judged by Andrea (set A's random old sample); until then provisional runs "
+    "are new-cohort only. Old marks (positives only) enter with prior-corrected weights so "
+    "the effective old-cohort motion rate equals set A's estimate. Acceptance: on cores "
+    "judged physiology, the median out-of-fold P(motion) of the two cohorts differs by at "
+    "most cohort_probe_max_delta, per mode; not computable is reported, never a pass."
+)
+"""The cohort shortcut rule (b) item 1(b)-(d)."""
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +174,9 @@ class R9Thresholds:
     tier_drop_f1: float = 0.02
     """Rulings (i)/(j): a tier step is dropped if audit-span F1 falls by at least this
     with the 95% interval of the drop excluding 0."""
+    cohort_probe_max_delta: float = 0.10
+    """Ruling 2026-10-08 (b) item 1(d): on physiology-judged cores the median out-of-fold
+    P(motion) may differ between cohorts by at most this, per mode."""
 
 
 R9_THRESHOLDS: Final = R9Thresholds()
@@ -142,9 +187,15 @@ def run_protocol() -> dict[str, Any]:
     """Everything written to the run record before training and checked on every use."""
     return {"r9": asdict(R9_THRESHOLDS), "decision_p": DECISION_P, "ece_bins": ECE_BINS,
             "w_adapt_grid": list(W_ADAPT_GRID), "calibration": CALIBRATION_KIND,
-            "interpretations": {"verdict_rule": VERDICT_RULE,
-                                "small_fold_rule": SMALL_FOLD_RULE,
-                                "calibration": CALIBRATION_NOTE}}
+            "params": dict(FIXED_PARAMS), "num_boost_round": NUM_BOOST_ROUND,
+            "adapt_rounds": ADAPT_ROUNDS,
+            "reuse": json.loads(json.dumps(TASK12_REUSE)),
+            "rules": {"verdict_rule": VERDICT_RULE,
+                      "small_fold_rule": SMALL_FOLD_RULE,
+                      "calibration": CALIBRATION_NOTE,
+                      "registry": REGISTRY_RULE,
+                      "renames": RENAMES_RULE,
+                      "cohort": COHORT_RULE}}
 
 
 def write_run_record(path: Path, *, run_id: str, extra: Mapping[str, Any] | None = None
@@ -237,6 +288,35 @@ def scores(y: npt.ArrayLike, yhat: npt.ArrayLike) -> Scores:
     return Scores(n=n, n_pos=int(yt.sum()), n_pred_pos=int(yp.sum()),
                   prevalence=_ratio(float(yt.sum()), n), precision=_ratio(tp, tp + fp),
                   recall=_ratio(tp, tp + fn), f1=_f1_counts(tp, fp, fn))
+
+
+def heldout_eval_metrics(y: npt.ArrayLike, yhat: npt.ArrayLike,
+                         recordings: npt.ArrayLike) -> dict[str, float]:
+    """GEMSBlanking's ``detector/heldout_eval`` metrics on our per-core predictions.
+
+    Reused by import (ruling 2026-10-08 item 1): its per-recording confusion
+    (``_compute_metrics``) on each recording's cores, and its micro (pooled) and macro
+    (mean over recordings, undefined ones skipped) aggregation (``_aggregate``). Returns
+    ``{"f1_heldout_eval_micro", "f1_heldout_eval_macro"}`` where defined, and ``{}`` when
+    the private checkout is absent. The micro F1 is the same quantity as :func:`scores`'
+    F1 and serves as a cross-check of it.
+    """
+    try:
+        he = import_detector_module("heldout_eval")
+    except (FileNotFoundError, ImportError):
+        return {}
+    yt = np.asarray(y).astype(bool)
+    yp = np.asarray(yhat).astype(bool)
+    rec = np.asarray(recordings).astype(str)
+    per = [he._compute_metrics(r, yp[rec == r], yt[rec == r], 0.0)
+           for r in sorted(set(rec.tolist()))]
+    agg = he._aggregate(per)
+    out: dict[str, float] = {}
+    if agg.get("micro") and agg["micro"].get("f1") is not None:
+        out["f1_heldout_eval_micro"] = float(agg["micro"]["f1"])
+    if agg.get("macro") and agg["macro"].get("f1") is not None:
+        out["f1_heldout_eval_macro"] = float(agg["macro"]["f1"])
+    return out
 
 
 def cluster_ids(table: pd.DataFrame) -> pd.Series:

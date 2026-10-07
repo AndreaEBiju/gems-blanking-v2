@@ -31,6 +31,12 @@ Leakage guards (task 12 tests): :func:`assert_disjoint_animals` on every fold, b
 key and - where GEMSBlanking's ``extract_animal_letter`` can read one - by the letter in
 the recording name; :func:`assert_no_recording_leak` on every mode-B fold, so no
 recording of the target is both adapted on and evaluated.
+
+Rulings 2026-10-08 and (b), applied in :func:`run_modes`: mode B's weight is chosen per
+held-out recording by inner validation on that fold's adaptation recordings; mode A is
+calibrated with zero target labels; optional tuning is nested inside each fold; old-cohort
+rows train only alongside set A's judged old negatives, with prior-corrected weights; and
+:func:`tier_check` keeps rulings (i)/(j)'s nested tier check wired for when they do.
 """
 
 from __future__ import annotations
@@ -50,6 +56,7 @@ import numpy.typing as npt
 import pandas as pd
 
 from gems_blanking_v2.io.detector_core import import_detector_module
+from gems_blanking_v2.model.compare import TierVerdict, tier_chain
 from gems_blanking_v2.model.evaluate import (
     BASELINE_FEATURE,
     CALIBRATION_KIND,
@@ -64,7 +71,7 @@ from gems_blanking_v2.model.evaluate import (
     require_run_record,
     scores,
 )
-from gems_blanking_v2.model.labels import OLD_TIERS, animal_key, is_test_animal
+from gems_blanking_v2.model.labels import OLD_TIERS, SET_A_BASIS, animal_key, is_test_animal
 from gems_blanking_v2.model.provenance import build_provenance, corpus_composition
 from gems_blanking_v2.model.registry import (
     ModelSpec,
@@ -74,17 +81,24 @@ from gems_blanking_v2.model.registry import (
 )
 from gems_blanking_v2.model.train import (
     ADAPT_ROUNDS,
+    FIXED_PARAMS,
     NUM_BOOST_ROUND,
     check_leakage,
     corpus_hash,
+    event_id,
     feature_columns,
     fit,
     predict_raw,
+    prior_correction,
+    prior_weights,
     sample_weights,
 )
+from gems_blanking_v2.model.tuning import Tuner, tuning_record
 from gems_blanking_v2.types import TrainingMode
 
 __all__ = [
+    "TIER_CHAIN",
+    "TIER_STEPS",
     "UNKNOWN_ANIMAL",
     "Fold",
     "LabelOptIns",
@@ -103,6 +117,7 @@ __all__ = [
     "read_renames",
     "refuse_test_rows",
     "run_modes",
+    "tier_check",
 ]
 
 I64 = npt.NDArray[np.int64]
@@ -169,7 +184,8 @@ class LabelOptIns:
             if src:
                 msg = f"allow_model_labels is False but the table has label_source {src}"
                 raise ValueError(msg)
-        old = table.loc[table["cohort"] == "old", "recording"].astype(str).unique()
+        inherited = (table["cohort"] == "old") & (table["basis"] != SET_A_BASIS)
+        old = table.loc[inherited, "recording"].astype(str).unique()
         tiers = {(old_tiers or {}).get(r) for r in old}
         outside = sorted(map(str, tiers - set(self.keep_tiers)))
         if outside:
@@ -574,8 +590,11 @@ class ModeRun:
     """Everything one :func:`run_modes` pass produced.
 
     ``predictions`` is long-format, one row per (mode, w_adapt, evaluated core):
-    ``mode, target, protocol, w_adapt, fold, row, recording, cluster, y, raw, p_cal,
-    yhat, yhat_thr, n_train_events``. ``w_adapt`` is ``nan`` outside mode B.
+    ``mode, target, protocol, w_adapt, w_rule, w_chosen, fold, row, recording, cluster,
+    y, raw, p_cal, yhat, yhat_thr, n_train_events``. ``w_adapt`` is ``nan`` outside mode
+    B's sweep; mode B's **inner-selected** series (ruling 2026-10-08 (b) item 2) has
+    ``w_adapt = nan``, ``w_rule = "inner_selected"`` and the weight each fold chose in
+    ``w_chosen``.
     """
 
     predictions: pd.DataFrame
@@ -583,6 +602,12 @@ class ModeRun:
     corpus: pd.DataFrame
     registered: tuple[str, ...] = ()
     """Model ids registered by this pass (empty unless a registry was given)."""
+    w_selection: pd.DataFrame = field(default_factory=pd.DataFrame)
+    """Per mode-B fold: the inner-validated ``w_adapt``, its basis and the inner F1 per w."""
+    tuned: tuple[dict[str, object], ...] = ()
+    """Per tuned fit: mode, target, fold and the parameters the nested tuner chose."""
+    priors: tuple[dict[str, object], ...] = ()
+    """Per fit with old-cohort rows: the prior correction applied (ruling (b) 1(c))."""
 
 
 def _subsample(rows: I64, n: int | None, rng: np.random.Generator) -> I64:
@@ -606,7 +631,8 @@ def _record(mode: TrainingMode, fold: Fold, t: pd.DataFrame, raw: npt.NDArray[np
     ev = t.iloc[fold.evaluate]
     return pd.DataFrame({
         "mode": str(mode), "target": fold.target, "protocol": PROTOCOL[mode],
-        "w_adapt": w, "fold": fold_name, "row": fold.evaluate,
+        "w_adapt": w, "w_rule": "sweep" if mode is TrainingMode.ADAPTED else "",
+        "w_chosen": np.nan, "fold": fold_name, "row": fold.evaluate,
         "recording": ev["recording"].astype(str).to_numpy(),
         "cluster": ev["cluster"].astype(str).to_numpy(),
         "y": ev["y"].to_numpy().astype(np.int8), "raw": raw,
@@ -614,6 +640,61 @@ def _record(mode: TrainingMode, fold: Fold, t: pd.DataFrame, raw: npt.NDArray[np
         "n_train_events": n_train, "n_adapt_events": n_adapt,
         "n_excluded_unknown": fold.n_excluded_unknown,
     })
+
+
+def _check_tuning_recorded(record_path: Path, tuner: Tuner | None) -> None:
+    raw = json.loads(Path(record_path).read_text(encoding="utf-8"))
+    have = (raw.get("extra") or {}).get("tuning")
+    want = tuning_record(tuner)
+    if have != want and not (have is None and tuner is None):
+        msg = (f"the run record's extra['tuning'] is {have!r}, but this pass tunes as {want!r};"
+               " write tuning_record(tuner) into the record before training")
+        raise ValueError(msg)
+
+
+def _calibrate(preds: pd.DataFrame, kind: Literal["isotonic"]) -> None:
+    """Fill ``p_cal`` in place (ruling 2026-10-08 (b) item 2, mode A with zero target labels).
+
+    Mode A: each target's calibrator is fitted on the OTHER targets' out-of-fold LOAO
+    predictions only - none of its own labels - so ``p_cal`` is ``nan`` for a target
+    when no other target's predictions hold both classes. Modes B and C (whose protocols
+    use target labels by design): cross-fitted over the target's own clusters, per
+    ``(mode, target, w_adapt)``.
+    """
+    pooled = (preds["mode"] == str(TrainingMode.POOLED)).to_numpy()
+    for t in sorted(set(preds.loc[pooled, "target"].astype(str))):
+        mine = pooled & (preds["target"] == t).to_numpy()
+        other = pooled & (preds["target"] != t).to_numpy()
+        yo = preds.loc[other, "y"].to_numpy()
+        if other.any() and np.unique(yo).size == 2:  # noqa: PLR2004
+            cal = Calibrator.fit(preds.loc[other, "raw"].to_numpy(), yo, kind)
+            preds.loc[mine, "p_cal"] = cal.apply(preds.loc[mine, "raw"].to_numpy())
+    rest = preds.loc[~pooled]
+    for _key, g in rest.groupby(["mode", "target", "w_adapt"], dropna=False):
+        preds.loc[g.index, "p_cal"] = crossfit_calibrate(
+            g["raw"].to_numpy(), g["y"].to_numpy(), g["cluster"].to_numpy(), kind=kind)
+
+
+def _select_w(grid: Sequence[float], inner: Mapping[float, tuple[list[npt.NDArray[np.int8]],
+                                                                  list[npt.NDArray[np.bool_]]]],
+              n_inner: int) -> tuple[float, str, dict[str, float]]:
+    """Pick the w with the highest pooled inner F1; ties and no evidence go to the smallest."""
+    f1 = {}
+    for wa in grid:
+        ys, ps = inner[wa]
+        f1[float(wa)] = (scores(np.concatenate(ys), np.concatenate(ps)).f1 if ys
+                         else float("nan"))
+    finite = {w: v for w, v in f1.items() if np.isfinite(v)}
+    shown = {f"{w:g}": v for w, v in f1.items() if np.isfinite(v)}
+    if not finite:
+        return float(min(grid)), (f"no inner evidence ({n_inner} inner fold(s) with no defined "
+                                  "F1); smallest w by rule"), shown
+    best = max(finite.values())
+    chosen = min(w for w, v in finite.items() if v == best)
+    tie = sum(v == best for v in finite.values()) > 1
+    basis = (f"inner leave-one-adaptation-recording-out over {n_inner} fold(s)"
+             + ("; tie, smallest w by rule" if tie else ""))
+    return chosen, basis, shown
 
 
 def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,  # noqa: PLR0912, PLR0915
@@ -624,16 +705,33 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
               rounds: int = NUM_BOOST_ROUND, adapt_rounds: int = ADAPT_ROUNDS,
               registry: Registry | None = None, user: str = "",
               old_tiers: Mapping[str, str] | None = None,
-              label_opt_ins: LabelOptIns | None = None) -> ModeRun:
+              label_opt_ins: LabelOptIns | None = None,
+              tuner: Tuner | None = None, select_w: bool = True) -> ModeRun:
     """Train and score every requested mode for every target, in one pass.
 
     Requires an existing run record (R9 thresholds written before training). ``table``
     comes from :func:`prepare_table`. ``train_size`` subsamples each fold's training
     corpus (the pooled part for A and B, the per-animal part for C) to that many events,
-    for the learning curve; ``None`` uses everything. Calibration is cross-fitted per
-    (mode, animal, ``w_adapt``) over the target's clusters
-    (:func:`~gems_blanking_v2.model.evaluate.crossfit_calibrate`), so ``p_cal`` is
-    held-out. Refused modes are returned, never silently skipped.
+    for the learning curve; ``None`` uses everything. Calibration
+    (:func:`_calibrate`): mode A with zero target labels, B and C cross-fitted over the
+    target's clusters, so ``p_cal`` is held-out. Refused modes are returned, never
+    silently skipped.
+
+    Ruling 2026-10-08 (b):
+
+    * **Old-cohort rows** train only alongside set A's judged old negatives, and then
+      with prior-corrected weights on the old positives
+      (:func:`~gems_blanking_v2.model.train.prior_weights`, recomputed on every fold's
+      training corpus); without set A any old row raises
+      :class:`~gems_blanking_v2.model.train.OldRowsRefusedError`.
+    * **Mode B's weight** is chosen per held-out recording by inner validation on that
+      fold's adaptation recordings (``select_w``; the learning curve turns it off), and
+      the chosen series is emitted beside the sweep.
+
+    ``tuner`` (ruling 2026-10-08 item 1; off by default): called once per fold with that
+    fold's training rows and their groups only - animal keys for A and B, recordings for
+    C - and checked never to see the held-out animal or recording. The run record's
+    ``extra["tuning"]`` must equal :func:`~gems_blanking_v2.model.tuning.tuning_record`.
 
     With ``registry`` (rooted wherever the caller says) the pass also trains and
     REGISTERS the final model of every evaluated mode (:func:`_register_finals`): one
@@ -647,6 +745,8 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
     require_run_record(record_path)
     refuse_test_rows(table)
     _check_renames_recorded(table, record_path)
+    _check_tuning_recorded(record_path, tuner)
+    prior_correction(table, seed=seed)  # raises before any fit if old rows lack set A
     if registry is not None:
         if not user:
             msg = "registering models needs the acting user"
@@ -676,27 +776,54 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
     check_leakage(x, table["recording"].astype(str).to_numpy())
     y = table["y"].to_numpy().astype(np.int8)
     w_all = sample_weights(table)
+    keys = table["animal_key"].to_numpy()
+    rec = table["recording"].astype(str).to_numpy()
+    scorable = _scorable(table)
     rng = np.random.default_rng(seed)
     parts: list[pd.DataFrame] = []
     refusals: list[Refusal] = []
     corpus: list[dict[str, object]] = []
-    priors: dict[str, tuple[lgb.Booster, I64]] = {}
+    priors: dict[str, tuple[lgb.Booster, I64, dict[str, object]]] = {}
+    w_sel: list[dict[str, object]] = []
+    tuned: list[dict[str, object]] = []
+    prior_log: list[dict[str, object]] = []
 
-    def train_on(rows: I64, *, init: lgb.Booster | None = None, w: npt.NDArray[np.float64]
-                 | None = None, n_rounds: int = rounds) -> lgb.Booster:
-        ww = w_all[rows] if w is None else w
-        return fit(x.iloc[rows], y[rows], ww, num_threads=num_threads, rounds=n_rounds,
-                   init_model=init)
+    def weights(rows: I64, base: npt.NDArray[np.float64], where: str) -> npt.NDArray[np.float64]:
+        mult, corr = prior_weights(table.iloc[rows], seed=seed)
+        if corr is not None:
+            prior_log.append({"fit": where, **corr.to_dict()})
+        return base * mult
+
+    def tune(rows: I64, groups_in: npt.ArrayLike, forbidden: str, where: dict[str, str]
+             ) -> dict[str, object]:
+        if tuner is None:
+            return dict(FIXED_PARAMS)
+        groups = np.asarray(groups_in).astype(str)
+        if forbidden in set(groups.tolist()):
+            msg = f"{where}: the held-out group {forbidden!r} reached the tuner"
+            raise AssertionError(msg)
+        p = dict(tuner(x.iloc[rows], y[rows], w_all[rows], groups, num_threads=num_threads))
+        tuned.append({**where, "params": p})
+        return p
+
+    def train_on(rows: I64, *, w: npt.NDArray[np.float64], params: Mapping[str, object],
+                 init: lgb.Booster | None = None, n_rounds: int = rounds) -> lgb.Booster:
+        return fit(x.iloc[rows], y[rows], w, num_threads=num_threads, rounds=n_rounds,
+                   init_model=init, params=params)
 
     for target in targets:
         pooled: lgb.Booster | None = None
         pooled_rows: I64 | None = None
+        params_t: dict[str, object] = dict(FIXED_PARAMS)
         need_pooled = TrainingMode.POOLED in modes or TrainingMode.ADAPTED in modes
         if need_pooled:
             (fa,) = loao_folds(table, [target])
             pooled_rows = _subsample(fa.train, train_size, rng)
-            pooled = train_on(pooled_rows)
-            priors[target] = (pooled, pooled_rows)
+            params_t = tune(pooled_rows, keys[pooled_rows], target,
+                            {"mode": "pooled", "target": target, "fold": "all"})
+            pooled = train_on(pooled_rows, w=weights(pooled_rows, w_all[pooled_rows],
+                                                     f"pooled {target}"), params=params_t)
+            priors[target] = (pooled, pooled_rows, params_t)
             corpus.append(_corpus_row(table, TrainingMode.POOLED, target, pooled_rows))
             if TrainingMode.POOLED in modes:
                 thr = _baseline_pred(x[BASELINE_FEATURE].iloc[pooled_rows], y[pooled_rows],
@@ -710,17 +837,52 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
             except ModeRefusedError as exc:
                 refusals.append(Refusal(str(exc.mode), target, exc.reason))
                 b_folds = []
-            for wa in w_adapt_grid:
-                for f in b_folds:
+
+            def adapt_fit(adapt_rows: I64, wa: float, where: str,
+                          prior: lgb.Booster = pooled, prows: I64 = pooled_rows,
+                          params: dict[str, object] = params_t) -> lgb.Booster:
+                rows = np.concatenate([prows, adapt_rows])
+                base = np.concatenate([w_all[prows], wa * w_all[adapt_rows]])
+                return train_on(rows, init=prior, w=weights(rows, base, where),
+                                n_rounds=adapt_rounds, params=params)
+
+            for f in b_folds:
+                fold_parts: dict[float, pd.DataFrame] = {}
+                for wa in w_adapt_grid:
+                    booster = adapt_fit(f.adapt, float(wa), f"adapted {target} {f.held_out[0]}")
                     rows = np.concatenate([pooled_rows, f.adapt])
-                    ww = np.concatenate([w_all[pooled_rows], wa * w_all[f.adapt]])
-                    booster = train_on(rows, init=pooled, w=ww, n_rounds=adapt_rounds)
                     thr = _baseline_pred(x[BASELINE_FEATURE].iloc[rows], y[rows],
                                          x[BASELINE_FEATURE].iloc[f.evaluate])
-                    parts.append(_record(TrainingMode.ADAPTED, f, table,
-                                         predict_raw(booster, x.iloc[f.evaluate]), thr,
-                                         int(rows.size), float(wa), f.held_out[0],
-                                         n_adapt=int(f.adapt.size)))
+                    part = _record(TrainingMode.ADAPTED, f, table,
+                                   predict_raw(booster, x.iloc[f.evaluate]), thr,
+                                   int(rows.size), float(wa), f.held_out[0],
+                                   n_adapt=int(f.adapt.size))
+                    fold_parts[float(wa)] = part
+                    parts.append(part)
+                if not select_w:
+                    continue
+                inner: dict[float, tuple[list[npt.NDArray[np.int8]],
+                                         list[npt.NDArray[np.bool_]]]] = {
+                    float(wa): ([], []) for wa in w_adapt_grid}
+                adapt_recs = sorted(set(rec[f.adapt].tolist()))
+                n_inner = 0
+                for r2 in adapt_recs:
+                    ev = f.adapt[(rec[f.adapt] == r2) & scorable[f.adapt]]
+                    if ev.size == 0:
+                        continue
+                    n_inner += 1
+                    rest = f.adapt[rec[f.adapt] != r2]
+                    for wa in w_adapt_grid:
+                        model = (pooled if rest.size == 0 else
+                                 adapt_fit(rest, float(wa), f"inner {target} {r2}"))
+                        inner[float(wa)][0].append(y[ev])
+                        inner[float(wa)][1].append(predict_raw(model, x.iloc[ev]) >= DECISION_P)
+                chosen, basis, f1s = _select_w(w_adapt_grid, inner, n_inner)
+                w_sel.append({"target": target, "fold": f.held_out[0], "w_chosen": chosen,
+                              "basis": basis, "inner_f1": json.dumps(f1s, sort_keys=True)})
+                sel = fold_parts[chosen].copy()
+                sel["w_adapt"], sel["w_rule"], sel["w_chosen"] = np.nan, "inner_selected", chosen
+                parts.append(sel)
             if b_folds:
                 corpus.append(_corpus_row(table, TrainingMode.ADAPTED, target,
                                           np.concatenate([pooled_rows, b_folds[0].adapt]),
@@ -738,7 +900,11 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
                                             "training recordings hold one class",
                                             f.held_out[0]))
                     continue
-                booster = train_on(rows)
+                params_c = tune(rows, rec[rows], f.held_out[0],
+                                {"mode": "per_animal", "target": target, "fold": f.held_out[0]})
+                booster = train_on(rows, w=weights(rows, w_all[rows],
+                                                   f"per_animal {target} {f.held_out[0]}"),
+                                   params=params_c)
                 thr = _baseline_pred(x[BASELINE_FEATURE].iloc[rows], y[rows],
                                      x[BASELINE_FEATURE].iloc[f.evaluate])
                 parts.append(_record(TrainingMode.PER_ANIMAL, f, table,
@@ -750,20 +916,18 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
     preds = pd.concat(parts, ignore_index=True) if parts else _empty_predictions()
     preds["p_cal"] = np.nan
     if calibration is not None and len(preds):
-        for _key, g in preds.groupby(["mode", "target", "w_adapt"], dropna=False):
-            preds.loc[g.index, "p_cal"] = crossfit_calibrate(
-                g["raw"].to_numpy(), g["y"].to_numpy(), g["cluster"].to_numpy(),
-                kind=calibration)
+        _calibrate(preds, calibration)
     registered: list[str] = []
     if registry is not None:
         registered = _register_finals(
-            table, preds, y=y, w_all=w_all, train_on=train_on, priors=priors,
-            modes=modes, targets=targets, w_adapt_grid=w_adapt_grid,
+            table, preds, w_all=w_all, train_on=train_on, weights=weights, tune=tune,
+            priors=priors, modes=modes, targets=targets, w_adapt_grid=w_adapt_grid,
             adapt_rounds=adapt_rounds, record_path=record_path, registry=registry,
             user=user, old_tiers=old_tiers, label_opt_ins=label_opt_ins,
-            refusals=refusals)
+            refusals=refusals, seed=seed)
     return ModeRun(predictions=preds, refusals=tuple(refusals), corpus=pd.DataFrame(corpus),
-                   registered=tuple(registered))
+                   registered=tuple(registered), w_selection=pd.DataFrame(w_sel),
+                   tuned=tuple(tuned), priors=tuple(prior_log))
 
 
 def _protocol_metrics(g: pd.DataFrame) -> dict[str, float]:
@@ -791,19 +955,23 @@ METRIC_BASIS: Final[dict[str, str]] = {
 """The decision basis of every metric a registered model carries (written to provenance)."""
 
 
-def _register_finals(table: pd.DataFrame, preds: pd.DataFrame, *,
-                     y: npt.NDArray[np.int8], w_all: npt.NDArray[np.float64],
+def _register_finals(table: pd.DataFrame, preds: pd.DataFrame, *,  # noqa: PLR0915
+                     w_all: npt.NDArray[np.float64],
                      train_on: Callable[..., lgb.Booster],
-                     priors: Mapping[str, tuple[lgb.Booster, I64]],
+                     weights: Callable[[I64, npt.NDArray[np.float64], str],
+                                       npt.NDArray[np.float64]],
+                     tune: Callable[..., dict[str, object]],
+                     priors: Mapping[str, tuple[lgb.Booster, I64, dict[str, object]]],
                      modes: Sequence[TrainingMode], targets: Sequence[str],
                      w_adapt_grid: Sequence[float], adapt_rounds: int,
                      record_path: Path, registry: Registry, user: str,
                      old_tiers: Mapping[str, str] | None,
                      label_opt_ins: LabelOptIns | None,
-                     refusals: list[Refusal]) -> list[str]:
+                     refusals: list[Refusal], seed: int) -> list[str]:
     """Train, calibrate and register the final model of each evaluated mode."""
     run_id = str(json.loads(Path(record_path).read_text(encoding="utf-8"))["run_id"])
     keys = table["animal_key"].to_numpy()
+    y = table["y"].to_numpy().astype(np.int8)
     out: list[str] = []
 
     def put(mode: TrainingMode, animal: str | None, booster: lgb.Booster, rows: I64,
@@ -816,7 +984,8 @@ def _register_finals(table: pd.DataFrame, preds: pd.DataFrame, *,
         cal = Calibrator.fit(held["raw"].to_numpy(), held["y"].to_numpy(), CALIBRATION_KIND)
         corpus_rows = table.iloc[rows]
         chash = corpus_hash(corpus_rows)
-        mid = model_content_id(booster, cal, mode=mode, animal=animal, corpus_hash=chash)
+        mid = model_content_id(booster, cal, mode=mode, animal=animal, corpus_hash=chash,
+                               w_adapt=w)
         spec = ModelSpec(mode=mode, animal=animal, version=run_id, corpus_hash=chash,
                          calibrator=calibrator_relpath(mid), trained_at=datetime.now(UTC),
                          metrics={protocol: _protocol_metrics(held)},
@@ -835,6 +1004,9 @@ def _register_finals(table: pd.DataFrame, preds: pd.DataFrame, *,
                                     "n_predictions": len(held)})
         if label_opt_ins is not None:
             prov["label_opt_ins"] = label_opt_ins.to_dict()
+        corr = prior_correction(corpus_rows, seed=seed)
+        if corr is not None:
+            prov["prior_correction"] = corr.to_dict()
         prov["metric_basis"] = dict(METRIC_BASIS)
         if mode is TrainingMode.POOLED:
             prov["metrics_note"] = (
@@ -847,8 +1019,12 @@ def _register_finals(table: pd.DataFrame, preds: pd.DataFrame, *,
     if TrainingMode.POOLED in modes:
         rows = np.arange(len(table), dtype=np.int64)
         held = preds[preds["mode"] == str(TrainingMode.POOLED)]
-        put(TrainingMode.POOLED, None, train_on(rows), rows, held, PROTOCOL[
-            TrainingMode.POOLED], None)
+        params = tune(rows, keys, "", {"mode": "pooled", "target": "final",
+                                                   "fold": "final"})
+        put(TrainingMode.POOLED, None,
+            train_on(rows, w=weights(rows, w_all[rows], "final pooled"), params=params),
+            rows, held, PROTOCOL[TrainingMode.POOLED], None)
+    rec = table["recording"].astype(str).to_numpy()
     for target in targets:
         is_t = keys == target
         t_rows = _rows(is_t)
@@ -856,14 +1032,19 @@ def _register_finals(table: pd.DataFrame, preds: pd.DataFrame, *,
             held = preds[(preds["mode"] == str(TrainingMode.PER_ANIMAL))
                          & (preds["target"] == target)]
             if not held.empty and np.unique(y[t_rows]).size == 2:  # noqa: PLR2004
-                put(TrainingMode.PER_ANIMAL, target, train_on(t_rows), t_rows, held,
+                params = tune(t_rows, rec[t_rows], "", {"mode": "per_animal",
+                                                        "target": target, "fold": "final"})
+                booster = train_on(t_rows, w=weights(t_rows, w_all[t_rows],
+                                                     f"final per_animal {target}"),
+                                   params=params)
+                put(TrainingMode.PER_ANIMAL, target, booster, t_rows, held,
                     PROTOCOL[TrainingMode.PER_ANIMAL], None)
             else:
                 refusals.append(Refusal(str(TrainingMode.PER_ANIMAL), target,
                                         "no held-out predictions or one-class labels",
                                         "final"))
         if TrainingMode.ADAPTED in modes and target in priors:
-            prior, prior_rows = priors[target]
+            prior, prior_rows, params_t = priors[target]
             for wa in w_adapt_grid:
                 held = preds[(preds["mode"] == str(TrainingMode.ADAPTED))
                              & (preds["target"] == target) & (preds["w_adapt"] == wa)]
@@ -873,11 +1054,56 @@ def _register_finals(table: pd.DataFrame, preds: pd.DataFrame, *,
                                             "final"))
                     continue
                 rows = np.concatenate([prior_rows, t_rows])
-                ww = np.concatenate([w_all[prior_rows], wa * w_all[t_rows]])
-                booster = train_on(rows, init=prior, w=ww, n_rounds=adapt_rounds)
+                base = np.concatenate([w_all[prior_rows], wa * w_all[t_rows]])
+                booster = train_on(rows, init=prior, w=weights(rows, base,
+                                                               f"final adapted {target}"),
+                                   n_rounds=adapt_rounds, params=params_t)
                 put(TrainingMode.ADAPTED, target, booster, rows, held,
                     PROTOCOL[TrainingMode.ADAPTED], float(wa))
     return out
+
+
+TIER_CHAIN: Final[tuple[str, ...]] = ("1", "1+2a", "1+2a+2b")
+"""Rulings (i)/(j): the nested tier steps, in order."""
+
+TIER_STEPS: Final[Mapping[str, tuple[str, ...]]] = {
+    "1": ("1",), "1+2a": ("1", "2a"), "1+2a+2b": ("1", "2a", "2b")}
+"""The old-cohort tiers each step admits."""
+
+
+def tier_check(labelled: Callable[[tuple[str, ...]], pd.DataFrame], *,
+               targets: Sequence[str], record_path: Path, num_threads: int,
+               renames: Path | None = None, seed: int = 0
+               ) -> tuple[list[TierVerdict], str, dict[str, pd.DataFrame]]:
+    """Rulings (i)/(j): the nested tier check, wired for when old-cohort rows return.
+
+    ``labelled(keep_tiers)`` returns the labelled rows of one step
+    (:func:`~gems_blanking_v2.model.labels.training_rows` with those tiers). For each step
+    of :data:`TIER_CHAIN` mode A is trained LOAO over the NEW-cohort ``targets`` and scored
+    on their audit spans; :func:`~gems_blanking_v2.model.compare.tier_chain` keeps a step
+    unless audit-span F1 falls by >= ``tier_drop_f1`` (CI excluding 0) against the
+    previous kept step. Every step trains old-cohort rows, so - by ruling 2026-10-08 (b)
+    item 1(b) - each needs set A's judged old negatives; without them :func:`run_modes`
+    raises :class:`~gems_blanking_v2.model.train.OldRowsRefusedError`. Returns the
+    verdicts, the largest kept step and the per-step mode-A predictions.
+    """
+    bad = [t for t in targets if not t.startswith("new:")]
+    if bad:
+        msg = f"the tier check scores new-cohort audit spans only; targets {bad} are not new"
+        raise ValueError(msg)
+    r9 = require_run_record(record_path)
+    preds: dict[str, pd.DataFrame] = {}
+    for name in TIER_CHAIN:
+        t = prepare_table(labelled(TIER_STEPS[name]), renames=renames)
+        run = run_modes(t, targets=targets, record_path=record_path, num_threads=num_threads,
+                        modes=(TrainingMode.POOLED,), calibration=None, seed=seed)
+        ids = np.array([event_id(r, a, b) for r, a, b in
+                        zip(t["recording"].astype(str), t["start_s"], t["stop_s"], strict=True)])
+        p = run.predictions
+        preds[name] = p.assign(eid=ids[p["row"].to_numpy().astype(int)])[
+            ["eid", "target", "cluster", "y", "yhat"]]
+    verdicts, largest = tier_chain(preds, TIER_CHAIN, r9, seed=seed)
+    return verdicts, largest, preds
 
 
 def learning_curve(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
@@ -900,7 +1126,7 @@ def learning_curve(table: pd.DataFrame, *, targets: Sequence[str], record_path: 
     for n in sizes:
         run = run_modes(table, targets=targets, record_path=record_path,
                         num_threads=num_threads, modes=modes, w_adapt_grid=w_adapt_grid,
-                        calibration=None, train_size=int(n), seed=seed)
+                        calibration=None, train_size=int(n), seed=seed, select_w=False)
         p = run.predictions
         for (mode, target, w), g in p.groupby(["mode", "target", "w_adapt"], dropna=False):
             per_fold = g.groupby("fold")["n_train_events"].first()
@@ -923,9 +1149,9 @@ def learning_curve(table: pd.DataFrame, *, targets: Sequence[str], record_path: 
 
 
 def _empty_predictions() -> pd.DataFrame:
-    cols = ["mode", "target", "protocol", "w_adapt", "fold", "row", "recording", "cluster",
-            "y", "raw", "yhat", "yhat_thr", "n_train_events", "n_adapt_events",
-            "n_excluded_unknown"]
+    cols = ["mode", "target", "protocol", "w_adapt", "w_rule", "w_chosen", "fold", "row",
+            "recording", "cluster", "y", "raw", "yhat", "yhat_thr", "n_train_events",
+            "n_adapt_events", "n_excluded_unknown"]
     return pd.DataFrame({c: [] for c in cols})
 
 
