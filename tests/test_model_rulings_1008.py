@@ -408,6 +408,15 @@ def test_every_fit_with_old_rows_carries_its_correction(tmp_path: Path) -> None:
     assert pr["fit"] == "pooled new:A" and pr["n_marks"] > 0
 
 
+def test_a_fold_without_enough_set_a_negatives_is_refused_not_raised(tmp_path: Path) -> None:
+    t = _old_table()  # ~7 set-A negatives per old recording: a 2-recording C fold has < 20
+    run = md.run_modes(t, targets=["old:F"], record_path=_record(tmp_path / "r.json"),
+                       num_threads=THREADS, rounds=5, adapt_rounds=5, w_adapt_grid=(1.0,))
+    refused = [r for r in run.refusals if "set A" in r.reason]
+    assert refused and {r.mode for r in refused} <= {"per_animal", "adapted"}
+    assert (run.predictions["mode"] == "pooled").any()  # the other animals' set A suffices
+
+
 def test_set_a_rows_bypass_the_tier_filter_only_they() -> None:
     raw = make_feature_table({"old": ("F",)}, n_recordings=2, cores_per_recording=5,
                              set_a_per_recording=3, seed=2)

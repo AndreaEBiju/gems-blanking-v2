@@ -88,6 +88,7 @@ from gems_blanking_v2.model.train import (
     ADAPT_ROUNDS,
     FIXED_PARAMS,
     NUM_BOOST_ROUND,
+    OldRowsRefusedError,
     check_feature_version,
     check_leakage,
     corpus_hash,
@@ -824,6 +825,66 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
         return fit(x.iloc[rows], y[rows], w, num_threads=num_threads, rounds=n_rounds,
                    init_model=init, params=params)
 
+    def fold_b(target: str, f: Fold, prior: lgb.Booster, prows: I64,
+               params: dict[str, object]) -> list[pd.DataFrame]:
+        """One mode-B fold: the sweep and the inner-selected series (all or nothing)."""
+
+        def adapt_fit(adapt_rows: I64, wa: float, where: str) -> lgb.Booster:
+            rows = np.concatenate([prows, adapt_rows])
+            base = np.concatenate([w_all[prows], wa * w_all[adapt_rows]])
+            return train_on(rows, init=prior, w=weights(rows, base, where),
+                            n_rounds=adapt_rounds, params=params)
+
+        fold_parts: dict[float, pd.DataFrame] = {}
+        for wa in w_adapt_grid:
+            booster = adapt_fit(f.adapt, float(wa), f"adapted {target} {f.held_out[0]}")
+            rows = np.concatenate([prows, f.adapt])
+            thr = _baseline_pred(x[BASELINE_FEATURE].iloc[rows], y[rows],
+                                 x[BASELINE_FEATURE].iloc[f.evaluate])
+            fold_parts[float(wa)] = _record(TrainingMode.ADAPTED, f, table,
+                                            predict_raw(booster, x.iloc[f.evaluate]), thr,
+                                            int(rows.size), float(wa), f.held_out[0],
+                                            n_adapt=int(f.adapt.size))
+        out = list(fold_parts.values())
+        if not select_w:
+            return out
+        inner: dict[float, tuple[list[npt.NDArray[np.int8]], list[npt.NDArray[np.bool_]]]] = {
+            float(wa): ([], []) for wa in w_adapt_grid}
+        n_inner = 0
+        for r2 in sorted(set(rec[f.adapt].tolist())):
+            ev = f.adapt[(rec[f.adapt] == r2) & scorable[f.adapt]]
+            if ev.size == 0:
+                continue
+            n_inner += 1
+            rest = f.adapt[rec[f.adapt] != r2]
+            for wa in w_adapt_grid:
+                model = (prior if rest.size == 0 else
+                         adapt_fit(rest, float(wa), f"inner {target} {r2}"))
+                inner[float(wa)][0].append(y[ev])
+                inner[float(wa)][1].append(predict_raw(model, x.iloc[ev]) >= DECISION_P)
+        chosen, basis, f1s = _select_w(w_adapt_grid, inner, n_inner)
+        w_sel.append({"target": target, "fold": f.held_out[0], "w_chosen": chosen,
+                      "basis": basis, "inner_f1": json.dumps(f1s, sort_keys=True)})
+        sel = fold_parts[chosen].copy()
+        sel["w_adapt"], sel["w_rule"], sel["w_chosen"] = np.nan, "inner_selected", chosen
+        return [*out, sel]
+
+    def fold_c(target: str, f: Fold) -> pd.DataFrame | None:
+        rows = _subsample(f.train, train_size, rng)
+        if np.unique(y[rows]).size < 2:  # noqa: PLR2004
+            refusals.append(Refusal(str(TrainingMode.PER_ANIMAL), target,
+                                    "training recordings hold one class", f.held_out[0]))
+            return None
+        params_c = tune(rows, rec[rows], f.held_out[0],
+                        {"mode": "per_animal", "target": target, "fold": f.held_out[0]})
+        booster = train_on(rows, w=weights(rows, w_all[rows],
+                                           f"per_animal {target} {f.held_out[0]}"),
+                           params=params_c)
+        thr = _baseline_pred(x[BASELINE_FEATURE].iloc[rows], y[rows],
+                             x[BASELINE_FEATURE].iloc[f.evaluate])
+        return _record(TrainingMode.PER_ANIMAL, f, table, predict_raw(booster, x.iloc[
+            f.evaluate]), thr, int(rows.size), np.nan, f.held_out[0])
+
     for target in targets:
         pooled: lgb.Booster | None = None
         pooled_rows: I64 | None = None
@@ -832,10 +893,15 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
         if need_pooled:
             (fa,) = loao_folds(table, [target])
             pooled_rows = _subsample(fa.train, train_size, rng)
-            params_t = tune(pooled_rows, keys[pooled_rows], target,
-                            {"mode": "pooled", "target": target, "fold": "all"})
-            pooled = train_on(pooled_rows, w=weights(pooled_rows, w_all[pooled_rows],
-                                                     f"pooled {target}"), params=params_t)
+            try:
+                params_t = tune(pooled_rows, keys[pooled_rows], target,
+                                {"mode": "pooled", "target": target, "fold": "all"})
+                pooled = train_on(pooled_rows, w=weights(pooled_rows, w_all[pooled_rows],
+                                                         f"pooled {target}"), params=params_t)
+            except OldRowsRefusedError as exc:  # this fold's corpus lacks set A's negatives
+                refusals.extend(Refusal(str(m), target, str(exc), "all") for m in
+                                (TrainingMode.POOLED, TrainingMode.ADAPTED) if m in modes)
+        if pooled is not None and pooled_rows is not None:
             priors[target] = (pooled, pooled_rows, params_t)
             corpus.append(_corpus_row(table, TrainingMode.POOLED, target, pooled_rows))
             if TrainingMode.POOLED in modes:
@@ -850,52 +916,12 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
             except ModeRefusedError as exc:
                 refusals.append(Refusal(str(exc.mode), target, exc.reason))
                 b_folds = []
-
-            def adapt_fit(adapt_rows: I64, wa: float, where: str,
-                          prior: lgb.Booster = pooled, prows: I64 = pooled_rows,
-                          params: dict[str, object] = params_t) -> lgb.Booster:
-                rows = np.concatenate([prows, adapt_rows])
-                base = np.concatenate([w_all[prows], wa * w_all[adapt_rows]])
-                return train_on(rows, init=prior, w=weights(rows, base, where),
-                                n_rounds=adapt_rounds, params=params)
-
             for f in b_folds:
-                fold_parts: dict[float, pd.DataFrame] = {}
-                for wa in w_adapt_grid:
-                    booster = adapt_fit(f.adapt, float(wa), f"adapted {target} {f.held_out[0]}")
-                    rows = np.concatenate([pooled_rows, f.adapt])
-                    thr = _baseline_pred(x[BASELINE_FEATURE].iloc[rows], y[rows],
-                                         x[BASELINE_FEATURE].iloc[f.evaluate])
-                    part = _record(TrainingMode.ADAPTED, f, table,
-                                   predict_raw(booster, x.iloc[f.evaluate]), thr,
-                                   int(rows.size), float(wa), f.held_out[0],
-                                   n_adapt=int(f.adapt.size))
-                    fold_parts[float(wa)] = part
-                    parts.append(part)
-                if not select_w:
-                    continue
-                inner: dict[float, tuple[list[npt.NDArray[np.int8]],
-                                         list[npt.NDArray[np.bool_]]]] = {
-                    float(wa): ([], []) for wa in w_adapt_grid}
-                adapt_recs = sorted(set(rec[f.adapt].tolist()))
-                n_inner = 0
-                for r2 in adapt_recs:
-                    ev = f.adapt[(rec[f.adapt] == r2) & scorable[f.adapt]]
-                    if ev.size == 0:
-                        continue
-                    n_inner += 1
-                    rest = f.adapt[rec[f.adapt] != r2]
-                    for wa in w_adapt_grid:
-                        model = (pooled if rest.size == 0 else
-                                 adapt_fit(rest, float(wa), f"inner {target} {r2}"))
-                        inner[float(wa)][0].append(y[ev])
-                        inner[float(wa)][1].append(predict_raw(model, x.iloc[ev]) >= DECISION_P)
-                chosen, basis, f1s = _select_w(w_adapt_grid, inner, n_inner)
-                w_sel.append({"target": target, "fold": f.held_out[0], "w_chosen": chosen,
-                              "basis": basis, "inner_f1": json.dumps(f1s, sort_keys=True)})
-                sel = fold_parts[chosen].copy()
-                sel["w_adapt"], sel["w_rule"], sel["w_chosen"] = np.nan, "inner_selected", chosen
-                parts.append(sel)
+                try:
+                    parts.extend(fold_b(target, f, pooled, pooled_rows, params_t))
+                except OldRowsRefusedError as exc:
+                    refusals.append(Refusal(str(TrainingMode.ADAPTED), target, str(exc),
+                                            f.held_out[0]))
             if b_folds:
                 corpus.append(_corpus_row(table, TrainingMode.ADAPTED, target,
                                           np.concatenate([pooled_rows, b_folds[0].adapt]),
@@ -907,22 +933,14 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
                 refusals.append(Refusal(str(exc.mode), target, exc.reason))
                 c_folds = []
             for f in c_folds:
-                rows = _subsample(f.train, train_size, rng)
-                if np.unique(y[rows]).size < 2:  # noqa: PLR2004
-                    refusals.append(Refusal(str(TrainingMode.PER_ANIMAL), target,
-                                            "training recordings hold one class",
+                try:
+                    part = fold_c(target, f)
+                except OldRowsRefusedError as exc:  # the animal's own set A is too small
+                    refusals.append(Refusal(str(TrainingMode.PER_ANIMAL), target, str(exc),
                                             f.held_out[0]))
                     continue
-                params_c = tune(rows, rec[rows], f.held_out[0],
-                                {"mode": "per_animal", "target": target, "fold": f.held_out[0]})
-                booster = train_on(rows, w=weights(rows, w_all[rows],
-                                                   f"per_animal {target} {f.held_out[0]}"),
-                                   params=params_c)
-                thr = _baseline_pred(x[BASELINE_FEATURE].iloc[rows], y[rows],
-                                     x[BASELINE_FEATURE].iloc[f.evaluate])
-                parts.append(_record(TrainingMode.PER_ANIMAL, f, table,
-                                     predict_raw(booster, x.iloc[f.evaluate]), thr,
-                                     int(rows.size), np.nan, f.held_out[0]))
+                if part is not None:
+                    parts.append(part)
             if c_folds:
                 corpus.append(_corpus_row(table, TrainingMode.PER_ANIMAL, target,
                                           c_folds[0].train, n_folds=len(c_folds)))
