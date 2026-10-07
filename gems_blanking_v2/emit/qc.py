@@ -32,10 +32,13 @@ session to a file the caller owns (:func:`append_longitudinal`).
 
 **Spike-consumer time lost per cuff (RULING 2026-10-08 (d) 3)** -
 :func:`spike_time_lost` - reports the time the line-distrust rule (``emit.line_distrust``)
-takes from the spike consumer beside the time its mask blanks, per spike signal. The
-line distrust is NOT blank: it is not in the masks, so it never enters the gates above.
-The handoff writes it into ``gate_json`` (``spike_time_lost``), and
-:func:`spike_time_lost_by_animal` sums it per animal x cuff - the ruling's cost table.
+takes from the spike consumer beside the time its motion mask blanks, per spike signal,
+with their overlap counted once in the total. The distrusted minutes are NaN in the spike
+consumer's input (ruling (e) Q2), but they are not in the masks, so they never enter the
+gates above ((e) Q2b: the hold guards against motion over-blanking). A cuff with more
+than :data:`LIST_DISTRUST_FRACTION` (50%) distrusted time is listed for Andrea
+(:func:`line_distrust_listed`), never held. The handoff writes both into ``gate_json``,
+and :func:`spike_time_lost_by_animal` sums the cost per animal x cuff.
 
 OUTSIDE THE GENERATION HASH.
 """
@@ -68,6 +71,7 @@ __all__ = [
     "blank_fraction_by_band",
     "blank_fraction_hold",
     "emit_gate",
+    "line_distrust_listed",
     "median_key",
     "retention_by_key",
     "retention_gate",
@@ -84,6 +88,8 @@ HOLD_MEDIAN_FLOOR: Final = 0.01
 the recording, which is not the outlier the rule exists to catch. Chosen here, not
 ruled - provisional."""
 HR_KEYED_BY_BAND: Final[frozenset[str]] = frozenset({"hrv", "breathing"})
+LIST_DISTRUST_FRACTION: Final = 0.5
+"""Ruling (e) Q2b: a cuff whose distrusted time exceeds 50% is listed for Andrea (not held)."""
 
 
 def median_key(consumer: str, signal: str, band: str) -> str:
@@ -276,7 +282,9 @@ def spike_time_lost(masks: Mapping[MaskKey, ConsumerMask], line_distrust: LineDi
                     ) -> dict[str, dict[str, float | int]]:
     """Spike-consumer time lost per spike signal: its mask's blank beside the line distrust.
 
-    Counted in the mask's own 10 ms frames, so the three times add up on one grid:
+    Counted in the mask's own 10 ms frames, so the three times add up on one grid. A
+    distrusted minute whose edge falls inside a frame counts that whole frame, so the
+    distrust times may over-count by at most one frame (10 ms) per span edge:
     ``mask_blank_s`` (frames the spike mask blanks - motion and ruled cuff distrust),
     ``line_distrust_s`` (frames overlapping a distrusted minute), ``line_distrust_only_s``
     (distrusted and not already blanked) and ``total_lost_s`` (either), each also as a
@@ -317,6 +325,15 @@ def _add_fractions(row: dict[str, float | int]) -> None:
     for k in _LOST_SECONDS:
         if epoch_s > 0:
             row[k.removesuffix("_s") + "_frac"] = float(row[k]) / epoch_s
+
+
+def line_distrust_listed(lost: Mapping[str, Mapping[str, float | int]]) -> dict[str, float]:
+    """Cuffs whose distrusted time exceeds 50% of the epoch: ``{signal: fraction}``.
+
+    Ruling (e) Q2b: listed for Andrea in the gate record, never held.
+    """
+    return {sig: float(row["line_distrust_frac"]) for sig, row in sorted(lost.items())
+            if float(row.get("line_distrust_frac", 0.0)) > LIST_DISTRUST_FRACTION}
 
 
 def spike_time_lost_by_animal(

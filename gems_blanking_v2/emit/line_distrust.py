@@ -1,82 +1,76 @@
-"""RULING 2026-10-08 (d) item 2: per-cuff-minute spike-consumer distrust for mains-locked spikes.
+"""RULINGS 2026-10-08 (d) item 2 and (e) Q1-Q5: spike-consumer distrust for mains-locked spikes.
 
 **The rule.** A cuff-minute is distrusted **for the spike consumer only** when its
-mains-locked spike excess is significant after Holm correction at :data:`ALPHA` = 0.01.
-Nothing else is affected: it is never motion blanking, and every other consumer keeps
-the minute (ruling 2026-10-07 (c): line noise is never a reason to blank).
+mains-locked spike excess is significant after Holm correction at :data:`ALPHA` = 0.01
+over **the animal's family** (per animal and cohort, every recording first - (e) Q1).
+Distrusted minutes are NaN in the spike consumer's input only ((e) Q2); no other
+consumer is touched. Line noise is never motion blanking (ruling 2026-10-07 (c)).
 
-**The test** is the one that produced the ruling's table (Night 1 ``hum_inventory._spikes``
-and ``line_dist.py``), run on the cuff's tripole **T** - the spike consumer's own signal,
-never a contact. The table approximated with contacts in the new cohort; the rule is on T,
-and :func:`minute_tests` refuses any signal not named ``<cuff>_T``. Per minute:
+**The test** is the one that produced ruling (d)'s table (Night 1 ``hum_inventory._spikes``
+and ``line_dist.py``), run on the cuff's tripole **T** - never a contact
+(:func:`minute_tests` refuses any signal not named ``<cuff>_T``) - generalised by (e) to
+what the spike consumer actually sees. Per minute:
 
-1. T over the minute is band-passed 300-3000 Hz (Butterworth order 4, ``output='sos'``,
-   ``sosfiltfilt``) - filtered per minute, as measured.
-2. Spikes are negative local minima below ``-4.5`` x the minute's robust sigma
-   (``1.4826 * MAD``), with a 1 ms refractory period (greedy, earliest kept).
-3. Fewer than :data:`MIN_SPIKES` (10) spikes: **untested**, and an untested minute is
-   never distrusted.
-4. ``m = n - 1`` inter-spike intervals; ``k`` of them lie within +/-1 ms of 1/60 s or
-   1/30 s. The chance rate is Poisson: ``lam = n / (t_last - t_first)`` and
-   ``p0 = sum_P [exp(-lam (P - 1 ms)) - exp(-lam (P + 1 ms))]`` over both periods.
-5. One-sided binomial ``p = P(X >= k | m, p0)``.
+1. **What is read** ((e) Q4, Q5): the minute's samples that are finite in RAW T and not
+   blanked by the spike consumer's own motion mask. Its maximal runs are the minute's
+   **stretches**; a stretch too short for ``sosfiltfilt`` (at most :data:`PADLEN`
+   samples, ~1 ms) is dropped. If the stretches together hold less than
+   :data:`MIN_VALID_S` (30 s) the minute is ``untested_short_valid``.
+2. Each stretch is band-passed 300-3000 Hz on its own (Butterworth order 4, ``output='sos'``,
+   ``sosfiltfilt``). One robust sigma per minute: ``1.4826 * MAD`` of all the filtered
+   stretches pooled.
+3. Spikes are negative local minima below ``-4.5 sigma``, with a 1 ms refractory period
+   (greedy, earliest kept), within each stretch. A spike in a motion-blanked span is
+   never detected, because those samples are not read (Q5). The samples in the 7.5 ms
+   taper beside a blank are read at full amplitude, where the consumer sees them
+   attenuated.
+4. Fewer than :data:`MIN_SPIKES` (10) spikes in the minute: ``untested_few_spikes``.
+5. **Intervals are within a stretch only:** an interval across a gap (missing samples or
+   a motion blank) is not an interval. ``m = sum_s (n_s - 1)`` over stretches with at
+   least two spikes; ``k`` of those lie within +/-1 ms of 1/60 s or 1/30 s.
+6. **Chance rate:** the interval MLE ``lam = m / sum_s (t_last,s - t_first,s)`` over the
+   stretches holding at least two spikes. It differs from the inventory measurement's
+   ``n / (t_last - t_first)`` by ``n / (n - 1)`` on an unsplit minute; the measurement's
+   form, pooled as ``sum n_s / sum span_s``, is biased high by ``(m + S) / m`` for ``S``
+   stretches and grows anti-conservative as motion splits a minute (review of a374ed3:
+   null P(p < 0.01) = 0.040 at 100 Hz with 0.25 s stretches). Then
+   ``p0 = sum_P [exp(-lam (P - 1 ms)) - exp(-lam (P + 1 ms))]`` over both periods and
+   ``p = P(X >= k | m, p0)``, one-sided binomial. With no interval at all the minute is
+   ``untested_few_spikes``.
 
 Caveat carried from the measurement: the chance model treats spikes as Poisson; the
 refractory period and real bursting make it approximate.
 
-**Minutes** are the recording's own: minute ``m`` is ``[60 m, 60 (m + 1))`` s of the file.
-Only minutes that lie inside the emitted epoch are assessable (the stim epoch is excluded
-as routing excludes it): a minute starting before the epoch - one inside or straddling the
-stim epoch - is ``not_assessable_epoch_edge``, and a trailing piece shorter than 30 s is
-``not_assessable_short`` (the measurement's partial-minute rule). Neither is tested, so
-neither is distrusted. A minute holding any non-finite sample is ``untested_non_finite``
-(the measurement skipped those too), and a flat one ``untested_no_signal`` (invariant 41:
-no statistic is reported from an input carrying no signal).
+**Minutes** are the recording's own: minute ``m`` is ``[60 m, 60 (m + 1))`` s of the file,
+cut to the emitted epoch. A minute whose in-epoch part is shorter than 30 s is
+``not_assessable_short``; the stim-to-recovery boundary minute follows the same rule as
+the trailing partial minute ((e) Q3). A flat minute is ``untested_no_signal``
+(invariant 41). None of these is distrusted.
 
-**T must be RAW - unmasked.** The test reads T as the consumer would before any blank:
-a masked T (NaN over motion spans) silently turns every minute holding a blank into
-``untested_non_finite``, so the rule would never see them. The parameter is named
-``raw_t``, and an input whose NaN runs all start and end exactly on the 10 ms mask grid
-(what ``emit.masks.apply_mask`` produces, and a genuine acquisition gap almost never
-does) is refused as masked - a cheap check, not a proof.
+**T must be RAW.** Motion enters only through the motion mask argument; a T that was
+already masked (interior NaN runs all on the 10 ms grid) is refused.
 
-**Two deliberate differences from the measurement**, both documented here so they are
-not mistaken for drift:
+**The Holm family is the animal's** ((e) Q1): an :class:`AnimalPTable` keyed by
+``animal_key`` = ``"cohort:animal"``, built from pass 1 over every recording of that
+animal and cohort; pass 2 decides each recording against the whole table
+(:func:`decide_animal`). It is a required argument with no default, and the table must
+hold exactly the recording's own p-values. A p-value is keyed by recording AND epoch
+(its start time) - a recording's stim and recovery epochs share the boundary minute -
+and a key given twice raises (invariant 27).
 
-* **Minute edges round, the measurement floored.** ``hum_inventory`` cut minute ``m`` at
-  ``int(60 m fs)`` samples from the file start; here a time becomes a sample through
-  ``extent.grid.seconds_to_sample`` (``round``), the one conversion every emitted span
-  uses (invariant 33). An edge can therefore sit one sample later (``60 fs = 1464843.75``
-  -> 1464844, not 1464843); one sample in 1.46 million changes no count.
-* **A raw flat check.** Before filtering, a minute whose own MAD is 0 is
-  ``untested_no_signal``. The measurement had only the filtered-sigma check, which a
-  constant minute passes: filtering turns its rounding noise into a tiny but positive
-  sigma and then into hundreds of "spikes" (found in testing).
+**Deliberate differences from the measurement:** minute edges round
+(``extent.grid.seconds_to_sample``) where it floored (at most one sample); a raw flat
+check before filtering; and (e)'s stretches, motion exclusion and boundary minute.
 
-**The Holm family is an explicit, required argument** (:data:`Family`) with no default,
-because the table that produced the ruling used every tested channel-minute of the
-animal, and at emission time that needs all of the animal's recordings first:
+**Representation.** :class:`LineDistrustRecord` holds every cuff-minute's counts, valid
+time, p-value and decision, with provenance (rules, test version, alpha, family,
+parameters, cleaner). In the handoff the distrusted minutes join the spike consumer's
+blank spans - the NaN it reads - while the record, its sidecar spans and the accounting
+keep motion and distrust apart (``emit.qc.spike_time_lost``). :func:`spike_input` is the
+Python-side input.
 
-* ``"recording"`` - Holm over this recording's tested cuff-minutes (both cuffs);
-* an :class:`AnimalPTable` - the animal's precomputed p-values (two passes: pass 1 runs
-  :func:`minute_tests` on every recording of the animal and builds the table with
-  :meth:`AnimalPTable.from_tests`; pass 2 decides each recording against the whole table).
-  The table must hold exactly this recording's tested p-values, or the two passes did not
-  test the same thing and the decision raises.
-
-Which family applies is a question for Andrea; nothing here chooses.
-
-**Representation.** The result is a :class:`LineDistrustRecord`: its own record, with
-provenance (rule, test version, alpha, family, input signal, cleaner) and every cuff-minute's
-counts and p-value. It is carried BESIDE the spike consumer's mask in the MATLAB handoff
-(``distrust_spikes_<cuff>_T`` spans and ``linedistrust_json``), never merged into it: the
-mask stays the motion (and ruled cuff) mask, and this rule writes no NaN into it.
-
-**Cleaner hook (ruling (b) 6, ruling (d) 3).** No mains cleaner is adopted; adoption is
-Andrea's decision. If one is adopted, pass it as ``cleaner`` (:class:`MainsCleaner`): the
-test then re-runs on the cleaned T, minutes no longer significant regain trust, and the
-record names the cleaner. Without one the test runs on raw T and the record says so
-(``cleaner`` absent).
+**Cleaner hook (ruling (b) 6, (d) 3).** None is adopted. A ``cleaner`` re-runs the test on
+cleaned T and is named in the record.
 
 OUTSIDE THE GENERATION HASH.
 """
@@ -96,9 +90,11 @@ from scipy.signal import butter, sosfiltfilt
 from scipy.stats import binom
 
 from gems_blanking_v2.constants import GRID_S, MAD_TO_SIGMA
+from gems_blanking_v2.emit.masks import ConsumerMask, apply_mask, frames_to_samples
 from gems_blanking_v2.extent.grid import (
     T0_TOLERANCE_S,
     frame_sample_bounds,
+    n_grid_frames,
     seconds_to_sample,
     to_matlab_inclusive,
 )
@@ -109,63 +105,62 @@ __all__ = [
     "LOCK_TOLERANCE_S",
     "MINUTE_S",
     "MIN_SPIKES",
+    "MIN_VALID_S",
     "RULE",
     "SPIKE_SIGMA",
     "TEST_VERSION",
     "AnimalPTable",
-    "Family",
     "LineDistrustRecord",
     "MainsCleaner",
     "MinuteResult",
     "MinuteTest",
-    "cuff_minute_distrust",
+    "Pass1",
     "decide",
+    "decide_animal",
     "detect_spikes",
     "holm_reject",
     "lock_test",
     "lock_test_parameters",
     "minute_tests",
+    "pass1",
+    "spike_input",
 ]
 
 F64 = npt.NDArray[np.float64]
+Bool = npt.NDArray[np.bool_]
 
-RULE: Final = "RULING 2026-10-08 (d) item 2"
-TEST_VERSION: Final = "mains_lock_binom_v1"
-"""Bump when anything in the test changes: a record names the version it was made under."""
+RULE: Final = "RULING 2026-10-08 (d) item 2; (e) Q1-Q5"
+TEST_VERSION: Final = "mains_lock_binom_v3"
+"""v2 = (e): animal x cohort family, stretches, motion exclusion, boundary minute;
+v3 = the chance rate is the interval MLE ``m / sum span``."""
 ALPHA: Final = 0.01
-"""Holm family-wise alpha (ruling (d) 2)."""
 MIN_SPIKES: Final = 10
-"""Fewer spikes than this in a minute: untested, never distrusted."""
 MINUTE_S: Final = 60.0
-MIN_PARTIAL_S: Final = 30.0
-"""A trailing minute shorter than this is not assessable (the measurement's rule)."""
+MIN_VALID_S: Final = 30.0
+"""A minute is tested only if its in-epoch part, and its read stretches, reach 30 s."""
 BAND_HZ: Final = (300.0, 3000.0)
 FILTER_ORDER: Final = 4
 SPIKE_SIGMA: Final = 4.5
-"""Negative peaks below ``-SPIKE_SIGMA`` robust sigma (``P.threshSigma``)."""
 REFRACTORY_S: Final = 0.001
 LOCK_PERIODS_S: Final[tuple[float, ...]] = (1.0 / 60.0, 1.0 / 30.0)
 LOCK_TOLERANCE_S: Final = 0.001
+PADLEN: Final = 27
+"""``sosfiltfilt``'s default padding for this order-4 band-pass (``3 (2 sections + 1)``
+less trailing zeros): a stretch of at most this many samples cannot be filtered."""
 
-Status = Literal["tested", "untested_few_spikes", "untested_non_finite", "untested_no_signal",
-                 "not_assessable_epoch_edge", "not_assessable_short"]
-STATUSES: Final[tuple[str, ...]] = ("tested", "untested_few_spikes", "untested_non_finite",
-                                    "untested_no_signal", "not_assessable_epoch_edge",
-                                    "not_assessable_short")
-_EDGE_TOL_S: Final = 1e-9
+Status = Literal["tested", "untested_few_spikes", "untested_short_valid",
+                 "untested_no_signal", "not_assessable_short"]
+STATUSES: Final[tuple[str, ...]] = ("tested", "untested_few_spikes", "untested_short_valid",
+                                    "untested_no_signal", "not_assessable_short")
 
 
 class MainsCleaner(Protocol):
-    """A mains cleaner the test may re-run on (ruling (d) 3). None is adopted yet.
-
-    ``name`` identifies it in provenance; calling it returns a cleaned copy of T
-    (microvolts, same length and rate). It must not modify its input.
-    """
+    """A mains cleaner the test may re-run on (ruling (d) 3). None is adopted yet."""
 
     name: str
 
     def __call__(self, x: F64, fs: float) -> F64:
-        """Return the cleaned signal."""
+        """Return the cleaned signal (same length and rate; the input is not modified)."""
         ...
 
 
@@ -174,73 +169,99 @@ class MainsCleaner(Protocol):
 # ---------------------------------------------------------------------------
 
 
-def detect_spikes(y_minute: npt.ArrayLike, fs: float) -> F64 | None:
-    """Spike times (s from the minute's first sample) on one minute of T, or None if flat.
+def _sos(fs: float) -> npt.NDArray[np.float64]:
+    return np.asarray(butter(FILTER_ORDER, [BAND_HZ[0] / (fs / 2), BAND_HZ[1] / (fs / 2)],
+                             btype="bandpass", output="sos"), dtype=np.float64)
 
-    Band-pass 300-3000 Hz (order 4, sos, filtfilt) over the minute, robust sigma of the
-    filtered minute, negative local minima below ``-4.5 sigma``, 1 ms refractory (greedy).
-    """
-    x = np.asarray(y_minute, dtype=np.float64)
-    if x.size < 3 or not float(np.median(np.abs(x - np.median(x)))) > 0:  # noqa: PLR2004
-        # Flat (or empty). Deliberately stricter than the measurement (module docstring):
-        # filtering would turn rounding noise into a positive sigma and then "spikes".
+
+def _runs(ok: Bool) -> list[tuple[int, int]]:
+    d = np.diff(np.concatenate(([0], ok.astype(np.int8), [0])))
+    return list(zip(np.flatnonzero(d == 1).tolist(), np.flatnonzero(d == -1).tolist(),
+                    strict=True))
+
+
+def _stretches(ok: Bool) -> list[tuple[int, int]]:
+    """Maximal runs of read samples long enough to filter."""
+    return [(a, b) for a, b in _runs(ok) if b - a > PADLEN]
+
+
+def _mad(x: F64) -> float:
+    return float(np.median(np.abs(x - np.median(x))))
+
+
+def _detect(x: F64, stretches: Sequence[tuple[int, int]], fs: float) -> list[F64] | None:
+    """Spike times (s from ``x[0]``) per stretch, or None if the read samples are flat."""
+    if not stretches:
         return None
-    sos = butter(FILTER_ORDER, [BAND_HZ[0] / (fs / 2), BAND_HZ[1] / (fs / 2)],
-                 btype="bandpass", output="sos")
-    y = sosfiltfilt(sos, x)
-    sig = MAD_TO_SIGMA * float(np.median(np.abs(y - np.median(y))))
+    raw = np.concatenate([x[a:b] for a, b in stretches])
+    if not _mad(raw) > 0:  # deliberate: stricter than the measurement (module docstring)
+        return None
+    sos = _sos(fs)
+    ys = [sosfiltfilt(sos, x[a:b]) for a, b in stretches]
+    sig = MAD_TO_SIGMA * _mad(np.concatenate(ys))
     if not sig > 0:
         return None
-    idx = np.flatnonzero((y[1:-1] < -SPIKE_SIGMA * sig) & (y[1:-1] <= y[:-2])
-                         & (y[1:-1] <= y[2:])) + 1
     gap = int(REFRACTORY_S * fs)
-    keep: list[int] = []
-    last = -(10 ** 12)
-    for i in idx.tolist():
-        if i - last >= gap:
-            keep.append(i)
-            last = i
-    return np.asarray(keep, dtype=np.float64) / fs
+    out: list[F64] = []
+    for (a, _b), y in zip(stretches, ys, strict=True):
+        idx = np.flatnonzero((y[1:-1] < -SPIKE_SIGMA * sig) & (y[1:-1] <= y[:-2])
+                             & (y[1:-1] <= y[2:])) + 1
+        keep: list[int] = []
+        last = -(10 ** 12)
+        for i in idx.tolist():
+            if i - last >= gap:
+                keep.append(i)
+                last = i
+        out.append((a + np.asarray(keep, dtype=np.float64)) / fs)
+    return out
+
+
+def detect_spikes(y_minute: npt.ArrayLike, fs: float) -> F64 | None:
+    """Spike times (s) on one gap-free stretch of T, or None if flat (the measurement's case)."""
+    x = np.asarray(y_minute, dtype=np.float64)
+    st = _stretches(np.ones(x.size, dtype=bool))
+    found = _detect(x, st, fs)
+    return None if found is None else np.concatenate(found)
 
 
 @dataclass(frozen=True, slots=True)
 class LockStat:
-    """The mains-lock statistic of one spike train: counts, chance and p (NaN if untested)."""
+    """The mains-lock statistic: spikes, intervals, locked intervals, chance and p."""
 
     n_spikes: int
+    m_intervals: int
     k_locked: int
     p0: float
     p: float
 
     @property
     def tested(self) -> bool:
-        """Whether there were enough spikes to test."""
-        return self.n_spikes >= MIN_SPIKES
+        """Whether there were enough spikes and intervals to test."""
+        return math.isfinite(self.p)
 
 
-def lock_test(t_s: npt.ArrayLike) -> LockStat:
-    """One-sided binomial test of mains-locked inter-spike intervals (module docstring 4-5).
-
-    Fewer than :data:`MIN_SPIKES` spikes: ``k``, ``p0`` and ``p`` are NaN/0 - untested.
-    """
-    t = np.sort(np.asarray(t_s, dtype=np.float64))
-    n = int(t.size)
-    if n < MIN_SPIKES:
-        return LockStat(n, 0, math.nan, math.nan)
-    iei = np.diff(t)
-    near = np.zeros(iei.size, dtype=bool)
-    for per in LOCK_PERIODS_S:
-        near |= np.abs(iei - per) <= LOCK_TOLERANCE_S
-    span = float(t[-1] - t[0])
-    if not span > 0:
-        msg = "spike times span no time: cannot estimate a Poisson rate"
-        raise ValueError(msg)
-    lam = n / span
+def lock_test(stretches: Sequence[npt.ArrayLike]) -> LockStat:
+    """One-sided binomial test of mains-locked intervals, within stretches (docstring 4-6)."""
+    ts = [np.sort(np.asarray(t, dtype=np.float64)) for t in stretches]
+    n = int(sum(t.size for t in ts))
+    m = k = 0
+    span = 0.0
+    for t in ts:
+        if t.size < 2:  # noqa: PLR2004
+            continue
+        iei = np.diff(t)
+        near = np.zeros(iei.size, dtype=bool)
+        for per in LOCK_PERIODS_S:
+            near |= np.abs(iei - per) <= LOCK_TOLERANCE_S
+        m += int(iei.size)
+        k += int(near.sum())
+        span += float(t[-1] - t[0])
+    if n < MIN_SPIKES or m == 0 or not span > 0:
+        return LockStat(n, m, k, math.nan, math.nan)
+    lam = m / span  # the interval MLE (docstring 6)
     p0 = sum(math.exp(-lam * (per - LOCK_TOLERANCE_S)) - math.exp(-lam * (per + LOCK_TOLERANCE_S))
              for per in LOCK_PERIODS_S)
-    m, k = n - 1, int(near.sum())
-    p = float(binom.sf(k - 1, m, p0))
-    return LockStat(n, k, float(p0), p)
+    return LockStat(n, m, k, float(p0), float(binom.sf(k - 1, m, p0)))
 
 
 def holm_reject(p: npt.ArrayLike, alpha: float) -> npt.NDArray[np.bool_]:
@@ -265,11 +286,10 @@ def holm_reject(p: npt.ArrayLike, alpha: float) -> npt.NDArray[np.bool_]:
 
 @dataclass(frozen=True, slots=True)
 class MinuteTest:
-    """One cuff-minute's test (pass 1). Times are on the recording's timeline, seconds.
+    """One cuff-minute's test (pass 1). Times on the recording's timeline, seconds.
 
-    ``start_s``/``stop_s`` are the minute's part inside the epoch. ``n_spikes`` is None
-    where nothing was detected (not assessable, non-finite, flat); ``k_locked``, ``p0``
-    and ``p`` are NaN/None unless ``status == "tested"``.
+    ``start_s``/``stop_s`` are the minute's part inside the epoch; ``valid_s`` the time
+    the test read (its stretches). Counts are None and numbers NaN where not computed.
     """
 
     signal: str
@@ -278,17 +298,18 @@ class MinuteTest:
     stop_s: float
     status: Status
     n_spikes: int | None = None
+    m_intervals: int | None = None
     k_locked: int | None = None
     p0: float = math.nan
     p: float = math.nan
+    valid_s: float = math.nan
 
     def __post_init__(self) -> None:
-        """Refuse an inconsistent row, and make every NaN the ``math.nan`` object.
+        """Refuse an inconsistent row; every NaN is the ``math.nan`` object.
 
-        Equal rows then compare equal: tuple comparison checks identity before ``==``,
-        and NaN != NaN.
+        Equal rows then compare equal (tuple comparison checks identity before ``==``).
         """
-        for name in ("p0", "p"):
+        for name in ("p0", "p", "valid_s"):
             if math.isnan(getattr(self, name)):
                 object.__setattr__(self, name, math.nan)
         if self.status not in STATUSES:
@@ -300,23 +321,17 @@ class MinuteTest:
 
 
 def _sample(t_s: float, epoch_start_s: float, fs: float, n_samples: int) -> int:
-    """Sample index of recording time ``t_s`` in the epoch, clipped to ``[0, n_samples]``."""
     return min(max(seconds_to_sample(t_s - epoch_start_s, fs), 0), n_samples)
 
 
 def minute_sample_bounds(start_s: float, stop_s: float, *, epoch_start_s: float, fs: float,
                          n_samples: int) -> tuple[int, int]:
-    """0-based half-open epoch samples of ``[start_s, stop_s)``, via ``extent.grid``.
-
-    Rounds, where the measurement floored: an edge may sit one sample later (module
-    docstring).
-    """
+    """0-based half-open epoch samples of ``[start_s, stop_s)``, via ``extent.grid``."""
     return (_sample(start_s, epoch_start_s, fs, n_samples),
             _sample(stop_s, epoch_start_s, fs, n_samples))
 
 
 def _on_mask_grid(k: int, fs: float) -> bool:
-    """Whether sample ``k`` is a 10 ms frame boundary under ``extent.grid``'s conversion."""
     i = int(round(k / (GRID_S * fs)))
     return frame_sample_bounds(i, i, fs)[0] == k
 
@@ -326,13 +341,10 @@ def _refuse_masked(name: str, x: F64, fs: float) -> None:
     bad = ~np.isfinite(x)
     if not bad.any():
         return
-    d = np.diff(np.concatenate(([0], bad.astype(np.int8), [0])))
-    runs = [(int(a), int(b)) for a, b in zip(np.flatnonzero(d == 1), np.flatnonzero(d == -1),
-                                             strict=True) if a > 0 and b < x.size]
+    runs = [(a, b) for a, b in _runs(bad) if a > 0 and b < x.size]
     if runs and all(_on_mask_grid(a, fs) and _on_mask_grid(b, fs) for a, b in runs):
         msg = (f"{name}: every NaN run starts and ends on the 10 ms mask grid - this T looks "
-               "masked. The mains-lock test reads RAW T; a masked one makes every blanked "
-               "minute untested")
+               "masked. The test reads RAW T and takes motion from the motion mask")
         raise ValueError(msg)
 
 
@@ -350,18 +362,34 @@ def _check_signal_names(names: Iterable[str]) -> None:
             raise ValueError(msg)
 
 
-def minute_tests(raw_t: Mapping[str, npt.ArrayLike], fs: float, *, epoch_start_s: float,
-                 cleaner: MainsCleaner | None = None) -> tuple[MinuteTest, ...]:
-    """Pass 1: test every cuff-minute that overlaps the epoch, on RAW T.
+def _motion_samples(name: str, mask: ConsumerMask, fs: float, n: int,
+                    epoch_start_s: float) -> Bool:
+    if mask.consumer != "spikes" or mask.signal != name:
+        msg = f"{name}: the motion mask must be the spike consumer's own, got {mask.key}"
+        raise ValueError(msg)
+    if (abs(mask.t0_s - epoch_start_s) > T0_TOLERANCE_S
+            or mask.invalid.size != n_grid_frames(n, fs, mask.grid_s)):
+        msg = (f"{name}: the motion mask ({mask.invalid.size} frames from {mask.t0_s} s) is "
+               f"not on this epoch ({n} samples from {epoch_start_s} s)")
+        raise ValueError(msg)
+    return frames_to_samples(mask.invalid, fs, n, mask.grid_s)
 
-    ``raw_t`` maps ``<cuff>_T`` to the cuff's tripole over the emitted epoch, **raw and
-    unmasked** (microvolts; sample 0 at ``epoch_start_s`` on the recording's timeline):
-    a masked T would make every blanked minute untested, so input that looks masked is
-    refused (module docstring). The inputs are never modified (invariant 17); a
-    ``cleaner`` receives a copy.
+
+def minute_tests(raw_t: Mapping[str, npt.ArrayLike], fs: float, *, epoch_start_s: float,
+                 motion: Mapping[str, ConsumerMask],
+                 cleaner: MainsCleaner | None = None) -> tuple[MinuteTest, ...]:
+    """Pass 1: test every cuff-minute overlapping the epoch, on RAW T less motion blanks.
+
+    ``raw_t`` maps ``<cuff>_T`` to the raw, unmasked tripole over the emitted epoch
+    (microvolts; sample 0 at ``epoch_start_s``). ``motion`` maps the same names to the
+    spike consumer's motion masks (required; an all-valid mask where nothing blanked).
+    Inputs are never modified (invariant 17); a ``cleaner`` receives a copy.
     """
     _check_signal_names(raw_t)
     _check_fs(fs)
+    if set(motion) != set(raw_t):
+        msg = f"motion masks for {sorted(motion)}, T for {sorted(raw_t)}: they must match"
+        raise ValueError(msg)
     out: list[MinuteTest] = []
     for name in sorted(raw_t):
         x = np.asarray(raw_t[name], dtype=np.float64)
@@ -369,42 +397,67 @@ def minute_tests(raw_t: Mapping[str, npt.ArrayLike], fs: float, *, epoch_start_s
         if cleaner is not None:
             x = np.asarray(cleaner(np.array(x, copy=True), fs), dtype=np.float64)
         n = int(x.size)
+        read = np.isfinite(x) & ~_motion_samples(name, motion[name], fs, n, epoch_start_s)
         e0, e1 = float(epoch_start_s), float(epoch_start_s) + n / fs
         for m in range(int(math.floor(e0 / MINUTE_S)), int(math.ceil(e1 / MINUTE_S))):
-            a, b = m * MINUTE_S, (m + 1) * MINUTE_S
-            ia, ib = max(a, e0), min(b, e1)
+            ia, ib = max(m * MINUTE_S, e0), min((m + 1) * MINUTE_S, e1)
             if not ib > ia:
                 continue
-            if a < e0 - _EDGE_TOL_S:
-                out.append(MinuteTest(name, m, ia, ib, "not_assessable_epoch_edge"))
-                continue
-            if ib - ia < MIN_PARTIAL_S:
+            if ib - ia < MIN_VALID_S:
                 out.append(MinuteTest(name, m, ia, ib, "not_assessable_short"))
                 continue
             k0, k1 = minute_sample_bounds(ia, ib, epoch_start_s=e0, fs=fs, n_samples=n)
-            seg = x[k0:k1]
-            if not np.isfinite(seg).all():
-                out.append(MinuteTest(name, m, ia, ib, "untested_non_finite"))
+            stretches = _stretches(read[k0:k1])
+            valid_s = sum(b - a for a, b in stretches) / fs
+            if valid_s < MIN_VALID_S:
+                out.append(MinuteTest(name, m, ia, ib, "untested_short_valid",
+                                      valid_s=valid_s))
                 continue
-            t = detect_spikes(seg, fs)
-            if t is None:
-                out.append(MinuteTest(name, m, ia, ib, "untested_no_signal"))
+            found = _detect(x[k0:k1], stretches, fs)
+            if found is None:
+                out.append(MinuteTest(name, m, ia, ib, "untested_no_signal", valid_s=valid_s))
                 continue
-            st = lock_test(t)
+            st = lock_test(found)
             if not st.tested:
-                out.append(MinuteTest(name, m, ia, ib, "untested_few_spikes", st.n_spikes))
+                out.append(MinuteTest(name, m, ia, ib, "untested_few_spikes", st.n_spikes,
+                                      st.m_intervals, valid_s=valid_s))
                 continue
-            out.append(MinuteTest(name, m, ia, ib, "tested", st.n_spikes, st.k_locked, st.p0,
-                                  st.p))
+            out.append(MinuteTest(name, m, ia, ib, "tested", st.n_spikes, st.m_intervals,
+                                  st.k_locked, st.p0, st.p, valid_s))
     return tuple(out)
 
 
+@dataclass(frozen=True)
+class Pass1:
+    """One recording's pass-1 output and the epoch it was tested on (no samples kept)."""
+
+    tests: tuple[MinuteTest, ...]
+    fs: float
+    epoch_start_s: float
+    n_samples: int
+    cleaner: str | None = None
+
+
+def pass1(raw_t: Mapping[str, npt.ArrayLike], fs: float, *, epoch_start_s: float,
+          motion: Mapping[str, ConsumerMask], cleaner: MainsCleaner | None = None) -> Pass1:
+    """Run :func:`minute_tests` on one recording; keep only what pass 2 needs."""
+    lengths = {int(np.asarray(x).size) for x in raw_t.values()}
+    if len(lengths) != 1:
+        msg = f"every cuff's T must cover the same epoch; got lengths {sorted(lengths)}"
+        raise ValueError(msg)
+    tests = minute_tests(raw_t, fs, epoch_start_s=epoch_start_s, motion=motion,
+                         cleaner=cleaner)
+    return Pass1(tests, float(fs), float(epoch_start_s), lengths.pop(),
+                 None if cleaner is None else cleaner.name)
+
+
 # ---------------------------------------------------------------------------
-# the family
+# the family: animal x cohort
 # ---------------------------------------------------------------------------
 
-PKey = tuple[str, str, int]
-"""``(recording, signal, minute)``."""
+PKey = tuple[str, float, str, int]
+"""``(recording, epoch_start_s, signal, minute)``: the epoch keeps a recording's stim
+and recovery boundary minutes apart."""
 
 
 def _canonical(doc: object) -> str:
@@ -412,48 +465,59 @@ def _canonical(doc: object) -> str:
                       allow_nan=False)
 
 
+def _check_animal_key(key: str) -> None:
+    parts = key.split(":")
+    if len(parts) != 2 or not all(p.strip() for p in parts):  # noqa: PLR2004
+        msg = f"animal_key must be 'cohort:animal', got {key!r}"
+        raise ValueError(msg)
+
+
 @dataclass(frozen=True)
 class AnimalPTable:
-    """Pass 1's p-values for every tested cuff-minute of one animal (the Holm family).
+    """Pass 1's p-values for every tested cuff-minute of one animal and cohort.
 
-    ``cleaner`` is the cleaner every row was tested under (None = raw T); a table mixing
-    cleaners or test versions cannot be built.
+    The Holm family ((e) Q1). ``animal_key`` is ``"cohort:animal"``. May be empty (no
+    tested minute anywhere: nothing can be distrusted).
     """
 
-    animal: str
+    animal_key: str
     pvalues: Mapping[PKey, float]
     test_version: str = TEST_VERSION
     cleaner: str | None = None
 
     def __post_init__(self) -> None:
-        """Refuse an empty table, an unnamed animal and non-finite p-values."""
-        if not self.animal:
-            msg = "an animal p-value table must name its animal"
-            raise ValueError(msg)
-        if not self.pvalues:
-            msg = f"{self.animal}: an empty p-value table is not a family"
-            raise ValueError(msg)
+        """Refuse a malformed key and p-values outside [0, 1]."""
+        _check_animal_key(self.animal_key)
         bad = [k for k, v in self.pvalues.items() if not (math.isfinite(v) and 0 <= v <= 1)]
         if bad:
-            msg = f"{self.animal}: p-values must be finite and in [0, 1]: {bad[:3]}"
+            msg = f"{self.animal_key}: p-values must be finite and in [0, 1]: {bad[:3]}"
             raise ValueError(msg)
 
     @classmethod
-    def from_tests(cls, animal: str, tests: Mapping[str, Sequence[MinuteTest]], *,
+    def from_tests(cls, animal_key: str,
+                   tests: Iterable[tuple[str, float, Sequence[MinuteTest]]], *,
                    cleaner: str | None = None) -> AnimalPTable:
-        """Build the table from pass 1 (``{recording: minute_tests(...)}``), tested rows only."""
+        """Build the table from pass 1 (``(recording, epoch_start_s, tests)``), tested rows.
+
+        A key given twice raises: it would overwrite another epoch's p-value (invariant 27).
+        """
         pv: dict[PKey, float] = {}
-        for rid, rows in tests.items():
+        for rid, e0, rows in tests:
             for r in rows:
-                if r.status == "tested":
-                    pv[(rid, r.signal, r.minute)] = r.p
-        return cls(animal, pv, TEST_VERSION, cleaner)
+                if r.status != "tested":
+                    continue
+                key = (rid, float(e0), r.signal, r.minute)
+                if key in pv:
+                    msg = f"{animal_key}: p-value key {key} given twice"
+                    raise ValueError(msg)
+                pv[key] = r.p
+        return cls(animal_key, pv, TEST_VERSION, cleaner)
 
     def to_record(self) -> dict[str, Any]:
         """JSON-ready (rows sorted; ``cleaner`` absent when raw)."""
         rec: dict[str, Any] = {
-            "animal": self.animal, "test_version": self.test_version,
-            "rows": [[r, s, m, p] for (r, s, m), p in sorted(self.pvalues.items())]}
+            "animal_key": self.animal_key, "test_version": self.test_version,
+            "rows": [[r, e, s, m, p] for (r, e, s, m), p in sorted(self.pvalues.items())]}
         if self.cleaner is not None:
             rec["cleaner"] = self.cleaner
         return rec
@@ -466,24 +530,20 @@ class AnimalPTable:
     def from_json(cls, text: str) -> AnimalPTable:
         """Parse :meth:`to_json`; a required field absent or null raises naming it."""
         doc = json.loads(text)
-        for key in ("animal", "test_version", "rows"):
+        for key in ("animal_key", "test_version", "rows"):
             if doc.get(key) is None:
                 msg = f"animal p-value table: required field {key!r} is absent"
                 raise ValueError(msg)
-        pv = {(str(r), str(s), int(m)): float(p) for r, s, m, p in doc["rows"]}
+        pv = {(str(r), float(e), str(s), int(m)): float(p) for r, e, s, m, p in doc["rows"]}
         if len(pv) != len(doc["rows"]):
             msg = "animal p-value table: duplicate (recording, signal, minute) rows"
             raise ValueError(msg)
-        return cls(doc["animal"], pv, doc["test_version"], doc.get("cleaner"))
+        return cls(doc["animal_key"], pv, doc["test_version"], doc.get("cleaner"))
 
     @property
     def sha256(self) -> str:
         """Hash of the canonical JSON: names the exact family in provenance."""
         return hashlib.sha256(self.to_json().encode("ascii")).hexdigest()
-
-
-Family = Literal["recording"] | AnimalPTable
-"""The Holm family: this recording's tested cuff-minutes, or the animal's whole table."""
 
 
 # ---------------------------------------------------------------------------
@@ -506,23 +566,29 @@ class MinuteResult:
 
 
 def lock_test_parameters() -> dict[str, Any]:
-    """Return the test's parameters as structured provenance fields (JSON-ready)."""
-    return {"signal": "T", "input": "raw, unmasked",
+    """Return the test's parameters and rules as structured provenance fields."""
+    return {"signal": "T", "input": "raw, unmasked; motion from the spike consumer's mask",
             "band_hz": list(BAND_HZ),
             "filter": {"design": "butter", "order": FILTER_ORDER, "output": "sos",
-                       "apply": "sosfiltfilt", "span": "minute"},
-            "sigma": "1.4826 * MAD of the filtered minute",
+                       "apply": "sosfiltfilt", "span": "stretch", "min_stretch_samples":
+                       PADLEN + 1},
+            "sigma": "1.4826 * MAD of the minute's filtered stretches, pooled",
             "spike_polarity": "negative", "spike_threshold_sigma": SPIKE_SIGMA,
             "refractory_s": REFRACTORY_S,
             "lock_periods_s": list(LOCK_PERIODS_S), "lock_tolerance_s": LOCK_TOLERANCE_S,
-            "chance": "poisson, lam = n / (t_last - t_first)",
-            "test": "one-sided binomial, P(X >= k | n - 1, p0)", "correction": "holm",
-            "min_spikes": MIN_SPIKES, "minute_s": MINUTE_S,
-            "min_partial_minute_s": MIN_PARTIAL_S}
+            "intervals": "within a stretch only; none across a gap or a motion blank",
+            "motion": "spikes in the spike consumer's motion-blanked spans are not read",
+            "chance": ("poisson, interval MLE lam = m / sum (t_last_s - t_first_s) over "
+                       "stretches with >= 2 spikes; differs from the inventory measurement's "
+                       "n / (t_last - t_first) by n / (n - 1) on an unsplit minute"),
+            "test": "one-sided binomial, P(X >= k | m, p0)", "correction": "holm",
+            "family": "animal x cohort, all recordings first",
+            "min_spikes": MIN_SPIKES, "minute_s": MINUTE_S, "min_valid_s": MIN_VALID_S,
+            "boundary_minute": "in-epoch part tested when >= min_valid_s"}
 
 
-_ROW_FLOATS: Final = ("start_s", "stop_s", "p0", "p")
-_ROW_INTS: Final = ("n_spikes", "k_locked")
+_ROW_FLOATS: Final = ("start_s", "stop_s", "p0", "p", "valid_s")
+_ROW_INTS: Final = ("n_spikes", "m_intervals", "k_locked")
 
 
 def _row(r: MinuteResult) -> dict[str, Any]:
@@ -537,9 +603,15 @@ def _row(r: MinuteResult) -> dict[str, Any]:
         v = getattr(t, k)
         if v is not None:
             row[k] = v
-    if t.status == "tested":
-        row["m_intervals"] = int(t.n_spikes or 0) - 1
     return row
+
+
+def _opt_int(row: Mapping[str, Any], key: str) -> int | None:
+    return None if row.get(key) is None else int(row[key])
+
+
+def _opt_float(row: Mapping[str, Any], key: str) -> float:
+    return math.nan if row.get(key) is None else float(row[key])
 
 
 def _unrow(row: Mapping[str, Any]) -> MinuteResult:
@@ -548,11 +620,9 @@ def _unrow(row: Mapping[str, Any]) -> MinuteResult:
             msg = f"line-distrust row: required field {key!r} is absent"
             raise ValueError(msg)
     t = MinuteTest(row["signal"], int(row["minute"]), float(row["start_s"]),
-                   float(row["stop_s"]), row["status"],
-                   None if row.get("n_spikes") is None else int(row["n_spikes"]),
-                   None if row.get("k_locked") is None else int(row["k_locked"]),
-                   math.nan if row.get("p0") is None else float(row["p0"]),
-                   math.nan if row.get("p") is None else float(row["p"]))
+                   float(row["stop_s"]), row["status"], _opt_int(row, "n_spikes"),
+                   _opt_int(row, "m_intervals"), _opt_int(row, "k_locked"),
+                   _opt_float(row, "p0"), _opt_float(row, "p"), _opt_float(row, "valid_s"))
     return MinuteResult(t, bool(row["distrusted"]))
 
 
@@ -560,9 +630,7 @@ def _unrow(row: Mapping[str, Any]) -> MinuteResult:
 class LineDistrustRecord:
     """One recording's spike-consumer line distrust: every cuff-minute, decided, with provenance.
 
-    ``family`` records the Holm family: ``kind`` (``recording`` | ``animal``), ``size``
-    (tests in it), and for an animal table its ``animal`` and ``sha256``. ``cleaner`` is
-    None for raw T. Carried beside the spike mask, never merged into it.
+    ``family``: ``kind`` (``animal_x_cohort``), ``animal_key``, ``size`` and ``sha256``.
     """
 
     recording: str
@@ -583,8 +651,8 @@ class LineDistrustRecord:
             object.__setattr__(self, "signals",
                                tuple(sorted({r.test.signal for r in self.minutes})))
         _check_signal_names(self.signals)
-        if self.family.get("kind") not in ("recording", "animal"):
-            msg = f"family kind must be 'recording' or 'animal', got {self.family!r}"
+        if self.family.get("kind") != "animal_x_cohort":
+            msg = f"family kind must be 'animal_x_cohort' (ruling (e) Q1), got {self.family!r}"
             raise ValueError(msg)
 
     @property
@@ -594,10 +662,11 @@ class LineDistrustRecord:
 
     @property
     def provenance(self) -> dict[str, Any]:
-        """What made the decision: rule, test version, alpha, family, parameters, cleaner."""
+        """What made the decision: rules, test version, alpha, family, parameters, cleaner."""
         rec: dict[str, Any] = {
             "rule": self.rule, "test_version": self.test_version, "alpha": self.alpha,
-            "family": dict(self.family), "consumer": "spikes", "parameters": lock_test_parameters()}
+            "family": dict(self.family), "consumer": "spikes",
+            "parameters": lock_test_parameters()}
         if self.cleaner is not None:
             rec["cleaner"] = self.cleaner
         return rec
@@ -612,13 +681,13 @@ class LineDistrustRecord:
 
     def sample_spans(self, signal: str) -> list[tuple[int, int]]:
         """Distrusted minutes as 0-based half-open epoch samples."""
-        return [minute_sample_bounds(a, b, epoch_start_s=self.epoch_start_s, fs=self.fs,
-                                     n_samples=self.n_samples)
-                for a, b in self.distrusted_spans(signal)]
+        return [s for s in (minute_sample_bounds(a, b, epoch_start_s=self.epoch_start_s,
+                                                 fs=self.fs, n_samples=self.n_samples)
+                            for a, b in self.distrusted_spans(signal)) if s[1] > s[0]]
 
     def matlab_spans(self, signal: str) -> F64:
         """Distrusted minutes as MATLAB 1-based inclusive epoch samples (N x 2)."""
-        spans = [s for s in self.sample_spans(signal) if s[1] > s[0]]
+        spans = self.sample_spans(signal)
         if not spans:
             return np.zeros((0, 2), dtype=np.float64)
         return to_matlab_inclusive([a for a, _ in spans], [b for _, b in spans])
@@ -695,68 +764,98 @@ def _check_tests(tests: Sequence[MinuteTest], *, fs: float, epoch_start_s: float
 
 
 def decide(tests: Sequence[MinuteTest], *, recording: str, fs: float, epoch_start_s: float,
-           n_samples: int, family: Family, cleaner: str | None = None) -> LineDistrustRecord:
-    """Pass 2: Holm at :data:`ALPHA` over ``family``; distrust this recording's rejections.
+           n_samples: int, family: AnimalPTable, cleaner: str | None = None
+           ) -> LineDistrustRecord:
+    """Pass 2: Holm at :data:`ALPHA` over the animal's table; distrust this recording's rejections.
 
-    ``family`` has no default (see the module docstring). With an :class:`AnimalPTable`,
-    the table must hold exactly this recording's tested p-values (to a relative 1e-12),
-    under the same test version and cleaner, or this raises. Also refuses an ``fs`` that
-    cannot carry the band, an empty epoch, a ``(signal, minute)`` row twice, and a row
-    outside the epoch.
+    ``family`` is required, with no default. The table must hold exactly this recording's
+    tested p-values (to a relative 1e-12), under the same test version and cleaner. Also
+    refuses an ``fs`` below the band, an empty epoch, a ``(signal, minute)`` row twice
+    and a row outside the epoch.
     """
     given: object = family  # checked at run time too: the type is not a guarantee
-    if not (isinstance(given, AnimalPTable) or given == "recording"):
-        msg = (f"family must be 'recording' or an AnimalPTable, got {given!r}: which one "
-               "applies is Andrea's call, so there is no default")
-        raise ValueError(msg)
+    if not isinstance(given, AnimalPTable):
+        msg = (f"family must be the animal x cohort AnimalPTable (ruling (e) Q1), got "
+               f"{given!r}")
+        raise TypeError(msg)
     _check_tests(tests, fs=fs, epoch_start_s=epoch_start_s, n_samples=n_samples)
-    tested = {(recording, t.signal, t.minute): t.p for t in tests if t.status == "tested"}
-    if isinstance(family, AnimalPTable):
-        if family.test_version != TEST_VERSION or family.cleaner != cleaner:
-            msg = (f"the animal table was made under {family.test_version} / cleaner "
-                   f"{family.cleaner!r}; this pass is {TEST_VERSION} / {cleaner!r}")
-            raise ValueError(msg)
-        mine = {k: v for k, v in family.pvalues.items() if k[0] == recording}
-        differ = sorted(k for k in set(mine) & set(tested)
-                        if not math.isclose(mine[k], tested[k], rel_tol=P_MATCH_RTOL,
-                                            abs_tol=0.0))[:3]
-        if set(mine) != set(tested) or differ:
-            missing = sorted(set(tested) - set(mine))[:3]
-            extra = sorted(set(mine) - set(tested))[:3]
-            msg = (f"{recording}: the animal table does not hold exactly this recording's "
-                   f"tested p-values (missing {missing}, extra {extra}, differing {differ}); "
-                   "pass 1 and pass 2 did not test the same thing")
-            raise ValueError(msg)
-        keys = sorted(family.pvalues)
-        fam: dict[str, Any] = {"kind": "animal", "animal": family.animal,
-                               "size": len(keys), "sha256": family.sha256}
-        pv = [family.pvalues[k] for k in keys]
-    else:
-        keys = sorted(tested)
-        fam = {"kind": "recording", "size": len(keys)}
-        pv = [tested[k] for k in keys]
+    if family.test_version != TEST_VERSION or family.cleaner != cleaner:
+        msg = (f"the animal table was made under {family.test_version} / cleaner "
+               f"{family.cleaner!r}; this pass is {TEST_VERSION} / {cleaner!r}")
+        raise ValueError(msg)
+    e0 = float(epoch_start_s)
+    tested = {(recording, e0, t.signal, t.minute): t.p for t in tests if t.status == "tested"}
+    mine = {k: v for k, v in family.pvalues.items() if k[0] == recording and k[1] == e0}
+    differ = sorted(k for k in set(mine) & set(tested)
+                    if not math.isclose(mine[k], tested[k], rel_tol=P_MATCH_RTOL,
+                                        abs_tol=0.0))[:3]
+    if set(mine) != set(tested) or differ:
+        missing = sorted(set(tested) - set(mine))[:3]
+        extra = sorted(set(mine) - set(tested))[:3]
+        msg = (f"{recording}: the animal table does not hold exactly this recording's "
+               f"tested p-values (missing {missing}, extra {extra}, differing {differ}); "
+               "pass 1 and pass 2 did not test the same thing")
+        raise ValueError(msg)
+    keys = sorted(family.pvalues)
+    pv = [family.pvalues[k] for k in keys]
     rejected = ({k for k, r in zip(keys, holm_reject(pv, ALPHA), strict=True) if r}
                 if keys else set())
+    fam = {"kind": "animal_x_cohort", "animal_key": family.animal_key, "size": len(keys),
+           "sha256": family.sha256}
     rows = tuple(MinuteResult(t, t.status == "tested"
-                              and (recording, t.signal, t.minute) in rejected) for t in tests)
+                              and (recording, e0, t.signal, t.minute) in rejected)
+                 for t in tests)
     return LineDistrustRecord(recording, float(fs), float(epoch_start_s), int(n_samples), fam,
                               rows, cleaner)
 
 
-def cuff_minute_distrust(raw_t: Mapping[str, npt.ArrayLike], fs: float, *, recording: str,
-                         epoch_start_s: float, family: Family,
-                         cleaner: MainsCleaner | None = None) -> LineDistrustRecord:
-    """Both passes for one recording: :func:`minute_tests` (on RAW T) then :func:`decide`.
+def decide_animal(animal_key: str, passes: Iterable[tuple[str, Pass1]]
+                  ) -> tuple[AnimalPTable, dict[tuple[str, float], LineDistrustRecord]]:
+    """Decide one animal x cohort - the production path: every pass 1 first, then Holm.
 
-    With an :class:`AnimalPTable` family, the table must come from pass 1 over the
-    animal's recordings, this one included (see :func:`decide`).
+    ``passes`` lists ``(recording, pass1(...))`` for every epoch of every recording of the
+    animal (and cohort); records come back keyed ``(recording, epoch_start_s)``. Pass 1
+    keeps no samples, so recordings can be loaded one at a time. All passes must share
+    one cleaner (or none); a ``(recording, epoch)`` given twice raises.
     """
-    _check_signal_names(raw_t)
-    lengths = {int(np.asarray(x).size) for x in raw_t.values()}
-    if len(lengths) != 1:
-        msg = f"every cuff's T must cover the same epoch; got lengths {sorted(lengths)}"
+    passes = list(passes)
+    keys = [(r, p.epoch_start_s) for r, p in passes]
+    if len(set(keys)) != len(keys):
+        msg = f"{animal_key}: a (recording, epoch) is given twice: {sorted(keys)}"
         raise ValueError(msg)
-    tests = minute_tests(raw_t, fs, epoch_start_s=epoch_start_s, cleaner=cleaner)
-    return decide(tests, recording=recording, fs=fs, epoch_start_s=epoch_start_s,
-                  n_samples=lengths.pop(), family=family,
-                  cleaner=None if cleaner is None else cleaner.name)
+    cleaners = {p.cleaner for _r, p in passes}
+    if len(cleaners) > 1:
+        msg = (f"{animal_key}: recordings tested under different cleaners "
+               f"{sorted(map(str, cleaners))}")
+        raise ValueError(msg)
+    cleaner = cleaners.pop() if cleaners else None
+    table = AnimalPTable.from_tests(animal_key,
+                                    [(r, p.epoch_start_s, p.tests) for r, p in passes],
+                                    cleaner=cleaner)
+    return table, {(r, p.epoch_start_s): decide(p.tests, recording=r, fs=p.fs,
+                                                epoch_start_s=p.epoch_start_s,
+                                                n_samples=p.n_samples, family=table,
+                                                cleaner=cleaner)
+                   for r, p in passes}
+
+
+def spike_input(x: npt.ArrayLike, fs: float, motion: ConsumerMask,
+                record: LineDistrustRecord) -> F64:
+    """Return the spike consumer's input on one cuff: motion AND distrusted minutes NaN.
+
+    Python-side twin of the handoff's ``blank_spikes_*`` ((e) Q2): distrusted minutes are
+    set NaN first, then ``emit.masks.apply_mask`` NaNs the motion frames and tapers beside
+    every NaN run (never writing a zero). ``x`` starts at the record's epoch start; the
+    input is never modified.
+    """
+    if motion.consumer != "spikes" or motion.signal not in record.signals:
+        msg = f"spike_input needs the spike consumer's mask of a recorded cuff, got {motion.key}"
+        raise ValueError(msg)
+    y = np.array(x, dtype=np.float64, copy=True)
+    if y.size != record.n_samples:
+        msg = f"{y.size} samples, but the record's epoch has {record.n_samples}"
+        raise ValueError(msg)
+    for a, b in record.sample_spans(motion.signal):
+        y[a:b] = np.nan
+    return apply_mask(y, fs, motion.invalid, grid_s=motion.grid_s,
+                      what=f"spike input {motion.signal}")

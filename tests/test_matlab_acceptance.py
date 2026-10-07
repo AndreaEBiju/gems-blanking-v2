@@ -33,10 +33,10 @@ from gems_blanking_v2.emit.provenance import MaskProvenance
 from gems_blanking_v2.extent.grid import n_grid_frames
 from scipy.io import savemat
 
-from tests.conftest import make_eng
+from tests.conftest import make_line_distrust, make_mains_spike_t
 
 FS = 24414.0625
-N_SAMPLES = int(60.0 * FS) + 37  # a trailing partial frame, on purpose
+N_SAMPLES = int(120.0 * FS) + 37  # a trailing partial frame, on purpose
 HARNESS = Path(__file__).parent / "matlab"
 DEFAULT_MATLAB = Path("C:/Program Files/MATLAB/R2026a/bin/matlab.exe")
 
@@ -67,8 +67,9 @@ def _masks() -> dict[mk.MaskKey, mk.ConsumerMask]:
     n = n_grid_frames(N_SAMPLES, FS)
     spans = [
         mk.MaskSpan("spikes", "L_T", 10.003, 10.4, "in_band"),
-        mk.MaskSpan("spikes", "L_T", 59.95, 61.0, "in_band"),  # runs into the partial frame
-        mk.MaskSpan("slow_wave", "ANT1", 20.0, 35.0, "in_band"),
+        mk.MaskSpan("spikes", "L_T", 59.95, 61.0, "in_band"),  # meets distrusted minute 1
+        mk.MaskSpan("spikes", "L_T", 119.95, 121.0, "in_band"),  # runs into the partial frame
+        mk.MaskSpan("slow_wave", "ANT1", 20.0, 50.0, "in_band"),
         mk.MaskSpan("mmc", "ANT1", 40.0, 41.0, "in_band"),
     ]
     return mk.build_masks(READS, spans, n_frames=n, t0_s=0.0)
@@ -88,9 +89,13 @@ def test_matlab_step1_bandpass_honours_the_emitted_masks(tmp_path: Path) -> None
                           routing_hash="test", created_at="2026-10-08T05:00:00+00:00",
                           recording="synthetic")
     medians = {f"{c}|{s}|{b}": 0.3 for c, s, b in masks}  # the real gate path (it holds)
-    eng = make_eng(FS, N_SAMPLES / FS + 0.1, seed=12).signal[:N_SAMPLES]
-    line = ld.cuff_minute_distrust({"L_T": eng}, FS, recording="synthetic", epoch_start_s=0.0,
-                                   family="recording")
+    # minute 1 carries a 60 Hz-locked train: distrusted, so NaN in the spike input ((e) Q2)
+    eng = make_mains_spike_t(FS, N_SAMPLES / FS + 0.1, locked_minutes=(1,),
+                             seed=12).signal[:N_SAMPLES]
+    spike_mask = masks[("spikes", "L_T", "300-3000")]
+    line = make_line_distrust({"L_T": eng}, FS, recording="synthetic",
+                              motion={"L_T": spike_mask})
+    assert line.distrusted_spans("L_T") == [(60.0, 120.0)]
     mask_file = write_mask_file(tmp_path / "synthetic_masks.mat", masks, prov, signals=READS,
                                 fs=FS,
                                 line_distrust=line,
@@ -114,16 +119,19 @@ def test_matlab_step1_bandpass_honours_the_emitted_masks(tmp_path: Path) -> None
 
     assert res["fs_matches"] and res["n_samples"] == N_SAMPLES
     by = {m["name"]: m for m in res["masks"]}
-    expect = {f"blank_{c}_{s}": m.invalid for (c, s, _b), m in masks.items()}
-    expect.update({f"notmeasured_mmc_{s}": f for s, f in mk.mmc_not_measured(masks).items()})
+    expect = {f"blank_{c}_{s}": mk.frames_to_samples(m.invalid, FS, N_SAMPLES)
+              for (c, s, _b), m in masks.items()}
+    expect.update({f"notmeasured_mmc_{s}": mk.frames_to_samples(f, FS, N_SAMPLES)
+                   for s, f in mk.mmc_not_measured(masks).items()})
+    # the spike input: motion AND distrusted minutes NaN, as the Python twin builds it
+    spikes = np.isnan(ld.spike_input(np.ones(N_SAMPLES), FS, spike_mask, line))
+    expect["blank_spikes_L_T"] = spikes
     assert set(by) == set(expect)
-    for name, frames in expect.items():
-        samples = mk.frames_to_samples(frames, FS, N_SAMPLES)
+    for name, samples in expect.items():
         idx = np.flatnonzero(samples)
         assert by[name]["n_nan"] == idx.size, name
         if idx.size:  # MATLAB indices are 1-based
             assert (by[name]["first"], by[name]["last"]) == (idx[0] + 1, idx[-1] + 1), name
-    spikes = mk.frames_to_samples(masks[("spikes", "L_T", "300-3000")].invalid, FS, N_SAMPLES)
     assert spikes[-1]  # the partial frame took the last frame's state
     assert res["step1_valid"] == N_SAMPLES - int(spikes.sum())
     assert res["step1_nan_equals_blank"] is True

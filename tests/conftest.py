@@ -38,7 +38,11 @@ import numpy.typing as npt
 import pandas as pd
 import pytest
 from gems_blanking_v2.acceptance.report import BlankRow
-from gems_blanking_v2.constants import FS_NOMINAL_HZ, MAD_TO_SIGMA
+from gems_blanking_v2.constants import ENG_BAND, FS_NOMINAL_HZ, GRID_S, MAD_TO_SIGMA
+from gems_blanking_v2.emit import line_distrust
+from gems_blanking_v2.emit.line_distrust import LineDistrustRecord
+from gems_blanking_v2.emit.masks import ConsumerMask
+from gems_blanking_v2.extent.grid import n_grid_frames
 from gems_blanking_v2.types import ChannelInfo, Recording
 from scipy.signal import butter, sosfiltfilt
 
@@ -1849,7 +1853,9 @@ def make_mains_spike_t(fs: float, dur_s: float, *, locked_minutes: tuple[int, ..
                        sparse_minutes: tuple[int, ...] = (), poisson_rate_hz: float = 20.0,
                        locked_keep: float = 0.7, background_rate_hz: float = 5.0,
                        n_sparse: int = 3, amp_uv: float = 40.0, noise_uv: float = 5.0,
-                       jitter_s: float = 5e-5, seed: int = 0) -> MainsSpikes:
+                       jitter_s: float = 5e-5,
+                       locked_spans_s: tuple[tuple[float, float], ...] = (),
+                       seed: int = 0) -> MainsSpikes:
     """White noise plus negative spikes, regime chosen per minute ``[60 m, 60 (m + 1))``.
 
     * ``locked_minutes``: a 60 Hz-locked impulse train (each cycle kept with probability
@@ -1857,7 +1863,9 @@ def make_mains_spike_t(fs: float, dur_s: float, *, locked_minutes: tuple[int, ..
       ``background_rate_hz`` - intervals pile up at 1/60, 1/30, 1/20 s;
     * ``sparse_minutes``: ``n_sparse`` uniformly placed spikes only (plus the noise's own
       4.5 sigma crossings, ~4 per minute for Gaussian noise in 300-3000 Hz);
-    * every other minute: Poisson spikes at ``poisson_rate_hz`` (the null).
+    * every other minute: Poisson spikes at ``poisson_rate_hz`` (the null);
+    * ``locked_spans_s``: an extra 60 Hz-locked train inside each ``[a, b)`` s, on top of
+      whatever the minute holds (drawn last, so a seed's other spikes do not move).
 
     Amplitudes in microvolts; ``signal`` starts at t = 0.
     """
@@ -1874,6 +1882,8 @@ def make_mains_spike_t(fs: float, dur_s: float, *, locked_minutes: tuple[int, ..
             times.append(np.sort(rng.uniform(a + 1.0, b - 1.0, n_sparse)))
         else:
             times.append(_poisson_times(rng, a, b, poisson_rate_hz))
+    times += [_locked_times(rng, a, b, keep=locked_keep, jitter_s=jitter_s)
+              for a, b in locked_spans_s]
     t_all = np.sort(np.concatenate(times)) if times else np.empty(0)
     _add_spikes(x, t_all, fs, amp_uv)
     return MainsSpikes(x, tuple(locked_minutes), tuple(sparse_minutes), t_all)
@@ -1921,6 +1931,31 @@ def make_spike_pair(fs: float, dur_s: float, *, gap_samples: int, amp_uv: float 
     x[k1] -= amp_uv
     x[k2] -= amp_uv
     return x, k1, k2
+
+
+def all_valid_spike_mask(signal: str, fs: float, n_samples: int, *,
+                         t0_s: float = 0.0) -> ConsumerMask:
+    """Return the spike consumer's motion mask on ``signal`` with nothing blanked."""
+    n = n_grid_frames(n_samples, fs)
+    return ConsumerMask("spikes", signal, ENG_BAND, np.zeros(n, dtype=bool), GRID_S, t0_s)
+
+
+def make_line_distrust(raw_t: dict[str, F64], fs: float, *, recording: str,
+                       epoch_start_s: float = 0.0,
+                       motion: dict[str, ConsumerMask] | None = None,
+                       animal_key: str = "new:A") -> LineDistrustRecord:
+    """Return one recording's line-distrust record, its animal family being that recording.
+
+    For tests that need a record for a handoff; the production path is
+    ``line_distrust.decide_animal`` over all of an animal's recordings. ``motion``
+    defaults to all-valid spike masks.
+    """
+    if motion is None:
+        motion = {s: all_valid_spike_mask(s, fs, int(np.asarray(x).size), t0_s=epoch_start_s)
+                  for s, x in raw_t.items()}
+    p = line_distrust.pass1(raw_t, fs, epoch_start_s=epoch_start_s, motion=motion)
+    return line_distrust.decide_animal(animal_key, [(recording, p)])[1][(recording,
+                                                                       p.epoch_start_s)]
 
 
 def make_spike_times(dur_s: float, *, rate_hz: float, locked_keep: float = 0.0,
