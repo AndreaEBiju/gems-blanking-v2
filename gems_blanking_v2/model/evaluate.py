@@ -4,11 +4,13 @@ Everything here works on **one judgment per core** (ruling 2026-10-07 (b) R3), n
 windows. ``y`` is 1 for ``motion``; ``unjudged`` and ``unsure`` rows never reach this
 module (``labels.training_rows`` drops them).
 
-R9 (ruling 2026-10-07 (b)) is fixed **before any training**: the thresholds live in
-:data:`R9_THRESHOLDS` and are written to the run record by :func:`write_run_record`,
-which every training entry point requires (:func:`require_run_record`). A record is
-write-once: re-writing it with different numbers raises, so a threshold cannot be moved
-after results are seen.
+R9 (ruling 2026-10-07 (b)) is fixed **before any training**. The thresholds
+(:data:`R9_THRESHOLDS`) and every other choice that decides a result - the decision
+probability, the ECE bins, the ``w_adapt`` grid, the calibration kind and the
+interpretations of the rules (:func:`run_protocol`) - are written to the run record by
+:func:`write_run_record`, which every training entry point requires
+(:func:`require_run_record`). A record is write-once: re-writing it with a different
+protocol, run id or extra raises, so nothing can be moved after results are seen.
 
 Uncertainty is a **cluster** bootstrap (R9): resample whole clusters with replacement -
 recordings for the old cohort, audit spans for the new cohort - because cores within a
@@ -35,7 +37,14 @@ from gems_blanking_v2.io.store import atomic_write_text
 
 __all__ = [
     "BASELINE_FEATURE",
+    "CALIBRATION_KIND",
+    "CALIBRATION_NOTE",
+    "DECISION_P",
+    "ECE_BINS",
     "R9_THRESHOLDS",
+    "SMALL_FOLD_RULE",
+    "VERDICT_RULE",
+    "W_ADAPT_GRID",
     "Calibrator",
     "R9Thresholds",
     "Scores",
@@ -47,6 +56,7 @@ __all__ = [
     "paired_diff_ci",
     "reliability_curve",
     "require_run_record",
+    "run_protocol",
     "scores",
     "write_run_record",
 ]
@@ -63,6 +73,37 @@ N_BOOTSTRAP: Final = 1000
 
 ECE_BINS: Final = 10
 """Equal-width probability bins for the expected calibration error."""
+
+DECISION_P: Final = 0.5
+"""Predictions are ``p >= DECISION_P``. Fixed, never tuned on evaluation rows."""
+
+W_ADAPT_GRID: Final[tuple[float, ...]] = (1.0, 3.0, 10.0, 30.0)
+"""Mode B target-animal weights, swept and reported as a curve - never picked by
+intuition (task 12)."""
+
+CALIBRATION_KIND: Final = "isotonic"
+"""The calibrator fitted per (mode, animal, ``w_adapt``) on held-out data."""
+
+VERDICT_RULE: Final = (
+    "INTERPRETATION (question for Andrea): C beats B only if F1(C)-F1(B) >= "
+    "c_beats_b_min_f1_gain with the paired cluster-bootstrap interval excluding 0, at EVERY "
+    "swept w_adapt; animals with fewer than min_positives_deciding positives never decide; "
+    "A vs C is never compared."
+)
+"""How the B-vs-C verdict reads the ``w_adapt`` sweep."""
+
+SMALL_FOLD_RULE: Final = (
+    "INTERPRETATION: R9's '< 20 positives' is applied per animal (its held-out recordings "
+    "pooled), not per LORO recording; per-recording positive counts are reported beside it."
+)
+"""How R9's small-fold rule is applied."""
+
+CALIBRATION_NOTE: Final = (
+    "INTERPRETATION (question for Andrea): calibration is cross-fitted over the target's "
+    "own held-out clusters for EVERY mode, including A; mode A's ece_cal therefore uses "
+    "target labels and is not a zero-label figure."
+)
+"""What ``ece_cal`` means for mode A."""
 
 
 # ---------------------------------------------------------------------------
@@ -97,28 +138,37 @@ R9_THRESHOLDS: Final = R9Thresholds()
 """The binding values. A record carrying anything else is refused."""
 
 
+def run_protocol() -> dict[str, Any]:
+    """Everything written to the run record before training and checked on every use."""
+    return {"r9": asdict(R9_THRESHOLDS), "decision_p": DECISION_P, "ece_bins": ECE_BINS,
+            "w_adapt_grid": list(W_ADAPT_GRID), "calibration": CALIBRATION_KIND,
+            "interpretations": {"verdict_rule": VERDICT_RULE,
+                                "small_fold_rule": SMALL_FOLD_RULE,
+                                "calibration": CALIBRATION_NOTE}}
+
+
 def write_run_record(path: Path, *, run_id: str, extra: Mapping[str, Any] | None = None
                      ) -> Path:
-    """Write the run record with the R9 thresholds, **before** any training.
+    """Write the run record (:func:`run_protocol`), **before** any training.
 
-    Write-once: if ``path`` exists it must carry exactly these thresholds and this
-    ``run_id``, otherwise this raises - an existing record is never overwritten.
-    ``extra`` (corpus description, params, notes) is stored beside the thresholds.
+    Write-once: if ``path`` exists it must carry exactly this protocol, this ``run_id``
+    and this ``extra``, otherwise this raises - an existing record is never overwritten.
+    ``extra`` (corpus description, params, notes) is stored beside the protocol.
     """
-    body: dict[str, Any] = {"run_id": run_id, "r9": asdict(R9_THRESHOLDS),
+    body: dict[str, Any] = {"run_id": run_id, **run_protocol(),
                             "written_before_training": True}
     if extra:
         body["extra"] = dict(extra)
+    text = json.dumps(body, indent=1, sort_keys=True, ensure_ascii=True, allow_nan=False)
     if path.exists():
         old = json.loads(path.read_text(encoding="utf-8"))
-        if old.get("r9") != body["r9"] or old.get("run_id") != run_id:
-            msg = (f"run record {path} already exists with different thresholds or run_id; "
-                   "R9 thresholds are never changed after a run starts")
+        if old != json.loads(text):
+            msg = (f"run record {path} already exists with a different protocol, run_id or "
+                   "extra; a run record is never changed after a run starts")
             raise ValueError(msg)
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, json.dumps(body, indent=1, sort_keys=True, ensure_ascii=True,
-                                       allow_nan=False) + "\n")
+    atomic_write_text(path, text + "\n")
     return path
 
 
@@ -126,7 +176,8 @@ def require_run_record(path: Path | None) -> R9Thresholds:
     """Return the thresholds of an existing run record, or raise.
 
     Training entry points call this first, so no model can be trained before the record
-    exists, and a record whose thresholds differ from :data:`R9_THRESHOLDS` is refused.
+    exists, and a record whose thresholds or protocol (:func:`run_protocol`) differ from
+    the code's is refused.
     """
     if path is None or not Path(path).is_file():
         msg = ("no run record: write the R9 thresholds with write_run_record() before "
@@ -137,6 +188,11 @@ def require_run_record(path: Path | None) -> R9Thresholds:
     if r9 != asdict(R9_THRESHOLDS):
         msg = f"run record {path} carries R9 thresholds {r9}, not the binding values"
         raise ValueError(msg)
+    for key, want in run_protocol().items():
+        if raw.get(key) != want:
+            msg = (f"run record {path} carries {key}={raw.get(key)!r}, not the protocol "
+                   f"this code applies ({want!r})")
+            raise ValueError(msg)
     return R9Thresholds(**r9)
 
 

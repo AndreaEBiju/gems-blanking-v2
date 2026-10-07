@@ -31,6 +31,7 @@ import pandas as pd
 
 from gems_blanking_v2.detect.features import FEATURE_NAMES
 from gems_blanking_v2.io.detector_core import import_detector_module
+from gems_blanking_v2.model.evaluate import W_ADAPT_GRID
 
 __all__ = [
     "ADAPT_ROUNDS",
@@ -76,9 +77,6 @@ validation split is carved out of corpora this small)."""
 ADAPT_ROUNDS: Final = 100
 """Extra rounds when mode B continues a pooled model with ``init_model``."""
 
-W_ADAPT_GRID: Final[tuple[float, ...]] = (1.0, 3.0, 10.0, 30.0)
-"""Mode B target-animal weights, swept and reported as a curve - never picked by
-intuition (task 12)."""
 
 W_VIDEO: Final = 3.0
 """Up-weight of ``provenance == 'video_assisted'`` positives."""

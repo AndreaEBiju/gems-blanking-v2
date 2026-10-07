@@ -1799,7 +1799,9 @@ def make_feature_table(
     the :data:`FEATURE_SIGNAL` columns shifted by ``separation`` standard deviations;
     ``animal_shift`` adds a per-animal offset to every feature (covariate shift). New-
     cohort rows are judged inside one audit span per recording (``motion`` /
-    ``physiology``); old-cohort rows carry the common-mode family as ``nan``. Recording
+    ``physiology``); old-cohort rows are positives only (R3: the old marks are positives,
+    so a test needing negatives uses the new cohort) and carry the common-mode family as
+    ``nan``. Recording
     names follow each cohort's convention, so the animal letter can be read from them.
     """
     from gems_blanking_v2.detect.features import FEATURE_NAMES  # noqa: PLC0415
@@ -1818,7 +1820,10 @@ def make_feature_table(
                     rec = f"E1000_{_OLD_TOKENS.get(letter, letter)}_E1000_bl_13{r:02d}"
                     span = None
                 for k in range(cores_per_recording):
-                    y = int(rng.random() < prevalence)
+                    draw = rng.random()
+                    # R3: old-cohort marks are positives only - an unmatched old core is
+                    # unjudged, never a negative - so an old judged row is always motion.
+                    y = 1 if cohort == "old" else int(draw < prevalence)
                     x = rng.normal(0.0, 1.0, len(FEATURE_NAMES)) + offset
                     x[sig_idx] += separation * y
                     row: dict[str, object] = dict(zip(FEATURE_NAMES, x.tolist(), strict=True))

@@ -10,16 +10,22 @@ C PER_    the target's other recordings only                  LORO within the an
   ANIMAL
 ========  ==================================================  ============================
 
-All three are evaluated on **the same rows** - every judged core of the target animal,
-one held-out recording at a time for B and C - so B vs C and A vs B are matched-protocol
-comparisons. A vs C is computed on the same rows too but is **not comparable** (LOAO vs
-LORO are different tasks, invariant 12) and :mod:`~gems_blanking_v2.model.compare`
-labels it so.
+All three are evaluated on **the same rows** - every scorable judged core of the target
+animal, one held-out recording at a time for B and C - so B vs C and A vs B are
+matched-protocol comparisons. For a new-cohort animal the scorable rows are its **audit
+spans** only (``span_id`` set; R1: "scored on its own audit spans"); a judged core outside
+any span may train (B's adaptation, C) but is never scored. A vs C is computed on the
+same rows too but is **not comparable** (LOAO vs LORO are different tasks, invariant 12)
+and :mod:`~gems_blanking_v2.model.compare` labels it so.
 
 Animals are keyed ``"<cohort>:<letter>"`` (:func:`animal_key`): the old cohort's ``J``
 (JEL) is not the new cohort's ``J``, and the old cohort's unconfirmed token ``?`` is its
-own unknown group - never a target and never a per-animal model - though its rows may
-train a pooled model for a *different* target.
+own unknown group - never a target and never a per-animal model. Its rows may train a
+pooled model for a NEW-cohort target, but never for an old-cohort target: a "?" recording
+may be that very animal (the count excluded is recorded on the fold).
+
+:func:`prepare_table` refuses the prospective test set outright: any row of new-cohort
+I, J or K (``labels.is_test_animal``), or any row whose ``label_set`` is not ``train``.
 
 Leakage guards (task 12 tests): :func:`assert_disjoint_animals` on every fold, by animal
 key and - where GEMSBlanking's ``extract_animal_letter`` can read one - by the letter in
@@ -29,7 +35,9 @@ recording of the target is both adapted on and evaluated.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import json
+import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal
@@ -42,6 +50,9 @@ import pandas as pd
 from gems_blanking_v2.io.detector_core import import_detector_module
 from gems_blanking_v2.model.evaluate import (
     BASELINE_FEATURE,
+    CALIBRATION_KIND,
+    DECISION_P,
+    W_ADAPT_GRID,
     ThresholdBaseline,
     cluster_bootstrap_ci,
     cluster_ids,
@@ -49,11 +60,10 @@ from gems_blanking_v2.model.evaluate import (
     require_run_record,
     scores,
 )
-from gems_blanking_v2.model.labels import animal_key
+from gems_blanking_v2.model.labels import animal_key, is_test_animal
 from gems_blanking_v2.model.train import (
     ADAPT_ROUNDS,
     NUM_BOOST_ROUND,
-    W_ADAPT_GRID,
     check_leakage,
     feature_columns,
     fit,
@@ -77,6 +87,7 @@ __all__ = [
     "loao_folds",
     "per_animal_folds",
     "prepare_table",
+    "read_renames",
     "run_modes",
 ]
 
@@ -94,8 +105,6 @@ PROTOCOL: Final[dict[TrainingMode, Protocol]] = {
 }
 """The evaluation protocol of each mode; metrics always carry it."""
 
-DECISION_P: Final = 0.5
-"""Predictions are ``p >= DECISION_P``. Fixed, never tuned on evaluation rows."""
 
 
 class ModeRefusedError(ValueError):
@@ -148,6 +157,8 @@ class Fold:
     evaluate: I64
     adapt: I64 = field(default_factory=lambda: np.zeros(0, dtype=np.int64))
     held_out: tuple[str, ...] = ()
+    n_excluded_unknown: int = 0
+    """Old "?" rows left out of this fold's training (old-cohort targets only)."""
 
     @property
     def protocol(self) -> Protocol:
@@ -156,7 +167,7 @@ class Fold:
 
 
 def prepare_table(table: pd.DataFrame, *,
-                  renamed: Mapping[str, str] | None = None) -> pd.DataFrame:
+                  renames: Path | None = None) -> pd.DataFrame:
     """Return a positional copy with ``animal_key``, ``cluster`` and ``name_letter`` added.
 
     ``table`` is the output of :func:`~gems_blanking_v2.model.labels.training_rows`
@@ -165,23 +176,43 @@ def prepare_table(table: pd.DataFrame, *,
     ``name_letter`` is the animal letter GEMSBlanking reads from the recording name - an
     independent second reading of the animal that the fold checks compare across. Where
     it disagrees with the declared ``animal`` this raises, naming the recordings, unless
-    the recording is listed in ``renamed`` (recording -> declared animal): a block whose
-    folder was renamed after acquisition, where the folder name is authoritative for
+    the recording is declared in the rename record ``renames`` (:func:`read_renames`, the
+    one source of acknowledged renames; the caller copies it into the run record): a
+    block whose folder was renamed after acquisition, where the folder name is authoritative for
     meaning (Andrea, 2026-09-26; CLAUDE.md invariant 30). An acknowledged recording's
     ``name_letter`` is its declared animal; an unacknowledged mismatch never passes.
     """
-    for col in ("recording", "animal", "cohort", "y"):
+    for col in ("recording", "animal", "cohort", "y", "label_set"):
         if col not in table.columns:
             msg = f"table is missing required column {col!r}"
             raise ValueError(msg)
+    test = np.array([is_test_animal(c, a) for c, a in
+                     zip(table["cohort"].astype(str), table["animal"].astype(str), strict=True)],
+                    dtype=bool)
+    not_train = (table["label_set"] != "train").to_numpy()
+    if test.any() or not_train.any():
+        msg = (f"{int(test.sum())} row(s) of the prospective test set (new-cohort I/J/K) and "
+               f"{int(not_train.sum())} row(s) with label_set != 'train' reached training; "
+               "R1: they are never trained on and never scored")
+        raise ValueError(msg)
+    per_rec = table.groupby(table["recording"].astype(str))[["animal", "cohort"]].nunique()
+    multi = per_rec[(per_rec > 1).any(axis=1)]
+    if len(multi):
+        msg = (f"recording(s) {list(multi.index[:5])} carry more than one animal or cohort; "
+               "one recording is one animal of one cohort")
+        raise ValueError(msg)
     out = table.reset_index(drop=True).copy()
+    if "span_id" not in out.columns:
+        out["span_id"] = None
     out["animal_key"] = [animal_key(c, a) for c, a in
                          zip(out["cohort"].astype(str), out["animal"].astype(str), strict=True)]
     if "cluster" not in out.columns:
         out["cluster"] = cluster_ids(out).to_numpy()
-    acknowledged = dict(renamed or {})
+    acknowledged = read_renames(renames) if renames is not None else {}
     letter_of = {r: animal_letter(r) for r in out["recording"].astype(str).unique()}
-    declared = dict(zip(out["recording"].astype(str), out["animal"].astype(str), strict=True))
+    first = out.drop_duplicates("recording")  # one animal per recording, asserted above
+    declared = dict(zip(first["recording"].astype(str), first["animal"].astype(str),
+                        strict=True))
     bad = []
     for rec, letter in letter_of.items():
         if letter is None or letter == declared[rec]:
@@ -192,9 +223,42 @@ def prepare_table(table: pd.DataFrame, *,
             bad.append((rec, declared[rec], letter))
     if bad:
         msg = (f"recording name reads a different animal than the declared one: {bad}; "
-               "pass renamed={recording: declared_animal} only for a ruled rename")
+               "declare a ruled rename in the rename record (read_renames)")
         raise ValueError(msg)
     out["name_letter"] = out["recording"].astype(str).map(letter_of)
+    return out
+
+
+_LETTER: Final = re.compile(r"^[A-Z]$")
+
+
+def read_renames(path: Path) -> dict[str, str]:
+    """Read the declared rename record: the ONE source of acknowledged renames.
+
+    A JSON list of ``{"recording", "cohort", "animal", "basis"}``: a recording whose
+    folder was renamed after acquisition, filed under ``animal`` although its name reads
+    another letter. ``basis`` names the ruling. Raises on a duplicate recording, a
+    missing field, or an animal that is not one upper-case letter. Returns
+    ``{recording: animal}`` for :func:`prepare_table`; the caller writes the file's
+    content into the run record.
+    """
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        msg = f"{path}: a rename record is a JSON list"
+        raise ValueError(msg)
+    out: dict[str, str] = {}
+    for i, row in enumerate(raw):
+        for key in ("recording", "cohort", "animal", "basis"):
+            if not row.get(key):
+                msg = f"{path}: entry {i} is missing {key!r}"
+                raise ValueError(msg)
+        if not _LETTER.match(str(row["animal"])) or row["cohort"] not in ("old", "new"):
+            msg = f"{path}: entry {i} has animal {row['animal']!r} / cohort {row['cohort']!r}"
+            raise ValueError(msg)
+        if row["recording"] in out:
+            msg = f"{path}: recording {row['recording']!r} is declared twice"
+            raise ValueError(msg)
+        out[str(row["recording"])] = str(row["animal"])
     return out
 
 
@@ -202,19 +266,44 @@ def _rows(mask: npt.NDArray[np.bool_]) -> I64:
     return np.flatnonzero(mask).astype(np.int64)
 
 
+def _scorable(table: pd.DataFrame) -> npt.NDArray[np.bool_]:
+    """Rows that may be scored: every old-cohort row; a new-cohort row only in an audit span."""
+    return ((table["cohort"] == "old") | table["span_id"].notna()).to_numpy()
+
+
+def _assert_scored_on_spans(table: pd.DataFrame, fold: Fold) -> None:
+    ev = table.iloc[fold.evaluate]
+    new = (ev["cohort"] == "new").to_numpy()
+    bad = new & ~ev["cluster"].astype(str).str.startswith("span:").to_numpy()
+    if bad.any() or ev.loc[new, "span_id"].isna().any():
+        msg = (f"{fold.mode} fold for {fold.target}: new-cohort rows scored outside an audit "
+               "span (R1: each new-cohort animal is scored on its own audit spans)")
+        raise AssertionError(msg)
+
+
 def loao_folds(table: pd.DataFrame, targets: Sequence[str]) -> list[Fold]:
     """Mode A: one fold per target animal key - train on every other key, score the target."""
     keys = table["animal_key"].to_numpy()
+    scorable = _scorable(table)
+    unknown_old = keys == f"old:{UNKNOWN_ANIMAL}"
     folds = []
     for t in targets:
         _check_target(t)
-        ev = keys == t
+        is_t = keys == t
+        ev = is_t & scorable
         if not ev.any():
-            msg = f"target {t} has no rows"
+            msg = f"target {t} has no scorable rows"
             raise ValueError(msg)
-        f = Fold(TrainingMode.POOLED, t, train=_rows(~ev), evaluate=_rows(ev),
-                 held_out=tuple(sorted(set(table.loc[ev, "recording"].astype(str)))))
+        train = ~is_t
+        n_unknown = 0
+        if t.startswith("old:"):  # a "?" recording may be this very animal
+            n_unknown = int((train & unknown_old).sum())
+            train &= ~unknown_old
+        f = Fold(TrainingMode.POOLED, t, train=_rows(train), evaluate=_rows(ev),
+                 held_out=tuple(sorted(set(table.loc[ev, "recording"].astype(str)))),
+                 n_excluded_unknown=n_unknown)
         assert_disjoint_animals(table, f)
+        _assert_scored_on_spans(table, f)
         folds.append(f)
     return folds
 
@@ -231,10 +320,11 @@ def _target_recordings(table: pd.DataFrame, target: str, mode: TrainingMode) -> 
         _check_target(target)
     except ValueError as exc:
         raise ModeRefusedError(mode, target, str(exc)) from exc
-    recs = sorted(set(table.loc[table["animal_key"] == target, "recording"].astype(str)))
+    is_t = table["animal_key"] == target
+    recs = sorted(set(table.loc[is_t, "recording"].astype(str)))
     if len(recs) < 2:  # noqa: PLR2004
         raise ModeRefusedError(mode, target, f"needs >= 2 labelled recordings, has {len(recs)}")
-    return recs
+    return sorted(set(table.loc[is_t & _scorable(table), "recording"].astype(str)))
 
 
 def adapted_folds(table: pd.DataFrame, target: str) -> list[Fold]:
@@ -248,13 +338,15 @@ def adapted_folds(table: pd.DataFrame, target: str) -> list[Fold]:
     keys = table["animal_key"].to_numpy()
     rec = table["recording"].astype(str).to_numpy()
     is_t = keys == target
+    scorable = _scorable(table)
     folds = []
     for r in recs:
         f = Fold(TrainingMode.ADAPTED, target, train=_rows(~is_t),
-                 adapt=_rows(is_t & (rec != r)), evaluate=_rows(is_t & (rec == r)),
-                 held_out=(r,))
+                 adapt=_rows(is_t & (rec != r)),
+                 evaluate=_rows(is_t & (rec == r) & scorable), held_out=(r,))
         assert_disjoint_animals(table, f)
         assert_no_recording_leak(table, f)
+        _assert_scored_on_spans(table, f)
         folds.append(f)
     return folds
 
@@ -273,11 +365,13 @@ def per_animal_folds(table: pd.DataFrame, target: str) -> list[Fold]:
         raise ModeRefusedError(TrainingMode.PER_ANIMAL, target,
                                f"labels hold one class only ({sorted(set(y.tolist()))})")
     rec = table["recording"].astype(str).to_numpy()
+    scorable = _scorable(table)
     folds = []
     for r in recs:
         f = Fold(TrainingMode.PER_ANIMAL, target, train=_rows(is_t & (rec != r)),
-                 evaluate=_rows(is_t & (rec == r)), held_out=(r,))
+                 evaluate=_rows(is_t & (rec == r) & scorable), held_out=(r,))
         _assert_single_animal(table, f)
+        _assert_scored_on_spans(table, f)
         folds.append(f)
     return folds
 
@@ -384,8 +478,8 @@ def _baseline_pred(x_train: pd.Series, y_train: npt.NDArray[np.int8],
 
 
 def _record(mode: TrainingMode, fold: Fold, t: pd.DataFrame, raw: npt.NDArray[np.float64],
-            thr: npt.NDArray[np.float64], n_train: int, w: float, fold_name: str
-            ) -> pd.DataFrame:
+            thr: npt.NDArray[np.float64], n_train: int, w: float, fold_name: str,
+            n_adapt: int = 0) -> pd.DataFrame:
     ev = t.iloc[fold.evaluate]
     return pd.DataFrame({
         "mode": str(mode), "target": fold.target, "protocol": PROTOCOL[mode],
@@ -394,7 +488,8 @@ def _record(mode: TrainingMode, fold: Fold, t: pd.DataFrame, raw: npt.NDArray[np
         "cluster": ev["cluster"].astype(str).to_numpy(),
         "y": ev["y"].to_numpy().astype(np.int8), "raw": raw,
         "yhat": (raw >= DECISION_P).astype(np.int8), "yhat_thr": thr,
-        "n_train_events": n_train,
+        "n_train_events": n_train, "n_adapt_events": n_adapt,
+        "n_excluded_unknown": fold.n_excluded_unknown,
     })
 
 
@@ -415,6 +510,13 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
     held-out. Refused modes are returned, never silently skipped.
     """
     require_run_record(record_path)
+    if calibration not in (None, CALIBRATION_KIND):
+        msg = f"calibration {calibration!r} is not the recorded kind {CALIBRATION_KIND!r}"
+        raise ValueError(msg)
+    off_grid = sorted(set(map(float, w_adapt_grid)) - set(W_ADAPT_GRID))
+    if off_grid:
+        msg = f"w_adapt {off_grid} is not on the recorded grid {W_ADAPT_GRID}"
+        raise ValueError(msg)
     feats = feature_columns(table)
     x = table[feats]
     check_leakage(x, table["recording"].astype(str).to_numpy())
@@ -461,11 +563,12 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
                                          x[BASELINE_FEATURE].iloc[f.evaluate])
                     parts.append(_record(TrainingMode.ADAPTED, f, table,
                                          predict_raw(booster, x.iloc[f.evaluate]), thr,
-                                         int(rows.size), float(wa), f.held_out[0]))
+                                         int(rows.size), float(wa), f.held_out[0],
+                                         n_adapt=int(f.adapt.size)))
             if b_folds:
                 corpus.append(_corpus_row(table, TrainingMode.ADAPTED, target,
-                                          np.concatenate([pooled_rows, b_folds[0].adapt,
-                                                          b_folds[0].evaluate])))
+                                          np.concatenate([pooled_rows, b_folds[0].adapt]),
+                                          n_folds=len(b_folds)))
         if TrainingMode.PER_ANIMAL in modes:
             try:
                 c_folds = per_animal_folds(table, target)
@@ -487,8 +590,7 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
                                      int(rows.size), np.nan, f.held_out[0]))
             if c_folds:
                 corpus.append(_corpus_row(table, TrainingMode.PER_ANIMAL, target,
-                                          np.concatenate([c_folds[0].train,
-                                                          c_folds[0].evaluate])))
+                                          c_folds[0].train, n_folds=len(c_folds)))
     preds = pd.concat(parts, ignore_index=True) if parts else _empty_predictions()
     preds["p_cal"] = np.nan
     if calibration is not None and len(preds):
@@ -510,7 +612,10 @@ def learning_curve(table: pd.DataFrame, *, targets: Sequence[str], record_path: 
     pooled part for A and B, the per-animal part for C) and rescored on the same held-out
     rows. A mode-C point is emitted only if **every** fold had at least that many
     training events, so a point never silently stands for a smaller corpus. One line per
-    mode (and per ``w_adapt`` for B); ``n_train_events`` is the median actual size.
+    mode (and per ``w_adapt`` for B), labelled with its protocol (invariant 12).
+    ``n_train_events`` is the median actual size of the subsampled corpus - for B the
+    pooled part only, so B sits on the same x as A; its adaptation rows are reported in
+    ``n_adapt_events``.
     """
     rows = []
     for n in sizes:
@@ -520,31 +625,41 @@ def learning_curve(table: pd.DataFrame, *, targets: Sequence[str], record_path: 
         p = run.predictions
         for (mode, target, w), g in p.groupby(["mode", "target", "w_adapt"], dropna=False):
             per_fold = g.groupby("fold")["n_train_events"].first()
+            n_adapt = g.groupby("fold")["n_adapt_events"].first()
             if mode == str(TrainingMode.PER_ANIMAL) and int(per_fold.min()) < int(n):
                 continue
             s = scores(g["y"].to_numpy(), g["yhat"].to_numpy())
             lo, hi = cluster_bootstrap_ci(g["y"].to_numpy(), g["yhat"].to_numpy(),
                                           g["cluster"].to_numpy(), n_resamples=n_resamples,
                                           seed=seed)
-            line = mode if mode != str(TrainingMode.ADAPTED) else f"adapted w={w:g}"
-            rows.append({"target": target, "line": line, "mode": mode, "w_adapt": w,
-                         "requested_size": int(n),
-                         "n_train_events": float(per_fold.median()), "f1": s.f1,
+            proto = PROTOCOL[TrainingMode(str(mode))]
+            line = (f"{mode} ({proto})" if mode != str(TrainingMode.ADAPTED)
+                    else f"adapted w={w:g} ({proto}; x excludes adaptation rows)")
+            rows.append({"target": target, "line": line, "mode": mode, "protocol": proto,
+                         "w_adapt": w, "requested_size": int(n),
+                         "n_train_events": float((per_fold - n_adapt).median()),
+                         "n_adapt_events": float(n_adapt.median()), "f1": s.f1,
                          "f1_lo": lo, "f1_hi": hi, "n_pos": s.n_pos, "n": s.n})
     return pd.DataFrame(rows)
 
 
 def _empty_predictions() -> pd.DataFrame:
     cols = ["mode", "target", "protocol", "w_adapt", "fold", "row", "recording", "cluster",
-            "y", "raw", "yhat", "yhat_thr", "n_train_events"]
+            "y", "raw", "yhat", "yhat_thr", "n_train_events", "n_adapt_events",
+            "n_excluded_unknown"]
     return pd.DataFrame({c: [] for c in cols})
 
 
-def _corpus_row(table: pd.DataFrame, mode: TrainingMode, target: str, rows: I64
-                ) -> dict[str, object]:
-    """Labelled events, positive fraction and recording count of a mode's corpus."""
+def _corpus_row(table: pd.DataFrame, mode: TrainingMode, target: str, rows: I64, *,
+                n_folds: int = 1) -> dict[str, object]:
+    """Labelled events, positive fraction and recording count of a mode's TRAINING corpus.
+
+    For B and C, whose corpus changes with the held-out recording, this is the first
+    fold's training corpus (held-out rows excluded); ``n_folds`` says how many there are.
+    """
     sub = table.iloc[rows]
-    return {"mode": str(mode), "target": target, "n_events": len(sub),
+    return {"mode": str(mode), "target": target, "corpus_of": "fold 1 of "
+            f"{n_folds}" if n_folds > 1 else "the only fold", "n_events": len(sub),
             "positive_fraction": float(sub["y"].mean()) if len(sub) else float("nan"),
             "n_recordings": int(sub["recording"].nunique()),
             "n_animals": int(sub["animal_key"].nunique())}

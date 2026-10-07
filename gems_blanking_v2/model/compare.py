@@ -2,7 +2,10 @@
 
 Per-animal scores, matched-protocol tables, the learning curve and calibration.
 
-Rules applied here, all fixed before results (they are read from the run record):
+Rules applied here. The thresholds come from the run record (``r9`` arguments are the
+value :func:`~gems_blanking_v2.model.evaluate.require_run_record` returned), and the
+readings marked INTERPRETATION are written into that record before training
+(:func:`~gems_blanking_v2.model.evaluate.run_protocol`):
 
 * **Per animal, never averaged** (task 12 validation protocol).
 * **Matched protocol only** (invariant 12): B vs C and A vs B are paired on the same
@@ -10,16 +13,18 @@ Rules applied here, all fixed before results (they are read from the run record)
   never enters a verdict.
 * **R9 mode rule:** C beats B only if ``F1(C) - F1(B) >= 0.03`` and the 95% paired
   cluster-bootstrap interval of the difference excludes 0. B is swept over ``w_adapt``
-  and the sweep is not tuned on: C must beat B at **every** swept weight - comparing C
-  with the best B is the conservative reading (written to the run record as such).
+  and the sweep is not tuned on: C must beat B at **every** swept weight
+  (INTERPRETATION, a question for Andrea).
 * **R9 small folds:** an animal with fewer than 20 positives is reported in its own
-  table and never decides.
+  table and never decides (INTERPRETATION: per animal, not per LORO recording; the
+  per-recording positive counts are reported beside it).
 * **Rulings (i)/(j) tier steps:** a step is kept unless audit-span F1 falls by at least
   0.02 with the 95% interval of the fall excluding 0, relative to the previous step.
 """
 
 from __future__ import annotations
 
+import io
 import json
 import math
 from collections.abc import Mapping, Sequence
@@ -31,8 +36,11 @@ import numpy as np
 import numpy.typing as npt
 import pandas as pd
 
-from gems_blanking_v2.io.store import atomic_write_text
+from gems_blanking_v2.io.store import atomic_write_bytes, atomic_write_text, validate_component
 from gems_blanking_v2.model.evaluate import (
+    CALIBRATION_NOTE,
+    SMALL_FOLD_RULE,
+    VERDICT_RULE,
     R9Thresholds,
     cluster_bootstrap_ci,
     ece,
@@ -57,12 +65,7 @@ __all__ = [
 MIN_CURVE_POINTS: Final = 5
 """The learning curve has at least this many log-spaced points (task 12)."""
 
-VERDICT_RULE: Final = (
-    "C beats B only if F1(C)-F1(B) >= c_beats_b_min_f1_gain with the paired cluster-"
-    "bootstrap interval excluding 0, at EVERY swept w_adapt; animals with fewer than "
-    "min_positives_deciding positives never decide; A vs C is never compared."
-)
-"""How the B-vs-C verdict reads the w_adapt sweep. Written to the run record."""
+
 
 
 def _group_keys(preds: pd.DataFrame) -> list[tuple[str, str, float]]:
@@ -121,8 +124,19 @@ def summarize(preds: pd.DataFrame, r9: R9Thresholds, *, seed: int = 0) -> pd.Dat
             "beats_threshold": bool(thr is not None and s.f1 > thr.f1),
             "n_train_events_median": float(g["n_train_events"].median()),
             "deciding": s.n_pos >= r9.min_positives_deciding,
+            **_per_recording_positives(g, r9),
+            "ece_cal_uses_target_labels": True,
         })
     return pd.DataFrame(rows)
+
+
+def _per_recording_positives(g: pd.DataFrame, r9: R9Thresholds) -> dict[str, object]:
+    """Positives per held-out recording (SMALL_FOLD_RULE: reported, not deciding)."""
+    per = g.groupby("recording")["y"].sum()
+    return {"n_heldout_recordings": len(per),
+            "n_recordings_lt_min_pos": int((per < r9.min_positives_deciding).sum()),
+            "min_pos_per_recording": int(per.min()) if len(per) else 0,
+            "median_pos_per_recording": float(per.median()) if len(per) else 0.0}
 
 
 def _paired(preds: pd.DataFrame, a: tuple[str, float], b: tuple[str, float], target: str,
@@ -283,12 +297,21 @@ def _plot_curves(curve: pd.DataFrame, out: Path) -> list[Path]:
         ax.set_ylabel("F1 (held-out, cluster-bootstrap 95% CI)")
         ax.set_title(f"learning curve - {target}")
         ax.legend(fontsize=7)
-        p = out / f"curve_{str(target).replace(':', '_')}.png"
+        p = out / validate_component(f"curve_{str(target).replace(':', '_')}.png")
         fig.tight_layout()
-        fig.savefig(p, dpi=110)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=110)
+        atomic_write_bytes(p, buf.getvalue())
         plt.close(fig)
         paths.append(p)
     return paths
+
+
+def _write_parquet(df: pd.DataFrame, path: Path) -> None:
+    """Write ``df`` to ``path`` atomically (temp file in the same directory, then replace)."""
+    tmp = path.with_name(path.name + ".tmp")
+    df.to_parquet(tmp, index=False)
+    tmp.replace(path)
 
 
 def write_comparison(out_dir: Path, stamp: str, *, summary: pd.DataFrame,
@@ -303,16 +326,18 @@ def write_comparison(out_dir: Path, stamp: str, *, summary: pd.DataFrame,
     protocol table (A vs C marked not comparable), the corpus table, reliability curves
     per mode and the verdicts. Readable as a file on its own (task 12).
     """
+    validate_component(stamp)  # cross-platform rule 9: the stamp becomes a file name
     out_dir.mkdir(parents=True, exist_ok=True)
     pq = out_dir / f"comparison_{stamp}.parquet"
-    summary.to_parquet(pq, index=False)
+    _write_parquet(summary, pq)
     lines = [f"# Mode comparison {stamp}", ""]
     if meta:
         lines += ["```json", json.dumps(dict(meta), indent=1, sort_keys=True, default=str),
                   "```", ""]
     if r9 is not None:
         lines += ["R9 thresholds (from the run record): `"
-                  + json.dumps(asdict(r9), sort_keys=True) + "`", "", VERDICT_RULE, ""]
+                  + json.dumps(asdict(r9), sort_keys=True) + "`", "", VERDICT_RULE, "",
+                  SMALL_FOLD_RULE, "", CALIBRATION_NOTE, ""]
     dec = summary[summary["deciding"]] if len(summary) else summary
     small = summary[~summary["deciding"]] if len(summary) else summary
     lines += ["## Per animal, per mode (deciding: >= 20 positives)", "",
@@ -328,7 +353,9 @@ def write_comparison(out_dir: Path, stamp: str, *, summary: pd.DataFrame,
                  if v.task11_investigation else "") + f" ({v.detail})" for v in verdicts]
     lines += ["", "## Corpus", "",
               markdown_table(corpus),
-              "", "## Calibration (reliability, cross-fitted calibrated p)", ""]
+              "", "## Calibration (reliability, cross-fitted calibrated p)", "",
+              "ece_cal for mode A uses target labels (cross-fitted over the target's own "
+              "held-out spans); it is not a zero-label figure.", ""]
     for (mode, target, w), g in preds.groupby(["mode", "target", "w_adapt"], dropna=False):
         ok = g["p_cal"].notna()
         if not ok.any():
@@ -338,7 +365,7 @@ def write_comparison(out_dir: Path, stamp: str, *, summary: pd.DataFrame,
         lines += [f"### {mode} {target} w={w}", "",
                   markdown_table(rc), ""]
     if curve is not None and len(curve):
-        curve.to_parquet(out_dir / f"learning_curve_{stamp}.parquet", index=False)
+        _write_parquet(curve, out_dir / f"learning_curve_{stamp}.parquet")
         pngs = _plot_curves(curve, out_dir)
         lines += ["## Learning curves", ""] + [f"![{p.stem}]({p.name})" for p in pngs] + [
             "", markdown_table(curve), ""]

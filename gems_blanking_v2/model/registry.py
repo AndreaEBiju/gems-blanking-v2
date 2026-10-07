@@ -5,10 +5,14 @@ The registry presents the options honestly and records the choice; it never deci
 * **No automatic selection anywhere.** :func:`run_inference` has no default for the
   model (a test inspects its signature), there is no fallback chain, and the
   per-(mode, animal) promotion pointer is a *label* that nothing at inference time reads.
+* **Animals are cohort-qualified.** ``ModelSpec.animal`` is an animal key
+  ``"<cohort>:<letter>"`` (:func:`~gems_blanking_v2.model.labels.animal_key`): the old
+  cohort's JEL and the new cohort's J share the letter "J" and are different rats. A
+  :class:`~gems_blanking_v2.types.Recording` carries only the letter, so every inference
+  entry point takes the recording's ``cohort`` explicitly (keyword-only, no default).
 * :func:`list_applicable` excludes models that cannot legally apply - a ``PER_ANIMAL``
-  or ``ADAPTED`` model of another animal - and asserts on its own output, so a
-  mismatched model can never be returned; :func:`run_inference` re-checks and fails
-  loudly when handed a model outside that list.
+  or ``ADAPTED`` model of another animal key; :func:`run_inference` checks the animal
+  key independently and then that the whole spec is listed, and fails loudly otherwise.
 * Every :class:`ModelSpec` carries the metrics it shipped on **keyed by protocol**
   (``{"LOAO": {"f1": 0.88}, "LORO": {...}}``), so a picker can show "F1 0.88 (LOAO)"
   beside "F1 0.94 (LORO)" without inviting the invalid comparison (invariant 12). A
@@ -49,6 +53,7 @@ from gems_blanking_v2.io.registry_log import (
 )
 from gems_blanking_v2.io.store import GemsStore, atomic_write_text, utc_stamp
 from gems_blanking_v2.model.evaluate import Calibrator
+from gems_blanking_v2.model.labels import animal_key
 from gems_blanking_v2.model.train import feature_columns, predict_raw
 from gems_blanking_v2.types import Recording, TrainingMode
 
@@ -76,6 +81,15 @@ SPEC_NAME: Final = "spec.json"
 BOOSTER_NAME: Final = "model.txt"
 CALIBRATOR_NAME: Final = "calibrator.json"
 _MODEL_ID_RE: Final = re.compile(r"^[0-9a-f]{32}$")
+_ANIMAL_KEY_RE: Final = re.compile(r"^(old|new):[^:\s]+$")
+COHORTS: Final[frozenset[str]] = frozenset({"old", "new"})
+
+
+def _check_cohort(cohort: str) -> str:
+    if cohort not in COHORTS:
+        msg = f"cohort must be one of {sorted(COHORTS)}, got {cohort!r}"
+        raise ValueError(msg)
+    return cohort
 
 
 def model_content_id(booster: lgb.Booster, calibrator: Calibrator, *, mode: TrainingMode,
@@ -116,7 +130,8 @@ def _canon(obj: object) -> str:
 class ModelSpec:
     """One trained model, as the user sees it in the picker (task 12A).
 
-    ``animal`` is ``None`` for ``POOLED`` and required otherwise. ``calibrator`` is a
+    ``animal`` is ``None`` for ``POOLED`` and otherwise an animal key
+    ``"<cohort>:<letter>"`` (validated). ``calibrator`` is a
     POSIX path **relative to gems_root** (cross-platform rule 2). ``metrics`` maps a
     protocol to its metric values; non-finite values are refused (JSON cannot carry
     them - a metric that could not be computed is absent).
@@ -137,6 +152,10 @@ class ModelSpec:
         if (mode is TrainingMode.POOLED) != (self.animal is None):
             msg = (f"{mode} model with animal={self.animal!r}: POOLED has no animal, "
                    "ADAPTED and PER_ANIMAL must name one")
+            raise ValueError(msg)
+        if self.animal is not None and not _ANIMAL_KEY_RE.match(self.animal):
+            msg = (f"animal must be an animal key '<cohort>:<letter>' with cohort old or new, "
+                   f"got {self.animal!r} (a bare letter names two rats across cohorts)")
             raise ValueError(msg)
         cal = PurePosixPath(Path(self.calibrator).as_posix())
         if cal.is_absolute() or Path(self.calibrator).is_absolute() or ".." in cal.parts:
@@ -304,28 +323,26 @@ class Registry:
         return Calibrator.from_json(p.read_text(encoding="utf-8"))
 
 
-def _applies(spec: ModelSpec, animal: str) -> bool:
-    return TrainingMode(spec.mode) is TrainingMode.POOLED or spec.animal == animal
+def _applies(spec: ModelSpec, key: str) -> bool:
+    return TrainingMode(spec.mode) is TrainingMode.POOLED or spec.animal == key
 
 
-def list_applicable(rec: Recording, registry: Registry) -> list[ModelSpec]:
+def list_applicable(rec: Recording, registry: Registry, *, cohort: str) -> list[ModelSpec]:
     """Every model that MAY be applied to ``rec``, metrics attached. Never a default.
 
-    ``PER_ANIMAL`` and ``ADAPTED`` models of other animals are excluded; the result is
-    then asserted, so a mismatch can never leave this function.
+    ``cohort`` is the recording's cohort (``"old"`` / ``"new"``), required: the recording
+    is matched on ``animal_key(cohort, rec.animal)``, never on the bare letter.
+    ``PER_ANIMAL`` and ``ADAPTED`` models of any other animal key are excluded.
     """
-    out = [s for s in registry.specs() if _applies(s, rec.animal)]
-    for s in out:
-        if TrainingMode(s.mode) is not TrainingMode.POOLED and s.animal != rec.animal:
-            msg = f"{s.mode} model for animal {s.animal} listed for animal {rec.animal}"
-            raise AssertionError(msg)
-    return out
+    key = animal_key(_check_cohort(cohort), rec.animal)
+    return [s for s in registry.specs() if _applies(s, key)]
 
 
-def _is_listed(chosen: ModelSpec, rec: Recording, registry: Registry) -> bool:
+def _is_listed(chosen: ModelSpec, rec: Recording, registry: Registry, cohort: str) -> bool:
     """Whether ``chosen`` - the whole spec, not just its id - is in ``list_applicable``."""
     text = chosen.to_json()
-    return any(s.to_json() == text for s in list_applicable(rec, registry))
+    return any(s.to_json() == text
+               for s in list_applicable(rec, registry, cohort=cohort))
 
 
 @dataclass(frozen=True)
@@ -337,11 +354,13 @@ class InferenceResult:
     provenance: dict[str, Any]
 
 
-def inference_provenance(spec: ModelSpec, *, rec: Recording, chosen_by: str) -> dict[str, Any]:
+def inference_provenance(spec: ModelSpec, *, rec: Recording, cohort: str,
+                         chosen_by: str) -> dict[str, Any]:
     """Return the provenance block of a run: the full spec and the user's choice."""
     return {"model": spec.to_dict(), "model_id": spec.model_id,
             "unvalidated": spec.unvalidated, "chosen_by": chosen_by,
-            "animal": rec.animal, "session": rec.session}
+            "animal": rec.animal, "cohort": _check_cohort(cohort),
+            "animal_key": animal_key(cohort, rec.animal), "session": rec.session}
 
 
 def require_model_in_provenance(prov: Mapping[str, Any]) -> ModelSpec:
@@ -352,47 +371,57 @@ def require_model_in_provenance(prov: Mapping[str, Any]) -> ModelSpec:
     return ModelSpec.from_dict(prov["model"])
 
 
-def run_inference(rec: Recording, chosen: ModelSpec, registry: Registry, *,
+def run_inference(rec: Recording, chosen: ModelSpec, registry: Registry, *, cohort: str,
                   cores: pd.DataFrame, chosen_by: str) -> InferenceResult:
     """Score ``rec``'s cores with the model the user chose. Fails if it may not apply.
 
     ``chosen`` has no default and there is no fallback: if the user has not chosen, the
-    run does not start. ``cores`` holds the recording's core feature rows.
+    run does not start. ``cohort`` is the recording's cohort (required). ``cores`` holds
+    the recording's core feature rows.
     """
-    if not _is_listed(chosen, rec, registry):
+    key = animal_key(_check_cohort(cohort), rec.animal)
+    if TrainingMode(chosen.mode) is not TrainingMode.POOLED and chosen.animal != key:
+        msg = (f"{chosen.mode} model for {chosen.animal} is not applicable to {key}; "
+               "choose from list_applicable()")
+        raise NotApplicableError(msg)
+    if not _is_listed(chosen, rec, registry, cohort):
         msg = (f"model {chosen.model_id} ({chosen.mode}, animal={chosen.animal}) is not "
-               f"applicable to animal {rec.animal}; choose from list_applicable()")
+               f"in list_applicable() for {key}")
         raise NotApplicableError(msg)
     booster = registry.booster(chosen)
     x = cores[feature_columns(cores, booster.feature_name())]
     raw = predict_raw(booster, x)
     p = registry.calibrator(chosen).apply(raw)
     return InferenceResult(p_motion=p, raw=raw,
-                           provenance=inference_provenance(chosen, rec=rec,
+                           provenance=inference_provenance(chosen, rec=rec, cohort=cohort,
                                                            chosen_by=chosen_by))
 
 
 def resolve_batch(recs: Sequence[Recording], choices: Mapping[str, ModelSpec],
-                  registry: Registry) -> pd.DataFrame:
+                  registry: Registry, *, cohort: str) -> pd.DataFrame:
     """Return the assignment table a batch shows for confirmation: one choice per animal.
 
-    Raises if any animal in the batch has no choice, or a choice is not applicable.
-    ``mixed_modes`` is True on every row when the batch spans more than one mode - the
-    QC report must surface it (mode is then a covariate, task 19).
+    A batch is one cohort (``cohort``, required); ``choices`` is keyed by animal key
+    (``"<cohort>:<letter>"``). Raises if any animal in the batch has no choice, or a choice
+    is not applicable. ``mixed_modes`` is True on every row when the batch spans more than
+    one mode - the QC report must surface it (mode is then a covariate, task 19).
     """
-    animals = sorted({r.animal for r in recs})
-    missing = [a for a in animals if a not in choices]
+    _check_cohort(cohort)
+    keys = sorted({animal_key(cohort, r.animal) for r in recs})
+    missing = [k for k in keys if k not in choices]
     if missing:
         msg = f"no model chosen for animal(s) {missing}; a batch needs one choice per animal"
         raise NotApplicableError(msg)
     rows = []
     for r in recs:
-        spec = choices[r.animal]
-        if not _is_listed(spec, r, registry):
-            msg = f"chosen model {spec.model_id} is not applicable to animal {r.animal}"
+        key = animal_key(cohort, r.animal)
+        spec = choices[key]
+        if not _is_listed(spec, r, registry, cohort):
+            msg = f"chosen model {spec.model_id} is not applicable to animal {key}"
             raise NotApplicableError(msg)
-        rows.append({"animal": r.animal, "session": r.session, "model_id": spec.model_id,
-                     "mode": str(TrainingMode(spec.mode)), "unvalidated": spec.unvalidated})
+        rows.append({"animal": r.animal, "animal_key": key, "session": r.session,
+                     "model_id": spec.model_id, "mode": str(TrainingMode(spec.mode)),
+                     "unvalidated": spec.unvalidated})
     out = pd.DataFrame(rows)
     out["mixed_modes"] = out["mode"].nunique() > 1 if len(out) else False
     return out
