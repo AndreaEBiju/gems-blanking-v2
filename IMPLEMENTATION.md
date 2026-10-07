@@ -5615,6 +5615,23 @@ This classifies each beat-locked component as leak or neural even if every subtr
 
 Andrea's confirmation now covers only the animal-alias table. The label-group table is informational unless she recognises a group.
 
+### RULING 2026-10-07 (j) — ruling (i) results accepted; tier 2 split by evidence strength
+
+**Measured (build, 2026-10-07):**
+- **Boundary test:** perfect separation among decidable files (≥ 4 edges): model 172/172 grid-locked, human 32/32 not. With undecidable files counted as failures it scores 88.7% on model and 94.1% on human, below the pre-fixed 95%.
+- **Model history:** GEMSBlanking's first commit and MATLAB export are dated 2026-05-17. No processed-file list exists. Model intervals could have been imported in browseMotionArtifacts format.
+- **Tiers:** 19 / 96 / 21 recordings. The 3 grid-locked `MESTIM_RAT` exports were already model.
+- **Night 1:** 195 jobs. The waiter is fixed: Git Bash had treated `America/New_York` as GMT.
+
+**Rulings:**
+1. **Using the test to exclude only is accepted.** It is a deviation from (i) item 1, but a conservative one: the test never admits a file, and here it changed nothing.
+2. **Tier 2 is split by the strength of its evidence:**
+   - **2a:** decidable and not grid-locked. Among decidable files the test was perfect, so this is positive evidence of hand marking.
+   - **2b:** undecidable (< 4 edges), admitted on the date route only (before 2026-05-17). This is weaker: the date is a first commit, and uncommitted earlier use is not ruled out.
+   Report counts of 2a and 2b per animal.
+3. **The data-driven check of (i) item 4 runs in three steps:** tier 1; tier 1 + 2a; tier 1 + 2a + 2b. Each step is kept only if it does not lower audit-span F1 by ≥ 0.02 with a 95% CI excluding 0, relative to the previous step. Mode choice uses the largest kept set, under (i)'s ranking-agreement condition.
+4. **Andrea's alias confirmation is still pending.** It changes only the animal column, so no recompute.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
