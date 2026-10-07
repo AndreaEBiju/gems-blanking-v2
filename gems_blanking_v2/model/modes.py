@@ -29,7 +29,7 @@ recording of the target is both adapted on and evaluated.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal
@@ -155,11 +155,20 @@ class Fold:
         return PROTOCOL[self.mode]
 
 
-def prepare_table(table: pd.DataFrame) -> pd.DataFrame:
-    """Return a positional copy with ``animal_key`` and ``cluster`` columns added.
+def prepare_table(table: pd.DataFrame, *,
+                  renamed: Mapping[str, str] | None = None) -> pd.DataFrame:
+    """Return a positional copy with ``animal_key``, ``cluster`` and ``name_letter`` added.
 
     ``table`` is the output of :func:`~gems_blanking_v2.model.labels.training_rows`
     (it must carry ``y``) joined to the feature columns.
+
+    ``name_letter`` is the animal letter GEMSBlanking reads from the recording name - an
+    independent second reading of the animal that the fold checks compare across. Where
+    it disagrees with the declared ``animal`` this raises, naming the recordings, unless
+    the recording is listed in ``renamed`` (recording -> declared animal): a block whose
+    folder was renamed after acquisition, where the folder name is authoritative for
+    meaning (Andrea, 2026-09-26; CLAUDE.md invariant 30). An acknowledged recording's
+    ``name_letter`` is its declared animal; an unacknowledged mismatch never passes.
     """
     for col in ("recording", "animal", "cohort", "y"):
         if col not in table.columns:
@@ -170,6 +179,22 @@ def prepare_table(table: pd.DataFrame) -> pd.DataFrame:
                          zip(out["cohort"].astype(str), out["animal"].astype(str), strict=True)]
     if "cluster" not in out.columns:
         out["cluster"] = cluster_ids(out).to_numpy()
+    acknowledged = dict(renamed or {})
+    letter_of = {r: animal_letter(r) for r in out["recording"].astype(str).unique()}
+    declared = dict(zip(out["recording"].astype(str), out["animal"].astype(str), strict=True))
+    bad = []
+    for rec, letter in letter_of.items():
+        if letter is None or letter == declared[rec]:
+            continue
+        if acknowledged.get(rec) == declared[rec]:
+            letter_of[rec] = declared[rec]
+        else:
+            bad.append((rec, declared[rec], letter))
+    if bad:
+        msg = (f"recording name reads a different animal than the declared one: {bad}; "
+               "pass renamed={recording: declared_animal} only for a ruled rename")
+        raise ValueError(msg)
+    out["name_letter"] = out["recording"].astype(str).map(letter_of)
     return out
 
 
@@ -281,7 +306,11 @@ def _letters(table: pd.DataFrame, rows: I64) -> set[tuple[str, str]]:
     out = set()
     for cohort, rec in set(zip(sub["cohort"].astype(str), sub["recording"].astype(str),
                                strict=True)):
-        letter = animal_letter(rec)
+        if "name_letter" in sub.columns:
+            letter = sub.loc[sub["recording"].astype(str) == rec, "name_letter"].iloc[0]
+            letter = None if pd.isna(letter) else str(letter)
+        else:
+            letter = animal_letter(rec)
         if letter is not None:
             out.add((cohort, letter))
     return out

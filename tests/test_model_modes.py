@@ -133,6 +133,22 @@ def test_mode_c_refuses_animals_it_cannot_fit(table: pd.DataFrame) -> None:
         md.loao_folds(unknown, ["old:?"])
 
 
+def test_a_name_that_reads_another_animal_needs_a_ruled_rename() -> None:
+    raw = make_feature_table({"new": ("A", "B")}, n_recordings=2, cores_per_recording=10,
+                             seed=14)
+    if md.animal_letter(str(raw["recording"].iloc[0])) is None:
+        pytest.skip("GEMSBlanking checkout not available: no second reading of the animal")
+    moved = str(raw.loc[raw["animal"] == "B", "recording"].iloc[0])  # a "gems_b_..." block
+    raw.loc[raw["recording"] == moved, "animal"] = "A"  # its folder was renamed to A
+    with pytest.raises(ValueError, match="reads a different animal"):
+        md.prepare_table(raw)
+    with pytest.raises(ValueError, match="reads a different animal"):
+        md.prepare_table(raw, renamed={moved: "B"})  # acknowledging the wrong animal
+    t = md.prepare_table(raw, renamed={moved: "A"})
+    assert set(t.loc[t["recording"] == moved, "name_letter"]) == {"A"}
+    md.loao_folds(t, ["new:A", "new:B"])  # the acknowledged block no longer trips the check
+
+
 def test_old_and_new_letters_are_different_animals() -> None:
     raw = make_feature_table({"new": ("J",), "old": ("J",)}, n_recordings=2,
                              cores_per_recording=10, seed=3)
