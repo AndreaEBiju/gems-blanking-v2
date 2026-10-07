@@ -23,9 +23,14 @@ from gems_blanking_v2.model import train as tr
 from gems_blanking_v2.model.labels import NEGATIVE_JUDGEMENTS
 from gems_blanking_v2.types import TrainingMode
 
-from tests.conftest import make_feature_table
+from tests.conftest import FEATURE_SIGNAL, make_feature_table
 
 THREADS = 2
+
+
+def _rate(t: pd.DataFrame) -> tr.OldRateEstimate:
+    """Return the combined old-rate estimate over a test table's own old rows."""
+    return tr.old_motion_rate(t)
 W = ev.W_ADAPT_GRID
 OPT_INS = md.LabelOptIns(allow_model_labels=False, keep_tiers=("1", "2a"))
 
@@ -36,12 +41,12 @@ def run(tmp_path_factory: pytest.TempPathFactory) -> tuple[pd.DataFrame, md.Mode
     root = tmp_path_factory.mktemp("prov")
     record = ev.write_run_record(root / "run_record.json", run_id="unit_run")
     raw = make_feature_table({"new": ("A", "B"), "old": ("F",)}, n_recordings=3,
-                             cores_per_recording=40, seed=31)
+                             cores_per_recording=120, set_a_per_recording=30, seed=31)
     tiers = {r: ("1" if i % 2 else "2a") for i, r in
              enumerate(sorted(set(raw.loc[raw["cohort"] == "old", "recording"])))}
     table = md.prepare_table(raw)
     reg = rg.Registry(GemsStore.initialise(root / "gems"))
-    out = md.run_modes(table, targets=["new:A", "new:B"], record_path=record,
+    out = md.run_modes(table, old_rate=_rate(table), targets=["new:A", "new:B"], record_path=record,
                        num_threads=THREADS, w_adapt_grid=W, rounds=30, adapt_rounds=10,
                        registry=reg, user="tester", old_tiers=tiers, label_opt_ins=OPT_INS)
     return table, out, reg, record
@@ -125,7 +130,7 @@ def test_provenance_json_carries_spec_corpus_thresholds_record_and_code(
         assert sum(c["label_source"].values()) == c["n_events"]
         assert set(c["label_source"]) == {"human"}
     old = [c for c in comp if c["animal_key"] == "old:F"]
-    assert {c["tier"] for c in old} == {"1", "2a"}
+    assert {c["tier"] for c in old} == {"1", "2a", "set_a"}
     assert sum(c["n_events"] for c in old) == int((table["cohort"] == "old").sum())
 
 
@@ -174,23 +179,29 @@ def test_registration_needs_a_user_and_a_full_calibrated_pass(tmp_path: Path) ->
     kw = {"targets": ["new:A"], "record_path": record, "num_threads": THREADS,
           "registry": reg}
     with pytest.raises(ValueError, match="acting user"):
-        md.run_modes(table, **kw)  # type: ignore[arg-type]
+        md.run_modes(table, old_rate=_rate(table), **kw)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="only a full, calibrated pass"):
-        md.run_modes(table, user="t", train_size=50, **kw)  # type: ignore[arg-type]
+        md.run_modes(table, old_rate=_rate(table),
+                     user="t", train_size=50, **kw)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="only a full, calibrated pass"):
-        md.run_modes(table, user="t", calibration=None, **kw)  # type: ignore[arg-type]
+        md.run_modes(table, old_rate=_rate(table),
+                     user="t", calibration=None, **kw)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="all three modes over the full"):
-        md.run_modes(table, user="t", w_adapt_grid=(1.0, 10.0), label_opt_ins=OPT_INS,
+        md.run_modes(table, old_rate=_rate(table),
+                     user="t", w_adapt_grid=(1.0, 10.0), label_opt_ins=OPT_INS,
                      **kw)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="all three modes over the full"):
-        md.run_modes(table, user="t", modes=(TrainingMode.POOLED,), label_opt_ins=OPT_INS,
+        md.run_modes(table, old_rate=_rate(table),
+                     user="t", modes=(TrainingMode.POOLED,), label_opt_ins=OPT_INS,
                      **kw)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="label opt-ins"):
-        md.run_modes(table, user="t", **kw)  # type: ignore[arg-type]
+        md.run_modes(table, old_rate=_rate(table), user="t", **kw)  # type: ignore[arg-type]
     as_dict: object = {"allow_model_labels": False, "keep_tiers": ["1"]}  # not LabelOptIns
     with pytest.raises(ValueError, match="label opt-ins"):
-        md.run_modes(table, user="t", label_opt_ins=as_dict, **kw)  # type: ignore[arg-type]
-    plain = md.run_modes(table, targets=["new:A"], record_path=record, num_threads=THREADS,
+        md.run_modes(table, old_rate=_rate(table),
+                     user="t", label_opt_ins=as_dict, **kw)  # type: ignore[arg-type]
+    plain = md.run_modes(table, old_rate=_rate(table),
+                         targets=["new:A"], record_path=record, num_threads=THREADS,
                          modes=(TrainingMode.POOLED,), rounds=10)
     assert plain.registered == ()
     assert reg.specs() == []
@@ -205,7 +216,7 @@ def test_label_opt_ins_are_checked_against_the_table(tmp_path: Path) -> None:
         with pytest.raises(TypeError, match="tuple of str"):
             md.LabelOptIns(allow_model_labels=False, keep_tiers=bad)  # type: ignore[arg-type]
     raw = make_feature_table({"new": ("A", "B"), "old": ("F",)}, n_recordings=2,
-                             cores_per_recording=10, seed=36)
+                             cores_per_recording=10, set_a_per_recording=40, seed=36)
     old_recs = sorted(set(raw.loc[raw["cohort"] == "old", "recording"]))
     tiers = {old_recs[0]: "1", old_recs[1]: "2b"}
     t = md.prepare_table(raw)
@@ -223,7 +234,8 @@ def test_label_opt_ins_are_checked_against_the_table(tmp_path: Path) -> None:
     record = ev.write_run_record(tmp_path / "r.json", run_id="r")
     reg = rg.Registry(GemsStore.initialise(tmp_path / "gems"))
     with pytest.raises(ValueError, match="outside keep_tiers"):
-        md.run_modes(t, targets=["new:A"], record_path=record, num_threads=THREADS,
+        md.run_modes(t, old_rate=_rate(t),
+                     targets=["new:A"], record_path=record, num_threads=THREADS,
                      registry=reg, user="t", old_tiers=tiers,
                      label_opt_ins=md.LabelOptIns(allow_model_labels=False, keep_tiers=("1",)))
 
@@ -236,7 +248,7 @@ def test_a_final_model_that_cannot_be_fitted_records_a_refusal(tmp_path: Path) -
     t = md.prepare_table(raw)
     record = ev.write_run_record(tmp_path / "r.json", run_id="r")
     reg = rg.Registry(GemsStore.initialise(tmp_path / "gems"))
-    out = md.run_modes(t, targets=["new:A", "new:B"], record_path=record,
+    out = md.run_modes(t, old_rate=_rate(t), targets=["new:A", "new:B"], record_path=record,
                        num_threads=THREADS, rounds=10, adapt_rounds=5, registry=reg,
                        user="t", label_opt_ins=md.LabelOptIns(False, ()))
     final = {(r.mode, r.target) for r in out.refusals if r.fold == "final"}
@@ -261,7 +273,8 @@ def test_a_registered_model_is_applicable_and_runs(
     listed = rg.list_applicable(rec_a, reg, cohort="new")
     assert {str(s.mode) for s in listed} == {"pooled", "adapted", "per_animal"}
     assert all(s.animal in (None, "new:A") for s in listed)
-    res = rg.run_inference(rec_a, listed[0], reg, cohort="new", cores=table, chosen_by="t")
+    res = rg.run_inference(rec_a, listed[0], reg, cohort="new", cores=table, chosen_by="t",
+                           evaluation=False)
     assert np.isfinite(res.p_motion).all()
 
 
@@ -278,10 +291,14 @@ def test_shap_review_html_reuses_detector_review(
         run: tuple[pd.DataFrame, md.ModeRun, rg.Registry, Path]) -> None:
     _t, _o, reg, _r = run
     pooled = next(s for s in reg.specs() if s.mode is TrainingMode.POOLED)
-    # unseen judged cores whose classes overlap, so some negatives are called motion
-    cores = md.prepare_table(make_feature_table({"new": ("A",)}, n_recordings=2,
-                                                cores_per_recording=60, separation=0.5,
-                                                seed=35))
+    # unseen judged cores whose classes overlap, so some negatives are called motion: six
+    # judged negatives are given the motion signature outright, so the disagreement set is
+    # never empty by the luck of a seed
+    raw = make_feature_table({"new": ("A",)}, n_recordings=2, cores_per_recording=60,
+                             separation=0.5, seed=35)
+    neg = raw.index[raw["y"] == 0][:6]
+    raw.loc[neg, list(FEATURE_SIGNAL)] += 3.0
+    cores = md.prepare_table(raw)
     fs = dict.fromkeys(cores["recording"].astype(str), 24414.0625)
     p = reg.calibrator(pooled).apply(tr.predict_raw(reg.booster(pooled), cores[
         tr.feature_columns(cores)]))

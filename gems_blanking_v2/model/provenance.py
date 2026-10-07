@@ -37,7 +37,7 @@ import pandas as pd
 from gems_blanking_v2.detect.recall import source_sha256
 from gems_blanking_v2.io.store import atomic_write_text
 from gems_blanking_v2.model.evaluate import run_protocol
-from gems_blanking_v2.model.labels import animal_key
+from gems_blanking_v2.model.labels import ADJUDICATED_BASIS, SET_A_BASIS, animal_key
 
 if TYPE_CHECKING:
     from gems_blanking_v2.model.registry import ModelSpec
@@ -52,6 +52,10 @@ __all__ = [
 ]
 
 PROVENANCE_NAME: Final = "provenance.json"
+SET_A_TIER: Final = "set_a"
+"""The corpus-composition tier of set A's judged random old cores."""
+ADJUDICATED_TIER: Final = "adjudicated"
+"""The corpus-composition tier of other old cores Andrea judged on the screen."""
 _PROTOCOL_KEYS: Final[tuple[str, ...]] = tuple(run_protocol())
 
 
@@ -76,17 +80,27 @@ def corpus_composition(table: pd.DataFrame, old_tiers: Mapping[str, str] | None
                        ) -> list[dict[str, Any]]:
     """Label counts (and label_source counts) per animal key x tier of a training corpus.
 
-    New-cohort rows carry no tier (the key is absent). Every old-cohort recording must
-    have a tier in ``old_tiers``; one without raises, naming it - an old label of unknown
-    tier is never admitted silently.
+    New-cohort rows carry no tier (the key is absent). Set A's judged random old cores
+    are Andrea's own judgments, not inherited marks: their tier is ``set_a``. Every other
+    old-cohort recording must have a tier in ``old_tiers``; one without raises, naming it
+    - an old label of unknown tier is never admitted silently.
     """
     keys = [animal_key(c, a) for c, a in
             zip(table["cohort"].astype(str), table["animal"].astype(str), strict=True)]
     tiers: list[str | None] = []
     missing: set[str] = set()
-    for c, r in zip(table["cohort"].astype(str), table["recording"].astype(str), strict=True):
+    basis = (table["basis"].astype(str) if "basis" in table.columns
+             else pd.Series([""] * len(table), index=table.index))
+    for c, r, b in zip(table["cohort"].astype(str), table["recording"].astype(str), basis,
+                       strict=True):
         if c != "old":
             tiers.append(None)
+            continue
+        if b == SET_A_BASIS:
+            tiers.append(SET_A_TIER)
+            continue
+        if b == ADJUDICATED_BASIS:
+            tiers.append(ADJUDICATED_TIER)
             continue
         t = (old_tiers or {}).get(r)
         if t is None:

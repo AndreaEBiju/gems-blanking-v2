@@ -1840,13 +1840,6 @@ FEATURE_SIGNAL: Final[tuple[str, ...]] = (
 )
 """The synthetic features that carry the motion signal; every other column is noise."""
 
-COMMON_MODE_FEATURES: Final[tuple[str, ...]] = (
-    "cm_resid_max_c0", "cm_resid_max_c100", "cm_resid_max_c250", "cm_resid_max_c500",
-    "within_minus_across_c0", "within_minus_across_c100", "within_minus_across_c250",
-    "within_minus_across_c500", "cm_fraction",
-)
-"""Absent (``nan``) on the old cohort's hardware tripole, as in the real feature matrix."""
-
 _OLD_TOKENS: Final[dict[str, str]] = {"F": "FRE", "J": "JEL", "L": "LOL", "O": "ORE"}
 
 
@@ -1858,6 +1851,8 @@ def make_feature_table(
     prevalence: float = 0.3,
     separation: float = 1.5,
     animal_shift: float = 0.0,
+    set_a_per_recording: int = 0,
+    set_a_prevalence: float = 0.3,
     seed: int = 0,
 ) -> pd.DataFrame:
     """Build a labelled core table: task 10's label columns, ``span_id``, features, ``y``.
@@ -1867,11 +1862,21 @@ def make_feature_table(
     ``animal_shift`` adds a per-animal offset to every feature (covariate shift). New-
     cohort rows are judged inside one audit span per recording (``motion`` /
     ``physiology``); old-cohort rows are positives only (R3: the old marks are positives,
-    so a test needing negatives uses the new cohort) and carry the common-mode family as
-    ``nan``. Recording
-    names follow each cohort's convention, so the animal letter can be read from them.
+    so a test needing negatives uses the new cohort). Both cohorts carry every feature
+    (the common signal set, ruling 2026-10-08 (b) P1). Recording names follow each
+    cohort's convention, so the animal letter can be read from them.
+
+    ``set_a_per_recording`` adds, to every old-cohort recording, that many cores judged
+    by Andrea in set A's random old sample (``basis == SET_A_BASIS``, both classes at
+    ``set_a_prevalence``; ruling 2026-10-08 (b) item 1(c)) - the old-negative source
+    without which no old-cohort row may train.
     """
-    from gems_blanking_v2.detect.features import FEATURE_NAMES  # noqa: PLC0415
+    from gems_blanking_v2.detect.features import (  # noqa: PLC0415
+        FEATURE_NAMES,
+        FEATURE_VERSION,
+        FEATURE_VERSION_COLUMN,
+    )
+    from gems_blanking_v2.model.labels import SET_A_BASIS  # noqa: PLC0415
 
     rng = np.random.default_rng(seed)
     rows: list[dict[str, object]] = []
@@ -1886,26 +1891,90 @@ def make_feature_table(
                 else:
                     rec = f"E1000_{_OLD_TOKENS.get(letter, letter)}_E1000_bl_13{r:02d}"
                     span = None
-                for k in range(cores_per_recording):
+                n_set_a = set_a_per_recording if cohort == "old" else 0
+                for k in range(cores_per_recording + n_set_a):
                     draw = rng.random()
+                    set_a = k >= cores_per_recording
                     # R3: old-cohort marks are positives only - an unmatched old core is
-                    # unjudged, never a negative - so an old judged row is always motion.
-                    y = 1 if cohort == "old" else int(draw < prevalence)
+                    # unjudged, never a negative - so an old judged row is always motion,
+                    # except set A's random cores, which Andrea judged either way.
+                    y = (int(draw < set_a_prevalence) if set_a else 1 if cohort == "old"
+                         else int(draw < prevalence))
                     x = rng.normal(0.0, 1.0, len(FEATURE_NAMES)) + offset
                     x[sig_idx] += separation * y
                     row: dict[str, object] = dict(zip(FEATURE_NAMES, x.tolist(), strict=True))
-                    if cohort == "old":
-                        for f in COMMON_MODE_FEATURES:
-                            row[f] = math.nan
                     t0 = 10.0 + 2.0 * k
                     row.update({
                         "recording": rec, "animal": letter, "cohort": cohort,
                         "start_s": t0, "stop_s": t0 + 0.2,
                         "judgement": "motion" if y else "physiology",
-                        "source": "human" if cohort == "new" else "inherited",
-                        "basis": "mark_overlap" if y else "exhaustive_span",
+                        "source": "human" if cohort == "new" or set_a else "inherited",
+                        "basis": SET_A_BASIS if set_a else "mark_overlap" if y
+                        else "exhaustive_span",
                         "label_set": "train", "label_source": "human", "span_id": span,
-                        "y": y,
+                        "y": y, FEATURE_VERSION_COLUMN: FEATURE_VERSION,
                     })
                     rows.append(row)
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# task 11 / ruling 2026-10-08 (b) P1: a common-set signal set of any nerve count
+# ---------------------------------------------------------------------------
+
+NERVE_CUFFS: Final = "LRABCDEFGH"
+"""Cuff letters for :func:`make_signal_set`'s nerve signals, in order (``L_T``, ``R_T``,
+``A_T``, ...): the first two are the common set's two cuffs."""
+
+
+class SignalSet(NamedTuple):
+    """Return of :func:`make_signal_set`."""
+
+    signals: dict[str, F64]
+    """``<cuff>_T`` nerve signals and ``ANT1``-``ANT3``, microvolts."""
+    events: list[tuple[float, float]]
+    """Injected event spans, seconds."""
+    quiet: list[tuple[float, float]]
+    """Event-free windows of event-like length, seconds."""
+
+
+def make_signal_set(n_nerve: int, fs: float, dur_s: float, *, n_events: int = 20,
+                    hit_p: float = 0.7, seed: int = 0) -> SignalSet:
+    """Nerve signals with IDENTICAL per-signal statistics, plus three fixed stomach channels.
+
+    Every nerve signal is an independent :func:`make_eng` host; each event hits each
+    nerve signal independently with probability ``hit_p``, at a per-signal gain drawn
+    from one log-normal - so signal ``i``'s statistics do not depend on ``n_nerve``,
+    and the first ``k`` signals of a larger set equal a ``k``-signal set of the same
+    seed. The stomach channels (slow, mostly event-free) depend on ``seed`` only.
+    Event kinds cycle through the four additive kinds; event amplitudes (in host sigma)
+    and durations (0.05-0.4 s) are drawn per event, not per signal.
+    """
+    if not 1 <= n_nerve <= len(NERVE_CUFFS):
+        msg = f"n_nerve must be 1..{len(NERVE_CUFFS)}, got {n_nerve}"
+        raise ValueError(msg)
+    rng = np.random.default_rng(seed)
+    slot = (dur_s - 4.0) / n_events
+    starts = 2.0 + slot * np.arange(n_events) + rng.uniform(0.0, 0.3 * slot, n_events)
+    durs = rng.uniform(0.05, 0.4, n_events)
+    amps = rng.uniform(3.0, 12.0, n_events)
+    kinds = [ADDITIVE_KINDS[k % len(ADDITIVE_KINDS)] for k in range(n_events)]
+    events = [(float(a), float(a + d)) for a, d in zip(starts, durs, strict=True)]
+    quiet = [(float(a + 0.5 * slot), float(a + 0.5 * slot + d))
+             for a, d in zip(starts, durs, strict=True) if a + 0.5 * slot + d + 0.6 < dur_s]
+    signals: dict[str, F64] = {}
+    for i in range(n_nerve):
+        srng = np.random.default_rng([seed, 1000 + i])
+        x = make_eng(fs, dur_s, rate_hz=15.0, seed=int(srng.integers(1 << 31))).signal
+        hits = srng.random(n_events) < hit_p
+        gains = srng.lognormal(0.0, 0.5, n_events)
+        for k in np.flatnonzero(hits):
+            x, _span = inject_artifact(x, fs, events[k][0], events[k][1] - events[k][0],
+                                       kinds[k], float(amps[k] * gains[k]), seed=int(k))
+        signals[f"{NERVE_CUFFS[i]}_T"] = x
+    t = np.arange(_n_samples(fs, dur_s)) / fs
+    for j in range(3):
+        srng = np.random.default_rng([seed, 2000 + j])
+        slow = 40.0 * np.sin(2 * np.pi * 0.05 * t + srng.uniform(0, 2 * np.pi))
+        signals[f"ANT{j + 1}"] = slow + srng.normal(0.0, 8.0, t.size)
+    return SignalSet(signals, events, quiet)
