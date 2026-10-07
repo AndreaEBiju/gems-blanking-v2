@@ -18,8 +18,11 @@ Two gates, both refusing to emit a heavily masked recording silently:
   animal's first recording) applies the 20% rule alone, and the report ALWAYS says so,
   held or not.
 
-The two gates combine into :func:`emit_gate`, which ``emit.masks.write_mask_file``
-enforces: a held recording is written only with an explicit release.
+The two gates combine into :func:`emit_gate`, which ``emit.handoff.write_mask_file``
+computes from the masks and enforces: a held recording is written only with an explicit
+release. A cuff distrusted outright by the routing table (retention 0 for the spike
+consumer on that cuff) therefore always holds its recording: a ruled distrust counts as
+blank. Whether it should is a question for a ruling (it is not motion).
 
 The QC report (:class:`QcReport`) carries what the spec lists; a quantity a recording
 does not have (velocity windows while task 18 is out, R5) is ABSENT from its record,
@@ -40,7 +43,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
-from gems_blanking_v2.emit.masks import ConsumerMask, EmitGate, MaskKey
+from gems_blanking_v2.emit.masks import ConsumerMask, MaskKey
 from gems_blanking_v2.extent.routing import RouteDecision
 from gems_blanking_v2.io.store import append_line
 
@@ -49,6 +52,7 @@ __all__ = [
     "HOLD_MEDIAN_FLOOR",
     "HOLD_MEDIAN_RATIO",
     "BlankHold",
+    "EmitGate",
     "LongitudinalRow",
     "QcReport",
     "RetentionVerdict",
@@ -153,14 +157,34 @@ def blank_fraction_hold(
                      dict(hum_features or {}), notes)
 
 
-def emit_gate(hold: BlankHold, retention: RetentionVerdict) -> EmitGate:
-    """Combine the two gates into what ``write_mask_file`` enforces."""
+@dataclass(frozen=True)
+class EmitGate:
+    """QC's verdict for one recording, as ``emit.handoff.write_mask_file`` computes it."""
+
+    held: bool
+    reasons: tuple[str, ...]
+    retention_flagged: bool
+    blank_held: bool
+    min_retention: float
+    medians_used: Mapping[str, float]
+    notes: tuple[str, ...]
+
+
+def emit_gate(masks: Mapping[MaskKey, ConsumerMask], *, min_retention: float,
+              animal_median: Mapping[str, float | None],
+              decisions: Iterable[RouteDecision] = (),
+              hum_features: Mapping[str, float] | None = None) -> EmitGate:
+    """Compute both gates from ``masks`` and combine them (what the writer enforces)."""
+    hold = blank_fraction_hold(masks, animal_median, decisions=decisions,
+                               hum_features=hum_features)
+    retention = retention_gate(masks, min_retention=min_retention)
     reasons = list(hold.reasons)
     if retention.flagged:
         reasons += [f"{k}: retention {r:.3f} < {retention.min_retention:g}"
                     for k, r in sorted(retention.below.items())]
+    used = {k: float(v) for k, v in animal_median.items() if v is not None}
     return EmitGate(hold.held or retention.flagged, tuple(reasons), retention.flagged,
-                    hold.held)
+                    hold.held, min_retention, used, hold.notes)
 
 
 def _present(d: Mapping[str, Any]) -> dict[str, Any]:

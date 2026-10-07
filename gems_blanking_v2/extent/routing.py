@@ -10,11 +10,15 @@ Rejecting data is the most expensive response, so the order is strict:
      trace in its own robust sigma, the span must hold no sample above the consumer's
      artifact cap (``P.maxThreshSigma`` = 40 sigma) and no excess of 4.5 sigma crossings
      over the rate outside the span (one-sided Poisson, p < :data:`EXCESS_P`). A 1 ms
-     transient at 75 sigma is not "corrected" because it is short.
+     transient at 75 sigma is not "corrected" because it is short. The ENG trace, its
+     sigma and its crossings are built ONCE per signal (:func:`eng_trace`) and shared by
+     every event on it. Conservative where the background is thin: with no crossings
+     outside the span, one crossing inside gives p = 0 (reject), and NaN gaps shorten
+     the background, lowering its rate.
    * every other consumer - the tolerance table's own scale: the band's log-envelope
-     z (``z = (log E - median log E) / (1.4826 MAD log E)``, invariant 5, computed by
-     ``bands`` exactly as detection computes it, over the whole of ``x``) must stay at or
-     below the consumer's tolerance throughout the span.
+     z must stay at or below the consumer's tolerance throughout the span. The z is
+     DETECTION's own (``EventEvidence.z``, the map ``extents_for_events`` already
+     holds), never recomputed here - one construction site (invariant 33).
    * ``hrv`` - operational: correct iff the beat train is unchanged (task 13's verdict,
      passed in as ``EventEvidence.hrv_changed``).
 
@@ -38,8 +42,8 @@ Two routes sit outside that order:
   (:data:`LINE_NOISE_ACTIONS`). The thresholds that decide "mains-dominant" are fixed
   inputs proposed from the Night 1 hum inventory, set before Night 2 - never defaults.
 
-**Timelines.** ``EventEvidence.span_s`` is on ``x``'s OWN timeline: 0 is ``x[0]``.
-``x`` should be the whole epoch, so the band references are whole-epoch scalars.
+**Timelines.** One convention, as for extents and masks: ``EventEvidence.span_s`` is on
+the RECORDING's timeline; ``x[0]`` is at ``x_t0_s`` and z's frame 0 at ``z_t0_s``.
 
 **NaN** (invariant 8): band filtering interpolates across NaN for the filter only and
 restores NaN (at the filtered rate) immediately after; every statistic is NaN-aware and
@@ -68,14 +72,7 @@ import numpy as np
 import numpy.typing as npt
 from scipy.stats import poisson
 
-from gems_blanking_v2.bands.envelope import (
-    _band_limit,
-    _decimate_for,
-    band_envelope_for,
-    log_envelope,
-)
-from gems_blanking_v2.bands.reference import epoch_reference
-from gems_blanking_v2.bands.zscore import zscore
+from gems_blanking_v2.bands.envelope import _band_limit, _decimate_for
 from gems_blanking_v2.constants import BANDS, ENG_BAND, GRID_S, MAD_TO_SIGMA
 from gems_blanking_v2.extent.grid import frame_sample_bounds, n_grid_frames
 from gems_blanking_v2.extent.tolerance import ToleranceTable, extent_consumers
@@ -87,12 +84,14 @@ __all__ = [
     "SPIKE_MAX_SIGMA",
     "SPIKE_REFRACTORY_S",
     "SPIKE_THRESH_SIGMA",
+    "EngTrace",
     "EventEvidence",
     "LineNoiseThresholds",
     "RouteDecision",
     "band_excess",
     "clip_frames",
     "decisions_table",
+    "eng_trace",
     "in_band_verdict",
     "is_mains_dominant",
     "route_counts",
@@ -231,8 +230,9 @@ def band_excess(x: npt.ArrayLike, fs: float, span_s: tuple[float, float], band: 
                 ) -> tuple[float, float]:
     """``(span RMS / band sigma, band sigma)`` of ``x`` after the band's own filter.
 
-    The band's sigma is the robust (MAD) sigma of the band-limited trace OUTSIDE the
-    span - the band's noise floor. NaN-aware throughout.
+    ``span_s`` is on ``x``'s own timeline here (0 = ``x[0]``). The band's sigma is the
+    robust (MAD) sigma of the band-limited trace OUTSIDE the span - the band's noise
+    floor. NaN-aware throughout. Used by the subtract route only.
     """
     y, rate = _band(np.asarray(x, dtype=np.float64), fs, band)
     sl = _span_slice(span_s, rate, y.size)
@@ -257,6 +257,35 @@ def _crossings(y: F64, thresh: float, rate: float) -> npt.NDArray[np.int64]:
 
 
 @dataclass(frozen=True)
+class EngTrace:
+    """One signal's 300-3000 Hz trace, built once and shared by every event on it.
+
+    ``sigma`` is the robust sigma of the whole trace (the consumer's session sigma);
+    ``crossings`` the 4.5 sigma crossings (sample indices at ``rate``); ``t0_s`` where
+    sample 0 sits on the recording's timeline.
+    """
+
+    signal: str
+    y: F64
+    rate: float
+    sigma: float
+    crossings: npt.NDArray[np.int64]
+    t0_s: float
+
+
+def eng_trace(signal: str, x: npt.ArrayLike, fs: float, *, x_t0_s: float) -> EngTrace:
+    """Build a signal's :class:`EngTrace` (once per signal per recording)."""
+    y, rate = _band(np.asarray(x, dtype=np.float64), fs, ENG_BAND)
+    fin = y[np.isfinite(y)]
+    sigma = MAD_TO_SIGMA * float(np.median(np.abs(fin - np.median(fin)))) if fin.size else 0.0
+    if not sigma > 0:
+        msg = f"{signal}: no ENG noise floor"
+        raise ValueError(msg)
+    return EngTrace(signal, y, rate, sigma, _crossings(y, SPIKE_THRESH_SIGMA * sigma, rate),
+                    x_t0_s)
+
+
+@dataclass(frozen=True)
 class InBand:
     """What :func:`in_band_verdict` measured: separable or not, and on which scale."""
 
@@ -267,23 +296,29 @@ class InBand:
     detail: str
 
 
-def in_band_verdict(x: npt.ArrayLike, fs: float, span_s: tuple[float, float], consumer: str,
-                    tolerances: ToleranceTable, *, signal: str = "x") -> InBand:
-    """Whether what survives the consumer's band filter in the span is below its tolerance."""
-    xx = np.asarray(x, dtype=np.float64)
+def in_band_verdict(ev: EventEvidence, consumer: str, tolerances: ToleranceTable) -> InBand:
+    """Whether what survives the consumer's band filter in the span is below its tolerance.
+
+    Reads the shared :class:`EngTrace` (spikes, velocity) or detection's z map (every
+    other consumer); computes neither.
+    """
+    a_s, b_s = ev.span_s
     if consumer in SAMPLE_LEVEL_CONSUMERS:
-        y, rate = _band(xx, fs, ENG_BAND)
-        sl = _span_slice(span_s, rate, y.size)
-        sigma = _sigma_outside(y, sl)
-        if not sigma > 0:
-            msg = f"{consumer}: no ENG noise floor outside the span"
+        tr = ev.eng
+        if tr is None:
+            msg = f"{consumer} routes on the shared ENG trace; EventEvidence.eng is missing"
             raise ValueError(msg)
-        peak = float(np.nanmax(np.abs(y[sl]))) / sigma
-        cross = _crossings(y, SPIKE_THRESH_SIGMA * sigma, rate)
-        n_in = int(((cross >= sl.start) & (cross < sl.stop)).sum())
-        t_in = max((sl.stop - sl.start) / rate, 1.0 / rate)
-        t_out = max((y.size - (sl.stop - sl.start)) / rate, 1.0 / rate)
-        lam = (cross.size - n_in) / t_out
+        sl = _span_slice((a_s - tr.t0_s, b_s - tr.t0_s), tr.rate, tr.y.size)
+        seg = tr.y[sl]
+        if not np.isfinite(seg).any():
+            msg = f"{consumer}/{tr.signal}: the span holds no finite ENG sample"
+            raise ValueError(msg)
+        peak = float(np.nanmax(np.abs(seg))) / tr.sigma
+        n_in = int(((tr.crossings >= sl.start) & (tr.crossings < sl.stop)).sum())
+        t_in = max((sl.stop - sl.start) / tr.rate, 1.0 / tr.rate)
+        t_out = max(float(np.isfinite(tr.y).sum() - np.isfinite(seg).sum()) / tr.rate,
+                    1.0 / tr.rate)
+        lam = (tr.crossings.size - n_in) / t_out
         p = float(poisson.sf(n_in - 1, lam * t_in)) if n_in > 0 else 1.0
         ok = peak <= SPIKE_MAX_SIGMA and p >= EXCESS_P
         return InBand(ok, "eng_sample_sigma", peak, SPIKE_MAX_SIGMA,
@@ -291,12 +326,13 @@ def in_band_verdict(x: npt.ArrayLike, fs: float, span_s: tuple[float, float], co
                       f"{SPIKE_THRESH_SIGMA:g} sigma vs {lam * t_in:.2f} expected (p {p:.3g})")
     band = extent_consumers()[consumer].band
     tol = tolerances.for_consumer(consumer)
-    le = log_envelope(band_envelope_for(xx, fs, band))
-    ref = epoch_reference(le, signal=signal, band=band)
-    z = zscore(le, ref, signal=signal, band=band)
-    i0 = max(0, int(math.floor(span_s[0] / GRID_S)))
-    i1 = min(z.size, int(math.ceil(span_s[1] / GRID_S)))
-    inside = z[i0:i1][np.isfinite(z[i0:i1])]
+    if ev.z is None or ev.z_t0_s is None or (ev.signal, band) not in ev.z:
+        msg = f"{consumer} routes on detection's z for ({ev.signal}, {band}); it was not given"
+        raise ValueError(msg)
+    z = np.asarray(ev.z[(ev.signal, band)], dtype=np.float64)
+    i0 = max(0, int(math.floor((a_s - ev.z_t0_s) / GRID_S)))
+    i1 = min(z.size, int(math.ceil((b_s - ev.z_t0_s) / GRID_S)))
+    inside = z[i0:i1][np.isfinite(z[i0:i1])] if i1 > i0 else np.empty(0)
     if inside.size == 0:
         msg = f"{consumer}: the {band} log-z is not assessable anywhere in the span"
         raise ValueError(msg)
@@ -314,22 +350,33 @@ def in_band_verdict(x: npt.ArrayLike, fs: float, span_s: tuple[float, float], co
 class EventEvidence:
     """What routing needs to know about one event on one consumer's signal.
 
-    ``x`` is the consumer's signal (microvolts), ideally the whole epoch; ``span_s`` the
-    event on ``x``'s OWN timeline (0 = ``x[0]``). ``clipped`` comes from
-    :func:`clip_frames`, ``mains_dominant`` from :func:`is_mains_dominant`. ``subtract``
-    is set only for a stereotyped event with known timing: it returns the signal with the
-    event's estimate subtracted. ``hrv_changed`` is task 13's operational verdict, needed
-    only to route ``hrv``.
+    ``span_s`` is on the recording's timeline; ``x`` (the consumer's signal, microvolts,
+    whole epoch) starts at ``x_t0_s``. ``z`` is detection's z map with frame 0 at
+    ``z_t0_s``; ``eng`` the shared :class:`EngTrace` for ``signal``. ``clipped`` comes
+    from :func:`clip_frames`, ``mains_dominant`` from :func:`is_mains_dominant`.
+    ``subtract`` is set only for a stereotyped event with known timing: it returns ``x``
+    with the event's estimate subtracted. ``hrv_changed`` is task 13's operational
+    verdict, needed only to route ``hrv``.
     """
 
     event_id: str
+    signal: str
     x: F64
     fs: float
     span_s: tuple[float, float]
+    x_t0_s: float
+    z: Mapping[tuple[str, str], npt.ArrayLike] | None = None
+    z_t0_s: float | None = None
+    eng: EngTrace | None = None
     clipped: bool = False
     mains_dominant: bool = False
     subtract: Callable[[F64], F64] | None = None
     hrv_changed: bool | None = None
+
+    @property
+    def local_span_s(self) -> tuple[float, float]:
+        """The span on ``x``'s own timeline (0 = ``x[0]``)."""
+        return (self.span_s[0] - self.x_t0_s, self.span_s[1] - self.x_t0_s)
 
 
 @dataclass(frozen=True)
@@ -371,16 +418,17 @@ def route_event(ev: EventEvidence, consumer: str, tolerances: ToleranceTable  # 
                                  "beat train unchanged by the event", "beat_train_unchanged")
         return RouteDecision(ev.event_id, consumer, "reject", "beat train changed",
                              "beat_train_changed")
-    verdict = in_band_verdict(ev.x, ev.fs, ev.span_s, consumer, tolerances)
+    verdict = in_band_verdict(ev, consumer, tolerances)
     if verdict.separable:
         return RouteDecision(ev.event_id, consumer, "correct", verdict.detail,
                              f"within_{verdict.scale}", in_band_value=verdict.value)
     if ev.subtract is not None:
         band = extent_consumers()[consumer].band
-        _ratio, sigma = band_excess(ev.x, ev.fs, ev.span_s, band)
+        local = ev.local_span_s
+        _ratio, sigma = band_excess(ev.x, ev.fs, local, band)
         cleaned = np.asarray(ev.subtract(np.asarray(ev.x, dtype=np.float64)), dtype=np.float64)
         y, rate = _band(cleaned, ev.fs, band)
-        residual = y[_span_slice(ev.span_s, rate, y.size)]
+        residual = y[_span_slice(local, rate, y.size)]
         fin = residual[np.isfinite(residual)]
         # What is left of the EVENT: the span's power above the band's own noise power.
         # A perfect subtraction leaves noise (RMS = sigma, remnant 0), so the remnant -

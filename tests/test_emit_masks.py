@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 import pytest
 from gems_blanking_v2.detect import chain
+from gems_blanking_v2.emit import handoff as ho
 from gems_blanking_v2.emit import masks as mk
 from gems_blanking_v2.emit import qc
 from gems_blanking_v2.emit.provenance import MaskProvenance, ProvenanceError
@@ -33,7 +34,9 @@ SIGNALS = {"spikes": ("L_T",), "slow_wave": ("ANT1",), "mmc": ("ANT1",),
 MODEL = {"mode": "pooled", "version": "0.3.0", "corpus_hash": "ab" * 16,
          "calibrator": "models/x/calibrator.json",
          "trained_at": datetime(2026, 10, 8, tzinfo=UTC), "n_train_events": 1200}
-OPEN = mk.EmitGate(held=False, reasons=(), retention_flagged=False, blank_held=False)
+# The real gate path, with medians that let an ordinary recording through.
+GATE: dict[str, Any] = {"min_retention": 0.5, "animal_median": {
+    "spikes|L_T|300-3000": 0.02, "slow_wave|ANT1|0-2": 0.02, "mmc|ANT1|2-50": 0.02}}
 
 
 def _prov() -> MaskProvenance:
@@ -128,22 +131,22 @@ def test_a_recovery_epoch_starting_at_120_s_is_shifted_exactly_once(tmp_path: Pa
     m = masks[("spikes", "L_T", "300-3000")]
     (a, b), = mk.masked_spans_s(m)
     assert a <= ext.start_s and ext.stop_s <= b and a >= 120.0
-    path = mk.write_mask_file(tmp_path / "r.mat", masks, _prov(), fs=FS, n_samples=N_SAMPLES,
-                              epoch_start_s=120.0, gate=OPEN)
+    path = ho.write_mask_file(tmp_path / "r.mat", masks, _prov(), fs=FS, n_samples=N_SAMPLES,
+                              epoch_start_s=120.0, **GATE)
     spans = loadmat(path)["blank_spikes_L_T"]
     i0 = int(np.floor((ext.start_s - 120.0) / 0.01))
     assert spans[0, 0] == frame_sample_bounds(i0, i0 + 1, FS)[0] + 1
     assert spans[0, 0] < 21 * FS  # epoch-relative: about 20 s in, not 140 s
     with pytest.raises(ValueError, match="grid starts at 120"):
-        mk.write_mask_file(tmp_path / "x.mat", masks, _prov(), fs=FS, n_samples=N_SAMPLES,
-                           epoch_start_s=0.0, gate=OPEN)
+        ho.write_mask_file(tmp_path / "x.mat", masks, _prov(), fs=FS, n_samples=N_SAMPLES,
+                           epoch_start_s=0.0, **GATE)
 
 
 def test_the_frame_count_must_match_the_epoch(tmp_path: Path) -> None:
     masks, _ = _eng_only()
     with pytest.raises(ValueError, match="frames for an epoch"):
-        mk.write_mask_file(tmp_path / "x.mat", masks, _prov(), fs=FS, n_samples=N_SAMPLES // 2,
-                           epoch_start_s=0.0, gate=OPEN)
+        ho.write_mask_file(tmp_path / "x.mat", masks, _prov(), fs=FS, n_samples=N_SAMPLES // 2,
+                           epoch_start_s=0.0, **GATE)
 
 
 def test_sample_mask_and_matlab_spans_agree_to_the_inclusive_end() -> None:
@@ -194,8 +197,8 @@ def test_the_mask_file_has_no_zero_runs_one_span_set_per_consumer_and_r6(tmp_pat
     masks, _ = _eng_only()
     masks[("mmc", "ANT1", "2-50")] = mk.ConsumerMask(
         "mmc", "ANT1", "2-50", mk.mask_frames([(30.0, 31.0)], N_FRAMES, t0_s=0.0), 0.01, 0.0)
-    path = mk.write_mask_file(tmp_path / "rec1_masks.mat", masks, _prov(), fs=FS,
-                              n_samples=N_SAMPLES, epoch_start_s=0.0, gate=OPEN,
+    path = ho.write_mask_file(tmp_path / "rec1_masks.mat", masks, _prov(), fs=FS,
+                              n_samples=N_SAMPLES, epoch_start_s=0.0, **GATE,
                               events=[{"start": 19.5, "stop": 21.0, "judgement": "motion"}])
     m = loadmat(path)
     for name, value in m.items():
@@ -216,8 +219,8 @@ def test_the_mask_file_has_no_zero_runs_one_span_set_per_consumer_and_r6(tmp_pat
 
 def test_a_mask_without_a_model_is_refused_on_write(tmp_path: Path) -> None:
     with pytest.raises(ProvenanceError, match="model"):
-        mk.write_mask_file(tmp_path / "x.mat", _eng_only()[0], None, fs=FS,
-                           n_samples=N_SAMPLES, epoch_start_s=0.0, gate=OPEN)
+        ho.write_mask_file(tmp_path / "x.mat", _eng_only()[0], None, fs=FS,
+                           n_samples=N_SAMPLES, epoch_start_s=0.0, **GATE)
     assert not list(tmp_path.iterdir())
 
 
@@ -254,16 +257,21 @@ def test_the_retention_gate_fires_on_an_over_masked_recording() -> None:
 
 def test_a_held_recording_is_written_only_with_a_release(tmp_path: Path) -> None:
     over = _masked(0.7)
-    gate = qc.emit_gate(qc.blank_fraction_hold(over, {"spikes|L_T|300-3000": 0.1}),
-                        qc.retention_gate(over, min_retention=0.5))
+    med = {"spikes|L_T|300-3000": 0.1}
+    gate = qc.emit_gate(over, min_retention=0.5, animal_median=med)
     assert gate.held and gate.retention_flagged and gate.blank_held
-    with pytest.raises(mk.RecordingHeldError, match="release"):
-        mk.write_mask_file(tmp_path / "x.mat", over, _prov(), fs=FS, n_samples=N_SAMPLES,
-                           epoch_start_s=0.0, gate=gate)
-    path = mk.write_mask_file(tmp_path / "x.mat", over, _prov(), fs=FS, n_samples=N_SAMPLES,
-                              epoch_start_s=0.0, gate=gate,
+    with pytest.raises(ho.RecordingHeldError, match="release"):
+        ho.write_mask_file(tmp_path / "x.mat", over, _prov(), fs=FS, n_samples=N_SAMPLES,
+                           epoch_start_s=0.0, min_retention=0.5, animal_median=med)
+    with pytest.raises(ValueError, match="blank string"):
+        ho.write_mask_file(tmp_path / "x.mat", over, _prov(), fs=FS, n_samples=N_SAMPLES,
+                           epoch_start_s=0.0, min_retention=0.5, animal_median=med,
+                           release="   ")
+    path = ho.write_mask_file(tmp_path / "x.mat", over, _prov(), fs=FS, n_samples=N_SAMPLES,
+                              epoch_start_s=0.0, min_retention=0.5, animal_median=med,
                               release="Andrea 2026-10-08: anaesthesia lightened, keep")
     g = json.loads(str(loadmat(path)["gate_json"][0]))
+    assert g["min_retention"] == 0.5 and g["medians_used"] == med
     assert g["held"] and g["release"].startswith("Andrea") and g["reasons"]
 
 
@@ -333,3 +341,28 @@ def test_the_longitudinal_table_is_one_animal_append_only(tmp_path: Path) -> Non
     assert raw.count(b"\n") == 2 and b"\r" not in raw
     with pytest.raises(ValueError, match="another animal"):
         qc.append_longitudinal(path, qc.LongitudinalRow("H", "s1", "x", {}, {}, {}, {}))
+
+
+def test_the_writer_computes_the_gate_from_the_masks(tmp_path: Path) -> None:
+    """No caller-built gate: an over-masked recording is held whatever the caller wants."""
+    over = _masked(0.7)
+    with pytest.raises(ho.RecordingHeldError, match="retention"):
+        ho.write_mask_file(tmp_path / "x.mat", over, _prov(), fs=FS, n_samples=N_SAMPLES,
+                           epoch_start_s=0.0, min_retention=0.5,
+                           animal_median={"spikes|L_T|300-3000": 0.9})
+    path = ho.write_mask_file(tmp_path / "ok.mat", _masked(0.01), _prov(), fs=FS,
+                              n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
+                              animal_median={})
+    g = json.loads(str(loadmat(path)["gate_json"][0]))
+    assert g["held"] is False and any("median unknown" in n for n in g["notes"])
+
+
+def test_the_retention_gate_alone_holds_the_recording(tmp_path: Path) -> None:
+    """15% blanked: under 20% and under 3x a 10% median, but retention 0.85 < 0.9."""
+    m = _masked(0.15)
+    gate = qc.emit_gate(m, min_retention=0.9, animal_median={"spikes|L_T|300-3000": 0.1})
+    assert gate.held and gate.retention_flagged and not gate.blank_held
+    with pytest.raises(ho.RecordingHeldError, match="retention"):
+        ho.write_mask_file(tmp_path / "x.mat", m, _prov(), fs=FS, n_samples=N_SAMPLES,
+                           epoch_start_s=0.0, min_retention=0.9,
+                           animal_median={"spikes|L_T|300-3000": 0.1})

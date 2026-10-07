@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from gems_blanking_v2.emit import masks as mk
+from gems_blanking_v2.emit.handoff import write_mask_file
 from gems_blanking_v2.emit.provenance import MaskProvenance
 from gems_blanking_v2.extent.grid import n_grid_frames
 from scipy.io import savemat
@@ -80,9 +81,12 @@ def test_matlab_step1_bandpass_honours_the_emitted_masks(tmp_path: Path) -> None
                           code_commit="test", generation_sha="0133349b3ebeff80",
                           routing_hash="test", created_at="2026-10-08T05:00:00+00:00",
                           recording="synthetic")
-    gate = mk.EmitGate(held=False, reasons=(), retention_flagged=False, blank_held=False)
-    mask_file = mk.write_mask_file(tmp_path / "synthetic_masks.mat", masks, prov, fs=FS,
-                                   n_samples=N_SAMPLES, epoch_start_s=0.0, gate=gate)
+    medians = {f"{c}|{s}|{b}": 0.3 for c, s, b in masks}  # the real gate path (it holds)
+    mask_file = write_mask_file(tmp_path / "synthetic_masks.mat", masks, prov, fs=FS,
+                                n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
+                                animal_median=medians,
+                                release="synthetic acceptance test: the slow_wave span "
+                                        "is 25% on purpose")
     rng = np.random.default_rng(11)
     eng = make_eng(FS, N_SAMPLES / FS + 0.1, seed=12).signal[:N_SAMPLES]
     y = np.column_stack([eng, rng.normal(0.0, 20.0, N_SAMPLES)])
@@ -115,3 +119,4 @@ def test_matlab_step1_bandpass_honours_the_emitted_masks(tmp_path: Path) -> None
     assert res["step1_nan_equals_blank"] is True
     assert res["max_zero_run_filtered"] <= 2 and res["max_zero_run_input"] <= 2
     assert res["band"] == [300, 3000]
+    assert Path(res["step1_from"]).resolve().parent == pnew.resolve()
