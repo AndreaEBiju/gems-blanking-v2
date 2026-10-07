@@ -23,7 +23,7 @@ from gems_blanking_v2.model import train as tr
 from gems_blanking_v2.model.labels import NEGATIVE_JUDGEMENTS
 from gems_blanking_v2.types import TrainingMode
 
-from tests.conftest import make_feature_table
+from tests.conftest import FEATURE_SIGNAL, make_feature_table
 
 THREADS = 2
 W = ev.W_ADAPT_GRID
@@ -278,10 +278,14 @@ def test_shap_review_html_reuses_detector_review(
         run: tuple[pd.DataFrame, md.ModeRun, rg.Registry, Path]) -> None:
     _t, _o, reg, _r = run
     pooled = next(s for s in reg.specs() if s.mode is TrainingMode.POOLED)
-    # unseen judged cores whose classes overlap, so some negatives are called motion
-    cores = md.prepare_table(make_feature_table({"new": ("A",)}, n_recordings=2,
-                                                cores_per_recording=60, separation=0.5,
-                                                seed=35))
+    # unseen judged cores whose classes overlap, so some negatives are called motion: six
+    # judged negatives are given the motion signature outright, so the disagreement set is
+    # never empty by the luck of a seed
+    raw = make_feature_table({"new": ("A",)}, n_recordings=2, cores_per_recording=60,
+                             separation=0.5, seed=35)
+    neg = raw.index[raw["y"] == 0][:6]
+    raw.loc[neg, list(FEATURE_SIGNAL)] += 3.0
+    cores = md.prepare_table(raw)
     fs = dict.fromkeys(cores["recording"].astype(str), 24414.0625)
     p = reg.calibrator(pooled).apply(tr.predict_raw(reg.booster(pooled), cores[
         tr.feature_columns(cores)]))
