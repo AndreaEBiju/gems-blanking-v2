@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -161,13 +162,85 @@ def test_a_name_that_reads_another_animal_needs_a_ruled_rename(tmp_path: Path) -
 
 def test_the_rename_record_is_validated(tmp_path: Path) -> None:
     row = {"recording": "r1", "cohort": "new", "animal": "A", "basis": "ruling"}
-    assert md.read_renames(_renames(tmp_path, [row])) == {"r1": "A"}
+    assert md.read_renames(_renames(tmp_path, [row])) == {"r1": ("new", "A")}
+    with pytest.raises(ValueError, match="not an object"):
+        md.read_renames(_renames(tmp_path, [row, ["r2", "new", "B"]]))  # type: ignore[list-item]
     with pytest.raises(ValueError, match="declared twice"):
         md.read_renames(_renames(tmp_path, [row, {**row, "animal": "B"}]))
     with pytest.raises(ValueError, match="missing 'basis'"):
         md.read_renames(_renames(tmp_path, [{k: v for k, v in row.items() if k != "basis"}]))
     with pytest.raises(ValueError, match="animal"):
         md.read_renames(_renames(tmp_path, [{**row, "animal": "a"}]))
+
+
+def test_a_rename_must_name_the_recordings_cohort(tmp_path: Path) -> None:
+    raw = make_feature_table({"new": ("A", "B")}, n_recordings=2, cores_per_recording=10,
+                             seed=21)
+    if md.animal_letter(str(raw["recording"].iloc[0])) is None:
+        pytest.skip("GEMSBlanking checkout not available: no second reading of the animal")
+    moved = str(raw.loc[raw["animal"] == "B", "recording"].iloc[0])
+    raw.loc[raw["recording"] == moved, "animal"] = "A"
+    old = _renames(tmp_path, [{"recording": moved, "cohort": "old", "animal": "A",
+                               "basis": "test"}])
+    with pytest.raises(ValueError, match="wrong cohort"):
+        md.prepare_table(raw, renames=old)
+
+
+def test_run_modes_requires_the_renames_in_the_run_record(tmp_path: Path) -> None:
+    raw = make_feature_table({"new": ("A", "B")}, n_recordings=2, cores_per_recording=20,
+                             seed=22)
+    path = _renames(tmp_path, [{"recording": "not_in_table", "cohort": "new", "animal": "A",
+                                "basis": "test"}])
+    t = md.prepare_table(raw, renames=path)
+    assert md.renames_record(path)["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert md.renames_record(path)["content"] == json.loads(path.read_text(encoding="utf-8"))
+    bare = ev.write_run_record(tmp_path / "bare.json", run_id="r")
+    with pytest.raises(ValueError, match="extra\\['renames'\\]"):
+        md.run_modes(t, targets=["new:A"], record_path=bare, num_threads=THREADS,
+                     modes=(TrainingMode.POOLED,), rounds=5)
+    good = ev.write_run_record(tmp_path / "good.json", run_id="r",
+                               extra={"renames": md.renames_record(path)})
+    md.run_modes(t, targets=["new:A"], record_path=good, num_threads=THREADS,
+                 modes=(TrainingMode.POOLED,), rounds=5)
+    path.write_text(path.read_text(encoding="utf-8").replace("test", "edited"),
+                    encoding="utf-8")
+    t2 = md.prepare_table(raw, renames=path)  # the file changed after the record
+    with pytest.raises(ValueError, match="extra\\['renames'\\]"):
+        md.run_modes(t2, targets=["new:A"], record_path=good, num_threads=THREADS,
+                     modes=(TrainingMode.POOLED,), rounds=5)
+    plain = md.prepare_table(raw)  # no renames: a record claiming some is refused
+    with pytest.raises(ValueError, match="extra\\['renames'\\]"):
+        md.run_modes(plain, targets=["new:A"], record_path=good, num_threads=THREADS,
+                     modes=(TrainingMode.POOLED,), rounds=5)
+
+
+def test_run_modes_rechecks_the_test_set(record: Path) -> None:
+    t = md.prepare_table(make_feature_table({"new": ("A", "B")}, n_recordings=2,
+                                            cores_per_recording=20, seed=23))
+    t.loc[t["animal"] == "B", "animal"] = "J"  # altered after preparation
+    with pytest.raises(ValueError, match="prospective test set"):
+        md.run_modes(t, targets=["new:A"], record_path=record, num_threads=THREADS,
+                     modes=(TrainingMode.POOLED,), rounds=5)
+
+
+def test_a_target_without_scorable_recordings_is_refused() -> None:
+    raw = make_feature_table({"new": ("A", "B")}, n_recordings=2, cores_per_recording=10,
+                             seed=24)
+    raw.loc[raw["animal"] == "A", "span_id"] = None
+    t = md.prepare_table(raw)
+    for fn in (md.adapted_folds, md.per_animal_folds):
+        with pytest.raises(md.ModeRefusedError, match="no recording with scorable"):
+            fn(t, "new:A")
+
+
+def test_loao_folds_assert_span_scoring_in_place(monkeypatch: pytest.MonkeyPatch) -> None:
+    raw = make_feature_table({"new": ("A", "B")}, n_recordings=2, cores_per_recording=10,
+                             seed=25)
+    raw.loc[raw.index[:3], "span_id"] = None  # animal A rows outside any span
+    t = md.prepare_table(raw)
+    monkeypatch.setattr(md, "_scorable", lambda tb: np.ones(len(tb), dtype=bool))
+    with pytest.raises(AssertionError, match="outside an audit span"):
+        md.loao_folds(t, ["new:A"])
 
 
 def test_one_recording_is_one_animal_of_one_cohort() -> None:
@@ -226,6 +299,12 @@ def test_unknown_old_rows_never_train_an_old_target() -> None:
     (f_new,) = md.loao_folds(t, ["new:A"])
     assert "old:?" in set(t["animal_key"].iloc[f_new.train])
     assert f_new.n_excluded_unknown == 0
+    for f_b in md.adapted_folds(t, "old:F"):  # mode B uses the same exclusion
+        assert "old:?" not in set(t["animal_key"].iloc[f_b.train])
+        assert np.array_equal(f_b.train, f_old.train)
+        assert f_b.n_excluded_unknown == f_old.n_excluded_unknown
+    for f_b in md.adapted_folds(t, "new:A"):
+        assert np.array_equal(f_b.train, f_new.train)
 
 
 def test_old_and_new_letters_are_different_animals() -> None:
@@ -289,7 +368,7 @@ def test_run_modes_refuses_a_protocol_off_the_record(table: pd.DataFrame,
                                                     record: Path) -> None:
     with pytest.raises(ValueError, match="recorded kind"):
         md.run_modes(table, targets=["new:A"], record_path=record, num_threads=THREADS,
-                     calibration="platt")
+                     calibration="platt")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="recorded grid"):
         md.run_modes(table, targets=["new:A"], record_path=record, num_threads=THREADS,
                      w_adapt_grid=(2.0,))
@@ -548,10 +627,15 @@ def test_cluster_ids_are_spans_in_the_new_cohort_and_recordings_in_the_old() -> 
 # ---------------------------------------------------------------------------
 
 
-def _bc(gains: list[float], los: list[float], n_pos: int) -> pd.DataFrame:
-    return pd.DataFrame({"target": "new:A", "comparison": "B vs C", "w_a": [1.0, 3.0][:len(gains)],
-                         "n_pos": n_pos, "f1_b_minus_a": gains, "lo": los,
-                         "hi": [g + 0.05 for g in gains]})
+def _bc(gains: list[float], los: list[float], n_pos: int,
+        ws: tuple[float, ...] = ev.W_ADAPT_GRID) -> pd.DataFrame:
+    """B-vs-C rows; the first two weights carry the given values, the rest a clear C win."""
+    k = len(ws)
+    g = (gains + [0.10] * k)[:k]
+    lo = (los + [0.05] * k)[:k]
+    return pd.DataFrame({"target": "new:A", "comparison": "B vs C", "w_a": list(ws),
+                         "n_pos": n_pos, "f1_b_minus_a": g, "lo": lo,
+                         "hi": [x + 0.05 for x in g]})
 
 
 def test_c_beats_b_only_by_the_r9_margin_at_every_weight() -> None:
@@ -565,6 +649,10 @@ def test_c_beats_b_only_by_the_r9_margin_at_every_weight() -> None:
     (v,) = cmp.b_vs_c_verdict(_bc([0.05, 0.04], [0.01, 0.005], 19), r9)
     assert not v.deciding and not v.task11_investigation
     assert v.verdict.startswith("not deciding")
+    for partial in ((30.0,), (1.0, 3.0, 10.0)):  # a winning sub-sweep decides nothing
+        (v,) = cmp.b_vs_c_verdict(_bc([0.2], [0.1], 50, ws=partial), r9)
+        assert v.verdict.startswith("incomplete sweep")
+        assert not v.deciding and not v.task11_investigation
 
 
 def test_tier_step_dropped_only_on_a_significant_fall() -> None:

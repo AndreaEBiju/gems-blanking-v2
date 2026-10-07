@@ -82,20 +82,45 @@ def test_list_applicable_never_returns_another_animals_model(
 
 def test_old_and_new_cohort_letters_never_share_a_model(
         reg: rg.Registry, booster: lgb.Booster, recording: Recording) -> None:
-    old_j = _register(reg, booster, TrainingMode.PER_ANIMAL, "old:J")
-    new_j = _register(reg, booster, TrainingMode.ADAPTED, "new:J", {"LOAO_ADAPT": {"f1": 0.5}})
-    rec_j = _rec(recording, "J")  # a Recording carries only the letter
-    assert {s.model_id for s in rg.list_applicable(rec_j, reg, cohort="new")} == {
-        new_j.model_id}
-    assert {s.model_id for s in rg.list_applicable(rec_j, reg, cohort="old")} == {
-        old_j.model_id}
-    with pytest.raises(rg.NotApplicableError, match="not applicable to new:J"):
-        rg.run_inference(rec_j, old_j, reg, cohort="new", cores=_TABLE, chosen_by="t")
+    # a non-test letter shared by both cohorts
+    old_a = _register(reg, booster, TrainingMode.PER_ANIMAL, "old:A")
+    new_a = _register(reg, booster, TrainingMode.ADAPTED, "new:A", {"LOAO_ADAPT": {"f1": 0.5}})
+    rec_a = _rec(recording, "A")  # a Recording carries only the letter
+    assert {s.model_id for s in rg.list_applicable(rec_a, reg, cohort="new")} == {
+        new_a.model_id}
+    assert {s.model_id for s in rg.list_applicable(rec_a, reg, cohort="old")} == {
+        old_a.model_id}
+    with pytest.raises(rg.NotApplicableError, match="not applicable to new:A"):
+        rg.run_inference(rec_a, old_a, reg, cohort="new", cores=_TABLE, chosen_by="t")
+    assert len(rg.resolve_batch([rec_a], {"old:A": old_a}, reg, cohort="old")) == 1
     with pytest.raises(rg.NotApplicableError, match="not applicable"):
-        rg.resolve_batch([rec_j], {"old:J": old_j}, reg, cohort="old").pipe(
-            lambda _t: rg.resolve_batch([rec_j], {"new:J": old_j}, reg, cohort="new"))
+        rg.resolve_batch([rec_a], {"new:A": old_a}, reg, cohort="new")
     with pytest.raises(ValueError, match="cohort must be"):
-        rg.list_applicable(rec_j, reg, cohort="J")
+        rg.list_applicable(rec_a, reg, cohort="A")
+    # old J (JEL) vs new J (a test animal): only a POOLED model may score new J
+    old_j = _register(reg, booster, TrainingMode.ADAPTED, "old:J", {"LOAO_ADAPT": {"f1": 0.4}})
+    pooled = _register(reg, booster, TrainingMode.POOLED, None)
+    rec_j = _rec(recording, "J")
+    assert {s.model_id for s in rg.list_applicable(rec_j, reg, cohort="new")} == {
+        pooled.model_id}
+    assert {s.model_id for s in rg.list_applicable(rec_j, reg, cohort="old")} == {
+        pooled.model_id, old_j.model_id}
+
+
+def test_animal_keys_are_one_letter_and_never_the_test_set() -> None:
+    mid = "0" * 32
+    kw = {"version": "1", "corpus_hash": "h", "calibrator": rg.calibrator_relpath(mid),
+          "trained_at": datetime(2026, 1, 1, tzinfo=UTC), "metrics": {},
+          "n_train_events": 1}
+    for bad in ("old:?", "new:a", "new:AB", "old: A", "new:"):
+        for mode in (TrainingMode.PER_ANIMAL, TrainingMode.ADAPTED):
+            with pytest.raises(ValueError, match="animal key"):
+                rg.ModelSpec(mode=mode, animal=bad, **kw)  # type: ignore[arg-type]
+    for test_animal in ("new:I", "new:J", "new:K"):
+        for mode in (TrainingMode.PER_ANIMAL, TrainingMode.ADAPTED):
+            with pytest.raises(ValueError, match="prospective test set"):
+                rg.ModelSpec(mode=mode, animal=test_animal, **kw)  # type: ignore[arg-type]
+    rg.ModelSpec(mode=TrainingMode.PER_ANIMAL, animal="old:J", **kw)  # type: ignore[arg-type]
 
 
 def test_metrics_carry_their_protocol(reg: rg.Registry, booster: lgb.Booster,
@@ -211,9 +236,7 @@ _metric = st.floats(min_value=-1e6, max_value=1e6, allow_nan=False, allow_infini
 @settings(max_examples=60, deadline=None)
 @given(mode=st.sampled_from(list(TrainingMode)),
        cohort=st.sampled_from(["old", "new"]),
-       letter=st.text(alphabet=st.characters(codec="utf-8", exclude_categories=["Cs", "Z", "Cc"],
-                                             exclude_characters=":"),
-                      min_size=1, max_size=4),
+       letter=st.sampled_from("ABCDEFGHLMNOPQRSTUVWXYZ"),
        version=st.text(max_size=8), corpus=st.text(max_size=12),
        mid=st.text(alphabet="0123456789abcdef", min_size=32, max_size=32),
        metrics=st.dictionaries(st.sampled_from(["LOAO", "LOAO_ADAPT", "LORO", "train"]),

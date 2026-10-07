@@ -35,6 +35,7 @@ recording of the target is both adapted on and evaluated.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Sequence
@@ -178,23 +179,16 @@ def prepare_table(table: pd.DataFrame, *,
     it disagrees with the declared ``animal`` this raises, naming the recordings, unless
     the recording is declared in the rename record ``renames`` (:func:`read_renames`, the
     one source of acknowledged renames; the caller copies it into the run record): a
-    block whose folder was renamed after acquisition, where the folder name is authoritative for
-    meaning (Andrea, 2026-09-26; CLAUDE.md invariant 30). An acknowledged recording's
+    block whose folder was renamed after acquisition, where the folder name is
+    authoritative for meaning (Andrea, 2026-09-26; CLAUDE.md invariant 30). An
+    acknowledged recording's
     ``name_letter`` is its declared animal; an unacknowledged mismatch never passes.
     """
     for col in ("recording", "animal", "cohort", "y", "label_set"):
         if col not in table.columns:
             msg = f"table is missing required column {col!r}"
             raise ValueError(msg)
-    test = np.array([is_test_animal(c, a) for c, a in
-                     zip(table["cohort"].astype(str), table["animal"].astype(str), strict=True)],
-                    dtype=bool)
-    not_train = (table["label_set"] != "train").to_numpy()
-    if test.any() or not_train.any():
-        msg = (f"{int(test.sum())} row(s) of the prospective test set (new-cohort I/J/K) and "
-               f"{int(not_train.sum())} row(s) with label_set != 'train' reached training; "
-               "R1: they are never trained on and never scored")
-        raise ValueError(msg)
+    _refuse_test_rows(table)
     per_rec = table.groupby(table["recording"].astype(str))[["animal", "cohort"]].nunique()
     multi = per_rec[(per_rec > 1).any(axis=1)]
     if len(multi):
@@ -209,6 +203,13 @@ def prepare_table(table: pd.DataFrame, *,
     if "cluster" not in out.columns:
         out["cluster"] = cluster_ids(out).to_numpy()
     acknowledged = read_renames(renames) if renames is not None else {}
+    cohort_of = dict(zip(out["recording"].astype(str), out["cohort"].astype(str),
+                         strict=False))
+    wrong_cohort = sorted(r for r, (c, _a) in acknowledged.items()
+                          if r in cohort_of and cohort_of[r] != c)
+    if wrong_cohort:
+        msg = f"rename record names the wrong cohort for {wrong_cohort[:5]}"
+        raise ValueError(msg)
     letter_of = {r: animal_letter(r) for r in out["recording"].astype(str).unique()}
     first = out.drop_duplicates("recording")  # one animal per recording, asserted above
     declared = dict(zip(first["recording"].astype(str), first["animal"].astype(str),
@@ -217,7 +218,7 @@ def prepare_table(table: pd.DataFrame, *,
     for rec, letter in letter_of.items():
         if letter is None or letter == declared[rec]:
             continue
-        if acknowledged.get(rec) == declared[rec]:
+        if acknowledged.get(rec, ("", ""))[1] == declared[rec]:
             letter_of[rec] = declared[rec]
         else:
             bad.append((rec, declared[rec], letter))
@@ -226,28 +227,67 @@ def prepare_table(table: pd.DataFrame, *,
                "declare a ruled rename in the rename record (read_renames)")
         raise ValueError(msg)
     out["name_letter"] = out["recording"].astype(str).map(letter_of)
+    out.attrs["renames"] = renames_record(renames) if renames is not None else None
     return out
+
+
+def _refuse_test_rows(table: pd.DataFrame) -> None:
+    """R1: no new-cohort I/J/K row and no row with label_set != 'train' may train."""
+    test = np.array([is_test_animal(c, a) for c, a in
+                     zip(table["cohort"].astype(str), table["animal"].astype(str), strict=True)],
+                    dtype=bool)
+    not_train = (table["label_set"] != "train").to_numpy()
+    if test.any() or not_train.any():
+        msg = (f"{int(test.sum())} row(s) of the prospective test set (new-cohort I/J/K) and "
+               f"{int(not_train.sum())} row(s) with label_set != 'train' reached training; "
+               "R1: they are never trained on and never scored")
+        raise ValueError(msg)
+
+
+def renames_record(path: Path) -> dict[str, object]:
+    """Return what a run record's ``extra["renames"]`` must carry: SHA-256 and content.
+
+    Validated through :func:`read_renames` first. :func:`run_modes` compares this with
+    the record, so the renames a table was prepared with are provably the recorded ones.
+    """
+    read_renames(path)
+    data = Path(path).read_bytes()
+    return {"sha256": hashlib.sha256(data).hexdigest(),
+            "content": json.loads(data.decode("utf-8"))}
+
+
+def _check_renames_recorded(table: pd.DataFrame, record_path: Path) -> None:
+    raw = json.loads(Path(record_path).read_text(encoding="utf-8"))
+    have = (raw.get("extra") or {}).get("renames")
+    want = table.attrs.get("renames")
+    if have != want:
+        msg = ("the run record's extra['renames'] does not match the rename record this table "
+               "was prepared with; write renames_record(path) into the record before training")
+        raise ValueError(msg)
 
 
 _LETTER: Final = re.compile(r"^[A-Z]$")
 
 
-def read_renames(path: Path) -> dict[str, str]:
+def read_renames(path: Path) -> dict[str, tuple[str, str]]:
     """Read the declared rename record: the ONE source of acknowledged renames.
 
     A JSON list of ``{"recording", "cohort", "animal", "basis"}``: a recording whose
     folder was renamed after acquisition, filed under ``animal`` although its name reads
-    another letter. ``basis`` names the ruling. Raises on a duplicate recording, a
-    missing field, or an animal that is not one upper-case letter. Returns
-    ``{recording: animal}`` for :func:`prepare_table`; the caller writes the file's
-    content into the run record.
+    another letter. ``basis`` names the ruling. Raises on a non-object entry, a duplicate
+    recording, a missing field, or an animal that is not one upper-case letter. Returns
+    ``{recording: (cohort, animal)}`` for :func:`prepare_table`, which checks the cohort
+    against the table; the caller writes :func:`renames_record` into the run record.
     """
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(raw, list):
         msg = f"{path}: a rename record is a JSON list"
         raise ValueError(msg)
-    out: dict[str, str] = {}
+    out: dict[str, tuple[str, str]] = {}
     for i, row in enumerate(raw):
+        if not isinstance(row, dict):
+            msg = f"{path}: entry {i} is not an object"
+            raise ValueError(msg)
         for key in ("recording", "cohort", "animal", "basis"):
             if not row.get(key):
                 msg = f"{path}: entry {i} is missing {key!r}"
@@ -258,7 +298,7 @@ def read_renames(path: Path) -> dict[str, str]:
         if row["recording"] in out:
             msg = f"{path}: recording {row['recording']!r} is declared twice"
             raise ValueError(msg)
-        out[str(row["recording"])] = str(row["animal"])
+        out[str(row["recording"])] = (str(row["cohort"]), str(row["animal"]))
     return out
 
 
@@ -285,7 +325,6 @@ def loao_folds(table: pd.DataFrame, targets: Sequence[str]) -> list[Fold]:
     """Mode A: one fold per target animal key - train on every other key, score the target."""
     keys = table["animal_key"].to_numpy()
     scorable = _scorable(table)
-    unknown_old = keys == f"old:{UNKNOWN_ANIMAL}"
     folds = []
     for t in targets:
         _check_target(t)
@@ -294,11 +333,7 @@ def loao_folds(table: pd.DataFrame, targets: Sequence[str]) -> list[Fold]:
         if not ev.any():
             msg = f"target {t} has no scorable rows"
             raise ValueError(msg)
-        train = ~is_t
-        n_unknown = 0
-        if t.startswith("old:"):  # a "?" recording may be this very animal
-            n_unknown = int((train & unknown_old).sum())
-            train &= ~unknown_old
+        train, n_unknown = _pooled_training(keys, t)
         f = Fold(TrainingMode.POOLED, t, train=_rows(train), evaluate=_rows(ev),
                  held_out=tuple(sorted(set(table.loc[ev, "recording"].astype(str)))),
                  n_excluded_unknown=n_unknown)
@@ -306,6 +341,20 @@ def loao_folds(table: pd.DataFrame, targets: Sequence[str]) -> list[Fold]:
         _assert_scored_on_spans(table, f)
         folds.append(f)
     return folds
+
+
+def _pooled_training(keys: npt.NDArray[np.object_], target: str
+                     ) -> tuple[npt.NDArray[np.bool_], int]:
+    """Return the pooled corpus of a target (modes A and B alike, invariant 33).
+
+    Every other animal key; for an OLD-cohort target also without the old "?" rows,
+    which may be that very animal. Returns the mask and how many "?" rows it left out.
+    """
+    train = keys != target
+    if not target.startswith("old:"):
+        return train, 0
+    unknown_old = keys == f"old:{UNKNOWN_ANIMAL}"
+    return train & ~unknown_old, int((train & unknown_old).sum())
 
 
 def _check_target(t: str) -> None:
@@ -324,7 +373,10 @@ def _target_recordings(table: pd.DataFrame, target: str, mode: TrainingMode) -> 
     recs = sorted(set(table.loc[is_t, "recording"].astype(str)))
     if len(recs) < 2:  # noqa: PLR2004
         raise ModeRefusedError(mode, target, f"needs >= 2 labelled recordings, has {len(recs)}")
-    return sorted(set(table.loc[is_t & _scorable(table), "recording"].astype(str)))
+    scored = sorted(set(table.loc[is_t & _scorable(table), "recording"].astype(str)))
+    if not scored:
+        raise ModeRefusedError(mode, target, "no recording with scorable (audit-span) rows")
+    return scored
 
 
 def adapted_folds(table: pd.DataFrame, target: str) -> list[Fold]:
@@ -339,11 +391,13 @@ def adapted_folds(table: pd.DataFrame, target: str) -> list[Fold]:
     rec = table["recording"].astype(str).to_numpy()
     is_t = keys == target
     scorable = _scorable(table)
+    pooled, n_unknown = _pooled_training(keys, target)
     folds = []
     for r in recs:
-        f = Fold(TrainingMode.ADAPTED, target, train=_rows(~is_t),
+        f = Fold(TrainingMode.ADAPTED, target, train=_rows(pooled),
                  adapt=_rows(is_t & (rec != r)),
-                 evaluate=_rows(is_t & (rec == r) & scorable), held_out=(r,))
+                 evaluate=_rows(is_t & (rec == r) & scorable), held_out=(r,),
+                 n_excluded_unknown=n_unknown)
         assert_disjoint_animals(table, f)
         assert_no_recording_leak(table, f)
         _assert_scored_on_spans(table, f)
@@ -496,7 +550,7 @@ def _record(mode: TrainingMode, fold: Fold, t: pd.DataFrame, raw: npt.NDArray[np
 def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,  # noqa: PLR0912, PLR0915
               num_threads: int, modes: Sequence[TrainingMode] = tuple(TrainingMode),
               w_adapt_grid: Sequence[float] = W_ADAPT_GRID,
-              calibration: Literal["isotonic", "platt"] | None = "isotonic",
+              calibration: Literal["isotonic"] | None = "isotonic",
               train_size: int | None = None, seed: int = 0,
               rounds: int = NUM_BOOST_ROUND, adapt_rounds: int = ADAPT_ROUNDS) -> ModeRun:
     """Train and score every requested mode for every target, in one pass.
@@ -510,6 +564,8 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
     held-out. Refused modes are returned, never silently skipped.
     """
     require_run_record(record_path)
+    _refuse_test_rows(table)
+    _check_renames_recorded(table, record_path)
     if calibration not in (None, CALIBRATION_KIND):
         msg = f"calibration {calibration!r} is not the recorded kind {CALIBRATION_KIND!r}"
         raise ValueError(msg)

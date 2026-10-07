@@ -41,6 +41,7 @@ from gems_blanking_v2.model.evaluate import (
     CALIBRATION_NOTE,
     SMALL_FOLD_RULE,
     VERDICT_RULE,
+    W_ADAPT_GRID,
     R9Thresholds,
     cluster_bootstrap_ci,
     ece,
@@ -190,7 +191,9 @@ def b_vs_c_verdict(matched: pd.DataFrame, r9: R9Thresholds) -> list[BvCVerdict]:
     """Apply R9: C beats B only by >= 0.03 F1 with the CI excluding 0, at every swept w.
 
     In the ``B vs C`` rows of :func:`matched_protocol_table`, ``a`` is B and ``b`` is C,
-    so ``f1_b_minus_a`` is ``F1(C) - F1(B)``.
+    so ``f1_b_minus_a`` is ``F1(C) - F1(B)``. "Every w" means the RECORDED grid
+    (:data:`~gems_blanking_v2.model.evaluate.W_ADAPT_GRID`): a target swept over any
+    other set of weights gets ``incomplete sweep`` and no verdict.
     """
     out: list[BvCVerdict] = []
     if matched.empty:
@@ -198,6 +201,11 @@ def b_vs_c_verdict(matched: pd.DataFrame, r9: R9Thresholds) -> list[BvCVerdict]:
     bc = matched[matched["comparison"] == "B vs C"]
     for target in sorted(set(bc["target"])):
         rows = bc[bc["target"] == target]
+        swept = sorted(set(rows["w_a"].astype(float)))
+        if swept != sorted(W_ADAPT_GRID):
+            out.append(BvCVerdict(target, f"incomplete sweep (w={swept}, recorded grid "
+                                  f"{list(W_ADAPT_GRID)}); no verdict", False, False, ""))
+            continue
         n_pos = int(rows["n_pos"].iloc[0])
         deciding = n_pos >= r9.min_positives_deciding
         gains = rows["f1_b_minus_a"].to_numpy(dtype=np.float64)

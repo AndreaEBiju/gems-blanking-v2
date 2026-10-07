@@ -53,7 +53,7 @@ from gems_blanking_v2.io.registry_log import (
 )
 from gems_blanking_v2.io.store import GemsStore, atomic_write_text, utc_stamp
 from gems_blanking_v2.model.evaluate import Calibrator
-from gems_blanking_v2.model.labels import animal_key
+from gems_blanking_v2.model.labels import animal_key, is_test_animal
 from gems_blanking_v2.model.train import feature_columns, predict_raw
 from gems_blanking_v2.types import Recording, TrainingMode
 
@@ -81,7 +81,7 @@ SPEC_NAME: Final = "spec.json"
 BOOSTER_NAME: Final = "model.txt"
 CALIBRATOR_NAME: Final = "calibrator.json"
 _MODEL_ID_RE: Final = re.compile(r"^[0-9a-f]{32}$")
-_ANIMAL_KEY_RE: Final = re.compile(r"^(old|new):[^:\s]+$")
+_ANIMAL_KEY_RE: Final = re.compile(r"^(old|new):([A-Z])$")
 COHORTS: Final[frozenset[str]] = frozenset({"old", "new"})
 
 
@@ -153,9 +153,15 @@ class ModelSpec:
             msg = (f"{mode} model with animal={self.animal!r}: POOLED has no animal, "
                    "ADAPTED and PER_ANIMAL must name one")
             raise ValueError(msg)
-        if self.animal is not None and not _ANIMAL_KEY_RE.match(self.animal):
-            msg = (f"animal must be an animal key '<cohort>:<letter>' with cohort old or new, "
-                   f"got {self.animal!r} (a bare letter names two rats across cohorts)")
+        key = None if self.animal is None else _ANIMAL_KEY_RE.match(self.animal)
+        if self.animal is not None and key is None:
+            msg = (f"animal must be an animal key '<cohort>:<A-Z>' with cohort old or new, "
+                   f"got {self.animal!r} (a bare letter names two rats across cohorts; the "
+                   "old '?' token is never a per-animal or adapted model)")
+            raise ValueError(msg)
+        if key is not None and is_test_animal(key.group(1), key.group(2)):
+            msg = (f"no {mode} model can exist for {self.animal}: new-cohort I/J/K are the "
+                   "prospective test set and are never trained on (R1)")
             raise ValueError(msg)
         cal = PurePosixPath(Path(self.calibrator).as_posix())
         if cal.is_absolute() or Path(self.calibrator).is_absolute() or ".." in cal.parts:
