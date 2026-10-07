@@ -71,7 +71,12 @@ from gems_blanking_v2.model.evaluate import (
     require_run_record,
     scores,
 )
-from gems_blanking_v2.model.labels import OLD_TIERS, SET_A_BASIS, animal_key, is_test_animal
+from gems_blanking_v2.model.labels import (
+    HUMAN_OLD_BASES,
+    OLD_TIERS,
+    animal_key,
+    is_test_animal,
+)
 from gems_blanking_v2.model.provenance import build_provenance, corpus_composition
 from gems_blanking_v2.model.registry import (
     ModelSpec,
@@ -111,6 +116,7 @@ __all__ = [
     "animal_letter",
     "assert_disjoint_animals",
     "assert_no_recording_leak",
+    "calibrate",
     "learning_curve",
     "loao_folds",
     "per_animal_folds",
@@ -189,7 +195,7 @@ class LabelOptIns:
             if src:
                 msg = f"allow_model_labels is False but the table has label_source {src}"
                 raise ValueError(msg)
-        inherited = (table["cohort"] == "old") & (table["basis"] != SET_A_BASIS)
+        inherited = (table["cohort"] == "old") & ~table["basis"].isin(sorted(HUMAN_OLD_BASES))
         old = table.loc[inherited, "recording"].astype(str).unique()
         tiers = {(old_tiers or {}).get(r) for r in old}
         outside = sorted(map(str, tiers - set(self.keep_tiers)))
@@ -658,7 +664,7 @@ def _check_tuning_recorded(record_path: Path, tuner: Tuner | None) -> None:
         raise ValueError(msg)
 
 
-def _calibrate(preds: pd.DataFrame, kind: Literal["isotonic"]) -> None:
+def calibrate(preds: pd.DataFrame, kind: Literal["isotonic"]) -> None:
     """Fill ``p_cal`` in place (ruling 2026-10-08 (b) item 2, mode A with zero target labels).
 
     Mode A: each target's calibrator is fitted on the OTHER targets' out-of-fold LOAO
@@ -923,7 +929,7 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
     preds = pd.concat(parts, ignore_index=True) if parts else _empty_predictions()
     preds["p_cal"] = np.nan
     if calibration is not None and len(preds):
-        _calibrate(preds, calibration)
+        calibrate(preds, calibration)
     registered: list[str] = []
     if registry is not None:
         registered = _register_finals(

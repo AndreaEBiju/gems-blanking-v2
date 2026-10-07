@@ -37,7 +37,7 @@ import pandas as pd
 from gems_blanking_v2.detect.recall import source_sha256
 from gems_blanking_v2.io.store import atomic_write_text
 from gems_blanking_v2.model.evaluate import run_protocol
-from gems_blanking_v2.model.labels import SET_A_BASIS, animal_key
+from gems_blanking_v2.model.labels import ADJUDICATED_BASIS, SET_A_BASIS, animal_key
 
 if TYPE_CHECKING:
     from gems_blanking_v2.model.registry import ModelSpec
@@ -53,6 +53,8 @@ __all__ = [
 
 PROVENANCE_NAME: Final = "provenance.json"
 SET_A_TIER: Final = "set_a"
+ADJUDICATED_TIER: Final = "adjudicated"
+"""The corpus-composition tier of other old cores Andrea judged on the screen."""
 """The corpus-composition tier of set A's judged random old cores."""
 _PROTOCOL_KEYS: Final[tuple[str, ...]] = tuple(run_protocol())
 
@@ -96,6 +98,9 @@ def corpus_composition(table: pd.DataFrame, old_tiers: Mapping[str, str] | None
             continue
         if b == SET_A_BASIS:
             tiers.append(SET_A_TIER)
+            continue
+        if b == ADJUDICATED_BASIS:
+            tiers.append(ADJUDICATED_TIER)
             continue
         t = (old_tiers or {}).get(r)
         if t is None:

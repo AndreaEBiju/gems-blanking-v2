@@ -32,7 +32,7 @@ import pandas as pd
 from gems_blanking_v2.detect.features import FEATURE_NAMES, FEATURE_VERSION, FEATURE_VERSION_COLUMN
 from gems_blanking_v2.io.detector_core import import_detector_module
 from gems_blanking_v2.model.evaluate import W_ADAPT_GRID
-from gems_blanking_v2.model.labels import SET_A_BASIS
+from gems_blanking_v2.model.labels import HUMAN_OLD_BASES, SET_A_BASIS
 from gems_blanking_v2.model.params import ADAPT_ROUNDS, FIXED_PARAMS, NUM_BOOST_ROUND
 
 __all__ = [
@@ -192,11 +192,14 @@ class PriorCorrection:
 
     The old marks are positives only, so taken at face value they make the old cohort
     look nearly all motion and teach "old cohort means motion". Set A's random old sample
-    is unbiased and holds both classes: its motion rate ``rate`` (``k_set_a / n_set_a``)
-    estimates the old cohort's. Every old-cohort POSITIVE row (set A's and the marks)
-    gets weight ``w_pos``, chosen so the effective old-cohort motion rate of the training
-    corpus, ``w_pos * n_pos / (w_pos * n_pos + n_neg)``, equals ``rate``; set A's
-    negatives keep weight 1. ``ci`` is the 95% cluster-bootstrap interval of ``rate``
+    is unbiased and holds both classes: its motion rate ``rate`` (``k_set_a / n_set_a``,
+    unsure and unjudged excluded) estimates the old cohort's. Every old-cohort POSITIVE
+    row (set A's, other adjudicated cores' and the marks) gets weight ``w_pos``, chosen so
+    the effective old-cohort motion rate of the training corpus,
+    ``w_pos * n_pos / (w_pos * n_pos + n_neg)``, equals ``rate``; old negatives (set A's
+    and other adjudicated ones) keep weight 1. Only set A's random rows estimate the rate;
+    a hum add-on or other targeted draw never does. ``ci`` is the 95% cluster-bootstrap
+    interval of ``rate``
     (resampling recordings, R9's old-cohort cluster) and ``w_pos_ci`` the weights at its
     ends - carried into provenance.
     """
@@ -260,9 +263,11 @@ def prior_correction(table: pd.DataFrame, *, base: npt.ArrayLike | None = None,
                "rows train only alongside old negatives judged by Andrea - provisional runs "
                "are new-cohort only")
         raise OldRowsRefusedError(msg)
-    marks = old & ~set_a
+    human = old & table["basis"].isin(sorted(HUMAN_OLD_BASES)).to_numpy()
+    marks = old & ~human
     if (y[marks] != 1).any():
-        msg = "an old-cohort row outside set A is not a positive; old marks are positives only"
+        msg = ("an inherited old-cohort row is not a positive; old marks are positives only "
+               "(only Andrea's own judgements may be old negatives)")
         raise ValueError(msg)
     bw = np.ones(len(table)) if base is None else np.asarray(base, dtype=np.float64)
     n_pos = float(bw[old & (y == 1)].sum())

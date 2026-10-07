@@ -229,18 +229,18 @@ def _preds(seed: int = 0) -> pd.DataFrame:
 def test_mode_a_calibration_never_reads_the_target_labels() -> None:
     p = _preds()
     p["p_cal"] = np.nan
-    md._calibrate(p, "isotonic")
+    md.calibrate(p, "isotonic")
     q = _preds()
     a = (q["target"] == "new:A").to_numpy()
     q.loc[a, "y"] = 1 - q.loc[a, "y"]
     q["p_cal"] = np.nan
-    md._calibrate(q, "isotonic")
+    md.calibrate(q, "isotonic")
     assert np.array_equal(p.loc[a, "p_cal"].to_numpy(), q.loc[a, "p_cal"].to_numpy())
     others = (p["target"] != "new:A").to_numpy()
     want = ev.Calibrator.fit(p.loc[others, "raw"], p.loc[others, "y"]).apply(p.loc[a, "raw"])
     assert np.allclose(p.loc[a, "p_cal"].to_numpy(), want)
     alone = p[p["target"] == "new:A"].assign(p_cal=np.nan)
-    md._calibrate(alone, "isotonic")
+    md.calibrate(alone, "isotonic")
     assert alone["p_cal"].isna().all()  # no other target: no calibration, never its own
 
 
@@ -613,3 +613,94 @@ def test_too_few_set_a_negatives_refuse_and_an_infinite_ci_weight_is_omitted() -
     d = corr.to_dict()
     assert "w_pos_at_ci" not in d and "rate of 1" in d["w_pos_at_ci_omitted"]
     json.dumps(d, allow_nan=False)  # writable: never raises after artifacts are on disk
+
+
+
+# ---------------------------------------------------------------------------
+# Night 2: set A judgements onto cores
+# ---------------------------------------------------------------------------
+
+
+def _set_a_sample() -> tuple[pd.DataFrame, pd.DataFrame, dict[str, str]]:
+    """Old cores of 4 recordings (all unjudged) and the screen's rows for some of them."""
+    rows, adj = [], []
+    want: dict[str, str] = {}
+    keys = ("1", "2", "3", "4", None)  # None: Space / never judged
+    names = {"1": "motion", "2": "physiology", "3": "unsure", "4": "line_noise"}
+    k = 0
+    for r in range(4):
+        rec = f"E1000_FRE_E1000_bl_13{r:02d}"
+        for i in range(40):
+            key = f"{rec}|{i * 1000}|{i * 1000 + 200}"
+            rows.append({"recording": rec, "animal": "F", "cohort": "old", "start_s": i * 1.0,
+                         "stop_s": i * 1.0 + 0.2, "judgement": "unjudged", "source": "inherited",
+                         "basis": "unmarked", "label_set": "train", "label_source": "human",
+                         "core_key": key})
+            press = keys[(k * 7 + r) % 5]
+            k += 1
+            if press is not None:
+                adj.append({"core_key": key, "judgement": names[press], "cohort": "old",
+                            "animal": "F", "label_set": "train", "queue_file": "setA_random",
+                            "at": f"2026-10-07T20:{k // 60:02d}:{k % 60:02d}+00:00"})
+            want[key] = {"1": "motion", "2": "physiology", "3": "unsure", "4": "line_noise",
+                         None: "unjudged"}[press]
+    # one targeted (hum) old row: a human negative that must NOT enter the rate
+    rows.append({**rows[0], "start_s": 900.0, "stop_s": 900.2, "core_key": "hum|1|2"})
+    adj.append({"core_key": "hum|1|2", "judgement": "physiology", "cohort": "old",
+                "animal": "F", "label_set": "train", "queue_file": "setA_hum",
+                "at": "2026-10-07T21:00:00+00:00"})
+    want["hum|1|2"] = "physiology"
+    return pd.DataFrame(rows), pd.DataFrame(adj), want
+
+
+def test_set_a_keys_become_labels_and_unsure_or_unjudged_never_negatives() -> None:
+    cores, adj, want = _set_a_sample()
+    # an earlier judgement of the same core, later undone and re-judged: the later one wins
+    adj = pd.concat([adj.iloc[[0]].assign(judgement="unsure", at="2026-10-07T19:00:00+00:00"),
+                     adj], ignore_index=True)
+    out, rep_ = lb.apply_adjudications(cores, adj, random_queue="setA_random")
+    got = dict(zip(out["core_key"], out["judgement"], strict=True))
+    assert got == want
+    random_keys = adj.loc[adj["queue_file"] == "setA_random", "core_key"].nunique()
+    assert rep_["n_conflicts"] == 0 and rep_["n_set_a_old"] == random_keys
+    assert rep_["n_duplicate_judgements"] == 1
+    assert (out.loc[out["core_key"] == "hum|1|2", "basis"] == lb.ADJUDICATED_BASIS).all()
+    # every recording at an admitted tier: only the judgement can exclude a core
+    tiers = dict.fromkeys(out["recording"].astype(str), "1")
+    tr_rows = lb.training_rows(out, old_tiers=tiers, keep_tiers=("1",))
+    y = dict(zip(tr_rows["core_key"], tr_rows["y"], strict=True))
+    for key, j in want.items():
+        if j in ("unsure", "unjudged"):
+            assert key not in y, (key, j)  # excluded, never a negative
+        else:
+            assert y[key] == int(j == "motion"), (key, j)
+    rand = tr_rows["basis"] == lb.SET_A_BASIS
+    k = int(tr_rows.loc[rand, "y"].sum())
+    n = int(rand.sum())
+    corr = tr.prior_correction(tr_rows, seed=3)
+    assert corr is not None and corr.rate == pytest.approx(k / n)  # hum row not in the rate
+    assert (corr.k_set_a, corr.n_set_a) == (k, n)
+    # the CI: 1000 resamples of the set-A recordings, as an independent computation
+    sub = tr_rows[rand]
+    codes, _u = pd.factorize(sub["recording"], sort=True)
+    kk = np.bincount(codes, weights=sub["y"].to_numpy(float))
+    nn = np.bincount(codes).astype(float)
+    draw = np.random.default_rng(3).integers(0, len(nn), size=(tr.PRIOR_CI_RESAMPLES, len(nn)))
+    lo, hi = np.quantile(kk[draw].sum(1) / nn[draw].sum(1), [0.025, 0.975])
+    assert corr.ci == pytest.approx((lo, hi))
+
+
+def test_an_adjudication_never_overwrites_a_different_label() -> None:
+    cores, adj, _want = _set_a_sample()
+    key = adj["core_key"].iloc[1]
+    cores.loc[cores["core_key"] == key, "judgement"] = "motion"
+    cores.loc[cores["core_key"] == key, "basis"] = "mark_overlap"
+    adj.loc[adj["core_key"] == key, "judgement"] = "physiology"
+    out, rep_ = lb.apply_adjudications(cores, adj, random_queue="setA_random")
+    row = out[out["core_key"] == key].iloc[0]
+    assert (row["judgement"], row["basis"]) == ("unjudged", "adjudication_conflict")
+    assert rep_["n_conflicts"] == 1
+    with pytest.raises(ValueError, match="match no core"):
+        lb.apply_adjudications(cores, adj.assign(core_key="nope"), random_queue="setA_random")
+    with pytest.raises(ValueError, match="not what the screen writes"):
+        lb.apply_adjudications(cores, adj.assign(judgement="skip"), random_queue="setA_random")
