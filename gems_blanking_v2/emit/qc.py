@@ -130,8 +130,16 @@ def blank_fraction_hold(
     """Hold the recording if any consumer mask blanks > 20% or > 3x the animal's median.
 
     ``animal_median`` maps :func:`median_key` to the animal's median blank fraction for
-    that mask, or ``None`` when unknown. Top reasons are counted by routing reason code.
+    that mask, or ``None`` when unknown. A median that is NaN, infinite or outside [0, 1]
+    raises naming its key: ``max(nan, floor)`` is NaN and ``f > 3 * nan`` is always
+    False, so a NaN would silently switch the 3x rule off. Top reasons are counted by
+    routing reason code.
     """
+    for k, v in animal_median.items():
+        if v is not None and not (math.isfinite(float(v)) and 0.0 <= float(v) <= 1.0):
+            msg = (f"animal median for {k} is {v!r}: a blank fraction must be finite and in "
+                   "[0, 1] (use None for unknown)")
+            raise ValueError(msg)
     frac = {_key(k): 1.0 - m.retention for k, m in sorted(masks.items())}
     reasons: list[str] = []
     unknown: list[str] = []
@@ -168,6 +176,8 @@ class EmitGate:
     min_retention: float
     medians_used: Mapping[str, float]
     notes: tuple[str, ...]
+    top_routes: tuple[tuple[str, int], ...] = ()
+    hum_features: Mapping[str, float] = field(default_factory=dict)
 
 
 def emit_gate(masks: Mapping[MaskKey, ConsumerMask], *, min_retention: float,
@@ -184,7 +194,8 @@ def emit_gate(masks: Mapping[MaskKey, ConsumerMask], *, min_retention: float,
                     for k, r in sorted(retention.below.items())]
     used = {k: float(v) for k, v in animal_median.items() if v is not None}
     return EmitGate(hold.held or retention.flagged, tuple(reasons), retention.flagged,
-                    hold.held, min_retention, used, hold.notes)
+                    hold.held, min_retention, used, hold.notes, hold.top_routes,
+                    dict(hold.hum_features))
 
 
 def _present(d: Mapping[str, Any]) -> dict[str, Any]:

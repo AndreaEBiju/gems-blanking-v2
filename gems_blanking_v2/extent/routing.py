@@ -308,6 +308,11 @@ def in_band_verdict(ev: EventEvidence, consumer: str, tolerances: ToleranceTable
         if tr is None:
             msg = f"{consumer} routes on the shared ENG trace; EventEvidence.eng is missing"
             raise ValueError(msg)
+        if tr.signal != ev.signal or abs(tr.t0_s - ev.x_t0_s) > 1e-9:  # noqa: PLR2004
+            msg = (f"the ENG trace is {tr.signal}@{tr.t0_s} s but the event reads "
+                   f"{ev.signal}@{ev.x_t0_s} s: never one signal's sigma for another "
+                   "(invariant 3)")
+            raise ValueError(msg)
         sl = _span_slice((a_s - tr.t0_s, b_s - tr.t0_s), tr.rate, tr.y.size)
         seg = tr.y[sl]
         if not np.isfinite(seg).any():

@@ -79,9 +79,6 @@ Bool = npt.NDArray[np.bool_]
 MaskKey = tuple[str, str, str]
 """``(consumer, signal, band)``."""
 
-MATLAB_NAME_MAX: Final = 63
-"""MATLAB's ``namelengthmax``."""
-
 TAPER_S: Final = 0.0075
 """Cosine taper on the valid side of each mask boundary, seconds: the middle of the
 spec's 5-10 ms. Applied by :func:`apply_mask` only (see the module docstring)."""

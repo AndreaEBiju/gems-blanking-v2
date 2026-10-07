@@ -31,13 +31,14 @@ def _zmap(x: np.ndarray, t0: float) -> dict[tuple[str, str], np.ndarray]:
     return out
 
 
-_CACHE: dict[int, tuple[np.ndarray, dict[tuple[str, str], np.ndarray], rt.EngTrace]] = {}
+_Cached = tuple[np.ndarray, dict[tuple[str, str], np.ndarray], rt.EngTrace]
+_CACHE: dict[tuple[int, float], _Cached] = {}
 
 
 def _ev(eid: str, x: np.ndarray, span: tuple[float, float], t0: float = 0.0,
         **kw: Any) -> rt.EventEvidence:  # noqa: ANN401
     """EventEvidence on the recording timeline, x starting at ``t0``; z and ENG built once."""
-    key = id(x)
+    key = (id(x), t0)
     if key not in _CACHE or _CACHE[key][0] is not x:
         _CACHE[key] = (x, _zmap(x, t0), rt.eng_trace("S", x, FS, x_t0_s=t0))
     _x, z, eng = _CACHE[key]
@@ -276,3 +277,13 @@ def test_a_subtraction_on_a_late_epoch_uses_xs_own_timeline() -> None:
     exact = _ev("t", x, span, t0=120.0, subtract=lambda s: s - artifact)
     d = rt.route_event(exact, "spikes", TOL)
     assert d.route == "subtract" and d.residual_ratio < 1.0
+
+
+def test_one_signals_eng_trace_is_never_used_for_another() -> None:
+    x, span = _drift()
+    tr = rt.eng_trace("L_T", x, FS, x_t0_s=0.0)
+    with pytest.raises(ValueError, match="invariant 3"):
+        rt.in_band_verdict(rt.EventEvidence("e", "R_T", x, FS, span, 0.0, eng=tr), "spikes", TOL)
+    with pytest.raises(ValueError, match="invariant 3"):
+        rt.in_band_verdict(rt.EventEvidence("e", "L_T", x, FS, span, 120.0, eng=tr),
+                           "spikes", TOL)
