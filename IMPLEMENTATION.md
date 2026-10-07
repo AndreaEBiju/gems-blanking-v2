@@ -5341,7 +5341,7 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
 
 ### RULING 2026-10-07 (b) — full-build plan approved; R1–R9 decided
 
-**The plan** (artifact `PU7DbzYLHZPYkN8XQvxVAk`) is approved as the order of work: preflight → tasks 11 and 10 → Night 1 (candidate replay + features) → Change 1 screen → labelling A → 12/12A → Night 2 → labelling B → Night 3 → model choice → 13/14/15 → Nights 4–5 (inference + masks) → Night 6 (MATLAB) → task 19. The standing working rule applies throughout: a status line on every message, long jobs overnight, never idle, a morning summary, and questions to Andrea any time 10:00–01:00.
+**The plan** (artifact `PU7DbzYLHZPYkN8XQvxVAk`) is approved as the order of work: preflight → tasks 11 and 10 → Night 1 (candidate replay + features) → Change 1 screen → labelling A → 12/12A → Night 2 → labelling B → Night 3 → model choice → 13/14/15 → Nights 4–5 (inference + masks) → Night 6 (MATLAB) → task 19. The standing working rule applies throughout: a status line on every message, long jobs overnight, never idle, a morning summary, and questions to Andrea any time 10:00–01:00. *(Hours and night start superseded by RULING 2026-10-08 (c): 09:00–00:30, night run at 00:30.)*
 
 **R1 — evaluation design: accepted.**
 - **Leave-one-animal-out (LOAO) over A, B and H.** Each is scored once, on its own audit spans, by a model trained on the old cohort, Andrea's judgments, and the other two animals' spans.
@@ -5709,6 +5709,53 @@ Andrea's confirmation now covers only the animal-alias table. The label-group ta
    - Adoption remains Andrea's decision.
 7. **Line-noise thresholds:** not fixed yet. Report the distribution of line ratio per channel and minute (histogram, per animal) and the share of minutes whose mains-locked spike fraction exceeds chance at α = 0.01 with family correction. The threshold for item 4 of (c) is ruled after that is seen. "Affected" at 57% is not a blanking decision, since line noise never blanks.
 8. **Labelling:** set A plus the hum add-on is ready for Andrea after the alias check. The I/J/K test items in set A are evaluation-only (R1).
+
+### RULING 2026-10-08 (c) — the standing working rule (replaces earlier statements of it)
+
+**Andrea, 2026-10-08:** hours are 09:00–00:30. The night run starts without waiting for "goodnight". The morning summary comes with a running task list for her day.
+
+1. **Andrea's hours: 09:00–00:30, her local time** (US Eastern, the build machine's system clock). Ask her anything in those hours.
+   - Use plain local time, not `TZ=America/New_York`: Git Bash on the build machine has no timezone database and silently falls back to GMT.
+2. **The night run starts automatically at 00:30** every night with the queued night work. "Goodnight" before 00:30 starts it earlier.
+   - The queue is prepared during the day, so 00:30 never finds it empty.
+   - If something blocks the night work, the blocker and a fallback job (the next unblocked measurement or build item) are named before 23:00.
+3. **Unchanged:**
+   - a status line on every message (RUNNING / NEEDS ANDREA / DONE, with an ETA in her time);
+   - never idle: when blocked, take the next unblocked item;
+   - long jobs overnight;
+   - push one at a time, merge (never rebase), hash frozen;
+   - all standing constraints.
+4. **The morning report is ready by 08:45.** It has two parts.
+   - **(a) Night summary:**
+     - what finished, failed or is still running;
+     - results and the questions that need rulings, ranked;
+     - anything stuck on a permission prompt or the usage limit.
+   - **(b) Andrea's day list**, a running list carried over and updated each morning:
+     - each item with its estimated minutes, where she does it (Mac, Windows build machine, or reply to Claude), and what it unblocks;
+     - **grouped by what can run in parallel:** items she can do while machine jobs run, and items independent of each other;
+     - **"Minimum today"**, marked clearly: the smallest set that keeps the build on track to finish by **Wednesday 2026-10-14** (one week from 2026-10-07), weekends included;
+     - **the critical path to 2026-10-14,** day by day (labelling sessions, nights, reviews), with slack in days. If today's minimum is missed, say what slips and the earliest new finish date.
+5. **Through the day,** keep the day list current: tick items off when done, and add new ones as they appear (at the end of a NEEDS ANDREA message).
+
+### Note on ruling dates, 2026-10-07
+
+The rulings headed **2026-10-08**, **(b)** and **(c)** were written on **2026-10-07**; the build machine's clock is right. The headings stay as identifiers, because prompts already cite them. The finish date in (c) is corrected to **Wednesday 2026-10-14**, one week from 2026-10-07.
+
+### RULING 2026-10-08 (d) — line-noise criterion for the spike consumer
+
+**Measured:**
+- Line-ratio distributions are not bimodal around 0.10. On A, B, I and K, most minutes sit at 0.04–0.16, with a long tail.
+- Share of nerve channel-minutes with a significant mains-locked spike excess (Holm, α = 0.01):
+
+  | A | B | H | I | J | K | old |
+  |---|---|---|---|---|---|---|
+  | 11.6% | 11.9% | 5.3% | 4.7% | 3.3% | 2.2% | ≤ 4.9% |
+
+**Ruling:**
+1. **No line-ratio threshold.** The ratio has no natural cut, so it stays a classifier feature only and decides no routing.
+2. **The spike consumer's per-minute distrust (ruling (c) item 4) uses the statistical test itself:** a cuff-minute is distrusted for the spike consumer when its mains-locked spike excess is significant after Holm correction at α = 0.01. Nothing else is affected: no blanking, and other consumers keep the minute.
+3. **The cost is reported:** spike-consumer time lost to this rule per animal and cuff, next to the time lost to motion blanking.
+   - If a mains cleaner is later adopted under (b) 6, the test is re-run on the cleaned signal, and minutes that are no longer significant regain trust.
 
 ### Adapter-check findings, 2026-09-28
 
@@ -6320,8 +6367,9 @@ exceeds **that consumer's tolerance** (table in Part A.4), padded by the measure
 filter settling time.
 
 **Measure the settling time**: run `impz` on the actual bandpass and take where it
-falls below 1% of peak. `P.edgeBufferMs` is currently 5; expect 30–50 ms. Report the
-measured value per band.
+falls below 1% of peak. `P.edgeBufferMs` is currently 5. Report the measured value per band. *(Measured
+2026-10-07: 5.1 ms for the spike consumer's 300–3000 Hz band; the earlier "expect
+30–50 ms" came from the old 100 Hz high-pass and is withdrawn — RULING 2026-10-08 (b) 3.)*
 
 ### The cardiac tolerance is operational, not an amplitude
 Suppress the span, re-run the peak detector, ask whether the beat train changed. A

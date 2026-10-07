@@ -26,8 +26,9 @@ exceeds **that consumer's tolerance** (table in Part A.4), padded by the measure
 filter settling time.
 
 **Measure the settling time**: run `impz` on the actual bandpass and take where it
-falls below 1% of peak. `P.edgeBufferMs` is currently 5; expect 30–50 ms. Report the
-measured value per band.
+falls below 1% of peak. `P.edgeBufferMs` is currently 5. Report the measured value per band. *(Measured
+2026-10-07: 5.1 ms for the spike consumer's 300–3000 Hz band; the earlier "expect
+30–50 ms" came from the old 100 Hz high-pass and is withdrawn — RULING 2026-10-08 (b) 3.)*
 
 ### The cardiac tolerance is operational, not an amplitude
 Suppress the span, re-run the peak detector, ask whether the beat train changed. A
