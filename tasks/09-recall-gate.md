@@ -1914,6 +1914,24 @@ This classifies each beat-locked component as leak or neural even if every subtr
 
 **4. Experiment 11 code.** Andrea brings the SSD to the build machine, or copies `Experiment 11\code` to a local, non-synced, non-git folder there. It is never placed in Google Drive folders that are git repos or shared, and never committed. Until then, build (B), (C), the injection test, scoring, and the (e) tests on the unsubtracted signal; (A) and the colleague's detector follow when the code arrives.
 
+### RULING 2026-10-07 (h) — old-cohort label sources (task 10)
+
+**Andrea, 2026-10-07:**
+- `<rec>_notched_v0.2.x_blankmotion.mat` (194 files, written May 25–28, 2026, in one batch; 190 v0.2.2, 4 v0.2.1) are **model output only**, not reviewed. Their `label_source` is **model**, so they are excluded from training and evaluation.
+- The plain `<rec>_blankmotion.mat` files (212 on Survivals, dated Apr 29 – Jul 30, 2026) are **a mix**: some she blanked by hand in `browseMotionArtifacts`, some were auto-blanked with a previous model.
+
+**Found on Andrea's Mac:** `~/.detector/training_manifest.json` (updated 2026-05-25). It lists 19 recordings, all `label_source: human`: 12 added by `phase1_build.py` (sources in `PortableSSD/blanking_training_data 05162026/`) and 7 added through the PyQt UI. History: model v0.1.0 was first trained 2026-05-18. Andrea copies the file to the build machine (Drive, outside any git folder).
+
+**Rule for each plain `_blankmotion.mat`:** the evidence below is applied in order, and the first that applies decides.
+1. **Listed in the manifest** → human.
+2. **Internal signature.** Read each file's variables and metadata on the build machine; a G: Drive copy is readable there, though cloud-only on the Mac. Group the files by signature.
+   - Use the 12 manifest `phase1_build` files as the known-human reference (`browseMotionArtifacts` output).
+   - A group carrying model or detector fields (version strings, probabilities, `detector`/`migrate_blankmotion` metadata) → model.
+3. **Date.** A file whose earliest timestamp predates the first model (2026-05-18), with the human signature → human.
+4. **Otherwise → unknown.** Unknown files are excluded, never assumed human (task 10's rule).
+
+**Andrea confirms the grouping** in one table: group, signature, date range, count, proposed source, and 3 example names per group. About 5 minutes, alongside the animal-alias table. Report how many old-cohort recordings remain human-labelled. If fewer than about 60, report what that does to the old-cohort share of training and to the mode-choice folds (R1 and R9 rules unchanged).
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
