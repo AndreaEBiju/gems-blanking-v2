@@ -134,15 +134,22 @@ def _old_rows() -> pd.DataFrame:
     return pd.DataFrame(rows, columns=list(lb.LABEL_COLUMNS))
 
 
-def test_old_cohort_rows_follow_the_tiers_of_ruling_i() -> None:
+def test_old_cohort_rows_follow_the_tiers_of_rulings_i_and_j() -> None:
     t = _old_rows()
-    tiers = {"o1": 1, "o2": 2, "o3": 0}  # o4 is absent from the map
+    tiers = {"o1": "1", "o2": "2a", "o3": "2b"}  # o4 is absent from the map
     assert lb.training_rows(t)["recording"].tolist() == []  # no map, no old rows
     assert lb.training_rows(t, old_tiers=tiers)["recording"].tolist() == ["o1"]
-    both = lb.training_rows(t, old_tiers=tiers, include_tier2=True)
-    assert both["recording"].tolist() == ["o1", "o2"]
+    step2 = lb.training_rows(t, old_tiers=tiers, keep_tiers=("1", "2a"))
+    assert step2["recording"].tolist() == ["o1", "o2"]
+    step3 = lb.training_rows(t, old_tiers=tiers, keep_tiers=lb.OLD_TIERS)
+    assert step3["recording"].tolist() == ["o1", "o2", "o3"]  # o4 never
     # new-cohort rows never depend on the old-cohort tiers
     assert len(lb.training_rows(_table(), old_tiers={})) == 2
+
+
+def test_an_unknown_tier_label_raises() -> None:
+    with pytest.raises(ValueError, match="keep_tiers"):
+        lb.training_rows(_old_rows(), old_tiers={"o1": "1"}, keep_tiers=("2",))
 
 
 def test_model_labels_need_an_explicit_opt_in() -> None:

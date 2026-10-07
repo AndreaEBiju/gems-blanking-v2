@@ -42,6 +42,7 @@ __all__ = [
     "EXCLUDED_EPOCH_FRACTION",
     "LABEL_COLUMNS",
     "MOTION_OVERLAP",
+    "OLD_TIERS",
     "TEST_ANIMALS",
     "AliasRow",
     "BlankmotionLabels",
@@ -63,6 +64,11 @@ MOTION_OVERLAP: Final = 0.5
 
 EXCLUDED_EPOCH_FRACTION: Final = 0.9
 """A segment longer than this fraction of its epoch is a protocol exclusion, not an event."""
+
+OLD_TIERS: Final[tuple[str, ...]] = ("1", "2a", "2b")
+"""Old-cohort label tiers (rulings 2026-10-07 (i), (j)): 1 manifest-listed; 2a decidable
+and not grid-locked; 2b undecidable, admitted on the date route only. Anything else is
+excluded. The training check adds them in this order, one step at a time."""
 
 TEST_ANIMALS: Final[frozenset[str]] = frozenset({"I", "J", "K"})
 """The prospective test set (ruling 2026-10-07 (b) R1): never in training."""
@@ -238,17 +244,18 @@ def recording_label_source(value: str | None) -> LabelSource:
 
 
 def training_rows(table: pd.DataFrame, *, allow_model_labels: bool = False,
-                  old_tiers: Mapping[str, int] | None = None,
-                  include_tier2: bool = False) -> pd.DataFrame:
+                  old_tiers: Mapping[str, str] | None = None,
+                  keep_tiers: Iterable[str] = ("1",)) -> pd.DataFrame:
     """Return the rows task 12 may train on, with a binary ``y`` (1 = motion).
 
     Drops ``unjudged`` and ``unsure`` (never negatives), every test-set row and animal
     (R1), and every recording whose ``label_source`` is ``unknown`` - or ``model`` /
     ``mixed`` unless ``allow_model_labels`` (an opt-in the caller records in provenance).
 
-    Old-cohort rows (ruling 2026-10-07 (i)) are kept only for recordings in ``old_tiers``
-    with tier 1, or tier 2 when ``include_tier2``; a recording absent from the map, or with
-    tier 0, is excluded - never assumed certain. ``old_tiers=None`` keeps no old-cohort row.
+    Old-cohort rows (rulings 2026-10-07 (i), (j)) are kept only for recordings whose tier
+    in ``old_tiers`` is one of ``keep_tiers`` (labels from :data:`OLD_TIERS`; default tier 1
+    only). A recording absent from the map, or with any other label, is excluded - never
+    assumed certain. ``old_tiers=None`` keeps no old-cohort row.
     Raises naming the column if a required column is missing.
     """
     missing = [c for c in LABEL_COLUMNS if c not in table.columns]
@@ -263,9 +270,13 @@ def training_rows(table: pd.DataFrame, *, allow_model_labels: bool = False,
             & (table["label_set"] == "train")
             & ~table["animal"].isin(TEST_ANIMALS)
             & table["label_source"].isin(ok_src))
-    allowed = {1, 2} if include_tier2 else {1}
+    allowed = set(keep_tiers)
+    unknown = allowed - set(OLD_TIERS)
+    if unknown:
+        msg = f"keep_tiers must be drawn from {OLD_TIERS}, got {sorted(unknown)}"
+        raise ValueError(msg)
     tiers = old_tiers or {}
-    old_ok = table["recording"].map(lambda r: tiers.get(r, 0) in allowed)
+    old_ok = table["recording"].map(lambda r: tiers.get(r) in allowed)
     keep &= (table["cohort"] != "old") | old_ok
     out = table.loc[keep].copy()
     out["y"] = (out["judgement"] == "motion").astype(np.int8)
