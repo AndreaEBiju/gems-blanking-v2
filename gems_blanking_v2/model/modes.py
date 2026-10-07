@@ -38,8 +38,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, Literal
 
@@ -54,18 +55,28 @@ from gems_blanking_v2.model.evaluate import (
     CALIBRATION_KIND,
     DECISION_P,
     W_ADAPT_GRID,
+    Calibrator,
     ThresholdBaseline,
     cluster_bootstrap_ci,
     cluster_ids,
     crossfit_calibrate,
+    ece,
     require_run_record,
     scores,
 )
 from gems_blanking_v2.model.labels import animal_key, is_test_animal
+from gems_blanking_v2.model.provenance import build_provenance, corpus_composition
+from gems_blanking_v2.model.registry import (
+    ModelSpec,
+    Registry,
+    calibrator_relpath,
+    model_content_id,
+)
 from gems_blanking_v2.model.train import (
     ADAPT_ROUNDS,
     NUM_BOOST_ROUND,
     check_leakage,
+    corpus_hash,
     feature_columns,
     fit,
     predict_raw,
@@ -514,6 +525,8 @@ class ModeRun:
     predictions: pd.DataFrame
     refusals: tuple[Refusal, ...]
     corpus: pd.DataFrame
+    registered: tuple[str, ...] = ()
+    """Model ids registered by this pass (empty unless a registry was given)."""
 
 
 def _subsample(rows: I64, n: int | None, rng: np.random.Generator) -> I64:
@@ -552,7 +565,9 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
               w_adapt_grid: Sequence[float] = W_ADAPT_GRID,
               calibration: Literal["isotonic"] | None = "isotonic",
               train_size: int | None = None, seed: int = 0,
-              rounds: int = NUM_BOOST_ROUND, adapt_rounds: int = ADAPT_ROUNDS) -> ModeRun:
+              rounds: int = NUM_BOOST_ROUND, adapt_rounds: int = ADAPT_ROUNDS,
+              registry: Registry | None = None, user: str = "",
+              old_tiers: Mapping[str, str] | None = None) -> ModeRun:
     """Train and score every requested mode for every target, in one pass.
 
     Requires an existing run record (R9 thresholds written before training). ``table``
@@ -562,10 +577,26 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
     (mode, animal, ``w_adapt``) over the target's clusters
     (:func:`~gems_blanking_v2.model.evaluate.crossfit_calibrate`), so ``p_cal`` is
     held-out. Refused modes are returned, never silently skipped.
+
+    With ``registry`` (rooted wherever the caller says) the pass also trains and
+    REGISTERS the final model of every evaluated mode (:func:`_register_finals`): one
+    POOLED model on every row, and per target a PER_ANIMAL model on all its rows and one
+    ADAPTED model per swept ``w_adapt``. Each carries the held-out metrics of its
+    protocol, a calibrator fitted on its mode's held-out predictions, and a
+    ``provenance.json``. Registered models are never promoted and none is a default;
+    ``user`` is required, ``old_tiers`` is required when old-cohort rows train, and a
+    learning-curve pass (``train_size``) never registers.
     """
     require_run_record(record_path)
     _refuse_test_rows(table)
     _check_renames_recorded(table, record_path)
+    if registry is not None:
+        if not user:
+            msg = "registering models needs the acting user"
+            raise ValueError(msg)
+        if train_size is not None or calibration is None:
+            msg = "only a full, calibrated pass registers models (no train_size, calibration on)"
+            raise ValueError(msg)
     if calibration not in (None, CALIBRATION_KIND):
         msg = f"calibration {calibration!r} is not the recorded kind {CALIBRATION_KIND!r}"
         raise ValueError(msg)
@@ -582,6 +613,7 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
     parts: list[pd.DataFrame] = []
     refusals: list[Refusal] = []
     corpus: list[dict[str, object]] = []
+    priors: dict[str, tuple[lgb.Booster, I64]] = {}
 
     def train_on(rows: I64, *, init: lgb.Booster | None = None, w: npt.NDArray[np.float64]
                  | None = None, n_rounds: int = rounds) -> lgb.Booster:
@@ -597,6 +629,7 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
             (fa,) = loao_folds(table, [target])
             pooled_rows = _subsample(fa.train, train_size, rng)
             pooled = train_on(pooled_rows)
+            priors[target] = (pooled, pooled_rows)
             corpus.append(_corpus_row(table, TrainingMode.POOLED, target, pooled_rows))
             if TrainingMode.POOLED in modes:
                 thr = _baseline_pred(x[BASELINE_FEATURE].iloc[pooled_rows], y[pooled_rows],
@@ -654,7 +687,90 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
             preds.loc[g.index, "p_cal"] = crossfit_calibrate(
                 g["raw"].to_numpy(), g["y"].to_numpy(), g["cluster"].to_numpy(),
                 kind=calibration)
-    return ModeRun(predictions=preds, refusals=tuple(refusals), corpus=pd.DataFrame(corpus))
+    registered: list[str] = []
+    if registry is not None:
+        registered = _register_finals(
+            table, preds, y=y, w_all=w_all, train_on=train_on, priors=priors,
+            modes=modes, targets=targets, w_adapt_grid=w_adapt_grid,
+            adapt_rounds=adapt_rounds, record_path=record_path, registry=registry,
+            user=user, old_tiers=old_tiers, refusals=refusals)
+    return ModeRun(predictions=preds, refusals=tuple(refusals), corpus=pd.DataFrame(corpus),
+                   registered=tuple(registered))
+
+
+def _protocol_metrics(g: pd.DataFrame) -> dict[str, float]:
+    """Held-out metrics of one mode's predictions; a metric that is undefined is absent."""
+    s = scores(g["y"].to_numpy(), g["yhat"].to_numpy())
+    vals = {"f1": s.f1, "precision": s.precision, "recall": s.recall,
+            "prevalence": s.prevalence, "n": float(s.n), "n_pos": float(s.n_pos),
+            "ece_raw": ece(g["raw"].to_numpy(), g["y"].to_numpy())}
+    cal = g["p_cal"].notna().to_numpy()
+    if cal.any():
+        vals["ece_cal"] = ece(g["p_cal"].to_numpy()[cal], g["y"].to_numpy()[cal])
+    return {k: float(v) for k, v in vals.items() if np.isfinite(v)}
+
+
+def _register_finals(table: pd.DataFrame, preds: pd.DataFrame, *,
+                     y: npt.NDArray[np.int8], w_all: npt.NDArray[np.float64],
+                     train_on: Callable[..., lgb.Booster],
+                     priors: Mapping[str, tuple[lgb.Booster, I64]],
+                     modes: Sequence[TrainingMode], targets: Sequence[str],
+                     w_adapt_grid: Sequence[float], adapt_rounds: int,
+                     record_path: Path, registry: Registry, user: str,
+                     old_tiers: Mapping[str, str] | None,
+                     refusals: list[Refusal]) -> list[str]:
+    """Train, calibrate and register the final model of each evaluated mode."""
+    run_id = str(json.loads(Path(record_path).read_text(encoding="utf-8"))["run_id"])
+    keys = table["animal_key"].to_numpy()
+    out: list[str] = []
+
+    def put(mode: TrainingMode, animal: str | None, booster: lgb.Booster, rows: I64,
+            held: pd.DataFrame, protocol: str, w: float | None) -> None:
+        if held.empty or held["y"].nunique() < 2:  # noqa: PLR2004
+            refusals.append(Refusal(str(mode), animal or "all",
+                                    "no two-class held-out predictions to calibrate on",
+                                    "final"))
+            return
+        cal = Calibrator.fit(held["raw"].to_numpy(), held["y"].to_numpy(), CALIBRATION_KIND)
+        corpus_rows = table.iloc[rows]
+        chash = corpus_hash(corpus_rows)
+        mid = model_content_id(booster, cal, mode=mode, animal=animal, corpus_hash=chash)
+        spec = ModelSpec(mode=mode, animal=animal, version=run_id, corpus_hash=chash,
+                         calibrator=calibrator_relpath(mid), trained_at=datetime.now(UTC),
+                         metrics={protocol: _protocol_metrics(held)},
+                         n_train_events=int(rows.size))
+        prov = build_provenance(spec, corpus=corpus_composition(corpus_rows, old_tiers),
+                                record_path=record_path, w_adapt=w)
+        out.append(registry.register(spec, booster, cal, user=user, provenance=prov,
+                                     corpus_id=run_id))
+
+    if TrainingMode.POOLED in modes:
+        rows = np.arange(len(table), dtype=np.int64)
+        held = preds[preds["mode"] == str(TrainingMode.POOLED)]
+        put(TrainingMode.POOLED, None, train_on(rows), rows, held, PROTOCOL[
+            TrainingMode.POOLED], None)
+    for target in targets:
+        is_t = keys == target
+        t_rows = _rows(is_t)
+        if TrainingMode.PER_ANIMAL in modes:
+            held = preds[(preds["mode"] == str(TrainingMode.PER_ANIMAL))
+                         & (preds["target"] == target)]
+            if not held.empty and np.unique(y[t_rows]).size == 2:  # noqa: PLR2004
+                put(TrainingMode.PER_ANIMAL, target, train_on(t_rows), t_rows, held,
+                    PROTOCOL[TrainingMode.PER_ANIMAL], None)
+        if TrainingMode.ADAPTED in modes and target in priors:
+            prior, prior_rows = priors[target]
+            for wa in w_adapt_grid:
+                held = preds[(preds["mode"] == str(TrainingMode.ADAPTED))
+                             & (preds["target"] == target) & (preds["w_adapt"] == wa)]
+                if held.empty:
+                    continue
+                rows = np.concatenate([prior_rows, t_rows])
+                ww = np.concatenate([w_all[prior_rows], wa * w_all[t_rows]])
+                booster = train_on(rows, init=prior, w=ww, n_rounds=adapt_rounds)
+                put(TrainingMode.ADAPTED, target, booster, rows, held,
+                    PROTOCOL[TrainingMode.ADAPTED], float(wa))
+    return out
 
 
 def learning_curve(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,

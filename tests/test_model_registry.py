@@ -15,9 +15,11 @@ import pytest
 from gems_blanking_v2.constants import FS_NOMINAL_HZ
 from gems_blanking_v2.io.detector_core import import_detector_module
 from gems_blanking_v2.io.store import GemsStore
+from gems_blanking_v2.model import evaluate as ev
 from gems_blanking_v2.model import registry as rg
 from gems_blanking_v2.model import train as tr
 from gems_blanking_v2.model.evaluate import Calibrator
+from gems_blanking_v2.model.provenance import build_provenance, corpus_composition
 from gems_blanking_v2.types import Recording, TrainingMode
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -57,8 +59,15 @@ def _register(reg: rg.Registry, booster: lgb.Booster, mode: TrainingMode,
                         {"LOAO": {"f1": 0.8}} if mode is TrainingMode.POOLED else
                         {"LORO": {"f1": 0.9}},
                         n_train_events=len(_TABLE))
-    reg.register(spec, booster, cal, user="tester")
+    reg.register(spec, booster, cal, user="tester", provenance=_prov(reg, spec))
     return spec
+
+
+def _prov(reg: rg.Registry, spec: rg.ModelSpec) -> dict[str, object]:
+    record = ev.write_run_record(reg.store.root / "run_record.json", run_id="t")
+    return build_provenance(spec, corpus=corpus_composition(_TABLE, None), record_path=record,
+                            w_adapt=3.0 if spec.mode is TrainingMode.ADAPTED else None,
+                            code={"package_sha256": "0" * 64})
 
 
 @pytest.fixture
@@ -194,10 +203,13 @@ def test_registry_is_append_only_and_models_immutable(
     cal = reg.calibrator(spec)
     changed = dataclasses.replace(spec, version="9.9.9")
     with pytest.raises(ValueError, match="immutable"):
-        reg.register(changed, booster, cal, user="tester")
+        reg.register(changed, booster, cal, user="tester", provenance=_prov(reg, changed))
     wrong = dataclasses.replace(spec, corpus_hash="different")
     with pytest.raises(ValueError, match="content id"):
-        reg.register(wrong, booster, cal, user="tester")
+        reg.register(wrong, booster, cal, user="tester", provenance=_prov(reg, wrong))
+    other = _register(reg, booster, TrainingMode.PER_ANIMAL, "new:A")
+    with pytest.raises(ValueError, match="does not carry this model's spec"):
+        reg.register(spec, booster, cal, user="tester", provenance=_prov(reg, other))
     reg.promote(spec.model_id, user="tester")
     assert reg.promoted_label(TrainingMode.POOLED, None) == spec.model_id
     shards = list(reg.store.registry_dir.iterdir())

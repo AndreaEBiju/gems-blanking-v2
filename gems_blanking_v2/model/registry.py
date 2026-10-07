@@ -54,6 +54,7 @@ from gems_blanking_v2.io.registry_log import (
 from gems_blanking_v2.io.store import GemsStore, atomic_write_text, utc_stamp
 from gems_blanking_v2.model.evaluate import Calibrator
 from gems_blanking_v2.model.labels import animal_key, is_test_animal
+from gems_blanking_v2.model.provenance import PROVENANCE_NAME, write_provenance
 from gems_blanking_v2.model.train import feature_columns, predict_raw
 from gems_blanking_v2.types import Recording, TrainingMode
 
@@ -245,14 +246,21 @@ class Registry:
     store: GemsStore
 
     def register(self, spec: ModelSpec, booster: lgb.Booster, calibrator: Calibrator, *,
-                 user: str, corpus_id: str = "") -> str:
+                 user: str, provenance: Mapping[str, Any], corpus_id: str = "") -> str:
         """Write the model once and append a ``trained`` event. Returns the model id.
 
         The spec's model id must be the content id of ``booster`` and ``calibrator``
         (:func:`model_content_id`), so a spec cannot point at a different model's files.
-        Refuses to overwrite an existing model directory with different content - models
-        are immutable.
+        ``provenance`` (:func:`~gems_blanking_v2.model.provenance.build_provenance`) is
+        required and must carry this exact spec; it is written as ``provenance.json``
+        beside the model (task 12 acceptance 6). Registering never promotes. Refuses to
+        overwrite an existing model directory with different content - models are
+        immutable.
         """
+        if provenance.get("model") != spec.to_dict() or provenance.get("model_id") != (
+                spec.model_id):
+            msg = "provenance does not carry this model's spec; build it from the spec"
+            raise ValueError(msg)
         mid = spec.model_id
         want = model_content_id(booster, calibrator, mode=TrainingMode(spec.mode),
                                 animal=spec.animal, corpus_hash=spec.corpus_hash)
@@ -271,6 +279,7 @@ class Registry:
             atomic_write_text(d / BOOSTER_NAME, booster.model_to_string())
             atomic_write_text(cal_path, calibrator.to_json() + "\n")
             atomic_write_text(spec_path, spec.to_json() + "\n")
+        write_provenance(d, provenance)
         append_event(self.store, RegistryEvent(
             ts=utc_stamp(spec.trained_at), user=user, action=RegistryAction.TRAINED,
             model_id=mid, mode=str(TrainingMode(spec.mode)), animal=spec.animal or "",
@@ -318,6 +327,10 @@ class Registry:
                 if best is None or ts > best[0]:
                     best = (ts, mid)
         return None if best is None else best[1]
+
+    def provenance_path(self, spec: ModelSpec) -> Path:
+        """Where a registered model's ``provenance.json`` lives."""
+        return self.store.model_dir(spec.model_id) / PROVENANCE_NAME
 
     def booster(self, spec: ModelSpec) -> lgb.Booster:
         """Load the booster of a registered spec."""
