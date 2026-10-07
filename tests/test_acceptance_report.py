@@ -245,7 +245,9 @@ def _write(tmp_path: Path, name: str, model: dict[str, str]) -> Path:
                           generation_sha="0133349b3ebeff80", routing_hash="r",
                           created_at="2026-10-08T05:00:00+00:00", recording=name)
     masks = _masks(0.01, 0.01)
-    return write_mask_file(tmp_path / f"{name}.mat", masks, prov, fs=FS, n_samples=N_SAMPLES,
+    return write_mask_file(tmp_path / f"{name}.mat", masks, prov,
+                           signals={"spikes": ("L_T",), "slow_wave": ("ANT1",)},
+                           fs=FS, n_samples=N_SAMPLES,
                            epoch_start_s=0.0, min_retention=0.5,
                            animal_median={"spikes|L_T|300-3000": 0.02,
                                           "slow_wave|ANT1|0-2": 0.02})
