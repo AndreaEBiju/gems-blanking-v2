@@ -22,6 +22,7 @@ import numpy.typing as npt
 import pandas as pd
 import pytest
 from gems_blanking_v2.constants import FS_NOMINAL_HZ
+from gems_blanking_v2.detect.features import FEATURE_VERSION
 from gems_blanking_v2.io.detector_core import import_detector_module
 from gems_blanking_v2.io.store import GemsStore
 from gems_blanking_v2.model import compare as cmp
@@ -112,9 +113,14 @@ class _SpyTuner:
     def record(self) -> dict[str, Any]:
         return {"enabled": True, "backend": "spy"}
 
+    metas: list[pd.DataFrame] = dataclasses.field(default_factory=list)
+
     def __call__(self, x: pd.DataFrame, y: npt.NDArray[np.int8], w: npt.NDArray[np.float64],
-                 groups: npt.NDArray[np.str_], *, num_threads: int) -> Mapping[str, Any]:
+                 groups: npt.NDArray[np.str_], *, scorable: npt.NDArray[np.bool_],
+                 meta: pd.DataFrame, num_threads: int) -> Mapping[str, Any]:
         self.calls.append((set(x.index.tolist()), set(groups.tolist())))
+        self.metas.append(meta)
+        assert len(scorable) == len(meta) == len(x)
         return {**pm.FIXED_PARAMS, "num_leaves": 7}
 
 
@@ -166,7 +172,9 @@ def test_the_optuna_tuner_says_so_when_optuna_is_absent(new_table: pd.DataFrame)
     assert t.record()["enabled"] and "nesting" in t.record()
     with pytest.raises(ImportError, match="tuning is off by default"):
         t(new_table[tr.feature_columns(new_table)], new_table["y"].to_numpy(),
-          np.ones(len(new_table)), new_table["animal_key"].to_numpy(), num_threads=1)
+          np.ones(len(new_table)), new_table["animal_key"].to_numpy(),
+          scorable=np.ones(len(new_table), bool), meta=new_table[list(md.TUNER_META)],
+          num_threads=1)
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +339,8 @@ def test_a_test_animal_model_exists_only_as_flagged_adapted_with_separate_labels
     reg.register(spec, booster, cal, user="t", provenance={**prov, "adaptation_separation": sep})
     rec, _t = make_multichannel(FS_NOMINAL_HZ, 2.0, seed=12)
     rec_j: Recording = dataclasses.replace(rec, animal="J", session="s_J")
+    assert sep["evaluation_spans"] == {"j1": [[10.0, 40.0]]}
+    assert len(sep["evaluation_spans_sha256"]) == len(sep["adapt_rows_sha256"]) == 64
     cores = _TABLE.drop(columns="span_id")
     with pytest.raises(rg.NotApplicableError, match="never scores evaluation spans"):
         rg.run_inference(rec_j, spec, reg, cohort="new", cores=cores, chosen_by="t",
@@ -418,7 +428,7 @@ def test_the_cohort_probe_is_never_a_pass_by_default(new_table: pd.DataFrame,
                        w_adapt_grid=(1.0,), rounds=10, adapt_rounds=5)
     probe = cmp.cohort_probe(run.predictions, new_table, r9).set_index("mode")
     assert set(probe.index) == {"pooled", "adapted", "per_animal"}
-    assert probe["passes"].isna().all()
+    assert "passes" not in probe.columns
     assert probe["status"].str.contains("no old-cohort cores judged physiology").all()
     t = _old_table()
     run = md.run_modes(t, targets=["new:A", "old:F"], record_path=_record(tmp_path / "o.json"),
@@ -426,10 +436,10 @@ def test_the_cohort_probe_is_never_a_pass_by_default(new_table: pd.DataFrame,
     p = cmp.cohort_probe(run.predictions, t, r9).set_index("mode")
     assert p.loc["pooled", "status"] in ("pass", "fail")
     assert p.loc["pooled", "n_physiology_old"] > 0 and p.loc["pooled", "n_physiology_new"] > 0
-    assert p.loc["pooled", "passes"] == (abs(p.loc["pooled", "delta"]) <= 0.10)
+    assert (p.loc["pooled", "status"] == "pass") == (abs(p.loc["pooled", "delta"]) <= 0.10)
     for mode in ("adapted", "per_animal"):  # not run in this pass: no predictions at all
         assert p.loc[mode, "status"].startswith("not computable: no out-of-fold")
-        assert math.isnan(p.loc[mode, "passes"])
+        assert p.loc[mode, "status"] not in ("pass", "fail")
 
 
 def test_two_adapted_weights_never_share_a_model_id() -> None:
@@ -486,3 +496,120 @@ def test_tier_chain_keeps_against_the_last_kept_step() -> None:
     with pytest.raises(ValueError, match="audit spans"):
         cmp.tier_chain({**steps, "1": base.assign(yhat=y, cluster="rec:x")},
                        ["1", "1+2a"], r9)
+
+
+# ---------------------------------------------------------------------------
+# review of 8c9c3b1..9a81be9
+# ---------------------------------------------------------------------------
+
+
+def test_a_table_of_other_feature_definitions_is_refused(tmp_path: Path) -> None:
+    raw = make_feature_table({"new": ("A", "B")}, n_recordings=2, cores_per_recording=10,
+                             seed=5)
+    md.prepare_table(raw)  # stamped with the current version
+    with pytest.raises(tr.FeatureVersionError, match="carries no"):
+        md.prepare_table(raw.drop(columns="feature_version"))  # Night 1: unstamped
+    with pytest.raises(tr.FeatureVersionError, match="computed under"):
+        md.prepare_table(raw.assign(feature_version="night1"))
+    rec = json.loads(_record(tmp_path / "r.json").read_text(encoding="utf-8"))
+    assert rec["feature_version"] == FEATURE_VERSION
+
+
+def test_inner_cv_scores_only_the_outer_scorable_rows(new_table: pd.DataFrame,
+                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    feats = tr.feature_columns(new_table)
+    seen: list[int] = []
+    real = tu.scores
+
+    def spy(y: npt.ArrayLike, yhat: npt.ArrayLike) -> ev.Scores:
+        seen.append(len(np.asarray(y)))
+        return real(y, yhat)
+
+    monkeypatch.setattr(tu, "scores", spy)
+    sub = new_table[new_table["animal_key"] != "new:A"].reset_index(drop=True)
+    mask = np.zeros(len(sub), bool)
+    mask[::3] = True  # a third of the rows are scorable
+    tu.inner_cv_f1(pm.FIXED_PARAMS, sub[feats], sub["y"], np.ones(len(sub)),
+                   sub["animal_key"], rounds=5, num_threads=THREADS, scorable=mask)
+    assert seen == [int(mask.sum())]
+
+
+def test_inner_folds_recompute_the_prior_correction(monkeypatch: pytest.MonkeyPatch) -> None:
+    t = _old_table(set_a=20)
+    feats = tr.feature_columns(t)
+    got: list[tuple[pd.Index, npt.NDArray[np.float64]]] = []
+    real = tu.fit
+
+    def spy(x: pd.DataFrame, y: npt.ArrayLike, w: npt.ArrayLike, **kw: Any) -> lgb.Booster:  # noqa: ANN401
+        got.append((x.index, np.asarray(w, dtype=np.float64)))
+        return real(x, y, w, **kw)
+
+    monkeypatch.setattr(tu, "fit", spy)
+    base = np.full(len(t), 2.0)
+    tu.inner_cv_f1(pm.FIXED_PARAMS, t[feats], t["y"], base, t["animal_key"], rounds=5,
+                   num_threads=THREADS, meta=t[list(md.TUNER_META)])
+    assert got
+    for idx, w in got:
+        sub = t.loc[idx]
+        corr = tr.prior_correction(sub, base=base[: len(sub)])
+        assert corr is not None  # every inner training set holds old rows
+        old = (sub["cohort"] == "old").to_numpy()
+        yy = sub["y"].to_numpy()
+        eff = (w[old] * yy[old]).sum() / w[old].sum()
+        assert eff == pytest.approx(corr.rate)  # its OWN set A's rate, not the fold's
+
+
+def test_a_flagged_model_never_scores_a_stored_span_whatever_the_flag(tmp_path: Path) -> None:
+    booster = tr.fit(_TABLE[_FEATS], _TABLE["y"], num_threads=THREADS, rounds=10)
+    spec, cal = _spec_for(booster, "new:J", flag=True)
+    reg = rg.Registry(GemsStore.initialise(tmp_path / "gems"))
+    record = ev.write_run_record(tmp_path / "rr.json", run_id="t")
+    prov = build_provenance(spec, corpus=corpus_composition(_TABLE, None), record_path=record,
+                            w_adapt=3.0, calibration={"kind": "isotonic", "fitted_on": "t",
+                                                      "protocol": "LOAO_ADAPT", "targets": [],
+                                                      "n_predictions": 0},
+                            code={"package_sha256": "0" * 64})
+    adapt = pd.DataFrame({"recording": ["j1"], "start_s": [100.0], "stop_s": [100.2],
+                          "label_set": [rg.ADAPT_LABEL_SET]})
+    rec0 = str(_TABLE["recording"].iloc[0])
+    sep = rg.adaptation_separation(adapt, animal="new:J",
+                                   evaluation_spans={rec0: [(10.0, 12.1)]})
+    reg.register(spec, booster, cal, user="t", provenance={**prov, "adaptation_separation": sep})
+    rec, _t = make_multichannel(FS_NOMINAL_HZ, 2.0, seed=12)
+    rec_j = dataclasses.replace(rec, animal="J", session="s_J")
+    cores = _TABLE.drop(columns="span_id")  # no span ids: only the stored spans can tell
+    with pytest.raises(rg.NotApplicableError, match="overlap the evaluation spans"):
+        rg.run_inference(rec_j, spec, reg, cohort="new", cores=cores, chosen_by="t",
+                         evaluation=False)
+    outside = cores[(cores["recording"] != rec0) | (cores["start_s"] >= 12.1)]
+    res = rg.run_inference(rec_j, spec, reg, cohort="new", cores=outside, chosen_by="t",
+                           evaluation=False)
+    assert len(res.p_motion) == len(outside)
+    with pytest.raises(tr.FeatureVersionError):
+        rg.run_inference(rec_j, spec, reg, cohort="new", chosen_by="t", evaluation=False,
+                         cores=outside.drop(columns="feature_version"))
+
+
+def test_the_prior_correction_holds_under_non_unit_base_weights() -> None:
+    t = _old_table()
+    rng = np.random.default_rng(1)
+    base = rng.choice([1.0, 3.0, 30.0], size=len(t))
+    mult, corr = tr.prior_weights(t, base=base)
+    assert corr is not None
+    w = base * mult
+    old = (t["cohort"] == "old").to_numpy()
+    yy = t["y"].to_numpy()
+    assert (w[old] * yy[old]).sum() / w[old].sum() == pytest.approx(corr.rate)
+
+
+def test_too_few_set_a_negatives_refuse_and_an_infinite_ci_weight_is_omitted() -> None:
+    t = _old_table()
+    neg = np.flatnonzero(((t["basis"] == lb.SET_A_BASIS) & (t["y"] == 0)).to_numpy())
+    keep = np.setdiff1d(np.arange(len(t)), neg[tr.MIN_SET_A_OLD_NEGATIVES - 1:])
+    with pytest.raises(tr.OldRowsRefusedError, match=f"at least {tr.MIN_SET_A_OLD_NEGATIVES}"):
+        tr.prior_correction(t.iloc[keep])
+    corr = tr.PriorCorrection(n_set_a=30, k_set_a=10, n_marks=5, rate=1 / 3, ci=(0.1, 1.0),
+                              w_pos=0.5, w_pos_ci=(0.1, math.inf))
+    d = corr.to_dict()
+    assert "w_pos_at_ci" not in d and "rate of 1" in d["w_pos_at_ci_omitted"]
+    json.dumps(d, allow_nan=False)  # writable: never raises after artifacts are on disk

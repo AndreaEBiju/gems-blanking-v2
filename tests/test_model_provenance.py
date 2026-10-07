@@ -36,7 +36,7 @@ def run(tmp_path_factory: pytest.TempPathFactory) -> tuple[pd.DataFrame, md.Mode
     root = tmp_path_factory.mktemp("prov")
     record = ev.write_run_record(root / "run_record.json", run_id="unit_run")
     raw = make_feature_table({"new": ("A", "B"), "old": ("F",)}, n_recordings=3,
-                             cores_per_recording=120, set_a_per_recording=8, seed=31)
+                             cores_per_recording=120, set_a_per_recording=30, seed=31)
     tiers = {r: ("1" if i % 2 else "2a") for i, r in
              enumerate(sorted(set(raw.loc[raw["cohort"] == "old", "recording"])))}
     table = md.prepare_table(raw)
@@ -205,7 +205,7 @@ def test_label_opt_ins_are_checked_against_the_table(tmp_path: Path) -> None:
         with pytest.raises(TypeError, match="tuple of str"):
             md.LabelOptIns(allow_model_labels=False, keep_tiers=bad)  # type: ignore[arg-type]
     raw = make_feature_table({"new": ("A", "B"), "old": ("F",)}, n_recordings=2,
-                             cores_per_recording=10, set_a_per_recording=4, seed=36)
+                             cores_per_recording=10, set_a_per_recording=40, seed=36)
     old_recs = sorted(set(raw.loc[raw["cohort"] == "old", "recording"]))
     tiers = {old_recs[0]: "1", old_recs[1]: "2b"}
     t = md.prepare_table(raw)

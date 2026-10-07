@@ -33,6 +33,7 @@ import pandas as pd
 from scipy.special import expit
 from sklearn.isotonic import IsotonicRegression  # type: ignore[import-untyped]
 
+from gems_blanking_v2.detect.features import FEATURE_VERSION
 from gems_blanking_v2.io.detector_core import import_detector_module
 from gems_blanking_v2.io.store import atomic_write_text
 from gems_blanking_v2.model.params import (
@@ -117,7 +118,9 @@ CALIBRATION_NOTE: Final = (
     "RULING 2026-10-08 (b) item 2: mode A is calibrated with zero target labels - the "
     "calibrator of each target is fitted on the OTHER targets' out-of-fold LOAO "
     "predictions. Modes B and C are cross-fitted over the target's own held-out clusters "
-    "(their protocols use target labels by design)."
+    "(their protocols use target labels by design). Indirect path, stated: the target's "
+    "rows trained the other targets' LOAO models, so its labels shape the scores the "
+    "calibrator is fitted on - but never the calibrator's own fit."
 )
 """What ``p_cal`` and ``ece_cal`` mean per mode."""
 
@@ -188,6 +191,7 @@ def run_protocol() -> dict[str, Any]:
     return {"r9": asdict(R9_THRESHOLDS), "decision_p": DECISION_P, "ece_bins": ECE_BINS,
             "w_adapt_grid": list(W_ADAPT_GRID), "calibration": CALIBRATION_KIND,
             "params": dict(FIXED_PARAMS), "num_boost_round": NUM_BOOST_ROUND,
+            "feature_version": FEATURE_VERSION,
             "adapt_rounds": ADAPT_ROUNDS,
             "reuse": json.loads(json.dumps(TASK12_REUSE)),
             "rules": {"verdict_rule": VERDICT_RULE,

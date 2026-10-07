@@ -83,6 +83,7 @@ from gems_blanking_v2.model.train import (
     ADAPT_ROUNDS,
     FIXED_PARAMS,
     NUM_BOOST_ROUND,
+    check_feature_version,
     check_leakage,
     corpus_hash,
     event_id,
@@ -126,6 +127,10 @@ UNKNOWN_ANIMAL: Final = "?"
 """The old cohort's unconfirmed animal token. Its own group; never a target."""
 
 Protocol = Literal["LOAO", "LOAO_ADAPT", "LORO"]
+
+TUNER_META: Final[tuple[str, ...]] = ("cohort", "basis", "y", "recording")
+"""The label columns a tuner receives, so its inner folds can recompute the prior
+correction (:func:`~gems_blanking_v2.model.tuning.inner_cv_f1`)."""
 
 PROTOCOL: Final[dict[TrainingMode, Protocol]] = {
     TrainingMode.POOLED: "LOAO",
@@ -269,6 +274,7 @@ def prepare_table(table: pd.DataFrame, *,
             msg = f"table is missing required column {col!r}"
             raise ValueError(msg)
     refuse_test_rows(table)
+    check_feature_version(table)
     per_rec = table.groupby(table["recording"].astype(str))[["animal", "cohort"]].nunique()
     multi = per_rec[(per_rec > 1).any(axis=1)]
     if len(multi):
@@ -789,7 +795,7 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
     prior_log: list[dict[str, object]] = []
 
     def weights(rows: I64, base: npt.NDArray[np.float64], where: str) -> npt.NDArray[np.float64]:
-        mult, corr = prior_weights(table.iloc[rows], seed=seed)
+        mult, corr = prior_weights(table.iloc[rows], base=base, seed=seed)
         if corr is not None:
             prior_log.append({"fit": where, **corr.to_dict()})
         return base * mult
@@ -802,7 +808,8 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
         if forbidden in set(groups.tolist()):
             msg = f"{where}: the held-out group {forbidden!r} reached the tuner"
             raise AssertionError(msg)
-        p = dict(tuner(x.iloc[rows], y[rows], w_all[rows], groups, num_threads=num_threads))
+        p = dict(tuner(x.iloc[rows], y[rows], w_all[rows], groups, scorable=scorable[rows],
+                       meta=table.iloc[rows][list(TUNER_META)], num_threads=num_threads))
         tuned.append({**where, "params": p})
         return p
 
@@ -975,7 +982,8 @@ def _register_finals(table: pd.DataFrame, preds: pd.DataFrame, *,  # noqa: PLR09
     out: list[str] = []
 
     def put(mode: TrainingMode, animal: str | None, booster: lgb.Booster, rows: I64,
-            held: pd.DataFrame, protocol: str, w: float | None) -> None:
+            held: pd.DataFrame, protocol: str, w: float | None,
+            base: npt.NDArray[np.float64]) -> None:
         if held.empty or held["y"].nunique() < 2:  # noqa: PLR2004
             refusals.append(Refusal(str(mode), animal or "all",
                                     "no two-class held-out predictions to calibrate on",
@@ -1004,7 +1012,7 @@ def _register_finals(table: pd.DataFrame, preds: pd.DataFrame, *,  # noqa: PLR09
                                     "n_predictions": len(held)})
         if label_opt_ins is not None:
             prov["label_opt_ins"] = label_opt_ins.to_dict()
-        corr = prior_correction(corpus_rows, seed=seed)
+        corr = prior_correction(corpus_rows, base=base, seed=seed)
         if corr is not None:
             prov["prior_correction"] = corr.to_dict()
         prov["metric_basis"] = dict(METRIC_BASIS)
@@ -1023,7 +1031,7 @@ def _register_finals(table: pd.DataFrame, preds: pd.DataFrame, *,  # noqa: PLR09
                                                    "fold": "final"})
         put(TrainingMode.POOLED, None,
             train_on(rows, w=weights(rows, w_all[rows], "final pooled"), params=params),
-            rows, held, PROTOCOL[TrainingMode.POOLED], None)
+            rows, held, PROTOCOL[TrainingMode.POOLED], None, w_all[rows])
     rec = table["recording"].astype(str).to_numpy()
     for target in targets:
         is_t = keys == target
@@ -1038,7 +1046,7 @@ def _register_finals(table: pd.DataFrame, preds: pd.DataFrame, *,  # noqa: PLR09
                                                      f"final per_animal {target}"),
                                    params=params)
                 put(TrainingMode.PER_ANIMAL, target, booster, t_rows, held,
-                    PROTOCOL[TrainingMode.PER_ANIMAL], None)
+                    PROTOCOL[TrainingMode.PER_ANIMAL], None, w_all[t_rows])
             else:
                 refusals.append(Refusal(str(TrainingMode.PER_ANIMAL), target,
                                         "no held-out predictions or one-class labels",
@@ -1059,7 +1067,7 @@ def _register_finals(table: pd.DataFrame, preds: pd.DataFrame, *,  # noqa: PLR09
                                                                f"final adapted {target}"),
                                    n_rounds=adapt_rounds, params=params_t)
                 put(TrainingMode.ADAPTED, target, booster, rows, held,
-                    PROTOCOL[TrainingMode.ADAPTED], float(wa))
+                    PROTOCOL[TrainingMode.ADAPTED], float(wa), base)
     return out
 
 

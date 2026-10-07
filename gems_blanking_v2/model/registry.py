@@ -55,7 +55,12 @@ from gems_blanking_v2.io.store import GemsStore, atomic_write_text, utc_stamp
 from gems_blanking_v2.model.evaluate import Calibrator
 from gems_blanking_v2.model.labels import animal_key, is_test_animal
 from gems_blanking_v2.model.provenance import PROVENANCE_NAME, write_provenance
-from gems_blanking_v2.model.train import feature_columns, predict_raw
+from gems_blanking_v2.model.train import (
+    check_feature_version,
+    event_id,
+    feature_columns,
+    predict_raw,
+)
 from gems_blanking_v2.types import Recording, TrainingMode
 
 __all__ = [
@@ -294,7 +299,8 @@ class Registry:
         if spec.never_scores_evaluation_spans:
             sep = provenance.get("adaptation_separation")
             if not isinstance(sep, Mapping) or sep.get("checked") is not True or sep.get(
-                    "animal") != spec.animal:
+                    "animal") != spec.animal or "evaluation_spans" not in sep or (
+                    "adapt_rows_sha256" not in sep):
                 msg = (f"an ADAPTED model of test animal {spec.animal} is registered only with "
                        "provenance['adaptation_separation'] from adaptation_separation() for "
                        "that animal (ruling 2026-10-08 (b) item 2)")
@@ -399,7 +405,10 @@ def adaptation_separation(rows: pd.DataFrame, *, animal: str,
     ``stop_s``, ``label_set``); ``evaluation_spans`` maps each recording to its evaluation
     (audit) spans in seconds. Raises unless every row has ``label_set == "adapt"`` and
     none overlaps an evaluation span in time; returns the record that
-    :meth:`Registry.register` requires in ``provenance["adaptation_separation"]``.
+    :meth:`Registry.register` requires in ``provenance["adaptation_separation"]``. The
+    record keeps the evaluation spans themselves (and their SHA-256) and the SHA-256 of
+    the checked rows' event ids, so :func:`run_inference` can refuse any core inside those
+    spans whatever the caller declares, and the check is tied to the rows it saw.
     """
     m = _ANIMAL_KEY_RE.match(animal)
     if m is None or not is_test_animal(m.group(1), m.group(2)):
@@ -424,9 +433,50 @@ def adaptation_separation(rows: pd.DataFrame, *, animal: str,
         msg = (f"{animal}: {len(overlaps)} adaptation row(s) overlap an evaluation span, e.g. "
                f"{overlaps[:3]}; adaptation and evaluation labels never overlap in time (R1)")
         raise ValueError(msg)
+    spans = {str(r): [[float(a), float(b)] for a, b in sorted(v)]
+             for r, v in sorted(evaluation_spans.items())}
+    ids = sorted(event_id(r, a, b) for r, a, b in zip(
+        rows["recording"].astype(str), rows["start_s"], rows["stop_s"], strict=True))
     return {"checked": True, "animal": animal, "rule": "ruling 2026-10-08 (b) item 2; R1",
             "n_adapt_rows": len(rows), "n_recordings": int(rows["recording"].nunique()),
-            "n_evaluation_spans": int(sum(len(v) for v in evaluation_spans.values()))}
+            "n_evaluation_spans": int(sum(len(v) for v in spans.values())),
+            "evaluation_spans": spans,
+            "evaluation_spans_sha256": hashlib.sha256(_canon(spans).encode("ascii")).hexdigest(),
+            "adapt_rows_sha256": hashlib.sha256("\n".join(ids).encode("ascii")).hexdigest()}
+
+
+def _stored_spans(registry: Registry, spec: ModelSpec) -> dict[str, list[list[float]]]:
+    """Return the evaluation spans a flagged model was checked against, verified by their hash."""
+    prov = json.loads(registry.provenance_path(spec).read_text(encoding="utf-8"))
+    sep = prov.get("adaptation_separation") or {}
+    spans = sep.get("evaluation_spans")
+    if not isinstance(spans, dict) or hashlib.sha256(_canon(spans).encode("ascii")).hexdigest(
+            ) != sep.get("evaluation_spans_sha256"):
+        msg = (f"model {spec.model_id}: its provenance does not carry the evaluation spans it "
+               "was separated from (or their hash does not match); it cannot be applied")
+        raise NotApplicableError(msg)
+    return {str(k): [[float(a), float(b)] for a, b in v] for k, v in spans.items()}
+
+
+def _refuse_inside_stored_spans(registry: Registry, spec: ModelSpec,
+                                cores: pd.DataFrame) -> None:
+    """Refuse any core of a flagged model that overlaps a stored evaluation span."""
+    if not spec.never_scores_evaluation_spans:
+        return
+    for col in ("recording", "start_s", "stop_s"):
+        if col not in cores.columns:
+            msg = (f"model {spec.model_id} never scores evaluation spans; the cores need "
+                   f"{col!r} to be checked against them")
+            raise NotApplicableError(msg)
+    spans = _stored_spans(registry, spec)
+    hits = [(r, float(a), float(b)) for r, a, b in zip(
+        cores["recording"].astype(str), cores["start_s"], cores["stop_s"], strict=True)
+        if any(float(a) < s1 and s0 < float(b) for s0, s1 in spans.get(r, ()))]
+    if hits:
+        msg = (f"run_inference: {len(hits)} core(s) overlap the evaluation spans model "
+               f"{spec.model_id} was separated from, e.g. {hits[:3]}; it never scores them "
+               "(ruling 2026-10-08 (b) item 2), whatever the evaluation flag says")
+        raise NotApplicableError(msg)
 
 
 def _applies(spec: ModelSpec, key: str) -> bool:
@@ -503,9 +553,12 @@ def run_inference(rec: Recording, chosen: ModelSpec, registry: Registry, *, coho
     run does not start. ``cohort`` is the recording's cohort (required). ``cores`` holds
     the recording's core feature rows. ``evaluation`` (required) says whether these cores
     are evaluation spans; a model flagged ``never_scores_evaluation_spans`` is refused on
-    them, and on any core carrying an audit ``span_id``.
+    them, on any core carrying an audit ``span_id``, and on any core overlapping the
+    evaluation spans stored in its separation record. ``cores`` must carry the current
+    ``feature_version``.
     """
     _refuse_on_evaluation(chosen, evaluation=evaluation, cores=cores, where="run_inference")
+    check_feature_version(cores, context="inference")
     key = animal_key(_check_cohort(cohort), rec.animal)
     if TrainingMode(chosen.mode) is not TrainingMode.POOLED and chosen.animal != key:
         msg = (f"{chosen.mode} model for {chosen.animal} is not applicable to {key}; "
@@ -515,6 +568,7 @@ def run_inference(rec: Recording, chosen: ModelSpec, registry: Registry, *, coho
         msg = (f"model {chosen.model_id} ({chosen.mode}, animal={chosen.animal}) is not "
                f"in list_applicable() for {key}")
         raise NotApplicableError(msg)
+    _refuse_inside_stored_spans(registry, chosen, cores)
     booster = registry.booster(chosen)
     x = cores[feature_columns(cores, booster.feature_name())]
     raw = predict_raw(booster, x)

@@ -32,7 +32,7 @@ def record(tmp_path: Path) -> Path:
 @pytest.fixture
 def table() -> pd.DataFrame:
     raw = make_feature_table({"new": ("A", "B", "H"), "old": ("F",)}, n_recordings=3,
-                             cores_per_recording=120, set_a_per_recording=10, seed=1)
+                             cores_per_recording=120, set_a_per_recording=40, seed=1)
     return md.prepare_table(raw)
 
 
@@ -453,7 +453,7 @@ def test_the_generator_honours_r3_old_positives_only() -> None:
 def test_old_cohort_positives_only_are_refused_for_mode_c(record: Path) -> None:
     # set A's negatives exist for F; L has only its inherited marks (positives)
     raw = make_feature_table({"new": ("A", "B"), "old": ("F", "L")}, n_recordings=2,
-                             cores_per_recording=30, set_a_per_recording=10, seed=4)
+                             cores_per_recording=30, set_a_per_recording=40, seed=4)
     raw = raw[~((raw["animal"] == "L") & (raw["basis"] == lb.SET_A_BASIS))]
     t = md.prepare_table(raw)
     run = md.run_modes(t, targets=["old:L"], record_path=record, num_threads=THREADS,

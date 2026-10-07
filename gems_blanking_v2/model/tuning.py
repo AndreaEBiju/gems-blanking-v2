@@ -36,7 +36,7 @@ import pandas as pd
 
 from gems_blanking_v2.model.evaluate import DECISION_P, scores
 from gems_blanking_v2.model.params import FIXED_PARAMS, NUM_BOOST_ROUND
-from gems_blanking_v2.model.train import fit, predict_raw
+from gems_blanking_v2.model.train import fit, predict_raw, prior_weights
 
 __all__ = [
     "SEARCH_SPACE",
@@ -64,8 +64,14 @@ class Tuner(Protocol):
     """Chooses parameters from ONE training fold's rows, by inner validation on them."""
 
     def __call__(self, x: pd.DataFrame, y: npt.NDArray[np.int8], w: npt.NDArray[np.float64],
-                 groups: npt.NDArray[np.str_], *, num_threads: int) -> Mapping[str, Any]:
-        """Return the full LightGBM parameter dict to train this fold with."""
+                 groups: npt.NDArray[np.str_], *, scorable: npt.NDArray[np.bool_],
+                 meta: pd.DataFrame, num_threads: int) -> Mapping[str, Any]:
+        """Return the full LightGBM parameter dict to train this fold with.
+
+        ``w`` are the base weights; ``scorable`` marks the rows the outer protocol scores;
+        ``meta`` (``cohort``, ``basis``, ``y``, ``recording``) lets the inner folds
+        recompute the old-cohort prior correction on their own training rows.
+        """
         ...
 
     def record(self) -> Mapping[str, Any]:
@@ -79,26 +85,37 @@ def tuning_record(tuner: Tuner | None) -> dict[str, Any]:
 
 
 def inner_cv_f1(params: Mapping[str, Any], x: pd.DataFrame, y: npt.ArrayLike,
-                w: npt.ArrayLike, groups: npt.ArrayLike, *, rounds: int,
-                num_threads: int) -> float:
+                w: npt.ArrayLike, groups: npt.ArrayLike, *, rounds: int, num_threads: int,
+                scorable: npt.ArrayLike | None = None,
+                meta: pd.DataFrame | None = None) -> float:
     """Pooled F1 (at ``DECISION_P``) of leave-one-group-out predictions on these rows only.
 
     Each group is predicted by a model trained on the other groups; a group whose
-    complement holds one class is skipped. ``nan`` when fewer than two groups can be
-    scored or F1 is undefined.
+    complement holds one class is skipped. Only rows marked ``scorable`` (the outer
+    protocol's scorable rows: new-cohort audit spans, every old row) are scored - the
+    rest train only, as in the outer folds. With ``meta`` each inner training set's
+    weights are ``w`` times the old-cohort prior correction recomputed on that set
+    (:func:`~gems_blanking_v2.model.train.prior_weights`), as every outer fit is. ``nan``
+    when fewer than two groups can be scored or F1 is undefined.
     """
     yy = np.asarray(y).astype(np.int8)
     ww = np.asarray(w, dtype=np.float64)
     gg = np.asarray(groups).astype(str)
+    sc = (np.ones(len(yy), dtype=bool) if scorable is None
+          else np.asarray(scorable).astype(bool))
     ys, ps = [], []
     for g in sorted(set(gg.tolist())):
         held = gg == g
-        if np.unique(yy[~held]).size < 2:  # noqa: PLR2004
+        ev = held & sc
+        if not ev.any() or np.unique(yy[~held]).size < 2:  # noqa: PLR2004
             continue
-        booster = fit(x.loc[~held], yy[~held], ww[~held], num_threads=num_threads,
+        wt = ww[~held]
+        if meta is not None:
+            wt = wt * prior_weights(meta.loc[~held], base=wt)[0]
+        booster = fit(x.loc[~held], yy[~held], wt, num_threads=num_threads,
                       rounds=rounds, params=params)
-        ys.append(yy[held])
-        ps.append(predict_raw(booster, x.loc[held]) >= DECISION_P)
+        ys.append(yy[ev])
+        ps.append(predict_raw(booster, x.loc[ev]) >= DECISION_P)
     if len(ys) < 2:  # noqa: PLR2004
         return float("nan")
     return scores(np.concatenate(ys), np.concatenate(ps)).f1
@@ -125,7 +142,8 @@ class OptunaInnerCV:
                             "held-out animal or recording is never passed")}
 
     def __call__(self, x: pd.DataFrame, y: npt.NDArray[np.int8], w: npt.NDArray[np.float64],
-                 groups: npt.NDArray[np.str_], *, num_threads: int) -> dict[str, Any]:
+                 groups: npt.NDArray[np.str_], *, scorable: npt.NDArray[np.bool_],
+                 meta: pd.DataFrame, num_threads: int) -> dict[str, Any]:
         """Search, then return ``FIXED_PARAMS`` updated with the best trial's values."""
         try:
             optuna = importlib.import_module("optuna")
@@ -143,7 +161,7 @@ class OptunaInnerCV:
                 else:
                     params[name] = trial.suggest_float(name, lo, hi, log=log)
             v = inner_cv_f1(params, x, y, w, groups, rounds=self.rounds,
-                            num_threads=num_threads)
+                            num_threads=num_threads, scorable=scorable, meta=meta)
             return v if np.isfinite(v) else 0.0
 
         study = optuna.create_study(direction="maximize",

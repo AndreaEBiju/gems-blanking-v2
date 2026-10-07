@@ -29,7 +29,7 @@ import numpy as np
 import numpy.typing as npt
 import pandas as pd
 
-from gems_blanking_v2.detect.features import FEATURE_NAMES
+from gems_blanking_v2.detect.features import FEATURE_NAMES, FEATURE_VERSION, FEATURE_VERSION_COLUMN
 from gems_blanking_v2.io.detector_core import import_detector_module
 from gems_blanking_v2.model.evaluate import W_ADAPT_GRID
 from gems_blanking_v2.model.labels import SET_A_BASIS
@@ -38,11 +38,14 @@ from gems_blanking_v2.model.params import ADAPT_ROUNDS, FIXED_PARAMS, NUM_BOOST_
 __all__ = [
     "ADAPT_ROUNDS",
     "FIXED_PARAMS",
+    "MIN_SET_A_OLD_NEGATIVES",
     "NUM_BOOST_ROUND",
     "W_ADAPT_GRID",
+    "FeatureVersionError",
     "LeakyFeatureError",
     "OldRowsRefusedError",
     "PriorCorrection",
+    "check_feature_version",
     "check_leakage",
     "corpus_hash",
     "event_id",
@@ -69,9 +72,31 @@ LEAK_MIN_GROUPS: Final = 3
 NON_FEATURE_COLUMNS: Final[frozenset[str]] = frozenset({
     "recording", "animal", "cohort", "start_s", "stop_s", "judgement", "source", "basis",
     "label_set", "label_source", "span_id", "peak_signal", "peak_band", "y", "cluster",
-    "animal_key", "provenance", "folder",
+    "animal_key", "provenance", "folder", FEATURE_VERSION_COLUMN,
 })
 """Bookkeeping columns that must never be trained on."""
+
+
+class FeatureVersionError(ValueError):
+    """A feature table was computed under other feature definitions (or carries no stamp)."""
+
+
+def check_feature_version(table: pd.DataFrame, *, context: str = "training") -> None:
+    """Refuse a table whose ``feature_version`` is absent or not :data:`FEATURE_VERSION`.
+
+    Rows computed under different definitions are never trained or scored together - a
+    Night 1 table (unstamped, contact families, count-dependent maxima) is refused.
+    """
+    if FEATURE_VERSION_COLUMN not in table.columns:
+        msg = (f"the table for {context} carries no {FEATURE_VERSION_COLUMN!r} column; feature "
+               f"tables must be stamped with the definitions they were computed under "
+               f"(current: {FEATURE_VERSION!r})")
+        raise FeatureVersionError(msg)
+    found = sorted(set(table[FEATURE_VERSION_COLUMN].astype(str)))
+    if found != [FEATURE_VERSION]:
+        msg = (f"the table for {context} was computed under feature version(s) {found}; this "
+               f"code is {FEATURE_VERSION!r}")
+        raise FeatureVersionError(msg)
 
 
 class LeakyFeatureError(ValueError):
@@ -152,6 +177,11 @@ class OldRowsRefusedError(ValueError):
     """Old-cohort rows reached training without set A's judged old negatives."""
 
 
+MIN_SET_A_OLD_NEGATIVES: Final = 20
+"""Fewest set-A old negatives with which old-cohort rows may train (PROPOSED, a question
+for Andrea): the bar R9 sets for a deciding fold's positives, applied to the only source
+of old negatives. Below it the old motion rate's CI is too wide to weight anything."""
+
 PRIOR_CI_RESAMPLES: Final = 1000
 """Cluster-bootstrap resamples (by recording) for the CI of set A's old motion rate."""
 
@@ -187,12 +217,19 @@ class PriorCorrection:
             "rate": self.rate, "w_pos": self.w_pos}
         if all(map(math.isfinite, self.ci)):
             out["rate_ci95"] = list(self.ci)
-            out["w_pos_at_ci"] = list(self.w_pos_ci)
+            if all(map(math.isfinite, self.w_pos_ci)):
+                out["w_pos_at_ci"] = list(self.w_pos_ci)
+            else:
+                out["w_pos_at_ci_omitted"] = (
+                    "the CI reaches a rate of 1, where no finite weight gives that rate")
         return out
 
 
-def _w_pos(rate: float, n_pos: int, n_neg: int) -> float:
-    """Weight on each old positive so that w * n_pos / (w * n_pos + n_neg) == rate."""
+def _w_pos(rate: float, n_pos: float, n_neg: float) -> float:
+    """Multiplier on each old positive so that w * n_pos / (w * n_pos + n_neg) == rate.
+
+    ``n_pos`` / ``n_neg`` are the base-weighted sums of the old positives / negatives.
+    """
     if n_pos == 0 or rate <= 0:
         return 0.0
     if rate >= 1:
@@ -200,11 +237,15 @@ def _w_pos(rate: float, n_pos: int, n_neg: int) -> float:
     return rate * n_neg / ((1 - rate) * n_pos)
 
 
-def prior_correction(table: pd.DataFrame, *, seed: int = 0) -> PriorCorrection | None:
+def prior_correction(table: pd.DataFrame, *, base: npt.ArrayLike | None = None,
+                     seed: int = 0) -> PriorCorrection | None:
     """Return the old-cohort correction of a TRAINING corpus, or ``None`` without old rows.
 
-    Raises :class:`OldRowsRefusedError` when old rows are present but set A's judged old
-    negatives are not (ruling (b) item 1(b): old rows train only alongside them).
+    ``base`` are the rows' weights before the correction (``w_adapt``, ``w_video``; 1 when
+    absent): ``w_pos`` solves the effective-rate equation on weighted sums, so the rate
+    holds whatever the base weights. Raises :class:`OldRowsRefusedError` when old rows
+    are present but set A holds fewer than :data:`MIN_SET_A_OLD_NEGATIVES` judged old
+    negatives (ruling (b) item 1(b): old rows train only alongside them).
     """
     old = (table["cohort"] == "old").to_numpy()
     if not old.any():
@@ -212,17 +253,20 @@ def prior_correction(table: pd.DataFrame, *, seed: int = 0) -> PriorCorrection |
     set_a = old & (table["basis"] == SET_A_BASIS).to_numpy()
     y = table["y"].to_numpy().astype(np.int8)
     n_a, k_a = int(set_a.sum()), int(y[set_a].sum())
-    if n_a - k_a == 0:
+    if n_a - k_a < MIN_SET_A_OLD_NEGATIVES:
         msg = (f"{int(old.sum())} old-cohort row(s) reached training without set A's judged "
-               f"old negatives ({n_a} set-A rows, {n_a - k_a} negative); ruling 2026-10-08 (b) "
-               "item 1(b): old-cohort rows train only alongside old negatives judged by "
-               "Andrea - provisional runs are new-cohort only")
+               f"old negatives ({n_a} set-A rows, {n_a - k_a} negative; at least "
+               f"{MIN_SET_A_OLD_NEGATIVES} needed); ruling 2026-10-08 (b) item 1(b): old-cohort "
+               "rows train only alongside old negatives judged by Andrea - provisional runs "
+               "are new-cohort only")
         raise OldRowsRefusedError(msg)
     marks = old & ~set_a
     if (y[marks] != 1).any():
         msg = "an old-cohort row outside set A is not a positive; old marks are positives only"
         raise ValueError(msg)
-    n_pos, n_neg = int(y[old].sum()), n_a - k_a
+    bw = np.ones(len(table)) if base is None else np.asarray(base, dtype=np.float64)
+    n_pos = float(bw[old & (y == 1)].sum())
+    n_neg = float(bw[old & (y == 0)].sum())
     rate = k_a / n_a
     rec = table["recording"].astype(str).to_numpy()[set_a]
     codes, uniq = pd.factorize(pd.Series(rec), sort=True)
@@ -237,10 +281,13 @@ def prior_correction(table: pd.DataFrame, *, seed: int = 0) -> PriorCorrection |
                            w_pos_ci=(_w_pos(lo, n_pos, n_neg), _w_pos(hi, n_pos, n_neg)))
 
 
-def prior_weights(table: pd.DataFrame, *, seed: int = 0
+def prior_weights(table: pd.DataFrame, *, base: npt.ArrayLike | None = None, seed: int = 0
                   ) -> tuple[F64, PriorCorrection | None]:
-    """Per-row multipliers of a training corpus: ``w_pos`` on old positives, 1 elsewhere."""
-    corr = prior_correction(table, seed=seed)
+    """Per-row multipliers of a training corpus: ``w_pos`` on old positives, 1 elsewhere.
+
+    Multiply them into ``base`` (the same weights passed here) to train.
+    """
+    corr = prior_correction(table, base=base, seed=seed)
     w = np.ones(len(table), dtype=np.float64)
     if corr is not None:
         pos_old = (table["cohort"] == "old").to_numpy() & (table["y"] == 1).to_numpy()

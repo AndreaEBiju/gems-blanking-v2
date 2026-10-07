@@ -303,8 +303,9 @@ def cohort_probe(preds: pd.DataFrame, table: pd.DataFrame, r9: R9Thresholds
     ``r9.cohort_probe_max_delta`` in absolute value. P(motion) is the model's raw
     output - the quantity its decisions threshold - with calibrated medians beside it.
     Mode B is its inner-selected series. A mode with no physiology-judged cores of either
-    cohort is ``not computable`` with the reason, and ``passes`` is then absent (``nan``)
-    - never a pass by default.
+    cohort is ``not computable`` with the reason. The verdict is ``status`` alone -
+    ``pass``, ``fail`` or ``not computable: <reason>`` - so nothing reads a missing value
+    as a pass.
     """
     series = {"pooled": math.nan, "adapted": SELECTED, "per_animal": math.nan}
     out = []
@@ -319,19 +320,18 @@ def cohort_probe(preds: pd.DataFrame, table: pd.DataFrame, r9: R9Thresholds
                                   "n_physiology_old": int((phys & (coh == "old")).sum())}
         missing = [c for c in ("new", "old") if not (phys & (coh == c)).any()]
         if g.empty:
-            rec.update({"status": "not computable: no out-of-fold predictions of this mode",
-                        "passes": math.nan})
+            rec["status"] = "not computable: no out-of-fold predictions of this mode"
         elif missing:
             rec.update({"status": ("not computable: no "
                                    + " or ".join(f"{c}-cohort" for c in missing)
                                    + " cores judged physiology in this mode's out-of-fold "
-                                   "predictions"), "passes": math.nan})
+                                   "predictions")})
         else:
             raw = g["raw"].to_numpy()
             med = {c: float(np.median(raw[phys & (coh == c)])) for c in ("new", "old")}
             delta = med["old"] - med["new"]
             rec.update({"median_raw_new": med["new"], "median_raw_old": med["old"],
-                        "delta": delta, "passes": abs(delta) <= r9.cohort_probe_max_delta,
+                        "delta": delta,
                         "status": "pass" if abs(delta) <= r9.cohort_probe_max_delta
                         else "fail"})
             if "p_cal" in g.columns:
@@ -486,13 +486,16 @@ def write_comparison(out_dir: Path, stamp: str, *, summary: pd.DataFrame,
                      r9: R9Thresholds | None = None,
                      probe: pd.DataFrame | None = None,
                      small: pd.DataFrame | None = None,
-                     w_selection: pd.DataFrame | None = None) -> Path:
+                     w_selection: pd.DataFrame | None = None,
+                     priors: Sequence[Mapping[str, object]] | None = None) -> Path:
     """Write ``comparison_<stamp>.parquet`` and a readable ``comparison_<stamp>.md``.
 
     The parquet holds the per-(mode, animal, w) summary; the report adds the matched-
     protocol table (A vs C marked not comparable), the small folds, mode B's inner w
     selection, the corpus table, reliability curves per mode, the verdicts and the cohort
-    probe per mode (:func:`cohort_probe`; absent means NOT COMPUTED, never a pass).
+    probe per mode (:func:`cohort_probe`; absent means NOT COMPUTED, never a pass) and the
+    old-cohort prior correction of every fit that trained old rows (``priors``,
+    :attr:`~gems_blanking_v2.model.modes.ModeRun.priors`).
     Readable as a file on its own (task 12).
     """
     validate_component(stamp)  # cross-platform rule 9: the stamp becomes a file name
@@ -531,6 +534,13 @@ def write_comparison(out_dir: Path, stamp: str, *, summary: pd.DataFrame,
         lines += ["NOT COMPUTED - no probe was supplied. This is not a pass.", ""]
     else:
         lines += [markdown_table(probe), ""]
+    lines += ["## Old-cohort prior correction per fit (ruling 2026-10-08 (b) item 1(c))", ""]
+    if priors:
+        lines += [markdown_table(pd.DataFrame([
+            {k: (json.dumps(v) if isinstance(v, list | dict) else v) for k, v in r.items()}
+            for r in priors])), ""]
+    else:
+        lines += ["No fit trained old-cohort rows.", ""]
     lines += ["## Corpus", "",
               markdown_table(corpus),
               "", "## Calibration (reliability, held-out calibrated p)", "",

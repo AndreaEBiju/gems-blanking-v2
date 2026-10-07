@@ -1871,7 +1871,11 @@ def make_feature_table(
     ``set_a_prevalence``; ruling 2026-10-08 (b) item 1(c)) - the old-negative source
     without which no old-cohort row may train.
     """
-    from gems_blanking_v2.detect.features import FEATURE_NAMES  # noqa: PLC0415
+    from gems_blanking_v2.detect.features import (  # noqa: PLC0415
+        FEATURE_NAMES,
+        FEATURE_VERSION,
+        FEATURE_VERSION_COLUMN,
+    )
     from gems_blanking_v2.model.labels import SET_A_BASIS  # noqa: PLC0415
 
     rng = np.random.default_rng(seed)
@@ -1908,7 +1912,7 @@ def make_feature_table(
                         "basis": SET_A_BASIS if set_a else "mark_overlap" if y
                         else "exhaustive_span",
                         "label_set": "train", "label_source": "human", "span_id": span,
-                        "y": y,
+                        "y": y, FEATURE_VERSION_COLUMN: FEATURE_VERSION,
                     })
                     rows.append(row)
     return pd.DataFrame(rows)

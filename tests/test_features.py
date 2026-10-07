@@ -255,3 +255,30 @@ def test_a_core_must_have_positive_duration() -> None:
 def test_feature_names_are_unique_and_carry_no_retired_band() -> None:
     assert len(set(ft.FEATURE_NAMES)) == len(ft.FEATURE_NAMES)
     assert ft.BANDS[ft.ENG_BAND].hi_hz == 3000.0  # ruling (b) R8: never 300-5000
+
+
+PER_SIGNAL_MAX: Final[tuple[str, ...]] = (
+    "band_ratio_max", "env_slope_max", "slew_max", "kurtosis_max", "line_length_max",
+    "onset_rate_max", "peak_z", "clip_frac")
+"""Per-context features that are the pair-max of a value of each signal alone."""
+
+
+def test_each_max_is_the_pair_max_of_its_per_signal_values() -> None:
+    # nerve signals only, so every group statistic is the nerve pair statistic; a signal's
+    # own value is read from a set holding it twice (pair-max of one repeated value)
+    ss = make_signal_set(3, FS, HOST_S, seed=21)
+    nerve = {k: v for k, v in ss.signals.items() if k.endswith("_T")}
+    cores = [(a, b, ()) for a, b in ss.events[:6] + ss.quiet[:3]]
+    whole = ft.feature_matrix(ft.prepare(ft.inputs_from_signals(nerve, FS, z_enter=Z_ENTER)),
+                              cores)
+    alone = [ft.feature_matrix(ft.prepare(ft.inputs_from_signals(
+        {"L_T": x, "R_T": x.copy()}, FS, z_enter=Z_ENTER)), cores) for x in nerve.values()]
+    names = [f"{n}_c{round(c * 1000)}" for n in PER_SIGNAL_MAX for c in ft.CONTEXTS_S]
+    names += ["line_ratio_max", "line_plv_max"]
+    names += [f"offset_rate_min_c{round(c * 1000)}" for c in ft.CONTEXTS_S]
+    for f in names:
+        per = np.vstack([m[f].to_numpy() for m in alone])
+        agg = ft.pair_min if "_min" in f else ft.pair_max
+        want = [agg(per[:, i].tolist()) for i in range(per.shape[1])]
+        np.testing.assert_allclose(whole[f].to_numpy(), want, rtol=1e-9, atol=1e-12,
+                                   equal_nan=True, err_msg=f)

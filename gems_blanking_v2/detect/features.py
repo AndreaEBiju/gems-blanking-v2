@@ -40,31 +40,62 @@ Hard constraints (CLAUDE.md invariant 10):
 The ENG band is 300-3000 Hz (ruling (b) R8, A.5b); the motion ratio is
 ``100-300 / 300-3000``.
 
-Families, each at ``CONTEXTS_S`` (the core itself, then +-100, 250, 500 ms):
+**Definitions.** ``N`` = nerve signals (``<cuff>_T``), ``S`` = stomach signals
+(``ANT<k>``), ``G`` = the groups {N, S}. ``pmax_X(v)`` / ``pmin_X(v)`` = mean over the
+unordered pairs of signals in X of the pair's max / min of the per-signal value ``v``
+(:func:`pair_max`; ``nan`` below 2 finite values). ``gmax(v)`` = max over G of
+``pmax_g(v)``; ``gmin`` likewise with ``pmin``; ``gmean(v)`` = mean over G of the
+within-group mean of ``v``. ``W`` = the window: the core widened by the context
+(suffix ``_c0``, ``_c100``, ``_c250``, ``_c500`` = +-0, 100, 250, 500 ms each side).
+``P_b(s)`` = mean square of signal ``s`` band-passed to band ``b`` over W; ``e(s)`` =
+its 300-3000 Hz RMS envelope at ~1 kHz; ``z(s, b)`` = detection's 10 ms z.
 
-* band ratio ``log10(P[100-300] / P[300-3000])`` per nerve signal: pair-max, median;
-* spatial: fraction of signals and of (signal, band) pairs over ``z_enter`` (mean over
-  groups of the within-group fraction); mean pairwise 300-3000 log-envelope
-  correlation of nerve signals; relative 300-3000 power of nerve signals (pair mean of
-  the pair's max over its mean; pair mean of the ``|log10|`` power ratio);
-* onset rate: the derivative of the **log** envelope (per second): per signal its max
-  (min) over bands and frames, then the group pair-max (pair-min); and the correlation
-  of level with rate on the peak pair (brief events couple them, sustained ones
-  decouple);
-* shape on the nerve signals: 300-3000 envelope slope over its mean, slew over RMS,
-  excess kurtosis, line length over RMS (pair-max and median), spectral entropy and 95%
-  spectral edge (median);
-* clipping fraction: share of samples on a flat run at the signal's rail (group
-  pair-max);
-* z summary: peak z (per signal over bands and frames, then group pair-max), and per
-  frame the group pair-max of each signal's max-over-bands z, averaged over frames.
+==========================  =========================================================
+feature (per context)       definition over W
+==========================  =========================================================
+band_ratio_max / _median    pmax_N / median_N of ``log10(P_100-300 / P_300-3000)``
+frac_signals_over           gmean of [any band of s has a frame with z > z_enter]
+frac_pairs_over             gmean of the fraction of s's bands with a frame over z_enter
+env_corr_mean               mean over nerve pairs of corr(log e(a), log e(b))
+power_rel_max               mean over nerve pairs of max(P_a, P_b) / mean(P_a, P_b),
+                            ``P`` = P_300-3000
+power_rel_spread            mean over nerve pairs of ``|log10(P_a / P_b)|``
+onset_rate_max              gmax of s's max over bands and frames of d(log env)/dt
+offset_rate_min             gmin of s's min over bands and frames of d(log env)/dt
+level_rate_corr             median over the group holding the event (larger gmax peak
+                            z) of corr(level, rate) on each signal's own peak band
+env_slope_max               pmax_N of max|de/dt| / mean(e)
+slew_max / _median          pmax_N / median_N of max|dx/dt| / RMS (raw, <= 1 s window)
+kurtosis_max / _median      pmax_N / median_N of the excess kurtosis (raw)
+line_length_max / _median   pmax_N / median_N of sum|dx| / (RMS * n) (raw)
+spec_entropy_median         median_N of the normalised spectral entropy (raw)
+spec_edge_median            median_N of the 95% spectral edge, Hz (raw)
+clip_frac                   gmax of the share of samples on a flat run at s's rail
+peak_z                      gmax of s's max over bands and frames of z
+z_mean                      mean over frames of [max over G of pmax_g of s's
+                            max-over-bands z in that frame]
+==========================  =========================================================
 
-Once per core (stationary, so not per context; ruling 2026-10-07 (c) item 2): the mains
-line ratio and the mains phase-locking value of the 300-3000 envelope (pair-max over
-nerve signals), and the common-mode fraction (pair mean of each nerve pair's common-mode
-fraction) - so the classifier can tell stationary mains-locked energy from transient
-motion. Plus the core's duration and its slow-band share over the core's over-threshold
-pairs **on the common set** (pairs of detection-only signals are not counted).
+==========================  =========================================================
+feature (once per core)     definition
+==========================  =========================================================
+duration_s                  the core's width, seconds
+slow_pair_share             share of the core's over-threshold pairs on the common set
+                            whose band is slow (``SLOW_BANDS``); ``nan`` with none
+line_ratio_max              pmax_N of the mains-harmonic (+-1 Hz) share of 1-3000 Hz
+                            power, in a 1-2 s window centred on the core
+line_plv_max                pmax_N of the 60 Hz phase-locking value of e, same window
+cm_fraction                 mean over nerve pairs of mean(((a+b)/2)^2) /
+                            mean((a^2+b^2)/2), 300-3000 Hz, same window
+==========================  =========================================================
+
+The once-per-core line features let the classifier tell stationary mains-locked energy
+from transient motion (ruling 2026-10-07 (c) item 2).
+
+:data:`FEATURE_VERSION` names these definitions. A feature table carries it in a
+``feature_version`` column and :func:`~gems_blanking_v2.model.modes.prepare_table`
+refuses a table of any other version, so rows computed under different definitions are
+never trained or scored together.
 
 Outside the generation hash: :mod:`~gems_blanking_v2.detect.chain` does not import this
 module, so building or changing features never changes what was proposed.
@@ -97,6 +128,8 @@ __all__ = [
     "CONTEXTS_S",
     "DROPPED_FAMILIES",
     "FEATURE_NAMES",
+    "FEATURE_VERSION",
+    "FEATURE_VERSION_COLUMN",
     "MAINS_HZ",
     "NERVE_RE",
     "STOMACH_RE",
@@ -190,6 +223,14 @@ DROPPED_FAMILIES: Final[Mapping[str, str]] = {
 """Families that cannot exist on the common signal set, and why (ruling 2026-10-08 (b)
 item 1(a)). Before P1 they were ``nan`` on every old-cohort row and their missingness
 alone separated the cohorts (AUC 1.000, cohort audit 2026-10-07)."""
+
+FEATURE_VERSION: Final = "p1-pair-2026-10-07"
+"""The version of every feature definition above. Bump it in the same change as any
+edit that alters a feature value (a docstring edit does not); a table of another version
+is refused for training and inference. Night 1's tables carry no stamp and are refused."""
+
+FEATURE_VERSION_COLUMN: Final = "feature_version"
+"""The column of a feature table that carries :data:`FEATURE_VERSION`."""
 
 FEATURE_NAMES: Final[tuple[str, ...]] = _ONCE + tuple(
     f"{name}{_sfx(c)}" for c in CONTEXTS_S for name in _PER_CONTEXT)
