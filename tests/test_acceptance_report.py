@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from gems_blanking_v2.emit import masks as mk
 from gems_blanking_v2.emit.handoff import write_mask_file
 from gems_blanking_v2.emit.provenance import MaskProvenance
 from gems_blanking_v2.extent.grid import n_grid_frames
+from gems_blanking_v2.extent.tolerance import expected_consumers
 from gems_blanking_v2.io.registry_log import RegistryAction, RegistryEvent
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -30,8 +32,8 @@ IJK = {("new", "I"): [(20, 21), (20, 21)], ("new", "J"): [(15, 16), (15, 15)],
 READS: dict[str, tuple[str, ...]] = {"spikes": ("L_T",), "slow_wave": ("ANT1",),
                                      "mmc": ("ANT1",), "hrv": ("RVN2",),
                                      "breathing": ("RVN2",), "velocity": ()}
-CONSUMERS = ["spikes", "mmc", "slow_wave", "breathing", "hrv"]
-"""Expected consumers: the tolerance table's, velocity excepted (R5)."""
+CONSUMERS = list(expected_consumers())
+"""Expected consumers: the tolerance table's, velocity excepted (R5) - the one helper."""
 TRAIN = [("new", "A"), ("new", "B"), ("new", "H"), ("old", "J")]
 
 
@@ -198,6 +200,13 @@ def test_row5_without_a_slow_band_or_baseline_overlap_is_not_computable() -> Non
     assert r.status is ar.Status.NOT_COMPUTABLE and "slow-band" in r.reason
     r2 = ar.row5_retention({"a": _masks(0.02, 0.2)}, {"other": 0.9})
     assert r2.status is ar.Status.NOT_COMPUTABLE and "baseline" in r2.reason
+    assert r2.detail["masks_without_baseline"] == ["a"]
+
+
+def test_row5_names_the_mask_recordings_it_could_not_compare() -> None:
+    r = ar.row5_retention({"a": _masks(0.02, 0.2), "b": _masks(0.5, 0.5)}, {"a": 0.9})
+    assert r.status is ar.Status.PASS and r.detail["n_baseline"] == 1
+    assert r.detail["masks_without_baseline"] == ["b"]
 
 
 # row 6 ---------------------------------------------------------------------
@@ -218,6 +227,13 @@ def test_row6_refuses_non_test_animals_and_a_leaky_scoring_model() -> None:
         ar.row6_cross_animal(IJK, scoring_corpus=[*TRAIN, ("new", "J")])
     part = ar.row6_cross_animal({("new", "I"): [(40, 42)]}, scoring_corpus=TRAIN)
     assert part.status is ar.Status.NOT_COMPUTABLE and "new:J" in part.reason
+
+
+def test_row6_refuses_two_keys_that_merge_once_case_is_normalised() -> None:
+    with pytest.raises(ValueError, match="new:I twice"):
+        ar.row6_cross_animal({**IJK, ("new", "i"): [(1, 1), (1, 1)]}, scoring_corpus=TRAIN)
+    with pytest.raises(ValueError, match="new:I twice"):
+        ar.row6_cross_animal({**IJK, ("NEW", "I"): [(1, 1), (1, 1)]}, scoring_corpus=TRAIN)
 
 
 # row 7 ---------------------------------------------------------------------
@@ -255,6 +271,31 @@ def test_row7_runs_per_consumer() -> None:
                                   consumers=['spikes', 'slow_wave'])
     assert r.status is ar.Status.FAIL and set(r.detail) == {"spikes", "slow_wave"}
     assert r.detail["slow_wave"]["coef"] == pytest.approx(0.05, abs=0.003)
+
+
+def test_row7_reports_the_failing_consumer_not_the_largest_coefficient() -> None:
+    """A noisy consumer with a larger |coef| whose CI spans 0 must not be the value."""
+    rng = np.random.default_rng(11)
+    noisy = [dataclasses.replace(r, motion_blank_s=r.motion_blank_s
+                                 + rng.normal(0, 0.4) * (r.duration_s - r.excluded_s))
+             for r in make_confound_rows(0.0, consumer="slow_wave", n=24, seed=6)]
+    rows = make_confound_rows(0.01, consumer="spikes") + noisy
+    r = ar.row7_coverage_confound(rows, has_coverage=True, equivalence_margin=None,
+                                  consumers=["spikes", "slow_wave"])
+    fail, quiet = r.detail["spikes"], r.detail["slow_wave"]
+    assert quiet["ci95"][0] < 0 < quiet["ci95"][1]  # the noisy one does not fail
+    assert abs(quiet["coef"]) > abs(fail["coef"])  # but has the larger coefficient
+    assert r.status is ar.Status.FAIL and r.value == fail["coef"]
+
+
+def test_rows_1_and_7_default_to_the_expected_consumers() -> None:
+    r1 = ar.row1_candidate_recall([_inj(True, "spikes")] * 100, {"r": 10})
+    assert r1.status is ar.Status.NOT_COMPUTABLE
+    assert all(c in r1.reason for c in CONSUMERS if c != "spikes")
+    r7 = ar.row7_coverage_confound(make_confound_rows(0.0), has_coverage=True,
+                                   equivalence_margin=0.01)
+    assert r7.status is ar.Status.NOT_COMPUTABLE
+    assert all(c in r7.reason for c in CONSUMERS if c != "spikes")
 
 
 def test_row7_refuses_without_coverage() -> None:
@@ -368,6 +409,36 @@ def test_row10_requires_the_full_record(curves: dict[tuple[str, str], Path]) -> 
     with pytest.raises(ValueError, match="R1"):
         ar.row10_mode_comparison(curves, _bvc(0.05, 0.01, 0.09, corpus="new_cohort_loao"),
                                  comparisons=[], animals=["H", "B"])
+
+
+def test_row10_cohort_must_agree_with_the_corpus(curves: dict[tuple[str, str], Path]) -> None:
+    with pytest.raises(ValueError, match="cannot come from cohort 'new'"):
+        ar.row10_mode_comparison(curves, _bvc(0.01, -0.02, 0.04, cohort="new",
+                                              cluster_unit="span"),
+                                 comparisons=[], animals=["H", "B"])
+    ok = _bvc(0.01, -0.02, 0.04, cohort="new", cluster_unit="span", corpus="within_animal")
+    assert ar.row10_mode_comparison(curves, ok, comparisons=[],
+                                    animals=["H", "B"]).status is ar.Status.PASS
+
+
+@pytest.mark.parametrize("where", ["main", "control"])
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_row10_refuses_non_finite_differences(curves: dict[tuple[str, str], Path], where: str,
+                                              bad: float) -> None:
+    for field in ("f1_diff", "lo", "hi"):
+        rec = _bvc(0.01, -0.02, 0.04)
+        target = rec if where == "main" else rec["matched_event_control"]
+        assert isinstance(target, dict)
+        if field == "f1_diff":
+            target["f1_diff"] = bad
+        else:
+            target["ci95"] = [bad, 0.04] if field == "lo" else [-0.02, bad]
+        with pytest.raises(ValueError, match="finite"):
+            ar.row10_mode_comparison(curves, rec, comparisons=[], animals=["H", "B"])
+    rec = _bvc(0.01, -0.02, 0.04)
+    rec["matched_event_control"] = {"f1_diff": 0.01, "ci95": [0.1]}
+    with pytest.raises(ValueError, match="two numbers"):
+        ar.row10_mode_comparison(curves, rec, comparisons=[], animals=["H", "B"])
 
 
 # row 11 --------------------------------------------------------------------
@@ -499,8 +570,8 @@ def test_row10_needs_animals_cluster_unit_by_cohort_and_a_matched_control(
         ar.row10_mode_comparison(curves, {**good, "cluster_unit": "span"}, comparisons=[],
                                  animals=["H", "B"])
     with pytest.raises(ValueError, match="clusters by"):
-        ar.row10_mode_comparison(curves, {**good, "cohort": "new"}, comparisons=[],
-                                 animals=["H", "B"])
+        ar.row10_mode_comparison(curves, {**good, "cohort": "new", "corpus": "within_animal"},
+                                 comparisons=[], animals=["H", "B"])
     no_ctrl = ar.row10_mode_comparison(curves, {**good, "matched_event_control": None},
                                        comparisons=[], animals=["H", "B"])
     assert no_ctrl.status is ar.Status.NOT_COMPUTABLE and "invariant 13" in no_ctrl.reason
@@ -532,6 +603,8 @@ def test_row12_needs_promotion_and_enough_held_out_data() -> None:
     assert gone.status is ar.Status.NOT_COMPUTABLE and "promoted" in gone.reason
     tiny = ar.row12_calibration(_promoted("m1"), {"m1": ([0.9, 0.1], [1.0, 0.0])})
     assert tiny.status is ar.Status.NOT_COMPUTABLE and "m1" in tiny.reason
+    short_y = ar.row12_calibration(_promoted("m1"), {"m1": (p, y[:2])})
+    assert short_y.status is ar.Status.NOT_COMPUTABLE and "m1" in short_y.reason
 
 
 @settings(max_examples=40, deadline=None)
@@ -548,3 +621,55 @@ def test_the_report_json_round_trips_without_nan(numbers: list[float | None],
     assert json.loads(json.dumps(doc, allow_nan=False)) == doc
     for r, n in zip(doc["rows"], numbers, strict=True):
         assert ("value" in r) == (n is not None and np.isfinite(n))
+
+
+_FLOATS = st.floats(allow_nan=True, allow_infinity=True)
+_SCALARS = st.one_of(st.none(), st.booleans(), st.integers(-10**6, 10**6), st.text(max_size=4),
+                     _FLOATS, _FLOATS.map(np.float64),
+                     st.floats(allow_nan=True, allow_infinity=True, width=32).map(np.float32),
+                     st.integers(-1000, 1000).map(np.int64), st.booleans().map(np.bool_),
+                     st.sampled_from([np.float32("nan"), np.float64("-inf"),
+                                      np.float32("inf"), float("nan")]))
+_DETAIL = st.recursive(_SCALARS, lambda kids: st.lists(kids, max_size=4)
+                       | st.dictionaries(st.text(max_size=4), kids, max_size=4), max_leaves=16)
+
+
+def _has_missing(v: object) -> bool:  # the test's own oracle, written apart from _missing
+    if v is None:
+        return True
+    if isinstance(v, (float, np.floating)):
+        return bool(np.isnan(v) or np.isinf(v))
+    if isinstance(v, list):
+        return any(_has_missing(x) for x in v)
+    return False
+
+
+def _no_null_or_nan(v: object) -> bool:
+    if isinstance(v, dict):
+        return all(_no_null_or_nan(x) for x in v.values())
+    if isinstance(v, list):
+        return all(_no_null_or_nan(x) for x in v)
+    return v is not None and not (isinstance(v, float) and not np.isfinite(v))
+
+
+@settings(max_examples=150, deadline=None)
+@given(detail=st.dictionaries(st.text(max_size=4), _DETAIL, max_size=5))
+def test_any_detail_serialises_with_missing_values_absent(detail: dict[str, object]) -> None:
+    rows = [ar.Row(i + 1, f"r{i + 1}", ar.Status.NOT_COMPUTABLE, "c", None, detail)
+            for i in range(12)]
+    doc = json.loads(ar.build_report(rows, ar.Disagreements(), code_commit="c",
+                                     generation_sha="g").to_json())
+    got = doc["rows"][0].get("detail", {})
+    assert _no_null_or_nan(got)
+    assert set(got) == {k for k, v in detail.items() if not _has_missing(v)}
+
+
+def test_nan_inside_a_list_makes_that_list_absent() -> None:
+    detail = {"ci95": [0.1, float("nan")], "f32": [np.float32("nan")],
+              "nested": [[1.0, [None]]], "kept": [1, np.float64(2.5), [np.int64(3)]],
+              "inner": {"lo": np.float32("inf"), "n": np.int64(4)}}
+    rows = [ar.Row(i + 1, f"r{i + 1}", ar.Status.NOT_COMPUTABLE, "c", None, detail)
+            for i in range(12)]
+    doc = json.loads(ar.build_report(rows, ar.Disagreements(), code_commit="c",
+                                     generation_sha="g").to_json())
+    assert doc["rows"][0]["detail"] == {"kept": [1, 2.5, [3]], "inner": {"n": 4}}

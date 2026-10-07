@@ -52,6 +52,7 @@ from scipy.stats import t as student_t
 from gems_blanking_v2.constants import ENG_BAND
 from gems_blanking_v2.emit.masks import TAPER_S, ConsumerMask, MaskKey, MaskSpan
 from gems_blanking_v2.emit.provenance import MaskProvenance, ProvenanceError
+from gems_blanking_v2.extent.tolerance import expected_consumers
 from gems_blanking_v2.io.nan_interop import find_zero_runs
 from gems_blanking_v2.io.registry_log import RegistryEvent, replay
 from gems_blanking_v2.model.labels import animal_key, is_test_animal
@@ -137,7 +138,19 @@ def _clean(v: Any) -> Any:  # noqa: ANN401 - JSON value
 
 
 def _missing(v: object) -> bool:
-    return v is None or (isinstance(v, float) and not math.isfinite(v))
+    """None, a non-finite float (numpy too), or a list holding one anywhere inside.
+
+    A list cannot drop one element without changing what the others mean (``ci95`` with
+    one bound gone is not a CI), so a list with a missing element is itself missing and
+    its key is absent - the JSON convention, never ``null`` or ``NaN``.
+    """
+    if v is None:
+        return True
+    if isinstance(v, (float, np.floating)):
+        return not math.isfinite(float(v))
+    if isinstance(v, (list, tuple, set, frozenset)):
+        return any(_missing(x) for x in v)
+    return False
 
 
 def _not_computable(number: int, name: str, condition: str, missing: str,
@@ -165,13 +178,16 @@ class Injection:
 
 def row1_candidate_recall(injections: Sequence[Injection] | None,
                           candidates_per_recording: Mapping[str, int] | None, *,
-                          consumers: Sequence[str]) -> Row:
+                          consumers: Sequence[str] | None = None) -> Row:
     """Per consumer, >= 98% of injections above its tolerance detected; <= 3000 candidates.
 
-    ``consumers`` is the EXPECTED set (the tolerance table's consumers, velocity excepted
-    while task 18 is out, R5); one with no injection above its tolerance is not
-    computable, named - a consumer missing from the data is never silently passed.
+    ``consumers`` is the EXPECTED set, by default
+    :func:`~gems_blanking_v2.extent.tolerance.expected_consumers` (the tolerance table's
+    consumers, velocity excepted while task 18 is out, R5); one with no injection above
+    its tolerance is not computable, named - a consumer missing from the data is never
+    silently passed.
     """
+    consumers = expected_consumers() if consumers is None else consumers
     cond = (f"for every consumer, >= {ROW1_RECALL:.0%} of injected synthetics above that "
             f"consumer's tolerance produce a candidate; <= {ROW1_MAX_CANDIDATES} "
             "candidates per injected recording")
@@ -367,9 +383,11 @@ def row5_retention(masks: Mapping[str, Mapping[MaskKey, ConsumerMask]] | None,
     if not masks:
         return _not_computable(5, "retention", cond, "emitted masks per recording")
     overlap = [r for r in masks if baseline_retention and r in baseline_retention]
+    no_baseline = sorted(r for r in masks if r not in overlap)
     if not overlap or baseline_retention is None:
         return _not_computable(5, "retention", cond,
-                               "baseline retention for the recordings whose masks are given")
+                               "baseline retention for the recordings whose masks are given",
+                               {"masks_without_baseline": no_baseline})
     by_band: dict[str, list[float]] = {}
     per: dict[str, float] = {}
     for rec in overlap:  # every median over the SAME recordings as the baseline
@@ -388,6 +406,7 @@ def row5_retention(masks: Mapping[str, Mapping[MaskKey, ConsumerMask]] | None,
     ok = med[ENG_BAND] >= base and all(med[ENG_BAND] > v for v in slow.values())
     return Row(5, "retention", Status.PASS if ok else Status.FAIL, cond, med[ENG_BAND],
                {"median_by_band": med, "baseline_median": base, "n_baseline": len(overlap),
+                "masks_without_baseline": no_baseline,
                 "eng_minus_slow": {b: med[ENG_BAND] - v for b, v in slow.items()},
                 "not_counted_as_slow": [b for b in med if b in ("10-150", "2-50")],
                 "per_band_per_channel": per})
@@ -437,7 +456,15 @@ def row6_cross_animal(per_animal: Mapping[tuple[str, str], Sequence[tuple[int, i
     if leaked:
         msg = f"the scoring model trained on test animals {leaked} (R1)"
         raise ValueError(msg)
-    per_animal = {(str(c).lower(), str(a).upper()): v for (c, a), v in per_animal.items()}
+    normalised: dict[tuple[str, str], Sequence[tuple[int, int]]] = {}
+    for (c, a), v in per_animal.items():
+        key = (str(c).lower(), str(a).upper())
+        if key in normalised:  # invariant 27: never let two inputs merge silently
+            msg = (f"per_animal names {animal_key(*key)} twice once case is normalised; "
+                   f"keys {sorted(map(str, per_animal))}")
+            raise ValueError(msg)
+        normalised[key] = v
+    per_animal = normalised
     for cohort, animal in per_animal:
         if not is_test_animal(cohort, animal):
             msg = f"{animal_key(cohort, animal)} is not in R1's test set; it cannot be in row 6"
@@ -600,7 +627,8 @@ def _confound_one(rows: Sequence[BlankRow]) -> dict[str, Any]:
 
 
 def row7_coverage_confound(rows: Sequence[BlankRow] | None, *, has_coverage: bool,  # noqa: PLR0911
-                           equivalence_margin: float | None, consumers: Sequence[str]) -> Row:
+                           equivalence_margin: float | None,
+                           consumers: Sequence[str] | None = None) -> Row:
     """Regress motion blank fraction on condition, per consumer, with coverage (and mode).
 
     REFUSES (raises :class:`CoverageMissingError`) when ``has_coverage`` is false or any
@@ -608,7 +636,9 @@ def row7_coverage_confound(rows: Sequence[BlankRow] | None, *, has_coverage: boo
     < 0.5 excluded, weighted by coverage, coverage a covariate; mode a factor when it
     varies. FAIL if any consumer's condition CI excludes 0. Otherwise PASS only within a
     RULED ``equivalence_margin`` (none ruled yet: not computable, CI reported).
+    ``consumers`` defaults to :func:`~gems_blanking_v2.extent.tolerance.expected_consumers`.
     """
+    consumers = expected_consumers() if consumers is None else consumers
     cond = ("motion blank fraction (over time at risk) does not depend on condition, per "
             "consumer (WLS on condition + coverage [+ mode], coverage-weighted, >= 0.5)")
     if not has_coverage or (rows and any(r.coverage is None for r in rows)):
@@ -696,9 +726,12 @@ MODE_C_MARGIN: Final = 0.03
 MODE_LETTERS: Final[Mapping[str, TrainingMode]] = {
     "A": TrainingMode.POOLED, "B": TrainingMode.ADAPTED, "C": TrainingMode.PER_ANIMAL}
 B_VS_C_CORPORA: Final[frozenset[str]] = frozenset({"old_cohort_loao", "within_animal"})
+"""R1: mode choice uses only old-cohort LOAO and within-animal held-out data."""
+CORPUS_COHORTS: Final[Mapping[str, frozenset[str]]] = {
+    "old_cohort_loao": frozenset({"old"}), "within_animal": frozenset({"old", "new"})}
+"""The cohorts each B-vs-C corpus can come from: old-cohort LOAO is old by definition."""
 CLUSTER_UNIT: Final[Mapping[str, str]] = {"old": "recording", "new": "span"}
 """R9: the bootstrap cluster per cohort."""
-"""R1: mode choice uses only old-cohort LOAO and within-animal held-out data."""
 
 
 def _mode(name: str) -> TrainingMode:
@@ -718,6 +751,19 @@ class Comparison:
     a: str
     b: str
     status: str
+
+
+def _finite_diff(record: Mapping[str, Any], what: str) -> tuple[float, tuple[float, float]]:
+    """``f1_diff`` and ``ci95`` (two numbers) as floats; raises unless all are finite."""
+    ci = record["ci95"]
+    if isinstance(ci, (str, bytes)) or not isinstance(ci, Sequence) or len(ci) != 2:  # noqa: PLR2004
+        msg = f"{what} ci95 must be two numbers, got {ci!r}"
+        raise ValueError(msg)
+    diff, lo, hi = float(record["f1_diff"]), float(ci[0]), float(ci[1])
+    if not all(math.isfinite(v) for v in (diff, lo, hi)):
+        msg = f"{what} f1_diff and ci95 must be finite, got {diff} and [{lo}, {hi}]"
+        raise ValueError(msg)
+    return diff, (lo, hi)
 
 
 def row10_mode_comparison(curves: Mapping[tuple[str, str], Path] | None,  # noqa: PLR0911, PLR0912
@@ -767,6 +813,10 @@ def row10_mode_comparison(curves: Mapping[tuple[str, str], Path] | None,  # noqa
         msg = (f"B-vs-C must be {BOOTSTRAP_RESAMPLES} resamples on {sorted(B_VS_C_CORPORA)} "
                f"(R9, R1); got {b_vs_c['n_resamples']} on {b_vs_c['corpus']!r}")
         raise ValueError(msg)
+    if str(b_vs_c["cohort"]) not in CORPUS_COHORTS[b_vs_c["corpus"]]:
+        msg = (f"B-vs-C corpus {b_vs_c['corpus']!r} cannot come from cohort "
+               f"{b_vs_c['cohort']!r} (it is {sorted(CORPUS_COHORTS[b_vs_c['corpus']])})")
+        raise ValueError(msg)
     unit = CLUSTER_UNIT.get(str(b_vs_c["cohort"]))
     if unit is None or b_vs_c["cluster_unit"] != unit:
         msg = (f"R9 clusters by recording (old cohort) or span (new cohort); got "
@@ -776,8 +826,8 @@ def row10_mode_comparison(curves: Mapping[tuple[str, str], Path] | None,  # noqa
     if not isinstance(control, Mapping) or "f1_diff" not in control or "ci95" not in control:
         return _not_computable(10, "mode_comparison", cond,
                                "a matched-event-count control for B vs C (invariant 13)")
-    diff = float(b_vs_c["f1_diff"])
-    lo, hi = (float(x) for x in b_vs_c["ci95"])
+    diff, (lo, hi) = _finite_diff(b_vs_c, "B-vs-C")
+    _finite_diff(control, "B-vs-C matched-event control")
     c_wins = diff >= MODE_C_MARGIN and lo > 0
     if c_wins:
         return Row(10, "mode_comparison", Status.FAIL, cond, diff,
@@ -786,7 +836,7 @@ def row10_mode_comparison(curves: Mapping[tuple[str, str], Path] | None,  # noqa
                    "PER_ANIMAL beating ADAPTED is a task 11 feature-invariance bug, not a "
                    "result to ship (CLAUDE.md, task 12)")
     return Row(10, "mode_comparison", Status.PASS, cond, diff,
-               {"verdict": "C beats B" if c_wins else "C does not beat B", "ci95": [lo, hi],
+               {"verdict": "C does not beat B", "ci95": [lo, hi],
                 "n_curves": len(curves), "cluster_unit": b_vs_c["cluster_unit"],
                 "excluded_folds": list(b_vs_c["excluded_folds"]), "corpus": b_vs_c["corpus"],
                 "matched_event_control": control, "task11_investigation_triggered": False})
@@ -906,7 +956,8 @@ def row12_calibration(registry_events: Sequence[RegistryEvent] | None,
     if not shipped:
         return _not_computable(12, "calibration", cond, "a promoted model in the registry log")
     lacking = sorted(m for m in shipped if not held_out or m not in held_out
-                     or np.asarray(held_out[m][0]).size < MIN_HELD_OUT)
+                     or min(np.asarray(held_out[m][0]).size,
+                            np.asarray(held_out[m][1]).size) < MIN_HELD_OUT)
     if lacking:
         return _not_computable(12, "calibration", cond, f"held-out data for {lacking}")
     assert held_out is not None

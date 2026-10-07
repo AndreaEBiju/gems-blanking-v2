@@ -460,3 +460,8 @@ def test_a_non_finite_hum_feature_raises_naming_it(tmp_path: Path) -> None:
                            animal_median={}, hum_features={"line_plv_max": float("nan")},
                            release="Andrea: test")
     assert not list(tmp_path.iterdir())
+
+
+def test_the_test_reads_cover_exactly_the_expected_consumers() -> None:
+    assert set(READS) - set(tl.OUT_OF_BUILD_CONSUMERS) == set(tl.expected_consumers())
+
