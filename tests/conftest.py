@@ -35,6 +35,7 @@ from typing import Final, Literal, NamedTuple, TypedDict
 
 import numpy as np
 import numpy.typing as npt
+import pandas as pd
 import pytest
 from gems_blanking_v2.constants import FS_NOMINAL_HZ, MAD_TO_SIGMA
 from gems_blanking_v2.types import ChannelInfo, Recording
@@ -1760,3 +1761,79 @@ def make_hr_trouble(  # noqa: PLR0912, PLR0915 - one knob per measured failure m
         ev += list(beats_all[pick] + rng.uniform(-0.0005, 0.0005, int(pick.sum())))
     return HrTrouble(sig, beats_all[~missing], beats_all[missing], trans_s,
                      np.sort(np.asarray(ev, dtype=np.float64)))
+
+
+# ---------------------------------------------------------------------------
+# task 12: synthetic core-feature tables with known ground truth
+# ---------------------------------------------------------------------------
+
+FEATURE_SIGNAL: Final[tuple[str, ...]] = (
+    "band_ratio_max_c0", "band_ratio_median_c0", "frac_signals_over_c0", "onset_rate_max_c0",
+    "slew_max_c0", "clip_frac_c0",
+)
+"""The synthetic features that carry the motion signal; every other column is noise."""
+
+COMMON_MODE_FEATURES: Final[tuple[str, ...]] = (
+    "cm_resid_max_c0", "cm_resid_max_c100", "cm_resid_max_c250", "cm_resid_max_c500",
+    "within_minus_across_c0", "within_minus_across_c100", "within_minus_across_c250",
+    "within_minus_across_c500", "cm_fraction",
+)
+"""Absent (``nan``) on the old cohort's hardware tripole, as in the real feature matrix."""
+
+_OLD_TOKENS: Final[dict[str, str]] = {"F": "FRE", "J": "JEL", "L": "LOL", "O": "ORE"}
+
+
+def make_feature_table(
+    animals: dict[str, tuple[str, ...]],
+    *,
+    n_recordings: int = 4,
+    cores_per_recording: int = 60,
+    prevalence: float = 0.3,
+    separation: float = 1.5,
+    animal_shift: float = 0.0,
+    seed: int = 0,
+) -> pd.DataFrame:
+    """Build a labelled core table: task 10's label columns, ``span_id``, features, ``y``.
+
+    ``animals`` maps cohort (``"new"`` / ``"old"``) to animal letters. Motion cores have
+    the :data:`FEATURE_SIGNAL` columns shifted by ``separation`` standard deviations;
+    ``animal_shift`` adds a per-animal offset to every feature (covariate shift). New-
+    cohort rows are judged inside one audit span per recording (``motion`` /
+    ``physiology``); old-cohort rows carry the common-mode family as ``nan``. Recording
+    names follow each cohort's convention, so the animal letter can be read from them.
+    """
+    from gems_blanking_v2.detect.features import FEATURE_NAMES  # noqa: PLC0415
+
+    rng = np.random.default_rng(seed)
+    rows: list[dict[str, object]] = []
+    sig_idx = [FEATURE_NAMES.index(f) for f in FEATURE_SIGNAL]
+    for cohort, letters in animals.items():
+        for a_i, letter in enumerate(letters):
+            offset = animal_shift * (a_i + 1) * (1 if cohort == "new" else -1)
+            for r in range(n_recordings):
+                if cohort == "new":
+                    rec = f"gems_{letter.lower()}_t01_ms{r}_bl_1200{r:02d}"
+                    span: str | None = f"plan_x_s{letter}{r}"
+                else:
+                    rec = f"E1000_{_OLD_TOKENS.get(letter, letter)}_E1000_bl_13{r:02d}"
+                    span = None
+                for k in range(cores_per_recording):
+                    y = int(rng.random() < prevalence)
+                    x = rng.normal(0.0, 1.0, len(FEATURE_NAMES)) + offset
+                    x[sig_idx] += separation * y
+                    row: dict[str, object] = dict(zip(FEATURE_NAMES, x.tolist(), strict=True))
+                    if cohort == "old":
+                        for f in COMMON_MODE_FEATURES:
+                            row[f] = math.nan
+                    t0 = 10.0 + 2.0 * k
+                    row.update({
+                        "recording": rec, "animal": letter, "cohort": cohort,
+                        "start_s": t0, "stop_s": t0 + 0.2,
+                        "judgement": "motion" if y else "physiology",
+                        "source": "human" if cohort == "new" else "inherited",
+                        "basis": "mark_overlap" if y else "exhaustive_span",
+                        "label_set": "train", "label_source": "human", "span_id": span,
+                        "y": y,
+                    })
+                    rows.append(row)
+    return pd.DataFrame(rows)
