@@ -109,9 +109,13 @@ NEGATIVE_JUDGEMENTS: Final[frozenset[str]] = frozenset({"physiology", "line_nois
 
 SET_A_BASIS: Final = "set_a_random"
 """``basis`` of an old-cohort core that Andrea judged in labelling set A's random old
-sample (ruling 2026-10-08 (b) item 1(c)): an unbiased draw of old cores with both classes,
-judged by a human - so neither inherited nor tiered. These rows are the old-cohort
-negative source without which no old-cohort row may train (item 1(b))."""
+sample (ruling 2026-10-08 (b) item 1(c)). What the sample is: a random draw of 300
+UNMARKED (unjudged) old cores from tier 1/2a/2b recordings, stratified by animal in
+proportion to each animal's unmarked cores with a floor of 10 per animal - not a draw of
+all old cores. Its motion rate is therefore the rate among unmarked cores; the cohort's
+rate combines it with the marked share (``train.old_motion_rate``). Judged by a human, so
+neither inherited nor tiered; the old-cohort negative source without which no old-cohort
+row may train (item 1(b))."""
 
 ADJUDICATED_BASIS: Final = "adjudicated"
 """``basis`` of a core judged on the adjudication screen outside set A's random old
@@ -382,7 +386,8 @@ def write_alias_table(rows: Sequence[AliasRow], path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def apply_adjudications(cores: pd.DataFrame, adj: pd.DataFrame, *, random_queue: str
+def apply_adjudications(cores: pd.DataFrame, adj: pd.DataFrame, *,
+                        rate_sample_keys: Iterable[str]
                         ) -> tuple[pd.DataFrame, dict[str, object]]:
     """Put the adjudication screen's judgements on the cores they judged.
 
@@ -392,8 +397,9 @@ def apply_adjudications(cores: pd.DataFrame, adj: pd.DataFrame, *, random_queue:
     are negatives, ``unsure`` (3) is kept as ``unsure`` and excluded by
     :func:`training_rows`; a core nobody judged keeps its own judgement (``unjudged``
     stays unjudged - invariant 9). ``source`` and ``label_source`` become ``human``;
-    ``basis`` is :data:`SET_A_BASIS` for an OLD-cohort core from ``random_queue`` (set A's
-    random old sample, the only rows that estimate the old motion rate) and
+    ``basis`` is :data:`SET_A_BASIS` for an OLD-cohort core whose key is in
+    ``rate_sample_keys`` - the queue rows drawn as set A's random old sample (``why ==
+    "old_random"``), matched by core key, never by queue file - and
     :data:`ADJUDICATED_BASIS` otherwise.
 
     A core judged twice keeps the later judgement (``at``). A judgement that would
@@ -403,7 +409,7 @@ def apply_adjudications(cores: pd.DataFrame, adj: pd.DataFrame, *, random_queue:
     Raises when a judgement's key matches no core, or its cohort, animal or label_set
     disagree with the core's (a data error, not a label).
     """
-    need = ("core_key", "judgement", "queue_file", "at", "cohort", "animal", "label_set")
+    need = ("core_key", "judgement", "at", "cohort", "animal", "label_set")
     gap = [c for c in need if c not in adj.columns]
     if gap or "core_key" not in cores.columns:
         msg = f"adjudication join needs core_key on both sides and {list(need)}; missing {gap}"
@@ -432,7 +438,7 @@ def apply_adjudications(cores: pd.DataFrame, adj: pd.DataFrame, *, random_queue:
     new = a["judgement"].astype(str).to_numpy()
     conflict = (prior != "unjudged") & (prior != new)
     is_old = a["cohort"].astype(str).to_numpy() == "old"
-    from_random = a["queue_file"].astype(str).to_numpy() == random_queue
+    from_random = a.index.isin(list(set(rate_sample_keys)))
     basis = np.where(is_old & from_random, SET_A_BASIS, ADJUDICATED_BASIS)
     ok = rows[~conflict]
     out.loc[out.index[ok], "judgement"] = new[~conflict]
@@ -440,8 +446,8 @@ def apply_adjudications(cores: pd.DataFrame, adj: pd.DataFrame, *, random_queue:
     out.loc[out.index[ok], ["source", "label_source"]] = "human"
     out.loc[out.index[rows[conflict]], "judgement"] = "unjudged"
     out.loc[out.index[rows[conflict]], "basis"] = "adjudication_conflict"
-    counts = (a.groupby(["cohort", "queue_file", "judgement"]).size().rename("n")
-              .reset_index())
+    counts = (a.assign(basis=basis).groupby(["cohort", "basis", "judgement"]).size()
+              .rename("n").reset_index())
     report: dict[str, object] = {
         "n_judgements": len(adj), "n_cores_judged": len(a), "n_duplicate_judgements": n_dup,
         "n_conflicts": int(conflict.sum()),

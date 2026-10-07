@@ -24,6 +24,11 @@ from tests.conftest import make_feature_table
 THREADS = 2
 
 
+def _rate(t: pd.DataFrame) -> tr.OldRateEstimate:
+    """Return the combined old-rate estimate over a test table's own old rows."""
+    return tr.old_motion_rate(t)
+
+
 @pytest.fixture
 def record(tmp_path: Path) -> Path:
     return ev.write_run_record(tmp_path / "run_record.json", run_id="test")
@@ -196,21 +201,23 @@ def test_run_modes_requires_the_renames_in_the_run_record(tmp_path: Path) -> Non
     assert md.renames_record(path)["content"] == json.loads(path.read_text(encoding="utf-8"))
     bare = ev.write_run_record(tmp_path / "bare.json", run_id="r")
     with pytest.raises(ValueError, match="extra\\['renames'\\]"):
-        md.run_modes(t, targets=["new:A"], record_path=bare, num_threads=THREADS,
+        md.run_modes(t, old_rate=_rate(t), targets=["new:A"], record_path=bare, num_threads=THREADS,
                      modes=(TrainingMode.POOLED,), rounds=5)
     good = ev.write_run_record(tmp_path / "good.json", run_id="r",
                                extra={"renames": md.renames_record(path)})
-    md.run_modes(t, targets=["new:A"], record_path=good, num_threads=THREADS,
+    md.run_modes(t, old_rate=_rate(t), targets=["new:A"], record_path=good, num_threads=THREADS,
                  modes=(TrainingMode.POOLED,), rounds=5)
     path.write_text(path.read_text(encoding="utf-8").replace("test", "edited"),
                     encoding="utf-8")
     t2 = md.prepare_table(raw, renames=path)  # the file changed after the record
     with pytest.raises(ValueError, match="extra\\['renames'\\]"):
-        md.run_modes(t2, targets=["new:A"], record_path=good, num_threads=THREADS,
+        md.run_modes(t2, old_rate=_rate(t2),
+                     targets=["new:A"], record_path=good, num_threads=THREADS,
                      modes=(TrainingMode.POOLED,), rounds=5)
     plain = md.prepare_table(raw)  # no renames: a record claiming some is refused
     with pytest.raises(ValueError, match="extra\\['renames'\\]"):
-        md.run_modes(plain, targets=["new:A"], record_path=good, num_threads=THREADS,
+        md.run_modes(plain, old_rate=_rate(plain),
+                     targets=["new:A"], record_path=good, num_threads=THREADS,
                      modes=(TrainingMode.POOLED,), rounds=5)
 
 
@@ -219,7 +226,8 @@ def test_run_modes_rechecks_the_test_set(record: Path) -> None:
                                             cores_per_recording=20, seed=23))
     t.loc[t["animal"] == "B", "animal"] = "J"  # altered after preparation
     with pytest.raises(ValueError, match="prospective test set"):
-        md.run_modes(t, targets=["new:A"], record_path=record, num_threads=THREADS,
+        md.run_modes(t, old_rate=_rate(t),
+                     targets=["new:A"], record_path=record, num_threads=THREADS,
                      modes=(TrainingMode.POOLED,), rounds=5)
 
 
@@ -283,7 +291,8 @@ def test_new_cohort_targets_are_scored_on_audit_spans_only(record: Path) -> None
         assert set(t["cluster"].iloc[f.evaluate].str[:5]) == {"span:"}
     trained = set().union(*(set(f.train) for f in md.per_animal_folds(t, "new:A")))
     assert out_rows <= trained  # they still train
-    run = md.run_modes(t, targets=["new:A"], record_path=record, num_threads=THREADS,
+    run = md.run_modes(t, old_rate=_rate(t),
+                       targets=["new:A"], record_path=record, num_threads=THREADS,
                        w_adapt_grid=(1.0,), rounds=10, adapt_rounds=5)
     assert not out_rows & set(run.predictions["row"].astype(int))
     bad = dataclasses.replace(fa, evaluate=np.concatenate([fa.evaluate, sorted(out_rows)[:1]]))
@@ -343,7 +352,8 @@ def test_a_leaky_recording_index_feature_is_rejected(table: pd.DataFrame) -> Non
 
 def test_training_refuses_without_a_run_record(table: pd.DataFrame, tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="no run record"):
-        md.run_modes(table, targets=["new:A"], record_path=tmp_path / "absent.json",
+        md.run_modes(table, old_rate=_rate(table),
+                     targets=["new:A"], record_path=tmp_path / "absent.json",
                      num_threads=THREADS)
 
 
@@ -380,10 +390,12 @@ def test_run_record_is_write_once_and_binding(tmp_path: Path) -> None:
 def test_run_modes_refuses_a_protocol_off_the_record(table: pd.DataFrame,
                                                     record: Path) -> None:
     with pytest.raises(ValueError, match="recorded kind"):
-        md.run_modes(table, targets=["new:A"], record_path=record, num_threads=THREADS,
+        md.run_modes(table, old_rate=_rate(table),
+                     targets=["new:A"], record_path=record, num_threads=THREADS,
                      calibration="platt")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="recorded grid"):
-        md.run_modes(table, targets=["new:A"], record_path=record, num_threads=THREADS,
+        md.run_modes(table, old_rate=_rate(table),
+                     targets=["new:A"], record_path=record, num_threads=THREADS,
                      w_adapt_grid=(2.0,))
 
 
@@ -399,7 +411,7 @@ def test_r9_values_are_the_ruled_ones() -> None:
 
 
 def test_all_three_modes_score_the_same_rows(table: pd.DataFrame, record: Path) -> None:
-    run = md.run_modes(table, targets=["new:A", "new:B"], record_path=record,
+    run = md.run_modes(table, old_rate=_rate(table), targets=["new:A", "new:B"], record_path=record,
                        num_threads=THREADS, w_adapt_grid=(1.0, 10.0), rounds=40,
                        adapt_rounds=20)
     p = run.predictions
@@ -456,7 +468,8 @@ def test_old_cohort_positives_only_are_refused_for_mode_c(record: Path) -> None:
                              cores_per_recording=30, set_a_per_recording=40, seed=4)
     raw = raw[~((raw["animal"] == "L") & (raw["basis"] == lb.SET_A_BASIS))]
     t = md.prepare_table(raw)
-    run = md.run_modes(t, targets=["old:L"], record_path=record, num_threads=THREADS,
+    run = md.run_modes(t, old_rate=_rate(t),
+                       targets=["old:L"], record_path=record, num_threads=THREADS,
                        modes=(TrainingMode.PER_ANIMAL,), rounds=10)
     assert [r.reason for r in run.refusals] == ["labels hold one class only ([1])"]
 
@@ -467,11 +480,13 @@ def test_old_rows_never_train_without_set_a_negatives(record: Path) -> None:
     t = md.prepare_table(raw)
     for targets in (["new:A"], ["old:F"]):
         with pytest.raises(tr.OldRowsRefusedError, match=r"item 1\(b\)"):
-            md.run_modes(t, targets=targets, record_path=record, num_threads=THREADS,
+            md.run_modes(t, old_rate=_rate(t),
+                         targets=targets, record_path=record, num_threads=THREADS,
                          rounds=5, adapt_rounds=5, w_adapt_grid=(1.0,))
     # new-cohort only: the provisional runs
     new_only = md.prepare_table(raw[raw["cohort"] == "new"])
-    run = md.run_modes(new_only, targets=["new:A"], record_path=record, num_threads=THREADS,
+    run = md.run_modes(new_only, old_rate=_rate(new_only),
+                       targets=["new:A"], record_path=record, num_threads=THREADS,
                        modes=(TrainingMode.POOLED,), rounds=5)
     assert len(run.predictions) and not run.priors
 
@@ -711,7 +726,8 @@ def test_tier_step_dropped_only_on_a_significant_fall() -> None:
 
 
 def test_a_vs_c_is_never_a_comparison(table: pd.DataFrame, record: Path) -> None:
-    run = md.run_modes(table, targets=["new:H"], record_path=record, num_threads=THREADS,
+    run = md.run_modes(table, old_rate=_rate(table),
+                       targets=["new:H"], record_path=record, num_threads=THREADS,
                        w_adapt_grid=(3.0,), rounds=30, adapt_rounds=10)
     m = cmp.matched_protocol_table(run.predictions, ev.R9_THRESHOLDS)
     ac = m[m["comparison"] == "A vs C"]
@@ -726,7 +742,8 @@ def test_a_vs_c_is_never_a_comparison(table: pd.DataFrame, record: Path) -> None
 def test_comparison_artifact_is_written(table: pd.DataFrame, record: Path,
                                         tmp_path: Path) -> None:
     r9 = ev.require_run_record(record)
-    run = md.run_modes(table, targets=["new:A"], record_path=record, num_threads=THREADS,
+    run = md.run_modes(table, old_rate=_rate(table),
+                       targets=["new:A"], record_path=record, num_threads=THREADS,
                        w_adapt_grid=(1.0,), rounds=30, adapt_rounds=10)
     summ = cmp.summarize(run.predictions, r9)
     matched = cmp.matched_protocol_table(run.predictions, r9)

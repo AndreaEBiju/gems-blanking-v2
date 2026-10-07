@@ -41,6 +41,11 @@ from tests.conftest import make_feature_table, make_multichannel
 THREADS = 2
 
 
+def _rate(t: pd.DataFrame) -> tr.OldRateEstimate:
+    """Return the combined old-rate estimate over a test table's own old rows."""
+    return tr.old_motion_rate(t)
+
+
 def _detector_available(name: str) -> bool:
     try:
         import_detector_module(name)
@@ -117,7 +122,8 @@ class _SpyTuner:
 
     def __call__(self, x: pd.DataFrame, y: npt.NDArray[np.int8], w: npt.NDArray[np.float64],
                  groups: npt.NDArray[np.str_], *, scorable: npt.NDArray[np.bool_],
-                 meta: pd.DataFrame, num_threads: int) -> Mapping[str, Any]:
+                 meta: pd.DataFrame, old_rate: tr.OldRateEstimate | None,
+                 num_threads: int) -> Mapping[str, Any]:
         self.calls.append((set(x.index.tolist()), set(groups.tolist())))
         self.metas.append(meta)
         assert len(scorable) == len(meta) == len(x)
@@ -128,7 +134,8 @@ def test_the_held_out_animal_never_reaches_the_tuner(new_table: pd.DataFrame,
                                                      tmp_path: Path) -> None:
     spy = _SpyTuner()
     record = _record(tmp_path / "r.json", tuning=spy.record())
-    run = md.run_modes(new_table, targets=["new:A", "new:H"], record_path=record,
+    run = md.run_modes(new_table, old_rate=_rate(new_table),
+                       targets=["new:A", "new:H"], record_path=record,
                        num_threads=THREADS, w_adapt_grid=(1.0,), rounds=10, adapt_rounds=5,
                        tuner=spy)
     keys = new_table["animal_key"].to_numpy()
@@ -147,10 +154,11 @@ def test_the_held_out_animal_never_reaches_the_tuner(new_table: pd.DataFrame,
 def test_tuning_must_be_in_the_run_record(new_table: pd.DataFrame, tmp_path: Path) -> None:
     spy = _SpyTuner()
     with pytest.raises(ValueError, match=r"extra\['tuning'\]"):
-        md.run_modes(new_table, targets=["new:A"], record_path=_record(tmp_path / "r.json"),
+        md.run_modes(new_table, old_rate=_rate(new_table),
+                     targets=["new:A"], record_path=_record(tmp_path / "r.json"),
                      num_threads=THREADS, modes=(TrainingMode.POOLED,), tuner=spy)
     with pytest.raises(ValueError, match=r"extra\['tuning'\]"):  # a record claiming tuning
-        md.run_modes(new_table, targets=["new:A"], num_threads=THREADS,
+        md.run_modes(new_table, old_rate=_rate(new_table), targets=["new:A"], num_threads=THREADS,
                      record_path=_record(tmp_path / "t.json", tuning=spy.record()),
                      modes=(TrainingMode.POOLED,))
 
@@ -174,6 +182,7 @@ def test_the_optuna_tuner_says_so_when_optuna_is_absent(new_table: pd.DataFrame)
         t(new_table[tr.feature_columns(new_table)], new_table["y"].to_numpy(),
           np.ones(len(new_table)), new_table["animal_key"].to_numpy(),
           scorable=np.ones(len(new_table), bool), meta=new_table[list(md.TUNER_META)],
+          old_rate=None,
           num_threads=1)
 
 
@@ -187,12 +196,12 @@ def test_bs_weight_never_sees_its_test_fold(new_table: pd.DataFrame, tmp_path: P
     kw: dict[str, Any] = {"targets": ["new:A"], "record_path": record, "num_threads": THREADS,
                           "modes": (TrainingMode.ADAPTED,), "w_adapt_grid": (1.0, 30.0),
                           "rounds": 20, "adapt_rounds": 10}
-    base = md.run_modes(new_table, **kw).w_selection.set_index("fold")
+    base = md.run_modes(new_table, old_rate=_rate(new_table), **kw).w_selection.set_index("fold")
     held = sorted(base.index)[0]
     flipped = new_table.copy()
     m = (flipped["recording"] == held).to_numpy()
     flipped.loc[m, "y"] = 1 - flipped.loc[m, "y"]  # the test fold's labels, inverted
-    again = md.run_modes(flipped, **kw).w_selection.set_index("fold")
+    again = md.run_modes(flipped, old_rate=_rate(flipped), **kw).w_selection.set_index("fold")
     assert again.loc[held, "w_chosen"] == base.loc[held, "w_chosen"]
     assert again.loc[held, "inner_f1"] == base.loc[held, "inner_f1"]
     assert (base["basis"].str.contains("inner leave-one-adaptation-recording-out")).all()
@@ -369,14 +378,15 @@ def _old_table(set_a: int = 10, seed: int = 50) -> pd.DataFrame:
     return md.prepare_table(raw)
 
 
-def test_prior_correction_sets_the_old_motion_rate_to_set_as() -> None:
+def test_prior_correction_sets_the_old_motion_rate_to_the_combined_estimate() -> None:
     t = _old_table()
-    w, corr = tr.prior_weights(t)
+    est = _rate(t)
+    w, corr = tr.prior_weights(t, rate=est)
     assert corr is not None
     old = (t["cohort"] == "old").to_numpy()
     set_a = old & (t["basis"] == lb.SET_A_BASIS).to_numpy()
     y = t["y"].to_numpy()
-    assert corr.rate == pytest.approx(y[set_a].mean())
+    assert corr.rate == est.rate > y[set_a].mean()  # marks count as motion: never set A's raw
     assert corr.n_marks == int((old & ~set_a).sum()) and corr.n_set_a == int(set_a.sum())
     eff = (w[old] * y[old]).sum() / w[old].sum()
     assert eff == pytest.approx(corr.rate)  # the effective old-cohort motion rate
@@ -386,23 +396,27 @@ def test_prior_correction_sets_the_old_motion_rate_to_set_as() -> None:
     assert corr.w_pos_ci[0] <= corr.w_pos <= corr.w_pos_ci[1]
     d = corr.to_dict()
     assert d["rate_ci95"] == [lo, hi] and "item 1(c)" in d["rule"]
-    assert tr.prior_weights(t[t["cohort"] == "new"])[1] is None
+    assert "marks counted as motion" in d["estimate"]["note"]
+    assert tr.prior_weights(t[t["cohort"] == "new"], rate=None)[1] is None
+    with pytest.raises(tr.OldRowsRefusedError, match="combined old motion-rate"):
+        tr.prior_weights(t, rate=None)
 
 
 def test_old_rows_without_set_a_negatives_are_refused() -> None:
     with pytest.raises(tr.OldRowsRefusedError, match="set A"):
-        tr.prior_correction(_old_table(set_a=0))
+        tr.prior_correction(_old_table(set_a=0), rate=_rate(_old_table()))
     t = _old_table()
     neg_only_marks = t.copy()
     m = ((t["cohort"] == "old") & (t["basis"] != lb.SET_A_BASIS)).to_numpy()
     neg_only_marks.loc[np.flatnonzero(m)[:1], "y"] = 0
     with pytest.raises(ValueError, match="positives only"):
-        tr.prior_correction(neg_only_marks)
+        tr.prior_correction(neg_only_marks, rate=_rate(t))
 
 
 def test_every_fit_with_old_rows_carries_its_correction(tmp_path: Path) -> None:
     t = _old_table()
-    run = md.run_modes(t, targets=["new:A"], record_path=_record(tmp_path / "r.json"),
+    run = md.run_modes(t, old_rate=_rate(t),
+                       targets=["new:A"], record_path=_record(tmp_path / "r.json"),
                        num_threads=THREADS, modes=(TrainingMode.POOLED,), rounds=10)
     (pr,) = run.priors
     assert pr["fit"] == "pooled new:A" and pr["n_marks"] > 0
@@ -410,7 +424,8 @@ def test_every_fit_with_old_rows_carries_its_correction(tmp_path: Path) -> None:
 
 def test_a_fold_without_enough_set_a_negatives_is_refused_not_raised(tmp_path: Path) -> None:
     t = _old_table()  # ~7 set-A negatives per old recording: a 2-recording C fold has < 20
-    run = md.run_modes(t, targets=["old:F"], record_path=_record(tmp_path / "r.json"),
+    run = md.run_modes(t, old_rate=_rate(t),
+                       targets=["old:F"], record_path=_record(tmp_path / "r.json"),
                        num_threads=THREADS, rounds=5, adapt_rounds=5, w_adapt_grid=(1.0,))
     refused = [r for r in run.refusals if "set A" in r.reason]
     assert refused and {r.mode for r in refused} <= {"per_animal", "adapted"}
@@ -433,14 +448,16 @@ def test_the_cohort_probe_is_never_a_pass_by_default(new_table: pd.DataFrame,
                                                      tmp_path: Path) -> None:
     r9 = ev.R9_THRESHOLDS
     record = _record(tmp_path / "r.json")
-    run = md.run_modes(new_table, targets=["new:A"], record_path=record, num_threads=THREADS,
+    run = md.run_modes(new_table, old_rate=_rate(new_table),
+                       targets=["new:A"], record_path=record, num_threads=THREADS,
                        w_adapt_grid=(1.0,), rounds=10, adapt_rounds=5)
     probe = cmp.cohort_probe(run.predictions, new_table, r9).set_index("mode")
     assert set(probe.index) == {"pooled", "adapted", "per_animal"}
     assert "passes" not in probe.columns
     assert probe["status"].str.contains("no old-cohort cores judged physiology").all()
     t = _old_table()
-    run = md.run_modes(t, targets=["new:A", "old:F"], record_path=_record(tmp_path / "o.json"),
+    run = md.run_modes(t, old_rate=_rate(t),
+                       targets=["new:A", "old:F"], record_path=_record(tmp_path / "o.json"),
                        num_threads=THREADS, modes=(TrainingMode.POOLED,), rounds=20)
     p = cmp.cohort_probe(run.predictions, t, r9).set_index("mode")
     assert p.loc["pooled", "status"] in ("pass", "fail")
@@ -478,7 +495,8 @@ def test_the_tier_check_runs_when_set_a_exists_and_refuses_without(tmp_path: Pat
 
     record = _record(tmp_path / "r.json")
     verdicts, largest, preds = md.tier_check(labelled, targets=["new:A", "new:B"],
-                                             record_path=record, num_threads=THREADS)
+                                             record_path=record, num_threads=THREADS,
+                                             old_rate_for=lambda _k: _rate(t))
     assert [v.step for v in verdicts] == ["1+2a", "1+2a+2b"]
     assert largest in md.TIER_CHAIN
     assert all(len(p) == len(preds["1"]) for p in preds.values())
@@ -487,7 +505,8 @@ def test_the_tier_check_runs_when_set_a_exists_and_refuses_without(tmp_path: Pat
     no_a = base[base["basis"] != lb.SET_A_BASIS]
     with pytest.raises(tr.OldRowsRefusedError):
         md.tier_check(lambda k: lb.training_rows(no_a, old_tiers=tiers, keep_tiers=k),
-                      targets=["new:A", "new:B"], record_path=record, num_threads=THREADS)
+                      targets=["new:A", "new:B"], record_path=record, num_threads=THREADS,
+                      old_rate_for=lambda _k: _rate(t))
 
 
 def test_tier_chain_keeps_against_the_last_kept_step() -> None:
@@ -556,11 +575,11 @@ def test_inner_folds_recompute_the_prior_correction(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(tu, "fit", spy)
     base = np.full(len(t), 2.0)
     tu.inner_cv_f1(pm.FIXED_PARAMS, t[feats], t["y"], base, t["animal_key"], rounds=5,
-                   num_threads=THREADS, meta=t[list(md.TUNER_META)])
+                   num_threads=THREADS, meta=t[list(md.TUNER_META)], old_rate=_rate(t))
     assert got
     for idx, w in got:
         sub = t.loc[idx]
-        corr = tr.prior_correction(sub, base=base[: len(sub)])
+        corr = tr.prior_correction(sub, rate=_rate(t), base=base[: len(sub)])
         assert corr is not None  # every inner training set holds old rows
         old = (sub["cohort"] == "old").to_numpy()
         yy = sub["y"].to_numpy()
@@ -599,11 +618,23 @@ def test_a_flagged_model_never_scores_a_stored_span_whatever_the_flag(tmp_path: 
                          cores=outside.drop(columns="feature_version"))
 
 
+def test_an_inner_fold_below_the_set_a_minimum_is_skipped_and_counted() -> None:
+    t = _old_table(set_a=20)
+    t = t[~((t["animal"] == "F") & (t["basis"] == lb.SET_A_BASIS))].reset_index(drop=True)
+    feats = tr.feature_columns(t)
+    skipped: list[str] = []
+    f1 = tu.inner_cv_f1(pm.FIXED_PARAMS, t[feats], t["y"], np.ones(len(t)), t["animal_key"],
+                        rounds=5, num_threads=THREADS, meta=t[list(md.TUNER_META)],
+                        old_rate=_rate(t), skipped=skipped)
+    assert skipped == ["old:L"]  # holding out L leaves no set-A negatives: skipped
+    assert np.isfinite(f1)  # the outer fold is not refused
+
+
 def test_the_prior_correction_holds_under_non_unit_base_weights() -> None:
     t = _old_table()
     rng = np.random.default_rng(1)
     base = rng.choice([1.0, 3.0, 30.0], size=len(t))
-    mult, corr = tr.prior_weights(t, base=base)
+    mult, corr = tr.prior_weights(t, rate=_rate(t), base=base)
     assert corr is not None
     w = base * mult
     old = (t["cohort"] == "old").to_numpy()
@@ -616,9 +647,9 @@ def test_too_few_set_a_negatives_refuse_and_an_infinite_ci_weight_is_omitted() -
     neg = np.flatnonzero(((t["basis"] == lb.SET_A_BASIS) & (t["y"] == 0)).to_numpy())
     keep = np.setdiff1d(np.arange(len(t)), neg[tr.MIN_SET_A_OLD_NEGATIVES - 1:])
     with pytest.raises(tr.OldRowsRefusedError, match=f"at least {tr.MIN_SET_A_OLD_NEGATIVES}"):
-        tr.prior_correction(t.iloc[keep])
+        tr.prior_correction(t.iloc[keep], rate=_rate(t))
     corr = tr.PriorCorrection(n_set_a=30, k_set_a=10, n_marks=5, rate=1 / 3, ci=(0.1, 1.0),
-                              w_pos=0.5, w_pos_ci=(0.1, math.inf))
+                              w_pos=0.5, w_pos_ci=(0.1, math.inf), estimate={})
     d = corr.to_dict()
     assert "w_pos_at_ci" not in d and "rate of 1" in d["w_pos_at_ci_omitted"]
     json.dumps(d, allow_nan=False)  # writable: never raises after artifacts are on disk
@@ -628,6 +659,11 @@ def test_too_few_set_a_negatives_refuse_and_an_infinite_ci_weight_is_omitted() -
 # ---------------------------------------------------------------------------
 # Night 2: set A judgements onto cores
 # ---------------------------------------------------------------------------
+
+
+def _keys(adj: pd.DataFrame) -> set[str]:
+    """Return the rate-sample keys: the random queue's old rows (``why == old_random`` there)."""
+    return set(adj.loc[adj["queue_file"] == "setA_random", "core_key"])
 
 
 def _set_a_sample() -> tuple[pd.DataFrame, pd.DataFrame, dict[str, str]]:
@@ -667,7 +703,7 @@ def test_set_a_keys_become_labels_and_unsure_or_unjudged_never_negatives() -> No
     # an earlier judgement of the same core, later undone and re-judged: the later one wins
     adj = pd.concat([adj.iloc[[0]].assign(judgement="unsure", at="2026-10-07T19:00:00+00:00"),
                      adj], ignore_index=True)
-    out, rep_ = lb.apply_adjudications(cores, adj, random_queue="setA_random")
+    out, rep_ = lb.apply_adjudications(cores, adj, rate_sample_keys=_keys(adj))
     got = dict(zip(out["core_key"], out["judgement"], strict=True))
     assert got == want
     random_keys = adj.loc[adj["queue_file"] == "setA_random", "core_key"].nunique()
@@ -686,17 +722,10 @@ def test_set_a_keys_become_labels_and_unsure_or_unjudged_never_negatives() -> No
     rand = tr_rows["basis"] == lb.SET_A_BASIS
     k = int(tr_rows.loc[rand, "y"].sum())
     n = int(rand.sum())
-    corr = tr.prior_correction(tr_rows, seed=3)
-    assert corr is not None and corr.rate == pytest.approx(k / n)  # hum row not in the rate
-    assert (corr.k_set_a, corr.n_set_a) == (k, n)
-    # the CI: 1000 resamples of the set-A recordings, as an independent computation
-    sub = tr_rows[rand]
-    codes, _u = pd.factorize(sub["recording"], sort=True)
-    kk = np.bincount(codes, weights=sub["y"].to_numpy(float))
-    nn = np.bincount(codes).astype(float)
-    draw = np.random.default_rng(3).integers(0, len(nn), size=(tr.PRIOR_CI_RESAMPLES, len(nn)))
-    lo, hi = np.quantile(kk[draw].sum(1) / nn[draw].sum(1), [0.025, 0.975])
-    assert corr.ci == pytest.approx((lo, hi))
+    est = tr.old_motion_rate(out, seed=3)  # the population: every core, unjudged included
+    assert (est.k_set_a, est.n_set_a) == (k, n)  # hum and unsure rows never in the rate
+    assert est.f_marked == 0.0 and est.r_unmarked == pytest.approx(k / n)
+    assert est.rate == pytest.approx(k / n) and est.ci[0] <= est.rate <= est.ci[1]
 
 
 def test_an_adjudication_never_overwrites_a_different_label() -> None:
@@ -705,11 +734,74 @@ def test_an_adjudication_never_overwrites_a_different_label() -> None:
     cores.loc[cores["core_key"] == key, "judgement"] = "motion"
     cores.loc[cores["core_key"] == key, "basis"] = "mark_overlap"
     adj.loc[adj["core_key"] == key, "judgement"] = "physiology"
-    out, rep_ = lb.apply_adjudications(cores, adj, random_queue="setA_random")
+    out, rep_ = lb.apply_adjudications(cores, adj, rate_sample_keys=_keys(adj))
     row = out[out["core_key"] == key].iloc[0]
     assert (row["judgement"], row["basis"]) == ("unjudged", "adjudication_conflict")
     assert rep_["n_conflicts"] == 1
     with pytest.raises(ValueError, match="match no core"):
-        lb.apply_adjudications(cores, adj.assign(core_key="nope"), random_queue="setA_random")
+        lb.apply_adjudications(cores, adj.assign(core_key="nope"), rate_sample_keys=())
     with pytest.raises(ValueError, match="not what the screen writes"):
-        lb.apply_adjudications(cores, adj.assign(judgement="skip"), random_queue="setA_random")
+        lb.apply_adjudications(cores, adj.assign(judgement="skip"), rate_sample_keys=())
+
+
+
+def _population(seed: int, n_marked: dict[str, int], n_unmarked: dict[str, int],
+                r_true: dict[str, float], n_drawn: dict[str, int]) -> pd.DataFrame:
+    """Old cores of two animals: marked ones, unmarked ones, and set A's judged draw."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    for a, n_m in n_marked.items():
+        recs = [f"E1000_{a}{a}{a}_E1000_bl_13{r:02d}" for r in range(6)]
+        for i in range(n_m):
+            rows.append({"cohort": "old", "animal": a, "recording": recs[i % 6],
+                         "basis": "mark_overlap", "judgement": "motion"})
+        for i in range(n_unmarked[a]):
+            judged = i < n_drawn[a]
+            j = ("motion" if rng.random() < r_true[a] else "physiology") if judged else "unjudged"
+            rows.append({"cohort": "old", "animal": a, "recording": recs[i % 6],
+                         "basis": lb.SET_A_BASIS if judged else "unmarked", "judgement": j})
+    return pd.DataFrame(rows)
+
+
+def test_the_combined_rate_undoes_the_per_animal_floor_and_counts_marks() -> None:
+    # animal F: few unmarked cores but over-drawn (the floor); L: many, under-drawn
+    pop = _population(1, {"F": 100, "L": 400}, {"F": 200, "L": 3800},
+                      {"F": 0.6, "L": 0.1}, {"F": 150, "L": 150})
+    est = tr.old_motion_rate(pop, seed=0)
+    f = 500 / 4500
+    assert est.f_marked == pytest.approx(f)
+    assert est.weights == pytest.approx({"F": 200 / 4000, "L": 3800 / 4000})
+    r_f, r_l = est.r_by_animal["F"], est.r_by_animal["L"]
+    assert est.r_unmarked == pytest.approx(0.05 * r_f + 0.95 * r_l)
+    assert est.rate == pytest.approx(f + (1 - f) * est.r_unmarked)
+    raw = (pop["judgement"] == "motion")[pop["basis"] == lb.SET_A_BASIS].mean()
+    assert abs(est.r_unmarked - raw) > 0.1  # the unweighted draw is badly off here
+    assert est.ci[0] < est.rate < est.ci[1]
+    d = est.to_dict()
+    assert d["f_marked"] == est.f_marked and "flagged for Andrea" in d["note"]
+    json.dumps(d, allow_nan=False)
+
+
+def test_before_set_a_is_judged_the_rate_is_absent_never_nan() -> None:
+    pop = _population(2, {"F": 50}, {"F": 300}, {"F": 0.2}, {"F": 0})  # nothing judged yet
+    est = tr.old_motion_rate(pop)
+    d = est.to_dict()
+    assert "rate" not in d and "r_unmarked" not in d and d["undefined"] == ["r_unmarked",
+                                                                            "rate"]
+    assert d["f_marked"] == pytest.approx(50 / 350)
+    json.dumps(d, allow_nan=False)  # a run record can always be written
+
+
+def test_a_judgement_key_survives_a_float_perturbation_of_the_core_times() -> None:
+    queue = pytest.importorskip("ui.adjudicate.queue")  # the screen's own key function
+    cores, adj, want = _set_a_sample()
+    # both sides keyed by the screen's construction site; the judgement side's times carry
+    # the float noise a parquet round trip or a recomputation can add
+    old_to_core = dict(zip(cores["core_key"], zip(cores["recording"], cores["start_s"],
+                                                  cores["stop_s"], strict=True), strict=True))
+    cores["core_key"] = [queue.core_key(r, a, b) for r, a, b in old_to_core.values()]
+    adj["core_key"] = [queue.core_key(r, a + 1e-9, b - 1e-9)
+                       for r, a, b in (old_to_core[k] for k in adj["core_key"])]
+    want = {queue.core_key(*old_to_core[k]): v for k, v in want.items()}
+    out, _r = lb.apply_adjudications(cores, adj, rate_sample_keys=_keys(adj))
+    assert dict(zip(out["core_key"], out["judgement"], strict=True)) == want

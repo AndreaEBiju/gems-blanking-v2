@@ -26,6 +26,11 @@ from gems_blanking_v2.types import TrainingMode
 from tests.conftest import FEATURE_SIGNAL, make_feature_table
 
 THREADS = 2
+
+
+def _rate(t: pd.DataFrame) -> tr.OldRateEstimate:
+    """Return the combined old-rate estimate over a test table's own old rows."""
+    return tr.old_motion_rate(t)
 W = ev.W_ADAPT_GRID
 OPT_INS = md.LabelOptIns(allow_model_labels=False, keep_tiers=("1", "2a"))
 
@@ -41,7 +46,7 @@ def run(tmp_path_factory: pytest.TempPathFactory) -> tuple[pd.DataFrame, md.Mode
              enumerate(sorted(set(raw.loc[raw["cohort"] == "old", "recording"])))}
     table = md.prepare_table(raw)
     reg = rg.Registry(GemsStore.initialise(root / "gems"))
-    out = md.run_modes(table, targets=["new:A", "new:B"], record_path=record,
+    out = md.run_modes(table, old_rate=_rate(table), targets=["new:A", "new:B"], record_path=record,
                        num_threads=THREADS, w_adapt_grid=W, rounds=30, adapt_rounds=10,
                        registry=reg, user="tester", old_tiers=tiers, label_opt_ins=OPT_INS)
     return table, out, reg, record
@@ -174,23 +179,29 @@ def test_registration_needs_a_user_and_a_full_calibrated_pass(tmp_path: Path) ->
     kw = {"targets": ["new:A"], "record_path": record, "num_threads": THREADS,
           "registry": reg}
     with pytest.raises(ValueError, match="acting user"):
-        md.run_modes(table, **kw)  # type: ignore[arg-type]
+        md.run_modes(table, old_rate=_rate(table), **kw)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="only a full, calibrated pass"):
-        md.run_modes(table, user="t", train_size=50, **kw)  # type: ignore[arg-type]
+        md.run_modes(table, old_rate=_rate(table),
+                     user="t", train_size=50, **kw)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="only a full, calibrated pass"):
-        md.run_modes(table, user="t", calibration=None, **kw)  # type: ignore[arg-type]
+        md.run_modes(table, old_rate=_rate(table),
+                     user="t", calibration=None, **kw)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="all three modes over the full"):
-        md.run_modes(table, user="t", w_adapt_grid=(1.0, 10.0), label_opt_ins=OPT_INS,
+        md.run_modes(table, old_rate=_rate(table),
+                     user="t", w_adapt_grid=(1.0, 10.0), label_opt_ins=OPT_INS,
                      **kw)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="all three modes over the full"):
-        md.run_modes(table, user="t", modes=(TrainingMode.POOLED,), label_opt_ins=OPT_INS,
+        md.run_modes(table, old_rate=_rate(table),
+                     user="t", modes=(TrainingMode.POOLED,), label_opt_ins=OPT_INS,
                      **kw)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="label opt-ins"):
-        md.run_modes(table, user="t", **kw)  # type: ignore[arg-type]
+        md.run_modes(table, old_rate=_rate(table), user="t", **kw)  # type: ignore[arg-type]
     as_dict: object = {"allow_model_labels": False, "keep_tiers": ["1"]}  # not LabelOptIns
     with pytest.raises(ValueError, match="label opt-ins"):
-        md.run_modes(table, user="t", label_opt_ins=as_dict, **kw)  # type: ignore[arg-type]
-    plain = md.run_modes(table, targets=["new:A"], record_path=record, num_threads=THREADS,
+        md.run_modes(table, old_rate=_rate(table),
+                     user="t", label_opt_ins=as_dict, **kw)  # type: ignore[arg-type]
+    plain = md.run_modes(table, old_rate=_rate(table),
+                         targets=["new:A"], record_path=record, num_threads=THREADS,
                          modes=(TrainingMode.POOLED,), rounds=10)
     assert plain.registered == ()
     assert reg.specs() == []
@@ -223,7 +234,8 @@ def test_label_opt_ins_are_checked_against_the_table(tmp_path: Path) -> None:
     record = ev.write_run_record(tmp_path / "r.json", run_id="r")
     reg = rg.Registry(GemsStore.initialise(tmp_path / "gems"))
     with pytest.raises(ValueError, match="outside keep_tiers"):
-        md.run_modes(t, targets=["new:A"], record_path=record, num_threads=THREADS,
+        md.run_modes(t, old_rate=_rate(t),
+                     targets=["new:A"], record_path=record, num_threads=THREADS,
                      registry=reg, user="t", old_tiers=tiers,
                      label_opt_ins=md.LabelOptIns(allow_model_labels=False, keep_tiers=("1",)))
 
@@ -236,7 +248,7 @@ def test_a_final_model_that_cannot_be_fitted_records_a_refusal(tmp_path: Path) -
     t = md.prepare_table(raw)
     record = ev.write_run_record(tmp_path / "r.json", run_id="r")
     reg = rg.Registry(GemsStore.initialise(tmp_path / "gems"))
-    out = md.run_modes(t, targets=["new:A", "new:B"], record_path=record,
+    out = md.run_modes(t, old_rate=_rate(t), targets=["new:A", "new:B"], record_path=record,
                        num_threads=THREADS, rounds=10, adapt_rounds=5, registry=reg,
                        user="t", label_opt_ins=md.LabelOptIns(False, ()))
     final = {(r.mode, r.target) for r in out.refusals if r.fold == "final"}

@@ -53,9 +53,9 @@ __all__ = [
 
 PROVENANCE_NAME: Final = "provenance.json"
 SET_A_TIER: Final = "set_a"
+"""The corpus-composition tier of set A's judged random old cores."""
 ADJUDICATED_TIER: Final = "adjudicated"
 """The corpus-composition tier of other old cores Andrea judged on the screen."""
-"""The corpus-composition tier of set A's judged random old cores."""
 _PROTOCOL_KEYS: Final[tuple[str, ...]] = tuple(run_protocol())
 
 

@@ -88,6 +88,7 @@ from gems_blanking_v2.model.train import (
     ADAPT_ROUNDS,
     FIXED_PARAMS,
     NUM_BOOST_ROUND,
+    OldRateEstimate,
     OldRowsRefusedError,
     check_feature_version,
     check_leakage,
@@ -719,7 +720,8 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
               registry: Registry | None = None, user: str = "",
               old_tiers: Mapping[str, str] | None = None,
               label_opt_ins: LabelOptIns | None = None,
-              tuner: Tuner | None = None, select_w: bool = True) -> ModeRun:
+              tuner: Tuner | None = None, select_w: bool = True,
+              old_rate: OldRateEstimate | None = None) -> ModeRun:
     """Train and score every requested mode for every target, in one pass.
 
     Requires an existing run record (R9 thresholds written before training). ``table``
@@ -759,7 +761,7 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
     refuse_test_rows(table)
     _check_renames_recorded(table, record_path)
     _check_tuning_recorded(record_path, tuner)
-    prior_correction(table, seed=seed)  # raises before any fit if old rows lack set A
+    prior_correction(table, rate=old_rate)  # raises before any fit if old rows lack set A
     if registry is not None:
         if not user:
             msg = "registering models needs the acting user"
@@ -802,7 +804,7 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
     prior_log: list[dict[str, object]] = []
 
     def weights(rows: I64, base: npt.NDArray[np.float64], where: str) -> npt.NDArray[np.float64]:
-        mult, corr = prior_weights(table.iloc[rows], base=base, seed=seed)
+        mult, corr = prior_weights(table.iloc[rows], rate=old_rate, base=base)
         if corr is not None:
             prior_log.append({"fit": where, **corr.to_dict()})
         return base * mult
@@ -816,7 +818,8 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
             msg = f"{where}: the held-out group {forbidden!r} reached the tuner"
             raise AssertionError(msg)
         p = dict(tuner(x.iloc[rows], y[rows], w_all[rows], groups, scorable=scorable[rows],
-                       meta=table.iloc[rows][list(TUNER_META)], num_threads=num_threads))
+                       meta=table.iloc[rows][list(TUNER_META)], old_rate=old_rate,
+                       num_threads=num_threads))
         tuned.append({**where, "params": p})
         return p
 
@@ -916,13 +919,15 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
             except ModeRefusedError as exc:
                 refusals.append(Refusal(str(exc.mode), target, exc.reason))
                 b_folds = []
+            n_ok = 0
             for f in b_folds:
                 try:
                     parts.extend(fold_b(target, f, pooled, pooled_rows, params_t))
+                    n_ok += 1
                 except OldRowsRefusedError as exc:
                     refusals.append(Refusal(str(TrainingMode.ADAPTED), target, str(exc),
                                             f.held_out[0]))
-            if b_folds:
+            if n_ok:
                 corpus.append(_corpus_row(table, TrainingMode.ADAPTED, target,
                                           np.concatenate([pooled_rows, b_folds[0].adapt]),
                                           n_folds=len(b_folds)))
@@ -932,6 +937,7 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
             except ModeRefusedError as exc:
                 refusals.append(Refusal(str(exc.mode), target, exc.reason))
                 c_folds = []
+            n_ok = 0
             for f in c_folds:
                 try:
                     part = fold_c(target, f)
@@ -941,7 +947,8 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
                     continue
                 if part is not None:
                     parts.append(part)
-            if c_folds:
+                    n_ok += 1
+            if n_ok:
                 corpus.append(_corpus_row(table, TrainingMode.PER_ANIMAL, target,
                                           c_folds[0].train, n_folds=len(c_folds)))
     preds = pd.concat(parts, ignore_index=True) if parts else _empty_predictions()
@@ -955,7 +962,7 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
             priors=priors, modes=modes, targets=targets, w_adapt_grid=w_adapt_grid,
             adapt_rounds=adapt_rounds, record_path=record_path, registry=registry,
             user=user, old_tiers=old_tiers, label_opt_ins=label_opt_ins,
-            refusals=refusals, seed=seed)
+            refusals=refusals, old_rate=old_rate)
     return ModeRun(predictions=preds, refusals=tuple(refusals), corpus=pd.DataFrame(corpus),
                    registered=tuple(registered), w_selection=pd.DataFrame(w_sel),
                    tuned=tuple(tuned), priors=tuple(prior_log))
@@ -998,7 +1005,8 @@ def _register_finals(table: pd.DataFrame, preds: pd.DataFrame, *,  # noqa: PLR09
                      record_path: Path, registry: Registry, user: str,
                      old_tiers: Mapping[str, str] | None,
                      label_opt_ins: LabelOptIns | None,
-                     refusals: list[Refusal], seed: int) -> list[str]:
+                     refusals: list[Refusal], old_rate: OldRateEstimate | None
+                     ) -> list[str]:
     """Train, calibrate and register the final model of each evaluated mode."""
     run_id = str(json.loads(Path(record_path).read_text(encoding="utf-8"))["run_id"])
     keys = table["animal_key"].to_numpy()
@@ -1036,7 +1044,7 @@ def _register_finals(table: pd.DataFrame, preds: pd.DataFrame, *,  # noqa: PLR09
                                     "n_predictions": len(held)})
         if label_opt_ins is not None:
             prov["label_opt_ins"] = label_opt_ins.to_dict()
-        corr = prior_correction(corpus_rows, base=base, seed=seed)
+        corr = prior_correction(corpus_rows, rate=old_rate, base=base)
         if corr is not None:
             prov["prior_correction"] = corr.to_dict()
         prov["metric_basis"] = dict(METRIC_BASIS)
@@ -1105,7 +1113,8 @@ TIER_STEPS: Final[Mapping[str, tuple[str, ...]]] = {
 
 def tier_check(labelled: Callable[[tuple[str, ...]], pd.DataFrame], *,
                targets: Sequence[str], record_path: Path, num_threads: int,
-               renames: Path | None = None, seed: int = 0
+               renames: Path | None = None, seed: int = 0,
+               old_rate_for: Callable[[tuple[str, ...]], OldRateEstimate | None] | None = None
                ) -> tuple[list[TierVerdict], str, dict[str, pd.DataFrame]]:
     """Rulings (i)/(j): the nested tier check, wired for when old-cohort rows return.
 
@@ -1116,8 +1125,10 @@ def tier_check(labelled: Callable[[tuple[str, ...]], pd.DataFrame], *,
     unless audit-span F1 falls by >= ``tier_drop_f1`` (CI excluding 0) against the
     previous kept step. Every step trains old-cohort rows, so - by ruling 2026-10-08 (b)
     item 1(b) - each needs set A's judged old negatives; without them :func:`run_modes`
-    raises :class:`~gems_blanking_v2.model.train.OldRowsRefusedError`. Returns the
-    verdicts, the largest kept step and the per-step mode-A predictions.
+    raises :class:`~gems_blanking_v2.model.train.OldRowsRefusedError`. Each step's prior
+    correction targets ``old_rate_for(keep_tiers)`` - the combined rate over that step's
+    own tier population. Returns the verdicts, the largest kept step and the per-step
+    mode-A predictions.
     """
     bad = [t for t in targets if not t.startswith("new:")]
     if bad:
@@ -1128,7 +1139,8 @@ def tier_check(labelled: Callable[[tuple[str, ...]], pd.DataFrame], *,
     for name in TIER_CHAIN:
         t = prepare_table(labelled(TIER_STEPS[name]), renames=renames)
         run = run_modes(t, targets=targets, record_path=record_path, num_threads=num_threads,
-                        modes=(TrainingMode.POOLED,), calibration=None, seed=seed)
+                        modes=(TrainingMode.POOLED,), calibration=None, seed=seed,
+                        old_rate=None if old_rate_for is None else old_rate_for(TIER_STEPS[name]))
         ids = np.array([event_id(r, a, b) for r, a, b in
                         zip(t["recording"].astype(str), t["start_s"], t["stop_s"], strict=True)])
         p = run.predictions

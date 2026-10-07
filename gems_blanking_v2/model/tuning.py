@@ -36,7 +36,13 @@ import pandas as pd
 
 from gems_blanking_v2.model.evaluate import DECISION_P, scores
 from gems_blanking_v2.model.params import FIXED_PARAMS, NUM_BOOST_ROUND
-from gems_blanking_v2.model.train import fit, predict_raw, prior_weights
+from gems_blanking_v2.model.train import (
+    OldRateEstimate,
+    OldRowsRefusedError,
+    fit,
+    predict_raw,
+    prior_weights,
+)
 
 __all__ = [
     "SEARCH_SPACE",
@@ -65,7 +71,8 @@ class Tuner(Protocol):
 
     def __call__(self, x: pd.DataFrame, y: npt.NDArray[np.int8], w: npt.NDArray[np.float64],
                  groups: npt.NDArray[np.str_], *, scorable: npt.NDArray[np.bool_],
-                 meta: pd.DataFrame, num_threads: int) -> Mapping[str, Any]:
+                 meta: pd.DataFrame, old_rate: OldRateEstimate | None,
+                 num_threads: int) -> Mapping[str, Any]:
         """Return the full LightGBM parameter dict to train this fold with.
 
         ``w`` are the base weights; ``scorable`` marks the rows the outer protocol scores;
@@ -87,7 +94,8 @@ def tuning_record(tuner: Tuner | None) -> dict[str, Any]:
 def inner_cv_f1(params: Mapping[str, Any], x: pd.DataFrame, y: npt.ArrayLike,
                 w: npt.ArrayLike, groups: npt.ArrayLike, *, rounds: int, num_threads: int,
                 scorable: npt.ArrayLike | None = None,
-                meta: pd.DataFrame | None = None) -> float:
+                meta: pd.DataFrame | None = None, old_rate: OldRateEstimate | None = None,
+                skipped: list[str] | None = None) -> float:
     """Pooled F1 (at ``DECISION_P``) of leave-one-group-out predictions on these rows only.
 
     Each group is predicted by a model trained on the other groups; a group whose
@@ -96,7 +104,9 @@ def inner_cv_f1(params: Mapping[str, Any], x: pd.DataFrame, y: npt.ArrayLike,
     rest train only, as in the outer folds. With ``meta`` each inner training set's
     weights are ``w`` times the old-cohort prior correction recomputed on that set
     (:func:`~gems_blanking_v2.model.train.prior_weights`), as every outer fit is. ``nan``
-    when fewer than two groups can be scored or F1 is undefined.
+    when fewer than two groups can be scored or F1 is undefined. An inner training set
+    that cannot carry its old rows (too few of set A's negatives once a group is held out)
+    is skipped, never fatal to the outer fold, and its group appended to ``skipped``.
     """
     yy = np.asarray(y).astype(np.int8)
     ww = np.asarray(w, dtype=np.float64)
@@ -111,7 +121,12 @@ def inner_cv_f1(params: Mapping[str, Any], x: pd.DataFrame, y: npt.ArrayLike,
             continue
         wt = ww[~held]
         if meta is not None:
-            wt = wt * prior_weights(meta.loc[~held], base=wt)[0]
+            try:
+                wt = wt * prior_weights(meta.loc[~held], rate=old_rate, base=wt)[0]
+            except OldRowsRefusedError:
+                if skipped is not None:
+                    skipped.append(g)
+                continue
         booster = fit(x.loc[~held], yy[~held], wt, num_threads=num_threads,
                       rounds=rounds, params=params)
         ys.append(yy[ev])
@@ -143,7 +158,8 @@ class OptunaInnerCV:
 
     def __call__(self, x: pd.DataFrame, y: npt.NDArray[np.int8], w: npt.NDArray[np.float64],
                  groups: npt.NDArray[np.str_], *, scorable: npt.NDArray[np.bool_],
-                 meta: pd.DataFrame, num_threads: int) -> dict[str, Any]:
+                 meta: pd.DataFrame, old_rate: OldRateEstimate | None,
+                 num_threads: int) -> dict[str, Any]:
         """Search, then return ``FIXED_PARAMS`` updated with the best trial's values."""
         try:
             optuna = importlib.import_module("optuna")
@@ -161,7 +177,8 @@ class OptunaInnerCV:
                 else:
                     params[name] = trial.suggest_float(name, lo, hi, log=log)
             v = inner_cv_f1(params, x, y, w, groups, rounds=self.rounds,
-                            num_threads=num_threads, scorable=scorable, meta=meta)
+                            num_threads=num_threads, scorable=scorable, meta=meta,
+                            old_rate=old_rate)
             return v if np.isfinite(v) else 0.0
 
         study = optuna.create_study(direction="maximize",
