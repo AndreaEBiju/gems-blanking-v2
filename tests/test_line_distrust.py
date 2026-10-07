@@ -85,7 +85,7 @@ def _rows(ps: dict[int, float], sig: str = "L_T") -> tuple[ld.MinuteTest, ...]:
 
 def _decide(rows: tuple[ld.MinuteTest, ...], *, recording: str = "rec1", n: int = N60,
             t0: float = 0.0, table: ld.AnimalPTable | None = None) -> ld.LineDistrustRecord:
-    table = table or ld.AnimalPTable.from_tests("new:A", {recording: rows})
+    table = table or ld.AnimalPTable.from_tests("new:A", [(recording, t0, rows)])
     return ld.decide(rows, recording=recording, fs=FS, epoch_start_s=t0, n_samples=n,
                      family=table)
 
@@ -182,7 +182,7 @@ def test_q4_intervals_across_a_gap_do_not_count_and_the_rate_pools_stretches() -
     assert (st_.n_spikes, st_.m_intervals, st_.k_locked) == (12, 10, 0)
     joined = ld.lock_test([np.concatenate([a, b])])
     assert (joined.m_intervals, joined.k_locked) == (11, 1)  # what the gap rule prevents
-    lam = 12 / ((a[-1] - a[0]) + (b[-1] - b[0]))
+    lam = 10 / ((a[-1] - a[0]) + (b[-1] - b[0]))  # the interval MLE: m / sum of spans
     p0 = sum(math.exp(-lam * (per - 0.001)) - math.exp(-lam * (per + 0.001))
              for per in (p60, 1.0 / 30.0))
     assert st_.p0 == pytest.approx(p0, rel=1e-12)
@@ -248,8 +248,8 @@ def test_the_animal_family_decides_the_correction() -> None:
     """A p of 0.005 survives Holm in a family of one, but not in the animal's eleven."""
     mine = _rows({0: 0.005})
     assert _distrusted(_decide(mine, recording="r1"), "L_T") == {0}
-    others = {f"r{i}": _rows({0: 0.5}) for i in range(2, 12)}
-    table = ld.AnimalPTable.from_tests("new:A", {"r1": mine, **others})
+    others = [(f"r{i}", 0.0, _rows({0: 0.5})) for i in range(2, 12)]
+    table = ld.AnimalPTable.from_tests("new:A", [("r1", 0.0, mine), *others])
     rec = _decide(mine, recording="r1", table=table)
     assert _distrusted(rec, "L_T") == set()
     assert rec.family == {"kind": "animal_x_cohort", "animal_key": "new:A", "size": 11,
@@ -262,29 +262,30 @@ def test_decide_animal_runs_every_recording_first() -> None:
     passes = {rid: ld.pass1({"L_T": x}, FS, epoch_start_s=0.0,
                             motion={"L_T": _motion("L_T", x.size)})
               for rid, x in (("r1", r1), ("r2", r2))}
-    table, recs = ld.decide_animal("new:A", passes)
-    assert set(recs) == {"r1", "r2"} and len(table.pvalues) == 6
+    table, by = ld.decide_animal("new:A", list(passes.items()))
+    recs = {r: by[(r, 0.0)] for r in ("r1", "r2")}
+    assert set(by) == {("r1", 0.0), ("r2", 0.0)} and len(table.pvalues) == 6
     assert _distrusted(recs["r1"], "L_T") == {1} and _distrusted(recs["r2"], "L_T") == set()
     assert recs["r1"].family == recs["r2"].family and recs["r1"].family["size"] == 6
     assert ld.AnimalPTable.from_json(table.to_json()) == table
     t1 = passes["r1"].tests
-    missing = ld.AnimalPTable.from_tests("new:A", {"r2": passes["r2"].tests})
-    altered = ld.AnimalPTable("new:A", {**table.pvalues, ("r1", "L_T", 0): 0.123})
+    missing = ld.AnimalPTable.from_tests("new:A", [("r2", 0.0, passes["r2"].tests)])
+    altered = ld.AnimalPTable("new:A", {**table.pvalues, ("r1", 0.0, "L_T", 0): 0.123})
     for bad in (missing, altered):
         with pytest.raises(ValueError, match="did not test the same thing"):
             _decide(t1, recording="r1", n=r1.size, table=bad)
-    cleaned = ld.AnimalPTable.from_tests("new:A", {"r1": t1}, cleaner="some_cleaner")
+    cleaned = ld.AnimalPTable.from_tests("new:A", [("r1", 0.0, t1)], cleaner="some_cleaner")
     with pytest.raises(ValueError, match="cleaner"):
         _decide(t1, recording="r1", n=r1.size, table=cleaned)
 
 
 def test_the_two_pass_match_tolerates_float_noise_only() -> None:
     mine = _rows({0: 0.001, 1: 0.5})
-    table = ld.AnimalPTable.from_tests("new:A", {"r1": mine, "r2": _rows({0: 0.5})})
+    table = ld.AnimalPTable.from_tests("new:A", [("r1", 0.0, mine), ("r2", 0.0, _rows({0: 0.5}))])
 
     def _with(scale: float) -> ld.AnimalPTable:
         pv = dict(table.pvalues)
-        pv[("r1", "L_T", 0)] *= scale
+        pv[("r1", 0.0, "L_T", 0)] *= scale
         return ld.AnimalPTable("new:A", pv)
 
     n = math.ceil(120.0 * FS)
@@ -296,12 +297,12 @@ def test_the_two_pass_match_tolerates_float_noise_only() -> None:
 def test_decide_refuses_impossible_inputs() -> None:
     with pytest.raises(ValueError, match="cannot carry"):
         ld.decide(_rows({0: 0.5}), recording="rec1", fs=2000.0, epoch_start_s=0.0,
-                  n_samples=120000, family=ld.AnimalPTable("new:A", {("rec1", "L_T", 0): 0.5}))
+                  n_samples=120000, family=ld.AnimalPTable("new:A", {("rec1", 0.0, "L_T", 0): 0.5}))
     with pytest.raises(ValueError, match="must hold samples"):
         _decide((), n=0)
     with pytest.raises(ValueError, match="appears twice"):
         _decide(_rows({0: 0.5}) * 2, table=ld.AnimalPTable.from_tests(
-            "new:A", {"rec1": _rows({0: 0.5})}))
+            "new:A", [("rec1", 0.0, _rows({0: 0.5}))]))
     with pytest.raises(ValueError, match="not inside the epoch"):
         _decide(_rows({0: 0.5, 1: 0.5}))
     with pytest.raises(ValueError, match="not inside the epoch"):
@@ -335,12 +336,12 @@ def test_a_cleaner_re_runs_the_test_and_minutes_regain_trust() -> None:
     cleaner = _Replace("hum_bug_v5_fixed", clean)
     p = ld.pass1({"L_T": raw}, FS, epoch_start_s=0.0, motion={"L_T": _motion("L_T", raw.size)},
                  cleaner=cleaner)
-    _table, recs = ld.decide_animal("new:A", {"r": p})
-    assert _distrusted(recs["r"], "L_T") == set() and cleaner.saw_copy
-    assert recs["r"].provenance["cleaner"] == "hum_bug_v5_fixed"
+    _table, recs = ld.decide_animal("new:A", [("r", p)])
+    assert _distrusted(recs[("r", 0.0)], "L_T") == set() and cleaner.saw_copy
+    assert recs[("r", 0.0)].provenance["cleaner"] == "hum_bug_v5_fixed"
     with pytest.raises(ValueError, match="different cleaners"):
-        ld.decide_animal("new:A", {"r": p, "s": ld.pass1(
-            {"L_T": raw}, FS, epoch_start_s=0.0, motion={"L_T": _motion("L_T", raw.size)})})
+        ld.decide_animal("new:A", [("r", p), ("s", ld.pass1(
+            {"L_T": raw}, FS, epoch_start_s=0.0, motion={"L_T": _motion("L_T", raw.size)}))])
 
 
 # ---------------------------------------------------------------------------
@@ -472,7 +473,9 @@ def test_provenance_records_the_rules_and_round_trips(tmp_path: Path) -> None:
                                         ["provenance_json"][0]))
     sld = prov.spike_line_distrust
     assert sld["rule"] == "RULING 2026-10-08 (d) item 2; (e) Q1-Q5" and sld["alpha"] == 0.01
-    assert sld["test_version"] == "mains_lock_binom_v2" == ld.TEST_VERSION
+    assert sld["test_version"] == "mains_lock_binom_v3" == ld.TEST_VERSION
+    assert "interval MLE" in sld["parameters"]["chance"]
+    assert "n / (n - 1)" in sld["parameters"]["chance"]
     assert sld["family"]["kind"] == "animal_x_cohort" and sld["family"]["size"] == 2
     par = sld["parameters"]
     assert par["signal"] == "T" and par["min_valid_s"] == 30.0
@@ -502,7 +505,7 @@ def test_the_record_round_trips_exactly(ps: list[float | None], cleaner: str | N
         else:
             rows.append(ld.MinuteTest("R_T", m, a, b, "tested", 200, 198, 7, 0.04, p, 59.5))
     rid = "r" + chr(0x2028) + "x"
-    table = ld.AnimalPTable.from_tests("old:J", {rid: rows}, cleaner=cleaner)
+    table = ld.AnimalPTable.from_tests("old:J", [(rid, t0, rows)], cleaner=cleaner)
     rec = ld.decide(tuple(rows), recording=rid, fs=FS, epoch_start_s=t0,
                     n_samples=math.ceil(60.0 * len(ps) * FS) + 1, family=table, cleaner=cleaner)
     text = rec.to_json()
@@ -557,7 +560,7 @@ def test_the_lock_statistic_matches_a_hand_made_train_exactly() -> None:
     st_ = ld.lock_test([t])
     n, m, k = t.size, t.size - 1, len(locked)
     assert (st_.n_spikes, st_.m_intervals, st_.k_locked) == (n, m, k)
-    lam = n / (t[-1] - t[0])
+    lam = m / (t[-1] - t[0])  # the interval MLE; the inventory's n / span is n / m larger
     p0 = sum(math.exp(-lam * (per - 0.001)) - math.exp(-lam * (per + 0.001)) for per in (p60, p30))
     assert st_.p0 == pytest.approx(p0, rel=1e-12)
     p = sum(math.comb(m, j) * p0 ** j * (1 - p0) ** (m - j) for j in range(k, m + 1))
@@ -622,3 +625,40 @@ def test_a_line_noise_reason_is_unknown_to_the_motion_accounting() -> None:
     with pytest.raises(ValueError, match="unknown mask reason"):
         ar.masked_motion_seconds(
             [mk.MaskSpan("spikes", "L_T", 0.0, 60.0, "line_noise_cuff_minute")], 600.0)
+
+
+def test_the_interval_mle_is_calibrated_when_motion_splits_the_minute() -> None:
+    """Seeded Poisson at 100 Hz cut into 0.25 s stretches: P(p < 0.01) stays near 0.01.
+
+    The pooled sum n_s / sum span_s it replaced gave 0.040 here (review of a374ed3).
+    """
+    hits = 0
+    n = 1000
+    for s in range(n):
+        t = make_spike_times(60.0, rate_hz=100.0, seed=1000 + s)
+        stretches = [t[(t >= a) & (t < a + 0.25)] for a in np.arange(0.0, 60.0, 0.25)]
+        hits += int(ld.lock_test(stretches).p < 0.01)
+    assert hits / n <= 0.015
+
+
+def test_a_recordings_two_epochs_keep_their_boundary_minutes_apart() -> None:
+    """Stim [0, 150) and recovery [150, 360) both test minute 2 (30 s each): two keys."""
+    fs = 25000.0  # 150 s is a whole number of samples, so each part is exactly 30 s
+    x = make_mains_spike_t(fs, 360.0, locked_spans_s=((150.5, 179.5),), seed=17).signal
+    k = int(150.0 * fs)
+    passes = []
+    for t0, seg in ((0.0, x[:k]), (150.0, x[k:])):
+        motion = {"L_T": all_valid_spike_mask("L_T", fs, seg.size, t0_s=t0)}
+        passes.append(("r", ld.pass1({"L_T": seg}, fs, epoch_start_s=t0, motion=motion)))
+    table, recs = ld.decide_animal("new:A", passes)
+    assert {("r", 0.0, "L_T", 2), ("r", 150.0, "L_T", 2)} <= set(table.pvalues)
+    assert set(recs) == {("r", 0.0), ("r", 150.0)}
+    assert 2 not in _distrusted(recs[("r", 0.0)], "L_T")
+    assert 2 in _distrusted(recs[("r", 150.0)], "L_T")
+    with pytest.raises(ValueError, match="given twice"):
+        ld.decide_animal("new:A", [passes[1], passes[1]])
+    untested = ld.Pass1(_rows({0: math.nan}), FS, 0.0, N60)  # no p-value to collide on
+    with pytest.raises(ValueError, match=r"\(recording, epoch\) is given twice"):
+        ld.decide_animal("new:A", [("u", untested), ("u", untested)])
+    with pytest.raises(ValueError, match="given twice"):
+        ld.AnimalPTable.from_tests("new:A", [("r", 150.0, passes[1][1].tests)] * 2)

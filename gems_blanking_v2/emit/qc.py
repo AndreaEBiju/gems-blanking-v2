@@ -282,7 +282,9 @@ def spike_time_lost(masks: Mapping[MaskKey, ConsumerMask], line_distrust: LineDi
                     ) -> dict[str, dict[str, float | int]]:
     """Spike-consumer time lost per spike signal: its mask's blank beside the line distrust.
 
-    Counted in the mask's own 10 ms frames, so the three times add up on one grid:
+    Counted in the mask's own 10 ms frames, so the three times add up on one grid. A
+    distrusted minute whose edge falls inside a frame counts that whole frame, so the
+    distrust times may over-count by at most one frame (10 ms) per span edge:
     ``mask_blank_s`` (frames the spike mask blanks - motion and ruled cuff distrust),
     ``line_distrust_s`` (frames overlapping a distrusted minute), ``line_distrust_only_s``
     (distrusted and not already blanked) and ``total_lost_s`` (either), each also as a

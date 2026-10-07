@@ -21,14 +21,19 @@ what the spike consumer actually sees. Per minute:
    stretches pooled.
 3. Spikes are negative local minima below ``-4.5 sigma``, with a 1 ms refractory period
    (greedy, earliest kept), within each stretch. A spike in a motion-blanked span is
-   never detected, because those samples are not read (Q5).
+   never detected, because those samples are not read (Q5). The samples in the 7.5 ms
+   taper beside a blank are read at full amplitude, where the consumer sees them
+   attenuated.
 4. Fewer than :data:`MIN_SPIKES` (10) spikes in the minute: ``untested_few_spikes``.
 5. **Intervals are within a stretch only:** an interval across a gap (missing samples or
    a motion blank) is not an interval. ``m = sum_s (n_s - 1)`` over stretches with at
    least two spikes; ``k`` of those lie within +/-1 ms of 1/60 s or 1/30 s.
-6. **Chance rate, exactly:** ``lam = sum_s n_s / sum_s (t_last,s - t_first,s)`` over the
-   stretches holding at least two spikes - the measurement's ``n / (t_last - t_first)``
-   pooled over stretches, identical to it for a minute with no gap and no blank. Then
+6. **Chance rate:** the interval MLE ``lam = m / sum_s (t_last,s - t_first,s)`` over the
+   stretches holding at least two spikes. It differs from the inventory measurement's
+   ``n / (t_last - t_first)`` by ``n / (n - 1)`` on an unsplit minute; the measurement's
+   form, pooled as ``sum n_s / sum span_s``, is biased high by ``(m + S) / m`` for ``S``
+   stretches and grows anti-conservative as motion splits a minute (review of a374ed3:
+   null P(p < 0.01) = 0.040 at 100 Hz with 0.25 s stretches). Then
    ``p0 = sum_P [exp(-lam (P - 1 ms)) - exp(-lam (P + 1 ms))]`` over both periods and
    ``p = P(X >= k | m, p0)``, one-sided binomial. With no interval at all the minute is
    ``untested_few_spikes``.
@@ -49,7 +54,9 @@ already masked (interior NaN runs all on the 10 ms grid) is refused.
 ``animal_key`` = ``"cohort:animal"``, built from pass 1 over every recording of that
 animal and cohort; pass 2 decides each recording against the whole table
 (:func:`decide_animal`). It is a required argument with no default, and the table must
-hold exactly the recording's own p-values.
+hold exactly the recording's own p-values. A p-value is keyed by recording AND epoch
+(its start time) - a recording's stim and recovery epochs share the boundary minute -
+and a key given twice raises (invariant 27).
 
 **Deliberate differences from the measurement:** minute edges round
 (``extent.grid.seconds_to_sample``) where it floored (at most one sample); a raw flat
@@ -123,8 +130,9 @@ F64 = npt.NDArray[np.float64]
 Bool = npt.NDArray[np.bool_]
 
 RULE: Final = "RULING 2026-10-08 (d) item 2; (e) Q1-Q5"
-TEST_VERSION: Final = "mains_lock_binom_v2"
-"""v2 = (e): animal x cohort family, stretches, motion exclusion, boundary minute."""
+TEST_VERSION: Final = "mains_lock_binom_v3"
+"""v2 = (e): animal x cohort family, stretches, motion exclusion, boundary minute;
+v3 = the chance rate is the interval MLE ``m / sum span``."""
 ALPHA: Final = 0.01
 MIN_SPIKES: Final = 10
 MINUTE_S: Final = 60.0
@@ -236,7 +244,7 @@ def lock_test(stretches: Sequence[npt.ArrayLike]) -> LockStat:
     """One-sided binomial test of mains-locked intervals, within stretches (docstring 4-6)."""
     ts = [np.sort(np.asarray(t, dtype=np.float64)) for t in stretches]
     n = int(sum(t.size for t in ts))
-    m = k = n_rate = 0
+    m = k = 0
     span = 0.0
     for t in ts:
         if t.size < 2:  # noqa: PLR2004
@@ -247,11 +255,10 @@ def lock_test(stretches: Sequence[npt.ArrayLike]) -> LockStat:
             near |= np.abs(iei - per) <= LOCK_TOLERANCE_S
         m += int(iei.size)
         k += int(near.sum())
-        n_rate += int(t.size)
         span += float(t[-1] - t[0])
     if n < MIN_SPIKES or m == 0 or not span > 0:
         return LockStat(n, m, k, math.nan, math.nan)
-    lam = n_rate / span
+    lam = m / span  # the interval MLE (docstring 6)
     p0 = sum(math.exp(-lam * (per - LOCK_TOLERANCE_S)) - math.exp(-lam * (per + LOCK_TOLERANCE_S))
              for per in LOCK_PERIODS_S)
     return LockStat(n, m, k, float(p0), float(binom.sf(k - 1, m, p0)))
@@ -448,8 +455,9 @@ def pass1(raw_t: Mapping[str, npt.ArrayLike], fs: float, *, epoch_start_s: float
 # the family: animal x cohort
 # ---------------------------------------------------------------------------
 
-PKey = tuple[str, str, int]
-"""``(recording, signal, minute)``."""
+PKey = tuple[str, float, str, int]
+"""``(recording, epoch_start_s, signal, minute)``: the epoch keeps a recording's stim
+and recovery boundary minutes apart."""
 
 
 def _canonical(doc: object) -> str:
@@ -486,21 +494,30 @@ class AnimalPTable:
             raise ValueError(msg)
 
     @classmethod
-    def from_tests(cls, animal_key: str, tests: Mapping[str, Sequence[MinuteTest]], *,
+    def from_tests(cls, animal_key: str,
+                   tests: Iterable[tuple[str, float, Sequence[MinuteTest]]], *,
                    cleaner: str | None = None) -> AnimalPTable:
-        """Build the table from pass 1 (``{recording: tests}``), tested rows only."""
+        """Build the table from pass 1 (``(recording, epoch_start_s, tests)``), tested rows.
+
+        A key given twice raises: it would overwrite another epoch's p-value (invariant 27).
+        """
         pv: dict[PKey, float] = {}
-        for rid, rows in tests.items():
+        for rid, e0, rows in tests:
             for r in rows:
-                if r.status == "tested":
-                    pv[(rid, r.signal, r.minute)] = r.p
+                if r.status != "tested":
+                    continue
+                key = (rid, float(e0), r.signal, r.minute)
+                if key in pv:
+                    msg = f"{animal_key}: p-value key {key} given twice"
+                    raise ValueError(msg)
+                pv[key] = r.p
         return cls(animal_key, pv, TEST_VERSION, cleaner)
 
     def to_record(self) -> dict[str, Any]:
         """JSON-ready (rows sorted; ``cleaner`` absent when raw)."""
         rec: dict[str, Any] = {
             "animal_key": self.animal_key, "test_version": self.test_version,
-            "rows": [[r, s, m, p] for (r, s, m), p in sorted(self.pvalues.items())]}
+            "rows": [[r, e, s, m, p] for (r, e, s, m), p in sorted(self.pvalues.items())]}
         if self.cleaner is not None:
             rec["cleaner"] = self.cleaner
         return rec
@@ -517,7 +534,7 @@ class AnimalPTable:
             if doc.get(key) is None:
                 msg = f"animal p-value table: required field {key!r} is absent"
                 raise ValueError(msg)
-        pv = {(str(r), str(s), int(m)): float(p) for r, s, m, p in doc["rows"]}
+        pv = {(str(r), float(e), str(s), int(m)): float(p) for r, e, s, m, p in doc["rows"]}
         if len(pv) != len(doc["rows"]):
             msg = "animal p-value table: duplicate (recording, signal, minute) rows"
             raise ValueError(msg)
@@ -561,7 +578,9 @@ def lock_test_parameters() -> dict[str, Any]:
             "lock_periods_s": list(LOCK_PERIODS_S), "lock_tolerance_s": LOCK_TOLERANCE_S,
             "intervals": "within a stretch only; none across a gap or a motion blank",
             "motion": "spikes in the spike consumer's motion-blanked spans are not read",
-            "chance": "poisson, lam = sum n_s / sum (t_last_s - t_first_s), stretches >= 2",
+            "chance": ("poisson, interval MLE lam = m / sum (t_last_s - t_first_s) over "
+                       "stretches with >= 2 spikes; differs from the inventory measurement's "
+                       "n / (t_last - t_first) by n / (n - 1) on an unsplit minute"),
             "test": "one-sided binomial, P(X >= k | m, p0)", "correction": "holm",
             "family": "animal x cohort, all recordings first",
             "min_spikes": MIN_SPIKES, "minute_s": MINUTE_S, "min_valid_s": MIN_VALID_S,
@@ -764,8 +783,9 @@ def decide(tests: Sequence[MinuteTest], *, recording: str, fs: float, epoch_star
         msg = (f"the animal table was made under {family.test_version} / cleaner "
                f"{family.cleaner!r}; this pass is {TEST_VERSION} / {cleaner!r}")
         raise ValueError(msg)
-    tested = {(recording, t.signal, t.minute): t.p for t in tests if t.status == "tested"}
-    mine = {k: v for k, v in family.pvalues.items() if k[0] == recording}
+    e0 = float(epoch_start_s)
+    tested = {(recording, e0, t.signal, t.minute): t.p for t in tests if t.status == "tested"}
+    mine = {k: v for k, v in family.pvalues.items() if k[0] == recording and k[1] == e0}
     differ = sorted(k for k in set(mine) & set(tested)
                     if not math.isclose(mine[k], tested[k], rel_tol=P_MATCH_RTOL,
                                         abs_tol=0.0))[:3]
@@ -783,30 +803,40 @@ def decide(tests: Sequence[MinuteTest], *, recording: str, fs: float, epoch_star
     fam = {"kind": "animal_x_cohort", "animal_key": family.animal_key, "size": len(keys),
            "sha256": family.sha256}
     rows = tuple(MinuteResult(t, t.status == "tested"
-                              and (recording, t.signal, t.minute) in rejected) for t in tests)
+                              and (recording, e0, t.signal, t.minute) in rejected)
+                 for t in tests)
     return LineDistrustRecord(recording, float(fs), float(epoch_start_s), int(n_samples), fam,
                               rows, cleaner)
 
 
-def decide_animal(animal_key: str, passes: Mapping[str, Pass1]
-                  ) -> tuple[AnimalPTable, dict[str, LineDistrustRecord]]:
+def decide_animal(animal_key: str, passes: Iterable[tuple[str, Pass1]]
+                  ) -> tuple[AnimalPTable, dict[tuple[str, float], LineDistrustRecord]]:
     """Decide one animal x cohort - the production path: every pass 1 first, then Holm.
 
-    ``passes`` maps each recording of the animal (and cohort) to its :func:`pass1`. Pass 1
+    ``passes`` lists ``(recording, pass1(...))`` for every epoch of every recording of the
+    animal (and cohort); records come back keyed ``(recording, epoch_start_s)``. Pass 1
     keeps no samples, so recordings can be loaded one at a time. All passes must share
-    one cleaner (or none).
+    one cleaner (or none); a ``(recording, epoch)`` given twice raises.
     """
-    cleaners = {p.cleaner for p in passes.values()}
+    passes = list(passes)
+    keys = [(r, p.epoch_start_s) for r, p in passes]
+    if len(set(keys)) != len(keys):
+        msg = f"{animal_key}: a (recording, epoch) is given twice: {sorted(keys)}"
+        raise ValueError(msg)
+    cleaners = {p.cleaner for _r, p in passes}
     if len(cleaners) > 1:
         msg = (f"{animal_key}: recordings tested under different cleaners "
                f"{sorted(map(str, cleaners))}")
         raise ValueError(msg)
     cleaner = cleaners.pop() if cleaners else None
-    table = AnimalPTable.from_tests(animal_key, {r: p.tests for r, p in passes.items()},
+    table = AnimalPTable.from_tests(animal_key,
+                                    [(r, p.epoch_start_s, p.tests) for r, p in passes],
                                     cleaner=cleaner)
-    return table, {r: decide(p.tests, recording=r, fs=p.fs, epoch_start_s=p.epoch_start_s,
-                             n_samples=p.n_samples, family=table, cleaner=cleaner)
-                   for r, p in passes.items()}
+    return table, {(r, p.epoch_start_s): decide(p.tests, recording=r, fs=p.fs,
+                                                epoch_start_s=p.epoch_start_s,
+                                                n_samples=p.n_samples, family=table,
+                                                cleaner=cleaner)
+                   for r, p in passes}
 
 
 def spike_input(x: npt.ArrayLike, fs: float, motion: ConsumerMask,

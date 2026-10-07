@@ -1954,7 +1954,8 @@ def make_line_distrust(raw_t: dict[str, F64], fs: float, *, recording: str,
         motion = {s: all_valid_spike_mask(s, fs, int(np.asarray(x).size), t0_s=epoch_start_s)
                   for s, x in raw_t.items()}
     p = line_distrust.pass1(raw_t, fs, epoch_start_s=epoch_start_s, motion=motion)
-    return line_distrust.decide_animal(animal_key, {recording: p})[1][recording]
+    return line_distrust.decide_animal(animal_key, [(recording, p)])[1][(recording,
+                                                                       p.epoch_start_s)]
 
 
 def make_spike_times(dur_s: float, *, rate_hz: float, locked_keep: float = 0.0,
