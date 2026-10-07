@@ -1,0 +1,136 @@
+"""Task 14: correct before subtract before reject; clipping bypasses the classifier."""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+from gems_blanking_v2.extent import routing as rt
+from gems_blanking_v2.extent.tolerance import ToleranceTable
+
+from tests.conftest import inject_artifact
+
+FS = 8000.0
+DUR_S = 60.0
+TOL = ToleranceTable({"spikes": 3.0, "velocity": 3.0, "mmc": 3.0, "slow_wave": 3.0,
+                      "breathing": 3.0}, source="synthetic test table")
+
+
+def _host(seed: int = 0) -> np.ndarray:
+    """Broadband noise: every band has a floor to be measured against."""
+    return np.random.default_rng(seed).normal(0.0, 10.0, int(DUR_S * FS))
+
+
+def _drift() -> tuple[np.ndarray, tuple[float, float]]:
+    x, truth = inject_artifact(_host(), FS, 30.0, 6.0, "drift", 40.0)
+    return x, (truth.start_s, truth.stop_s)
+
+
+def test_a_pure_drift_routes_to_correct_in_the_eng_consumer() -> None:
+    x, span = _drift()
+    d = rt.route_event(rt.EventEvidence("e1", x, FS, span), "spikes", TOL)
+    assert d.route == "correct" and not d.masks
+    assert d.in_band_ratio < TOL.for_consumer("spikes")
+
+
+def test_the_same_drift_routes_to_reject_in_the_0_2_hz_consumer() -> None:
+    x, span = _drift()
+    d = rt.route_event(rt.EventEvidence("e1", x, FS, span), "slow_wave", TOL)
+    assert d.route == "reject" and d.masks
+    assert d.in_band_ratio > TOL.for_consumer("slow_wave")
+
+
+def test_a_clipped_span_is_masked_with_no_model_call() -> None:
+    x, truth = inject_artifact(_host(), FS, 10.0, 0.5, "clip", 0.5)
+    frames = rt.clip_frames(x, FS, rail_uv=truth.rail_uv, frac_min=0.5)
+    assert frames[int(10.1 / 0.01)] and not frames[int(20.0 / 0.01)]
+    clipped = rt.EventEvidence("clip", x, FS, (truth.start_s, truth.stop_s), clipped=True)
+
+    def classifier(_ev: rt.EventEvidence) -> bool:
+        raise AssertionError("the classifier was invoked on a clipped span")
+
+    out = rt.route_events([clipped], ["spikes", "slow_wave"], TOL, classify=classifier)
+    assert [(d.consumer, d.route) for d in out] == [("spikes", "clip"), ("slow_wave", "clip")]
+    assert all(d.masks for d in out)
+
+
+def test_unclipped_events_do_go_through_the_classifier() -> None:
+    x, span = _drift()
+    calls: list[str] = []
+
+    def classifier(ev: rt.EventEvidence) -> bool:
+        calls.append(ev.event_id)
+        return ev.event_id == "yes"
+
+    evs = [rt.EventEvidence("yes", x, FS, span), rt.EventEvidence("no", x, FS, span)]
+    out = rt.route_events(evs, ["spikes"], TOL, classify=classifier)
+    assert calls == ["yes", "no"] and [d.event_id for d in out] == ["yes"]
+
+
+def _tribo() -> tuple[np.ndarray, np.ndarray, tuple[float, float]]:
+    host = _host(1)
+    x, truth = inject_artifact(host, FS, 40.0, 0.4, "tribo", 30.0, seed=2)
+    return x, x - host, (truth.start_s, truth.stop_s)
+
+
+def test_a_failed_subtraction_falls_back_to_reject_with_its_residual() -> None:
+    x, artifact, span = _tribo()
+    half = rt.EventEvidence("t", x, FS, span, subtract=lambda s: s - 0.5 * artifact)
+    d = rt.route_event(half, "spikes", TOL)
+    assert d.route == "reject" and d.residual_ratio >= 1.0
+    assert d.residual is not None and d.residual.size > 0  # the residual is emitted
+
+
+def test_a_verified_subtraction_keeps_the_data() -> None:
+    x, artifact, span = _tribo()
+    exact = rt.EventEvidence("t", x, FS, span, subtract=lambda s: s - artifact)
+    d = rt.route_event(exact, "spikes", TOL)
+    assert d.route == "subtract" and not d.masks and d.residual_ratio < 1.0
+
+
+def test_an_in_band_event_that_is_not_stereotyped_is_rejected() -> None:
+    x, _artifact, span = _tribo()
+    assert rt.route_event(rt.EventEvidence("t", x, FS, span), "spikes", TOL).route == "reject"
+
+
+@pytest.mark.parametrize("consumer", sorted(rt.LINE_NOISE_ACTIONS))
+def test_line_noise_never_routes_to_reject(consumer: str) -> None:
+    x, _artifact, span = _tribo()
+    ev = rt.EventEvidence("hum", x, FS, span, mains_dominant=True)
+    d = rt.route_event(ev, consumer, TOL)
+    assert d.route == "line_noise" and not d.masks
+    assert d.action == rt.LINE_NOISE_ACTIONS[consumer]
+
+
+def test_line_noise_actions_follow_ruling_c_item_4() -> None:
+    a = rt.LINE_NOISE_ACTIONS
+    assert a["spikes"] == "per_minute_cuff_distrust"
+    assert a["hrv"] == "hum_lock_persistence_test"
+    assert a["mmc"] == a["slow_wave"] == "ant1_notch_rule"
+    assert "reject" not in a.values()
+
+
+def test_mains_dominance_needs_both_fixed_thresholds() -> None:
+    th = rt.LineNoiseThresholds(0.3, 0.5, source="hum inventory (synthetic)")
+    assert rt.is_mains_dominant({"line_ratio_max": 0.4, "line_plv_max": 0.6}, th)
+    assert not rt.is_mains_dominant({"line_ratio_max": 0.4, "line_plv_max": 0.2}, th)
+    assert not rt.is_mains_dominant({"line_ratio_max": 0.4}, th)  # missing is not mains
+    with pytest.raises(ValueError, match="source"):
+        rt.LineNoiseThresholds(0.3, 0.5, source="")
+
+
+def test_clipping_wins_over_line_noise_and_every_route_is_counted() -> None:
+    x, span = _drift()
+    evs = [rt.EventEvidence("c", x, FS, span, clipped=True, mains_dominant=True),
+           rt.EventEvidence("d", x, FS, span)]
+    out = rt.route_events(evs, ["spikes", "slow_wave"], TOL, classify=lambda _e: True)
+    counts = rt.route_counts(out)
+    assert counts["spikes"]["clip"] == 1 and counts["spikes"]["correct"] == 1
+    assert counts["slow_wave"]["clip"] == 1 and counts["slow_wave"]["reject"] == 1
+    assert set(counts["spikes"]) == set(rt.ROUTES)
+    rows = rt.decisions_table(out)
+    assert len(rows) == 4 and all("nan" not in str(r).lower() for r in rows)
+
+
+def test_clip_frames_refuses_an_undeclared_rail() -> None:
+    with pytest.raises(ValueError, match="rail_uv"):
+        rt.clip_frames(_host(), FS, rail_uv=0.0, frac_min=0.5)
