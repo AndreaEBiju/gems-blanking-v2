@@ -24,8 +24,9 @@ from __future__ import annotations
 
 import html
 import os
+import platform
 import shutil
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Final
 
@@ -33,7 +34,7 @@ import numpy as np
 import pandas as pd
 
 from gems_blanking_v2.io.detector_core import import_detector_module
-from gems_blanking_v2.io.store import atomic_write_bytes, atomic_write_text
+from gems_blanking_v2.io.store import atomic_write_bytes, atomic_write_text, safe_component
 from gems_blanking_v2.model.evaluate import DECISION_P
 from gems_blanking_v2.model.labels import NEGATIVE_JUDGEMENTS
 from gems_blanking_v2.model.modes import refuse_test_rows
@@ -118,11 +119,7 @@ def write_shap_review(registry: Registry, spec: ModelSpec, cores: pd.DataFrame, 
                      "table; the signal is not loaded here.</p>")
     shap_top = (review.compute_shap_for_windows(booster, x.iloc[idx], top_n=3)[0]
                 if len(idx) else [])
-    for stale in out_dir.parent.glob("shap.building-*"):  # left by a killed process
-        shutil.rmtree(stale, ignore_errors=True)
-    build = out_dir.with_name(f"shap.building-{os.getpid()}")
-    build.mkdir(parents=True)
-    try:
+    def write(build: Path) -> None:
         tmp = build / (REVIEW_NAME + ".raw")
         review.generate_review_html(
             spec.model_id, disagreements=dis, shap_top=shap_top, channel_plots=plots,
@@ -135,11 +132,35 @@ def write_shap_review(registry: Registry, spec: ModelSpec, cores: pd.DataFrame, 
         atomic_write_text(build / TOP_FEATURES_NAME,
                           _top_features_html(spec, booster.feature_name(), mean_abs, top_n,
                                              len(cores)))
+
+    _publish(out_dir, write)
+    return out_dir
+
+
+def _publish(out_dir: Path, write: Callable[[Path], None]) -> None:
+    """Build into this process's own sibling directory, check it, move it into place.
+
+    Only OUR build directory is ever removed. Model directories live on the shared drive,
+    so another machine may be building the same review right now; deleting its
+    ``shap.building-*`` would let it move a gutted directory into the write-once
+    ``shap/``. A leftover from a killed process is harmless: it is never read, and every
+    build uses its own name (host + PID). The build must hold both pages before the move.
+    """
+    build = out_dir.with_name(
+        f"shap.building-{safe_component(platform.node(), 'host')}-{os.getpid()}")
+    if build.exists():
+        shutil.rmtree(build)
+    build.mkdir(parents=True)
+    try:
+        write(build)
+        incomplete = [n for n in (REVIEW_NAME, TOP_FEATURES_NAME) if not (build / n).is_file()]
+        if incomplete:
+            msg = f"SHAP review build {build} lacks {incomplete}; not moved into place"
+            raise RuntimeError(msg)
         os.replace(build, out_dir)  # noqa: PTH105 - a directory move, atomic or nothing
     except BaseException:
         shutil.rmtree(build, ignore_errors=True)
         raise
-    return out_dir
 
 
 def review_samples(start_s: float, stop_s: float, fs: float) -> tuple[int, int, int]:

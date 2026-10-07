@@ -199,6 +199,9 @@ def test_label_opt_ins_are_checked_against_the_table(tmp_path: Path) -> None:
         md.LabelOptIns(allow_model_labels="no", keep_tiers=())  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="drawn from"):
         md.LabelOptIns(allow_model_labels=False, keep_tiers=("3",))
+    for bad in ("1", ["1"], ("1", 2)):
+        with pytest.raises(TypeError, match="tuple of str"):
+            md.LabelOptIns(allow_model_labels=False, keep_tiers=bad)  # type: ignore[arg-type]
     raw = make_feature_table({"new": ("A", "B"), "old": ("F",)}, n_recordings=2,
                              cores_per_recording=10, seed=36)
     old_recs = sorted(set(raw.loc[raw["cohort"] == "old", "recording"]))
@@ -361,8 +364,26 @@ def test_a_failed_shap_build_leaves_nothing_and_can_retry(
     assert not (mdir / "shap").exists()
     assert not list(mdir.glob("shap.building-*"))
     monkeypatch.undo()
+    other = mdir / "shap.building-otherhost-99999"  # another machine's build in progress
+    other.mkdir()
+    (other / "partial.html").write_text("x", encoding="utf-8")
     out = sr.write_shap_review(reg, target, table, fs=fs, top_k=2)
     assert (out / sr.REVIEW_NAME).is_file()
+    assert (other / "partial.html").is_file()  # never touched
+
+
+@pytest.mark.skipif(not _detector_review_available(), reason="GEMSBlanking not available")
+def test_an_incomplete_shap_build_is_never_moved_into_place(
+        run: tuple[pd.DataFrame, md.ModeRun, rg.Registry, Path],
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    table, _o, reg, _r = run
+    target = next(s for s in reg.specs() if s.mode is TrainingMode.PER_ANIMAL)
+    fs = dict.fromkeys(table["recording"].astype(str), 1000.0)
+    monkeypatch.setattr(sr, "atomic_write_text", lambda *_a, **_k: None)  # top page lost
+    with pytest.raises(RuntimeError, match="lacks"):
+        sr.write_shap_review(reg, target, table, fs=fs, top_k=2)
+    mdir = reg.store.model_dir(target.model_id)
+    assert not (mdir / "shap").exists()
 
 
 @pytest.mark.skipif(not _detector_review_available(), reason="GEMSBlanking not available")

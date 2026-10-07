@@ -152,6 +152,10 @@ class LabelOptIns:
         if not isinstance(flag, bool):
             msg = f"allow_model_labels must be a bool, got {flag!r}"
             raise TypeError(msg)
+        tiers: object = self.keep_tiers
+        if not isinstance(tiers, tuple) or not all(isinstance(t, str) for t in tiers):
+            msg = f"keep_tiers must be a tuple of str (a bare '1' is not), got {tiers!r}"
+            raise TypeError(msg)
         bad = sorted(set(self.keep_tiers) - set(OLD_TIERS))
         if bad:
             msg = f"keep_tiers must be drawn from {OLD_TIERS}, got {bad}"
@@ -244,7 +248,7 @@ def prepare_table(table: pd.DataFrame, *,
     acknowledged recording's
     ``name_letter`` is its declared animal; an unacknowledged mismatch never passes.
     """
-    for col in ("recording", "animal", "cohort", "y", "label_set"):
+    for col in ("recording", "animal", "cohort", "y", "label_set", "label_source"):
         if col not in table.columns:
             msg = f"table is missing required column {col!r}"
             raise ValueError(msg)
