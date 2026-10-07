@@ -5757,6 +5757,18 @@ The rulings headed **2026-10-08**, **(b)** and **(c)** were written on **2026-10
 3. **The cost is reported:** spike-consumer time lost to this rule per animal and cuff, next to the time lost to motion blanking.
    - If a mains cleaner is later adopted under (b) 6, the test is re-run on the cleaned signal, and minutes that are no longer significant regain trust.
 
+### RULING 2026-10-08 (e) — distrust questions Q1–Q5; labelling decisions recorded
+
+**Andrea, 2026-10-07:** animal J right-cuff local spikes (zero lag, RVN1 > RVN2 ≫ RVN3, about 1.6 s clusters) are labelled **1**: likely local EMG or contact movement, not neural. A "correct" route (per-contact template subtraction) is measured, report only. J common-mode bursts are labelled **1**. The B-named block filed under A is **animal A**. The old-cohort rate estimator and the minimum of 20 old negatives are confirmed.
+
+**Distrust (ruling (d)) implementation:**
+- **Q1, Holm family: per animal and cohort,** over all of the animal's cuff-minute p-values. Compute every recording first, then correct. This matches the rates quoted in (d) and makes the bar independent of recording length.
+- **Q2, the spike consumer's input:** distrusted minutes are NaN in the spike consumer's input only; no other consumer is affected.
+- **Q2b, the hold:** distrusted time does **not** count toward the 20%/3× blank hold, which guards against motion over-blanking. It is reported beside it, per cuff. A cuff with more than 50% distrusted time is listed for Andrea; it is not held.
+- **Q3, the stim-to-recovery boundary minute:** its in-epoch part is tested when it is at least 30 s long. This is the same rule as the trailing partial minute.
+- **Q4, missing samples:** the finite stretches of a minute are tested if together they reach 30 s. Otherwise the minute is untested.
+- **Q5, spikes during motion:** spikes inside the spike consumer's motion-blanked spans are excluded from the mains-lock test, because the consumer never sees them.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
