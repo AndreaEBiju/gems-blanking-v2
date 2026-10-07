@@ -1932,6 +1932,41 @@ This classifies each beat-locked component as leak or neural even if every subtr
 
 **Andrea confirms the grouping** in one table: group, signature, date range, count, proposed source, and 3 example names per group. About 5 minutes, alongside the animal-alias table. Report how many old-cohort recordings remain human-labelled. If fewer than about 60, report what that does to the old-cohort share of training and to the mode-choice folds (R1 and R9 rules unchanged).
 
+### RULING 2026-10-07 (i) — old-cohort labels: tiers, a boundary test for auto-blanking, and a data-driven inclusion check
+
+**Andrea, 2026-10-07:**
+- The previous model's auto-blanked files were **saved without her review**.
+- She is **not sure when auto-blanking started**, so the 2026-05-18 date cut cannot separate them. An earlier model, such as the GEMSBlanking LightGBM, may have auto-blanked files in the browseMotionArtifacts format.
+- She is **not sure** whether groups 3, 7, 10 or 4–6 are hers.
+
+**The risk.** Training on unreviewed model output teaches the new model to imitate the old one. Scoring on it rewards that imitation. The 104 "human" recordings of the (h) report may contain such files.
+
+**1. Boundary test (measure on every plain file).** A model blanks on its own window grid. A person marks by eye.
+- For each file's segments, compute:
+  - start and stop positions modulo every candidate hop (the GEMSBlanking and detector-pyqt window and hop lengths, read from their code and configs);
+  - the duration distribution;
+  - the segment count and total blanked fraction.
+- **Grid-locked:** ≥ 80% of boundaries fall within ±1 sample of a model grid, or durations cluster on hop multiples. Report each as a p-value against uniform phase.
+- **References, before results:**
+  - known human: the 19 manifest recordings;
+  - known model: the 194 `_notched_v0.2.x` files, plus any GEMSBlanking inference outputs on disk.
+- **Report the test's accuracy on both references.** It is used only if it separates them, with ≥ 95% correct on each.
+
+**2. Model history.** From the GEMSBlanking and detector-pyqt git logs, inference scripts and output folders, find the earliest date any model could write blanking files, and any list of files it processed. A processed-file list identifies auto-blanked files directly.
+
+**3. Tiers:**
+- **Tier 1, certain:** the manifest-listed recordings.
+- **Tier 2, probable:** browseMotionArtifacts signature, **not** grid-locked (if the test is valid), **and** not on any model processed-file list. It must also either predate the earliest model-output date from item 2 or pass the boundary test. Odd groups 3, 7, 10 and 4–6 enter tier 2 only by the same tests.
+- **Excluded:** everything else, and anything ambiguous.
+- `blankingApplied` false stays excluded.
+
+**4. Use:**
+- **Old-cohort scoring and mode choice:** report folds on tier 1 alone and on tiers 1+2. Mode choice uses tiers 1+2 only if both give the same mode ranking; otherwise it uses tier 1. R9's thresholds are unchanged.
+- **Training, data-driven check:** train with tier 1 only and with tiers 1+2. Score both on the new-cohort audit spans, which are Andrea's blind marks (A/B/H LOAO). **Tier 2 is dropped** if adding it lowers audit-span F1 by ≥ 0.02 with a 95% CI excluding 0.
+- **Report:** counts per tier and animal, the boundary test's reference accuracy, and both trainings' audit-span scores.
+
+Andrea's confirmation now covers only the animal-alias table. The label-group table is informational unless she recognises a group.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
