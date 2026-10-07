@@ -31,7 +31,11 @@ from gems_blanking_v2.emit.provenance import MaskProvenance, ProvenanceError
 from gems_blanking_v2.emit.qc import emit_gate
 from gems_blanking_v2.extent.grid import T0_TOLERANCE_S, n_grid_frames, to_matlab_inclusive
 from gems_blanking_v2.extent.routing import RouteDecision
-from gems_blanking_v2.extent.tolerance import extent_consumers
+from gems_blanking_v2.extent.tolerance import (
+    OUT_OF_BUILD_CONSUMERS,
+    expected_consumers,
+    extent_consumers,
+)
 from gems_blanking_v2.io.nan_interop import assert_no_zero_runs
 
 __all__ = ["RecordingHeldError", "write_mask_file"]
@@ -68,7 +72,7 @@ def _check_coverage(masks: Mapping[MaskKey, ConsumerMask],
                     signals: Mapping[str, Sequence[str]]) -> None:
     """Raise unless ``masks`` cover exactly what the recording reads, on the right bands."""
     consumers = extent_consumers()
-    required = sorted(c for c in consumers if c != "velocity")
+    required = expected_consumers()
     absent = [c for c in required if c not in signals]
     if absent:
         msg = (f"signals must name every consumer the recording could read (an empty tuple "
@@ -77,12 +81,18 @@ def _check_coverage(masks: Mapping[MaskKey, ConsumerMask],
     if not masks:
         msg = "refusing to write a mask file with no masks"
         raise ValueError(msg)
+    unknown = sorted(({c for c, _s, _b in masks} - set(consumers))
+                     | (set(signals) - set(consumers)))
+    if unknown:
+        msg = f"unknown consumers {unknown}; the consumers are {sorted(consumers)}"
+        raise ValueError(msg)
     wrong_band = sorted(f"{c}/{s}: {b}" for c, s, b in masks if b != consumers[c].band)
     if wrong_band:
         msg = f"masks on the wrong band for their consumer: {wrong_band}"
         raise ValueError(msg)
-    want_keys = {(c, s) for c, names in signals.items() if c != "velocity" for s in names}
-    have_keys = {(c, s) for c, s, _b in masks if c != "velocity"}
+    want_keys = {(c, s) for c, names in signals.items() if c not in OUT_OF_BUILD_CONSUMERS
+                 for s in names}
+    have_keys = {(c, s) for c, s, _b in masks if c not in OUT_OF_BUILD_CONSUMERS}
     if want_keys != have_keys:
         msg = (f"masks do not cover what this recording reads: missing "
                f"{sorted(want_keys - have_keys)}, unexpected {sorted(have_keys - want_keys)}")
@@ -105,8 +115,11 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
     excepted while task 18 is out), so the gate cannot be passed by leaving an
     over-blanked consumer out.
 
-    Refuses: provenance that does not name a model; masks that do not cover ``signals``;
-    a held recording (gate computed here, from ``masks``) without a non-blank
+    Refuses: provenance that does not name a model; ``signals`` that does not name every
+    consumer of :func:`~gems_blanking_v2.extent.tolerance.expected_consumers`; an empty
+    ``masks``; a consumer (in ``masks`` or ``signals``) that is not in the tolerance
+    table; a mask on a band other than its consumer's; masks that do not cover
+    ``signals``; a held recording (gate computed here, from ``masks``) without a non-blank
     ``release``; a mask whose grid does not start at
     ``epoch_start_s`` or does not have ``floor(n_samples / fs / grid)`` frames. Every
     numeric array is checked for exact-zero runs (invariant 1).

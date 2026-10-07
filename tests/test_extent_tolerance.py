@@ -314,3 +314,9 @@ def test_hrv_origin_decides_which_beats_the_span_holds() -> None:
     ev = _event(120.0 + sim.beat_s - 0.01, 120.0 + sim.beat_s + 0.01)
     ext = tl.hrv_extent(ev, sim.contaminated, FS, signal="RVN2", x_t0_s=120.0)
     assert ext is not None  # the beat inside the span cannot be verified -> changed
+
+
+def test_expected_consumers_is_the_table_without_what_is_out_of_this_build() -> None:
+    assert tl.expected_consumers() == ("breathing", "hrv", "mmc", "slow_wave", "spikes")
+    assert "velocity" in tl.extent_consumers()
+    assert set(tl.extent_consumers()) - set(tl.expected_consumers()) == {"velocity"}

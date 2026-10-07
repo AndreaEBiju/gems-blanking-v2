@@ -63,6 +63,7 @@ __all__ = [
     "CONSUMER_FILTERS",
     "CONSUMER_SIGNAL_ERRATA",
     "MMC_NOT_MEASURED_HALF_S",
+    "OUT_OF_BUILD_CONSUMERS",
     "STRUCK_CONSUMERS",
     "CardiacVerdict",
     "ConsumerFilter",
@@ -76,6 +77,7 @@ __all__ = [
     "compute_extent",
     "consumer_settling",
     "consumer_signals",
+    "expected_consumers",
     "extent_consumers",
     "extents_for_events",
     "hrv_extent",
@@ -95,6 +97,9 @@ F64 = npt.NDArray[np.float64]
 STRUCK_CONSUMERS: Final[frozenset[str]] = frozenset({"slow_c"})
 """Struck from A.4 on 2026-09-23 (never implemented anywhere); ``constants.py`` still
 lists it."""
+OUT_OF_BUILD_CONSUMERS: Final[frozenset[str]] = frozenset({"velocity"})
+"""Consumers with an extent but no masks in this build: velocity, because task 18 is out
+(ruling 2026-10-07 (b) R5). They are still in :func:`extent_consumers`."""
 
 CONSUMER_SIGNAL_ERRATA: Final[Mapping[str, tuple[str, ...]]] = {
     "mmc": ("ANT1", "ANT2", "ANT3"),
@@ -117,6 +122,16 @@ def extent_consumers() -> dict[str, ConsumerSpec]:
         signals = CONSUMER_SIGNAL_ERRATA.get(c.name, c.signals)
         out[c.name] = ConsumerSpec(c.name, signals, c.band, c.tolerance)
     return out
+
+
+def expected_consumers() -> tuple[str, ...]:
+    """Return the consumers every mask file and acceptance row must cover, sorted.
+
+    :func:`extent_consumers` without :data:`OUT_OF_BUILD_CONSUMERS`. This is the one
+    construction site for that set (invariant 33): the mask-file coverage check, the
+    acceptance rows and their tests all call it, so they cannot drift apart.
+    """
+    return tuple(sorted(c for c in extent_consumers() if c not in OUT_OF_BUILD_CONSUMERS))
 
 
 def consumer_signals(consumer: str, *, cuffs: Sequence[str] = (),

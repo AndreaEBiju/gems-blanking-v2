@@ -13,6 +13,7 @@ OUTSIDE THE GENERATION HASH.
 from __future__ import annotations
 
 import math
+from typing import Final
 
 import numpy as np
 import numpy.typing as npt
@@ -21,7 +22,7 @@ from gems_blanking_v2.constants import GRID_S
 
 __all__ = ["T0_TOLERANCE_S", "frame_sample_bounds", "n_grid_frames", "to_matlab_inclusive"]
 
-T0_TOLERANCE_S = 1e-9
+T0_TOLERANCE_S: Final = 1e-9
 """Two time origins closer than this are the same origin (float noise only)."""
 
 

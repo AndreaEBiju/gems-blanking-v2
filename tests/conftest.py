@@ -36,6 +36,7 @@ from typing import Final, Literal, NamedTuple, TypedDict
 import numpy as np
 import numpy.typing as npt
 import pytest
+from gems_blanking_v2.acceptance.report import BlankRow
 from gems_blanking_v2.constants import FS_NOMINAL_HZ, MAD_TO_SIGMA
 from gems_blanking_v2.types import ChannelInfo, Recording
 from scipy.signal import butter, sosfiltfilt
@@ -1798,3 +1799,31 @@ def make_fiducial_shift(fs: float, dur_s: float, *, beat_index: int, shift_s: fl
     sig = ref.signal.copy()
     sig[lo:lo + kernel.size] += amp_uv * (moved - kernel)
     return FiducialShift(sig, ref.signal, t_s)
+
+
+# ---------------------------------------------------------------------------
+# task 19: blank fractions with a known condition effect and correlated covariates
+# ---------------------------------------------------------------------------
+
+
+def make_confound_rows(coef: float, *, n: int = 120, seed: int = 3,
+                       consumer: str = "spikes", modes: bool = True) -> list[BlankRow]:
+    """Coverage and mode both correlate with condition and carry their own effects.
+
+    stim_recovery recordings have lower coverage and are more often scored by the
+    adapted model; coverage (-0.05 per unit) and adapted mode (+0.02) change the blank
+    fraction on their own. Only a regression that carries both recovers ``coef``.
+    """
+    rng = np.random.default_rng(seed)
+    rows = []
+    for i in range(n):
+        stim = i % 2 == 1
+        cov = rng.uniform(0.55, 0.8) if stim else rng.uniform(0.75, 1.0)
+        adapted = modes and rng.uniform() < (0.7 if stim else 0.2)
+        frac = (0.10 + coef * stim - 0.05 * cov + 0.02 * adapted + rng.normal(0, 0.002))
+        dur, excl = 1200.0, 120.0 if stim else 0.0
+        rows.append(BlankRow(f"r{i}", consumer, "stim_recovery" if stim else "baseline",
+                                "adapted" if adapted else "pooled", frac * (dur - excl), dur,
+                                excl, float(cov)))
+    rows.append(BlankRow("low", consumer, "baseline", "pooled", 600.0, 1200.0, 0.0, 0.3))
+    return rows
