@@ -274,6 +274,21 @@ def test_crossfit_calibration_meets_the_ece_tolerance_on_held_out_data() -> None
         assert ev.ece(cal, y) <= ev.R9_THRESHOLDS.ece_max
 
 
+def test_platt_does_not_diverge_on_saturated_scores() -> None:
+    # LightGBM-like output: most scores pinned near 0 or 1, positives a minority
+    rng = np.random.default_rng(13)
+    n = 10000
+    y = (rng.random(n) < 0.23).astype(int)  # noqa: PLR2004
+    logit = np.where(y == 1, rng.normal(3.0, 4.0, n), rng.normal(-4.0, 4.0, n))
+    raw = 1 / (1 + np.exp(-logit))
+    raw[rng.random(n) < 0.2] = np.where(rng.random() < 0.5, 1e-9, 1 - 1e-9)  # noqa: PLR2004
+    c = ev.Calibrator.fit(raw, y, "platt")
+    assert 0.01 < c.a < 10  # noqa: PLR2004
+    p = c.apply(raw)
+    assert 0.05 < p.mean() < 0.5  # noqa: PLR2004
+    assert ev.ece(p, y) < ev.ece(raw, y) + 0.02  # noqa: PLR2004
+
+
 def test_calibrator_round_trips_as_json() -> None:
     rng = np.random.default_rng(6)
     s = rng.random(200)

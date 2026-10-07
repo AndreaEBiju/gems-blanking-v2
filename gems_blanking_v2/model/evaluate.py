@@ -381,8 +381,19 @@ class Calibrator:
 
 
 def _platt_fit(z: F64, t: F64, iters: int = 100) -> tuple[float, float]:
-    """Logistic regression of ``t`` on ``z`` by Newton's method (two parameters)."""
+    """Logistic regression of ``t`` on ``z``: damped Newton with a backtracking line search.
+
+    A plain Newton step diverges on real LightGBM scores (many near 0 and 1, logits at
+    the +-13.8 clip): measured on a provisional fold it returned ``a = 5e8``. Every step
+    here must lower the log-loss, so the fit cannot run away.
+    """
+
+    def loss(a: float, b: float) -> float:
+        u = a * z + b
+        return float(np.sum(np.logaddexp(0.0, u) - t * u))
+
     a, b = 1.0, 0.0
+    cur = loss(a, b)
     for _ in range(iters):
         p = expit(a * z + b)
         w = np.maximum(p * (1 - p), 1e-12)
@@ -390,8 +401,18 @@ def _platt_fit(z: F64, t: F64, iters: int = 100) -> tuple[float, float]:
         h = np.array([[np.sum(w * z * z), np.sum(w * z)], [np.sum(w * z), np.sum(w)]])
         h += 1e-9 * np.eye(2)
         step = np.linalg.solve(h, g)
-        a, b = a - float(step[0]), b - float(step[1])
-        if float(np.max(np.abs(step))) < _NEWTON_TOL:
+        lr = 1.0
+        while lr > _NEWTON_TOL:
+            na, nb = a - lr * float(step[0]), b - lr * float(step[1])
+            new = loss(na, nb)
+            if new <= cur:
+                break
+            lr /= 2
+        else:
+            break
+        moved = max(abs(na - a), abs(nb - b))
+        a, b, cur = na, nb, new
+        if moved < _NEWTON_TOL:
             break
     return a, b
 
