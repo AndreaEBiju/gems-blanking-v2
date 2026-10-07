@@ -26,6 +26,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from gems_blanking_v2.emit import line_distrust as ld
 from gems_blanking_v2.emit import masks as mk
 from gems_blanking_v2.emit.handoff import write_mask_file
 from gems_blanking_v2.emit.provenance import MaskProvenance
@@ -87,14 +88,17 @@ def test_matlab_step1_bandpass_honours_the_emitted_masks(tmp_path: Path) -> None
                           routing_hash="test", created_at="2026-10-08T05:00:00+00:00",
                           recording="synthetic")
     medians = {f"{c}|{s}|{b}": 0.3 for c, s, b in masks}  # the real gate path (it holds)
+    eng = make_eng(FS, N_SAMPLES / FS + 0.1, seed=12).signal[:N_SAMPLES]
+    line = ld.cuff_minute_distrust({"L_T": eng}, FS, recording="synthetic", epoch_start_s=0.0,
+                                   family="recording")
     mask_file = write_mask_file(tmp_path / "synthetic_masks.mat", masks, prov, signals=READS,
                                 fs=FS,
+                                line_distrust=line,
                                 n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
                                 animal_median=medians,
                                 release="synthetic acceptance test: the slow_wave span "
                                         "is 25% on purpose")
     rng = np.random.default_rng(11)
-    eng = make_eng(FS, N_SAMPLES / FS + 0.1, seed=12).signal[:N_SAMPLES]
     y = np.column_stack([eng, rng.normal(0.0, 20.0, N_SAMPLES)])
     sig_file = tmp_path / "synthetic_signal.mat"
     savemat(sig_file, {"y": y, "fs": FS, "channelLabels": np.array(["L_T", "ANT1"], dtype=object),

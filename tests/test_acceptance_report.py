@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import numpy as np
 import pytest
 from gems_blanking_v2.acceptance import report as ar
 from gems_blanking_v2.detect import chain
+from gems_blanking_v2.emit import line_distrust as ld
 from gems_blanking_v2.emit import masks as mk
 from gems_blanking_v2.emit.handoff import write_mask_file
 from gems_blanking_v2.emit.provenance import MaskProvenance
@@ -445,6 +447,25 @@ def test_row10_refuses_non_finite_differences(curves: dict[tuple[str, str], Path
 # row 11 --------------------------------------------------------------------
 
 
+FS_HANDOFF = 24414.0625
+"""The mask file is written at the TDT rate: a spike consumer cannot exist at this module's
+2 kHz (its 300-3000 Hz band is above Nyquist), so a handoff carrying one at 2 kHz would be
+an impossible fixture (invariant 25)."""
+N_HANDOFF = int(round(DUR_S * FS_HANDOFF))
+assert n_grid_frames(N_HANDOFF, FS_HANDOFF) == N_FRAMES  # the same masks fit both rates
+
+
+@functools.cache
+def _eng_t() -> np.ndarray:
+    return make_eng(FS_HANDOFF, DUR_S + 0.1, seed=4).signal[:N_HANDOFF]
+
+
+def _ld(name: str) -> ld.LineDistrustRecord:
+    """Return the line-distrust record for the handoff, tested on a synthetic raw T."""
+    return ld.cuff_minute_distrust({"L_T": _eng_t()}, FS_HANDOFF, recording=name,
+                                   epoch_start_s=0.0, family="recording")
+
+
 def _write(folder: Path, name: str, model: dict[str, str], routing: str = "64c2e1ea") -> Path:
     folder.mkdir(parents=True, exist_ok=True)
     prov = MaskProvenance(model=model, thresholds={"source": "test"},
@@ -454,7 +475,9 @@ def _write(folder: Path, name: str, model: dict[str, str], routing: str = "64c2e
     masks = _masks(0.01, 0.01)
     return write_mask_file(folder / f"{name}.mat", masks, prov,
                            signals=READS,
-                           fs=FS, n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
+                           line_distrust=_ld(name),
+                           fs=FS_HANDOFF, n_samples=N_HANDOFF, epoch_start_s=0.0,
+                           min_retention=0.5,
                            animal_median={})
 
 

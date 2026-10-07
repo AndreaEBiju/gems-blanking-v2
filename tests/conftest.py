@@ -1803,6 +1803,142 @@ def make_fiducial_shift(fs: float, dur_s: float, *, beat_index: int, shift_s: fl
 
 
 # ---------------------------------------------------------------------------
+# ruling 2026-10-08 (d): mains-locked spike trains, per minute
+# ---------------------------------------------------------------------------
+
+MAINS_SPIKE_WIDTH_S: Final = 1.2e-4
+"""Gaussian sigma of the synthetic negative spike, seconds (a ~0.3 ms wide impulse; the old
+cohort's mains impulses measured 0.12-0.16 ms)."""
+
+
+def _add_spikes(x: F64, times_s: F64, fs: float, amp_uv: float) -> None:
+    """Add a negative Gaussian impulse of peak ``amp_uv`` at each time (analytic, unfiltered)."""
+    half = int(math.ceil(5 * MAINS_SPIKE_WIDTH_S * fs))
+    for t in times_s.tolist():
+        c = t * fs
+        k0 = max(0, int(math.floor(c)) - half)
+        k1 = min(x.size, int(math.floor(c)) + half + 1)
+        k = np.arange(k0, k1, dtype=np.float64)
+        x[k0:k1] -= amp_uv * np.exp(-0.5 * ((k - c) / (MAINS_SPIKE_WIDTH_S * fs)) ** 2)
+
+
+def _poisson_times(rng: np.random.Generator, a_s: float, b_s: float, rate_hz: float) -> F64:
+    n = int(rng.poisson(rate_hz * (b_s - a_s)))
+    return np.sort(rng.uniform(a_s, b_s, n))
+
+
+def _locked_times(rng: np.random.Generator, a_s: float, b_s: float, *, keep: float,
+                  jitter_s: float) -> F64:
+    """Return a 60 Hz-locked train in ``[a, b)``, each cycle kept with probability ``keep``."""
+    phase = float(rng.uniform(0.002, 1.0 / 60.0 - 0.002))
+    t = np.arange(a_s + phase, b_s - 0.002, 1.0 / 60.0)
+    t = t[rng.random(t.size) < keep]
+    return t + rng.uniform(-jitter_s, jitter_s, t.size)
+
+
+class MainsSpikes(NamedTuple):
+    """A synthetic T (or contact) with per-minute spike regimes; ground truth by minute."""
+
+    signal: F64
+    locked_minutes: tuple[int, ...]
+    sparse_minutes: tuple[int, ...]
+    spike_times_s: F64
+
+
+def make_mains_spike_t(fs: float, dur_s: float, *, locked_minutes: tuple[int, ...] = (),
+                       sparse_minutes: tuple[int, ...] = (), poisson_rate_hz: float = 20.0,
+                       locked_keep: float = 0.7, background_rate_hz: float = 5.0,
+                       n_sparse: int = 3, amp_uv: float = 40.0, noise_uv: float = 5.0,
+                       jitter_s: float = 5e-5, seed: int = 0) -> MainsSpikes:
+    """White noise plus negative spikes, regime chosen per minute ``[60 m, 60 (m + 1))``.
+
+    * ``locked_minutes``: a 60 Hz-locked impulse train (each cycle kept with probability
+      ``locked_keep``, +/-``jitter_s`` jitter) on top of Poisson spikes at
+      ``background_rate_hz`` - intervals pile up at 1/60, 1/30, 1/20 s;
+    * ``sparse_minutes``: ``n_sparse`` uniformly placed spikes only (plus the noise's own
+      4.5 sigma crossings, ~4 per minute for Gaussian noise in 300-3000 Hz);
+    * every other minute: Poisson spikes at ``poisson_rate_hz`` (the null).
+
+    Amplitudes in microvolts; ``signal`` starts at t = 0.
+    """
+    rng = np.random.default_rng(seed)
+    n = _n_samples(fs, dur_s)
+    x = rng.normal(0.0, noise_uv, n)
+    times: list[F64] = []
+    for m in range(int(math.ceil(dur_s / 60.0))):
+        a, b = 60.0 * m, min(60.0 * (m + 1), n / fs)
+        if m in locked_minutes:
+            times += [_locked_times(rng, a, b, keep=locked_keep, jitter_s=jitter_s),
+                      _poisson_times(rng, a, b, background_rate_hz)]
+        elif m in sparse_minutes:
+            times.append(np.sort(rng.uniform(a + 1.0, b - 1.0, n_sparse)))
+        else:
+            times.append(_poisson_times(rng, a, b, poisson_rate_hz))
+    t_all = np.sort(np.concatenate(times)) if times else np.empty(0)
+    _add_spikes(x, t_all, fs, amp_uv)
+    return MainsSpikes(x, tuple(locked_minutes), tuple(sparse_minutes), t_all)
+
+
+def make_mains_spike_contacts(fs: float, dur_s: float, *, locked_minutes: tuple[int, ...],
+                              poisson_rate_hz: float = 20.0, locked_keep: float = 0.7,
+                              amp_uv: float = 40.0, noise_uv: float = 5.0,
+                              seed: int = 0) -> tuple[F64, F64, F64]:
+    """Three contacts sharing a COMMON-MODE 60 Hz-locked train in ``locked_minutes``.
+
+    The locked train is identical on V1, V2 and V3 (same samples, same amplitude), so the
+    tripole ``0.5 V1 + 0.5 V3 - V2`` cancels it exactly; each contact also carries its
+    own independent noise and Poisson spikes at ``poisson_rate_hz`` throughout. Ground
+    truth: every contact is mains-locked in those minutes, T is not.
+    """
+    rng = np.random.default_rng(seed)
+    n = _n_samples(fs, dur_s)
+    common = np.zeros(n)
+    for m in locked_minutes:
+        a, b = 60.0 * m, min(60.0 * (m + 1), n / fs)
+        _add_spikes(common, _locked_times(rng, a, b, keep=locked_keep, jitter_s=5e-5), fs,
+                    amp_uv)
+    out = []
+    for _ in range(3):
+        x = rng.normal(0.0, noise_uv, n)
+        _add_spikes(x, _poisson_times(rng, 0.0, n / fs, poisson_rate_hz), fs, amp_uv)
+        out.append(x + common)
+    return out[0], out[1], out[2]
+
+
+def make_spike_pair(fs: float, dur_s: float, *, gap_samples: int, amp_uv: float = 200.0,
+                    noise_uv: float = 1.0, seed: int = 0) -> tuple[F64, int, int]:
+    """Return white noise with two one-sample negative impulses ``gap_samples`` apart.
+
+    Returns ``(signal, k1, k2)``. Two equal impulses make the filtered trace symmetric
+    about their midpoint, so while they dwarf the noise its two minima sit at ``k1`` and
+    ``k2`` exactly (the test asserts it): the refractory boundary can be tested to the
+    sample.
+    """
+    rng = np.random.default_rng(seed)
+    x = rng.normal(0.0, noise_uv, _n_samples(fs, dur_s))
+    k1 = x.size // 2
+    k2 = k1 + gap_samples
+    x[k1] -= amp_uv
+    x[k2] -= amp_uv
+    return x, k1, k2
+
+
+def make_spike_times(dur_s: float, *, rate_hz: float, locked_keep: float = 0.0,
+                     seed: int = 0) -> F64:
+    """Return spike TIMES only (s), for statistics of the lock test without a signal.
+
+    Poisson at ``rate_hz``, plus a 60 Hz-locked train when ``locked_keep > 0`` (each cycle
+    kept with that probability, +/-50 us jitter).
+    """
+    rng = np.random.default_rng(seed)
+    t = _poisson_times(rng, 0.0, dur_s, rate_hz)
+    if locked_keep > 0:
+        t = np.concatenate([t, _locked_times(rng, 0.0, dur_s, keep=locked_keep,
+                                             jitter_s=5e-5)])
+    return np.sort(t)
+
+
+# ---------------------------------------------------------------------------
 # task 19: blank fractions with a known condition effect and correlated covariates
 # ---------------------------------------------------------------------------
 

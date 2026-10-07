@@ -12,11 +12,24 @@ the epoch, via ``extent.grid`` - invariant 15) per mask key, never a merged one,
 ``notmeasured_mmc_<signal>`` (R6), ``provenance_json``, ``events_json``,
 ``retention_json`` and ``gate_json``. Provenance that does not name a model is refused.
 
+**Spike-consumer line distrust (RULING 2026-10-08 (d) 2)** travels BESIDE the spike
+masks, never inside them: ``distrust_spikes_<cuff>_T`` (N x 2, the same 1-based inclusive
+epoch samples) per spike signal, and ``linedistrust_json`` (the whole
+:class:`~gems_blanking_v2.emit.line_distrust.LineDistrustRecord`: every cuff-minute's
+counts, p-value and decision). ``blank_spikes_*`` stays the motion (and ruled cuff) mask;
+this rule writes nothing into it. ``line_distrust`` is a required argument: a recording
+whose spike consumer reads anything must carry a record covering exactly those signals,
+and one that reads nothing passes ``None``. The record's provenance is copied into
+``provenance_json`` (``spike_line_distrust``) here, from the record itself, and its cost
+(``emit.qc.spike_time_lost``: per cuff, the spike mask's blank beside the line distrust;
+ruling (d) 3) into ``gate_json`` as ``spike_time_lost`` - reported, never gating.
+
 OUTSIDE THE GENERATION HASH.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
@@ -26,9 +39,10 @@ import numpy as np
 import numpy.typing as npt
 from scipy.io import savemat
 
+from gems_blanking_v2.emit.line_distrust import LineDistrustRecord
 from gems_blanking_v2.emit.masks import ConsumerMask, MaskKey, mask_sample_spans, mmc_not_measured
 from gems_blanking_v2.emit.provenance import MaskProvenance, ProvenanceError
-from gems_blanking_v2.emit.qc import emit_gate
+from gems_blanking_v2.emit.qc import emit_gate, spike_time_lost
 from gems_blanking_v2.extent.grid import T0_TOLERANCE_S, n_grid_frames, to_matlab_inclusive
 from gems_blanking_v2.extent.routing import RouteDecision
 from gems_blanking_v2.extent.tolerance import (
@@ -99,11 +113,61 @@ def _check_coverage(masks: Mapping[MaskKey, ConsumerMask],
         raise ValueError(msg)
 
 
+def _with_line_distrust(provenance: MaskProvenance, line_distrust: LineDistrustRecord | None,
+                        *, signals: Mapping[str, Sequence[str]], fs: float, n_samples: int,
+                        epoch_start_s: float) -> MaskProvenance:
+    """Check the record against this file and return the provenance that names it."""
+    spike_signals = tuple(sorted(signals.get("spikes", ())))
+    if line_distrust is None:
+        if spike_signals:
+            msg = (f"the spike consumer reads {list(spike_signals)}: the file must carry its "
+                   "line-distrust record (RULING 2026-10-08 (d) 2); none given")
+            raise ValueError(msg)
+        if provenance.spike_line_distrust:
+            msg = "provenance names a spike line-distrust rule but no record is carried"
+            raise ProvenanceError(msg)
+        return provenance
+    if tuple(sorted(line_distrust.signals)) != spike_signals:
+        msg = (f"the line-distrust record covers {list(line_distrust.signals)} but the spike "
+               f"consumer reads {list(spike_signals)}")
+        raise ValueError(msg)
+    if (line_distrust.fs != float(fs) or line_distrust.n_samples != int(n_samples)
+            or abs(line_distrust.epoch_start_s - epoch_start_s) > T0_TOLERANCE_S):
+        msg = (f"the line-distrust record is for fs {line_distrust.fs}, {line_distrust.n_samples}"
+               f" samples from {line_distrust.epoch_start_s} s; this file is fs {fs}, "
+               f"{n_samples} samples from {epoch_start_s} s")
+        raise ValueError(msg)
+    if line_distrust.recording != provenance.recording:
+        msg = (f"the line-distrust record is for {line_distrust.recording!r}, the provenance "
+               f"for {provenance.recording!r}")
+        raise ValueError(msg)
+    want = json.loads(json.dumps(line_distrust.provenance, allow_nan=False))
+    if provenance.spike_line_distrust and dict(provenance.spike_line_distrust) != want:
+        msg = "provenance names a different spike line-distrust rule than the record carried"
+        raise ProvenanceError(msg)
+    return dataclasses.replace(provenance, spike_line_distrust=want)
+
+
+def _write_line_distrust(doc: dict[str, Any], masks: Mapping[MaskKey, ConsumerMask],
+                         line_distrust: LineDistrustRecord | None
+                         ) -> dict[str, dict[str, float | int]] | None:
+    """Put the record's spans and JSON in ``doc`` (beside the masks); return its cost."""
+    if line_distrust is None:
+        return None
+    for sig in line_distrust.signals:
+        spans = line_distrust.matlab_spans(sig)
+        assert_no_zero_runs(spans.ravel(), what=f"line-distrust spans spikes/{sig}")
+        doc[_matlab_name("distrust", "spikes", sig)] = spans
+    doc["linedistrust_json"] = line_distrust.to_json()
+    return spike_time_lost(masks, line_distrust)
+
+
 def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
                     provenance: MaskProvenance | None, *, signals: Mapping[str, Sequence[str]],
                     fs: float, n_samples: int,
                     epoch_start_s: float, min_retention: float,
                     animal_median: Mapping[str, float | None],
+                    line_distrust: LineDistrustRecord | None,
                     decisions: Iterable[RouteDecision] = (),
                     hum_features: Mapping[str, float] | None = None,
                     release: str | None = None,
@@ -121,14 +185,19 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
     table; a mask on a band other than its consumer's; masks that do not cover
     ``signals``; a held recording (gate computed here, from ``masks``) without a non-blank
     ``release``; a mask whose grid does not start at
-    ``epoch_start_s`` or does not have ``floor(n_samples / fs / grid)`` frames. Every
-    numeric array is checked for exact-zero runs (invariant 1).
+    ``epoch_start_s`` or does not have ``floor(n_samples / fs / grid)`` frames; a
+    ``line_distrust`` record missing while the spike consumer reads a signal, covering
+    other signals than it reads, made for another epoch or recording, or whose rule
+    disagrees with one the provenance already names. Every numeric array is checked for
+    exact-zero runs (invariant 1).
     """
     if provenance is None:
         msg = "a mask file must carry provenance naming its model (task 15); none given"
         raise ProvenanceError(msg)
     provenance.validate()
     _check_coverage(masks, signals)
+    provenance = _with_line_distrust(provenance, line_distrust, signals=signals, fs=fs,
+                                     n_samples=n_samples, epoch_start_s=epoch_start_s)
     gate = emit_gate(masks, min_retention=min_retention, animal_median=animal_median,
                      decisions=decisions, hum_features=hum_features)
     if release is not None and not release.strip():
@@ -156,6 +225,7 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
         doc[_matlab_name("notmeasured", "mmc", sig)] = _matlab_spans(
             frames, fs, n_samples, masks[("mmc", sig, extent_consumers()["mmc"].band)].grid_s,
             f"not-measured spans mmc/{sig}")
+    lost = _write_line_distrust(doc, masks, line_distrust)
     gate_doc: dict[str, Any] = {"held": gate.held, "reasons": list(gate.reasons),
                                 "retention_flagged": gate.retention_flagged,
                                 "blank_held": gate.blank_held,
@@ -164,6 +234,8 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
                                 "notes": list(gate.notes),
                                 "top_routes": [list(t) for t in gate.top_routes],
                                 "hum_features": dict(gate.hum_features)}
+    if lost is not None:
+        gate_doc["spike_time_lost"] = lost
     if release:
         gate_doc["release"] = release
     doc["provenance_json"] = provenance.to_json()

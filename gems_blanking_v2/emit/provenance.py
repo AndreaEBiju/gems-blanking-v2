@@ -133,7 +133,11 @@ class MaskProvenance:
     table and routing thresholds with their sources; ``reference_values`` the whole-file
     reference scalars per ``signal|band``; ``code_commit`` the commit of this package;
     ``generation_sha`` the candidate generator's hash; ``routing_hash`` the frozen
-    routing table; ``settling_s`` each consumer chain's measured settling.
+    routing table; ``settling_s`` each consumer chain's measured settling;
+    ``spike_line_distrust`` the spike consumer's mains-lock distrust rule as applied
+    (``emit.line_distrust.LineDistrustRecord.provenance``: rule, test version, alpha,
+    family, input, cleaner) - absent when the recording has no spike consumer. The MATLAB
+    writer fills it from the record it carries, so the two cannot disagree.
     """
 
     model: Mapping[str, Any]
@@ -146,13 +150,15 @@ class MaskProvenance:
     recording: str
     settling_s: Mapping[str, float] = field(default_factory=dict)
     extra: Mapping[str, Any] = field(default_factory=dict)
+    spike_line_distrust: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Normalise to the JSON form and validate."""
         # Normalise to the JSON form once, so a provenance equals its own reparse (the
         # round trip is an identity), and a ModelSpec object becomes its record.
         object.__setattr__(self, "model", model_spec_record(self.model))
-        for name in ("thresholds", "reference_values", "settling_s", "extra"):
+        for name in ("thresholds", "reference_values", "settling_s", "extra",
+                     "spike_line_distrust"):
             value = _clean(dict(getattr(self, name)))
             object.__setattr__(self, name, json.loads(json.dumps(value, allow_nan=False)))
         self.validate()
@@ -190,6 +196,8 @@ class MaskProvenance:
         }
         if self.extra:
             rec["extra"] = _clean(dict(self.extra))
+        if self.spike_line_distrust:
+            rec["spike_line_distrust"] = _clean(dict(self.spike_line_distrust))
         return {k: v for k, v in rec.items() if v not in ({}, None)}
 
     def to_json(self) -> str:
@@ -211,4 +219,5 @@ class MaskProvenance:
                    reference_values=doc["reference_values"], code_commit=doc["code_commit"],
                    generation_sha=doc["generation_sha"], routing_hash=doc["routing_hash"],
                    created_at=doc["created_at"], recording=doc["recording"],
-                   settling_s=doc.get("settling_s") or {}, extra=doc.get("extra") or {})
+                   settling_s=doc.get("settling_s") or {}, extra=doc.get("extra") or {},
+                   spike_line_distrust=doc.get("spike_line_distrust") or {})

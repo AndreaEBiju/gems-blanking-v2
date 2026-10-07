@@ -20,15 +20,25 @@ import numpy.typing as npt
 
 from gems_blanking_v2.constants import GRID_S
 
-__all__ = ["T0_TOLERANCE_S", "frame_sample_bounds", "n_grid_frames", "to_matlab_inclusive"]
+__all__ = ["T0_TOLERANCE_S", "frame_sample_bounds", "n_grid_frames", "seconds_to_sample",
+           "to_matlab_inclusive"]
 
 T0_TOLERANCE_S: Final = 1e-9
 """Two time origins closer than this are the same origin (float noise only)."""
 
 
+def seconds_to_sample(t_s: float, fs: float) -> int:
+    """Return the 0-based sample index of ``t_s`` seconds from the epoch start: ``round(t fs)``.
+
+    The one time-to-sample rounding: frame bounds (:func:`frame_sample_bounds`) and the
+    line-distrust minute bounds (``emit.line_distrust``) both go through it.
+    """
+    return int(round(t_s * fs))
+
+
 def frame_sample_bounds(i0: int, i1: int, fs: float, grid_s: float = GRID_S) -> tuple[int, int]:
     """Return the 0-based half-open samples ``[k0, k1)`` covered by frames ``[i0, i1)``."""
-    return int(round(i0 * grid_s * fs)), int(round(i1 * grid_s * fs))
+    return seconds_to_sample(i0 * grid_s, fs), seconds_to_sample(i1 * grid_s, fs)
 
 
 def n_grid_frames(n_samples: int, fs: float, grid_s: float = GRID_S) -> int:

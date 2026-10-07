@@ -120,14 +120,21 @@ EXCESS_P: Final = 0.01
 rate. Chosen here, not measured - provisional, for a ruling."""
 
 LINE_NOISE_ACTIONS: Final[Mapping[str, str]] = {
-    "spikes": "per_minute_cuff_distrust",
+    "spikes": "line_distrust_record",
     "velocity": "keep_minute",
     "hrv": "hum_lock_persistence_test",
     "breathing": "hum_lock_persistence_test",
     "mmc": "ant1_notch_rule",
     "slow_wave": "ant1_notch_rule",
 }
-"""Ruling (c) item 4: what each consumer does with a mains-dominant core. None rejects."""
+"""Ruling (c) item 4: what each consumer does with a mains-dominant core. None rejects.
+
+The spike consumer's action is ``line_distrust_record``, not decided per core: RULING
+2026-10-08 (d) 2 decides it per cuff-minute by the mains-lock test on T
+(``emit.line_distrust``), and it is carried beside the spike mask, never in it. It is
+deliberately NOT ``per_minute_cuff_distrust``, which is ruling 2026-10-03's mask reason
+for spans that ARE merged into the spike mask. This map is code, not routing-table data,
+so the frozen routing table's hash does not cover it."""
 
 
 @dataclass(frozen=True, slots=True)
