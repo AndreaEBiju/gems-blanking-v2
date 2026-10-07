@@ -48,6 +48,7 @@ def test_the_consumer_table_carries_the_ruled_corrections() -> None:
     cons = tl.extent_consumers()
     assert "slow_c" not in cons
     assert cons["mmc"].signals == ("ANT1", "ANT2", "ANT3")
+    assert cons["slow_wave"].signals == ("ANT1", "ANT2", "ANT3")
     assert set(cons) == set(tl.CONSUMER_FILTERS)
 
 
@@ -55,6 +56,8 @@ def test_the_corrections_are_still_needed_in_constants() -> None:
     """Fails once constants.py carries R8 and the strike: then remove the patch here."""
     by = {c.name: c for c in CONSUMERS}
     assert "slow_c" in by, "constants.py struck slow_c: delete STRUCK_CONSUMERS"
+    assert by["slow_wave"].signals == ("stomach_ref",), (
+        "constants.py now has slow_wave's signals: drop it from CONSUMER_SIGNAL_ERRATA")
     assert by["mmc"].signals == ("stomach_ref",), (
         "constants.py now has mmc's signals: delete CONSUMER_SIGNAL_ERRATA")
 
@@ -95,7 +98,8 @@ def test_measured_settling_per_consumer_at_the_tdt_rate() -> None:
     got = {c: _settle(c) for c in tl.CONSUMER_FILTERS}
     assert got["spikes"].total_s == pytest.approx(0.00512, abs=1e-4)
     assert got["hrv"].total_s == pytest.approx(0.1402, abs=1e-3)
-    assert got["mmc"].total_s == pytest.approx(0.4858, abs=1e-3)
+    assert got["mmc"].impulse_s == pytest.approx(0.4858, abs=1e-3)
+    assert got["mmc"].total_s == 15.0  # the 30 s moving threshold's half-window (R6)
     sw = got["slow_wave"]
     assert sw.impulse_s == pytest.approx(8.167, abs=0.01)  # the spec's measured 8.17 s
     assert sw.total_s == sw.impulse_s > sw.extra_s == 2.5
@@ -112,16 +116,16 @@ def test_a_consumer_without_a_chain_has_unknown_settling() -> None:
 
 def _z(eng_bump: float, slow_bump: float, dur: float = 60.0) -> dict[Any, Any]:
     eng = make_band_z("300-3000", dur, bumps=((20.0, 20.2, eng_bump, "L_T"),), signal="L_T")
-    slow = make_band_z("0-2", dur, bumps=((19.0, 27.0, slow_bump, "stomach_ref"),),
-                       signal="stomach_ref")
-    return {("L_T", "300-3000"): eng.z_max, ("stomach_ref", "0-2"): slow.z_max}
+    slow = make_band_z("0-2", dur, bumps=((19.0, 27.0, slow_bump, "ANT1"),),
+                       signal="ANT1")
+    return {("L_T", "300-3000"): eng.z_max, ("ANT1", "0-2"): slow.z_max}
 
 
 def test_an_eng_only_event_has_a_spike_extent_and_none_for_slow_wave() -> None:
     ev = _event(19.5, 21.0)
     z = _z(eng_bump=12.0, slow_bump=1.0)
     spikes = tl.compute_extent(ev, z, "spikes", signal="L_T", tolerances=TOL, fs=FS, z_t0_s=0.0)
-    slow = tl.compute_extent(ev, z, "slow_wave", signal="stomach_ref", tolerances=TOL, fs=FS,
+    slow = tl.compute_extent(ev, z, "slow_wave", signal="ANT1", tolerances=TOL, fs=FS,
                              z_t0_s=0.0)
     assert slow is None
     assert spikes is not None
@@ -141,7 +145,7 @@ def test_the_extent_is_not_the_candidate_interval() -> None:
 
 def test_a_slow_band_extent_states_its_coarse_resolution() -> None:
     ev = _event(19.5, 21.0)
-    ext = tl.compute_extent(ev, _z(12.0, 9.0), "slow_wave", signal="stomach_ref",
+    ext = tl.compute_extent(ev, _z(12.0, 9.0), "slow_wave", signal="ANT1",
                             tolerances=TOL, fs=FS, z_t0_s=0.0)
     assert ext is not None and ext.resolution_s == 7.5
     assert ext.start_s == pytest.approx(19.0 - _settle("slow_wave").total_s)
@@ -218,12 +222,13 @@ def test_beat_train_comparison_counts_added_lost_and_moved() -> None:
 def test_hrv_extent_follows_the_operational_verdict() -> None:
     moved = make_fiducial_shift(FS, 6.0, beat_index=15, shift_s=0.002, seed=3)
     ev = _event(moved.beat_s - 0.01, moved.beat_s + 0.01)
-    ext = tl.hrv_extent(ev, moved.contaminated, FS, signal="RVN2", suppressed=moved.reference)
+    ext = tl.hrv_extent(ev, moved.contaminated, FS, signal="RVN2", x_t0_s=0.0,
+                        suppressed=moved.reference)
     assert ext is not None and ext.consumer == "hrv" and ext.band == "10-150"
     pad = _settle("hrv").total_s
     assert ext.stop_s - ext.start_s == pytest.approx(0.02 + 2 * pad)
     still = make_fiducial_shift(FS, 6.0, beat_index=15, shift_s=0.00005, seed=3)
-    assert tl.hrv_extent(ev, still.contaminated, FS, signal="RVN2",
+    assert tl.hrv_extent(ev, still.contaminated, FS, signal="RVN2", x_t0_s=0.0,
                          suppressed=still.reference) is None
     with pytest.raises(ValueError, match="operational"):
         tl.compute_extent(ev, {}, "hrv", signal="RVN2", tolerances=TOL, fs=FS, z_t0_s=0.0)
@@ -250,15 +255,62 @@ def test_z_on_a_region_timeline_is_placed_by_its_origin() -> None:
                             z_t0_s=120.0)
     assert ext is not None
     assert (ext.core_start_s, ext.core_stop_s) == pytest.approx((140.0, 140.2))
-    assert tl.compute_extent(ev, z, "spikes", signal="L_T", tolerances=TOL, fs=FS,
-                             z_t0_s=0.0) is None
+    with pytest.raises(tl.ExtentNotAssessableError, match="not assessable"):
+        tl.compute_extent(ev, z, "spikes", signal="L_T", tolerances=TOL, fs=FS, z_t0_s=0.0)
 
 
 def test_every_event_gets_an_answer_for_every_consumer() -> None:
     evs = {"a": _event(19.5, 21.0), "b": _event(40.0, 41.0)}
     rows = tl.extents_for_events(evs, _z(12.0, 1.0),
-                                 {"spikes": ("L_T",), "slow_wave": ("stomach_ref",)},
-                                 tolerances=TOL, fs=FS, z_t0_s=0.0)
+                                 {"spikes": ("L_T",), "slow_wave": ("ANT1",)},
+                                 tolerances=TOL, fs=FS, z_t0_s=0.0,
+                                 confirmed=tl.is_confirmed_motion)
     got = {(e, c): x is not None for e, c, _s, x in rows}
     assert got == {("a", "spikes"): True, ("a", "slow_wave"): False,
                    ("b", "spikes"): False, ("b", "slow_wave"): False}
+
+
+def test_an_event_outside_or_nan_in_z_is_not_assessable_not_under_tolerance() -> None:
+    z = _z(12.0, 1.0)
+    nan_z = {k: np.full_like(v, np.nan) for k, v in z.items()}
+    ev = _event(19.5, 21.0)
+    with pytest.raises(tl.ExtentNotAssessableError):
+        tl.compute_extent(ev, nan_z, "spikes", signal="L_T", tolerances=TOL, fs=FS, z_t0_s=0.0)
+    rows = tl.extents_for_events({"a": ev}, nan_z, {"spikes": ("L_T",)}, tolerances=TOL, fs=FS,
+                                 z_t0_s=0.0, confirmed=tl.is_confirmed_motion)
+    assert isinstance(rows[0][3], tl.NotAssessable)
+
+
+def test_hrv_is_never_silently_skipped() -> None:
+    evs = {"a": _event(19.5, 21.0)}
+    with pytest.raises(ValueError, match="refusing to skip hrv"):
+        tl.extents_for_events(evs, _z(12.0, 1.0), {"hrv": ("RVN2",)}, tolerances=TOL, fs=FS,
+                              z_t0_s=0.0, confirmed=tl.is_confirmed_motion)
+    with pytest.raises(ValueError, match="refusing to skip hrv"):
+        tl.extents_for_events(evs, _z(12.0, 1.0), {"hrv": ("RVN2",)}, tolerances=TOL, fs=FS,
+                              z_t0_s=0.0, confirmed=tl.is_confirmed_motion,
+                              hr_signal=("RVN1", np.zeros(10), 0.0))
+
+
+def test_an_unconfirmed_event_gets_no_extent() -> None:
+    evs = {"a": _event(19.5, 21.0, judgement="physiology")}
+    with pytest.raises(ValueError, match="not confirmed"):
+        tl.extents_for_events(evs, _z(12.0, 1.0), {"spikes": ("L_T",)}, tolerances=TOL, fs=FS,
+                              z_t0_s=0.0, confirmed=tl.is_confirmed_motion)
+
+
+def test_hrv_extent_is_placed_by_the_signal_origin() -> None:
+    """The HR channel's x[0] at 120 s: the extent comes back on the event's timeline."""
+    moved = make_fiducial_shift(FS, 6.0, beat_index=15, shift_s=0.002, seed=3)
+    ev = _event(120.0 + moved.beat_s - 0.01, 120.0 + moved.beat_s + 0.01)
+    ext = tl.hrv_extent(ev, moved.contaminated, FS, signal="RVN2", x_t0_s=120.0,
+                        suppressed=moved.reference)
+    assert ext is not None and ext.core_start_s == pytest.approx(120.0 + moved.beat_s - 0.01)
+
+
+def test_hrv_origin_decides_which_beats_the_span_holds() -> None:
+    """Without a suppressed reference the span must land on x's samples via x_t0_s."""
+    sim = make_fiducial_shift(FS, 6.0, beat_index=15, shift_s=0.0, seed=3)
+    ev = _event(120.0 + sim.beat_s - 0.01, 120.0 + sim.beat_s + 0.01)
+    ext = tl.hrv_extent(ev, sim.contaminated, FS, signal="RVN2", x_t0_s=120.0)
+    assert ext is not None  # the beat inside the span cannot be verified -> changed

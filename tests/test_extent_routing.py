@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pytest
+from gems_blanking_v2.bands import envelope
 from gems_blanking_v2.extent import routing as rt
 from gems_blanking_v2.extent.tolerance import ToleranceTable
 
-from tests.conftest import inject_artifact
+from tests.conftest import inject_artifact, make_eng
 
 FS = 8000.0
 DUR_S = 60.0
@@ -29,14 +32,14 @@ def test_a_pure_drift_routes_to_correct_in_the_eng_consumer() -> None:
     x, span = _drift()
     d = rt.route_event(rt.EventEvidence("e1", x, FS, span), "spikes", TOL)
     assert d.route == "correct" and not d.masks
-    assert d.in_band_ratio < TOL.for_consumer("spikes")
+    assert d.in_band_value < rt.SPIKE_MAX_SIGMA  # sample level, in ENG sigma
 
 
 def test_the_same_drift_routes_to_reject_in_the_0_2_hz_consumer() -> None:
     x, span = _drift()
     d = rt.route_event(rt.EventEvidence("e1", x, FS, span), "slow_wave", TOL)
     assert d.route == "reject" and d.masks
-    assert d.in_band_ratio > TOL.for_consumer("slow_wave")
+    assert d.in_band_value > TOL.for_consumer("slow_wave")  # the table's own log-z scale
 
 
 def test_a_clipped_span_is_masked_with_no_model_call() -> None:
@@ -134,3 +137,73 @@ def test_clipping_wins_over_line_noise_and_every_route_is_counted() -> None:
 def test_clip_frames_refuses_an_undeclared_rail() -> None:
     with pytest.raises(ValueError, match="rail_uv"):
         rt.clip_frames(_host(), FS, rail_uv=0.0, frac_min=0.5)
+
+
+def test_a_short_large_transient_in_a_long_span_is_not_corrected() -> None:
+    """1 ms at 75 sigma inside a 0.5 s span: its RMS is small, its peak is not."""
+    host = _host(3)
+    x, truth = inject_artifact(host, FS, 20.0, 0.001, "tribo", 75.0, seed=4)
+    span = (truth.start_s - 0.25, truth.start_s + 0.25)
+    for consumer in ("spikes", "velocity"):
+        d = rt.route_event(rt.EventEvidence("t", x, FS, span), consumer, TOL)
+        assert d.route == "reject" and d.masks, d.reason
+        assert d.in_band_value > rt.SPIKE_MAX_SIGMA
+
+
+def test_an_excess_of_eng_crossings_is_in_band_even_under_the_cap() -> None:
+    x, _artifact, span = _tribo()  # 30 sigma crackle: under the 40 sigma cap
+    v = rt.in_band_verdict(x, FS, span, "spikes", TOL)
+    assert not v.separable and v.value < rt.SPIKE_MAX_SIGMA and "crossings" in v.detail
+
+
+def test_hrv_routes_from_the_operational_verdict() -> None:
+    x, span = _drift()
+    with pytest.raises(ValueError, match="hrv_changed"):
+        rt.route_event(rt.EventEvidence("h", x, FS, span), "hrv", TOL)
+    assert rt.route_event(rt.EventEvidence("h", x, FS, span, hrv_changed=False), "hrv",
+                          TOL).route == "correct"
+    assert rt.route_event(rt.EventEvidence("h", x, FS, span, hrv_changed=True), "hrv",
+                          TOL).route == "reject"
+
+
+def test_nan_stays_nan_and_nothing_is_invented() -> None:
+    """Invariant 8: interpolation is for the filter only; the residual carries NaN."""
+    x, artifact, span = _tribo()
+    x = x.copy()
+    gap = slice(int((span[0] + 0.1) * FS), int((span[0] + 0.15) * FS))
+    x[gap] = np.nan
+    d = rt.route_event(rt.EventEvidence("t", x, FS, span,
+                                        subtract=lambda s: s - np.nan_to_num(artifact)),
+                       "spikes", TOL)
+    assert d.residual is not None and np.isnan(d.residual).any()
+    y, rate = rt._band(x, FS, "300-3000")
+    assert np.isnan(y[int((span[0] + 0.11) * rate)])
+    assert np.isfinite(y[int((span[0] + 0.3) * rate)])
+
+
+def test_the_band_filters_are_the_detection_sides_own() -> None:
+    """Pinned: routing must use bands.envelope's design (inside the generation hash)."""
+    assert vars(rt)["_band_limit"] is vars(envelope)["_band_limit"]
+    assert vars(rt)["_decimate_for"] is vars(envelope)["_decimate_for"]
+
+
+def test_reason_codes_carry_no_numbers() -> None:
+    x, span = _drift()
+    out = rt.route_events([rt.EventEvidence("d", x, FS, span)], ["spikes", "slow_wave"], TOL,
+                          classify=lambda _e: True)
+    assert all(d.reason_code and not any(ch.isdigit() for ch in d.reason_code) for d in out)
+
+
+def test_the_artifact_cap_catches_a_transient_the_crossing_count_cannot() -> None:
+    """Catch a transient on real-looking ENG with the 40 sigma cap alone.
+
+    20 spikes/s well over 4.5 sigma: one transient adds a crossing or two - no
+    significant excess - so only the consumer's own 40 sigma cap rejects it.
+    """
+    host = make_eng(FS, DUR_S, rate_hz=20.0, spike_uv=80.0, noise_uv=6.0, seed=5).signal
+    x, truth = inject_artifact(host, FS, 20.0, 0.001, "tribo", 75.0, seed=4)
+    span = (truth.start_s - 0.25, truth.start_s + 0.25)
+    v = rt.in_band_verdict(x, FS, span, "spikes", TOL)
+    assert not v.separable and v.value > rt.SPIKE_MAX_SIGMA
+    p_excess = float(re.search(r"\(p ([0-9.e+-]+)\)", v.detail).group(1))  # type: ignore[union-attr]
+    assert p_excess >= rt.EXCESS_P  # the excess test alone would have passed it

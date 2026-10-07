@@ -68,6 +68,8 @@ __all__ = [
     "ConsumerFilter",
     "ConsumerSettling",
     "Extent",
+    "ExtentNotAssessableError",
+    "NotAssessable",
     "ToleranceTable",
     "beat_train_changed",
     "cardiac_operational_damage",
@@ -96,10 +98,14 @@ lists it."""
 
 CONSUMER_SIGNAL_ERRATA: Final[Mapping[str, tuple[str, ...]]] = {
     "mmc": ("ANT1", "ANT2", "ANT3"),
+    "slow_wave": ("ANT1", "ANT2", "ANT3"),
 }
 """Ruling 2026-10-07 (b) R8 item 2 (and 2026-10-06 item 3): ``extract_mmc.m`` reads
-ANT1-3 directly; ``stomach_ref`` is a detection input only. ``constants.py`` still says
-``stomach_ref``."""
+ANT1-3 directly; ``stomach_ref`` is a detection input only. The same holds for
+``slow_wave``: the invariant-43 ruling (``IMPLEMENTATION.md``: "slow_wave and mmc read
+them raw") and ``batch_process.m`` (``swData = signal(:, 3:5)``, the raw ANT1-3) agree,
+though R8's text names only mmc - a spec inconsistency to flag. ``constants.py`` still
+says ``stomach_ref`` for both."""
 
 
 def extent_consumers() -> dict[str, ConsumerSpec]:
@@ -169,7 +175,10 @@ CONSUMER_FILTERS: Final[Mapping[str, ConsumerFilter]] = {
         "velocity", "bandpass", 300.0, 3000.0, 4,
         "the ENG band (A.4); task 18 is out of this build (ruling (b) R5)"),
     "mmc": ConsumerFilter(
-        "mmc", "bandpass", 2.0, 50.0, 4, "extract_mmc.m: butter(4, [2 50]) + filtfilt"),
+        "mmc", "bandpass", 2.0, 50.0, 4, "extract_mmc.m: butter(4, [2 50]) + filtfilt",
+        extra_edge_s=15.0,
+        extra_source="extract_mmc.m movmedian threshold, sigmaWin 30 s: its half-window "
+                     "reaches 15 s across an edge (ruling (b) R6)"),
     "slow_wave": ConsumerFilter(
         "slow_wave", "lowpass", 0.0, 0.15, 2,
         "batch_process.m P.sw_lowPassCutoff=0.15, P.sw_lowPassOrder=2; "
@@ -354,6 +363,23 @@ class Extent:
     resolution_s: float
 
 
+class ExtentNotAssessableError(ValueError):
+    """The consumer's z cannot be judged anywhere in the event's span.
+
+    The span is outside the z record, or z is NaN there. Distinct from "under
+    tolerance", which is ``None``.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class NotAssessable:
+    """Record of an :class:`ExtentNotAssessableError` in :func:`extents_for_events`."""
+
+    consumer: str
+    signal: str
+    reason: str
+
+
 def _runs(over: npt.NDArray[np.bool_]) -> list[tuple[int, int]]:
     d = np.diff(np.concatenate(([0], over.astype(np.int8), [0])))
     return list(zip(np.flatnonzero(d == 1).tolist(), np.flatnonzero(d == -1).tolist(),
@@ -363,7 +389,7 @@ def _runs(over: npt.NDArray[np.bool_]) -> list[tuple[int, int]]:
 def compute_extent(event: Event, z: Mapping[tuple[str, str], npt.ArrayLike], consumer: str,
                    *, signal: str, tolerances: ToleranceTable, fs: float, z_t0_s: float,
                    grid_s: float = GRID_S) -> Extent | None:
-    """Return the event's extent for ``consumer`` on ``signal``, or ``None`` if under tolerance.
+    """Return the event's extent for ``consumer`` on ``signal``; ``None`` if under tolerance.
 
     ``z`` maps ``(signal, band)`` to the robust z on the shared grid, whose frame 0
     starts at ``z_t0_s`` on the event's timeline - required, because detection returns z
@@ -372,7 +398,9 @@ def compute_extent(event: Event, z: Mapping[tuple[str, str], npt.ArrayLike], con
     epoch. The extent is the union of the runs of frames over the consumer's tolerance
     that overlap the event's span, padded each side by the consumer chain's settling and
     clipped to the z record.
-    The event must be confirmed motion (:func:`is_confirmed_motion`).
+    The caller passes confirmed motion events only (:func:`extents_for_events` enforces
+    it). Raises :class:`ExtentNotAssessableError` when the span lies outside the z record or z
+    is NaN on every frame of it - that is not "under tolerance".
     """
     if consumer == "hrv":
         msg = "hrv's extent is operational: use hrv_extent"
@@ -388,6 +416,11 @@ def compute_extent(event: Event, z: Mapping[tuple[str, str], npt.ArrayLike], con
     c = event.candidate
     i0 = int(math.floor((c.start_s - z_t0_s) / grid_s))
     i1 = int(math.ceil((c.stop_s - z_t0_s) / grid_s))
+    lo_i, hi_i = max(0, i0), min(zz.size, i1)
+    if hi_i <= lo_i or not np.isfinite(zz[lo_i:hi_i]).any():
+        msg = (f"{consumer}/{signal}: z is not assessable in [{c.start_s:.3f}, "
+               f"{c.stop_s:.3f}) s (z covers [{z_t0_s:.3f}, {z_t0_s + zz.size * grid_s:.3f}))")
+        raise ExtentNotAssessableError(msg)
     hits = [(a, b) for a, b in _runs(over) if a < i1 and b > i0]
     if not hits:
         return None
@@ -406,28 +439,51 @@ def compute_extent(event: Event, z: Mapping[tuple[str, str], npt.ArrayLike], con
 def extents_for_events(
     events: Mapping[str, Event], z: Mapping[tuple[str, str], npt.ArrayLike],
     signals: Mapping[str, Sequence[str]], *, tolerances: ToleranceTable, fs: float,
-    z_t0_s: float, hr_signal: tuple[str, npt.ArrayLike] | None = None,
-) -> list[tuple[str, str, str, Extent | None]]:
-    """Every event x consumer x signal: ``(event_id, consumer, signal, extent or None)``.
+    z_t0_s: float, confirmed: Callable[[Event], bool],
+    hr_signal: tuple[str, npt.ArrayLike, float] | None = None,
+) -> list[tuple[str, str, str, Extent | NotAssessable | None]]:
+    """Every event x consumer x signal: ``(event_id, consumer, signal, result)``.
 
-    ``None`` is an explicit "under this consumer's tolerance", so the output says
-    something about every event for every consumer (task 13's acceptance). ``signals``
-    maps consumer to the signals it reads here (:func:`consumer_signals`); ``hrv`` is
-    judged operationally on ``hr_signal = (name, samples)`` and skipped without it.
+    ``result`` is an :class:`Extent`, ``None`` (under this consumer's tolerance) or
+    :class:`NotAssessable`, so the output says something about every event for every
+    consumer (task 13's acceptance). ``signals`` maps consumer to the signals it reads
+    here (:func:`consumer_signals`).
+
+    ``confirmed`` decides which events are motion (normally :func:`is_confirmed_motion`
+    with the calibrated model's threshold); an unconfirmed event raises - extents are
+    for confirmed motion only. This is intended: an ``inherited`` judgement is never a
+    confirmation by itself, so it gets an extent only if ``confirmed`` says so.
+
+    ``hrv`` is operational and needs ``hr_signal = (name, samples, x_t0_s)`` for the
+    channel ``signals["hrv"]`` names; reading hrv without it raises rather than leaving
+    hrv silently unmasked.
     """
-    out: list[tuple[str, str, str, Extent | None]] = []
+    if "hrv" in signals:
+        need = tuple(signals["hrv"])
+        if hr_signal is None or need != (hr_signal[0],):
+            have = None if hr_signal is None else hr_signal[0]
+            msg = f"hrv reads {need} but hr_signal is {have!r}: refusing to skip hrv"
+            raise ValueError(msg)
+    out: list[tuple[str, str, str, Extent | NotAssessable | None]] = []
     for eid, ev in events.items():
+        if not confirmed(ev):
+            msg = f"event {eid} is not confirmed motion; extents are for confirmed events"
+            raise ValueError(msg)
         for consumer, names in signals.items():
             for sig in names:
                 if consumer == "hrv":
-                    if hr_signal is None or hr_signal[0] != sig:
-                        continue
+                    assert hr_signal is not None
                     out.append((eid, consumer, sig, hrv_extent(ev, hr_signal[1], fs,
-                                                               signal=sig)))
-                else:
-                    out.append((eid, consumer, sig,
-                                compute_extent(ev, z, consumer, signal=sig,
-                                               tolerances=tolerances, fs=fs, z_t0_s=z_t0_s)))
+                                                               signal=sig,
+                                                               x_t0_s=hr_signal[2])))
+                    continue
+                try:
+                    res: Extent | NotAssessable | None = compute_extent(
+                        ev, z, consumer, signal=sig, tolerances=tolerances, fs=fs,
+                        z_t0_s=z_t0_s)
+                except ExtentNotAssessableError as exc:
+                    res = NotAssessable(consumer, sig, str(exc))
+                out.append((eid, consumer, sig, res))
     return out
 
 
@@ -511,7 +567,7 @@ def beat_train_changed(reference_s: npt.ArrayLike, test_s: npt.ArrayLike, *,
 
 def cardiac_operational_damage(
     x: npt.ArrayLike, fs: float, span_s: tuple[float, float], *,
-    suppressed: npt.ArrayLike | None = None,
+    suppressed: npt.ArrayLike | None = None,  # span_s is on x's own timeline (0 = x[0])
     detector: Callable[[F64, float], Any] | None = None,
     shift_tol_s: float | None = None,
 ) -> CardiacVerdict:
@@ -550,19 +606,23 @@ def cardiac_operational_damage(
     return beat_train_changed(keep_w, keep_wo, shift_tol_s=tol, match_s=0.020)
 
 
-def hrv_extent(event: Event, x: npt.ArrayLike, fs: float, *, signal: str,
+def hrv_extent(event: Event, x: npt.ArrayLike, fs: float, *, signal: str, x_t0_s: float,
                suppressed: npt.ArrayLike | None = None,
                detector: Callable[[F64, float], Any] | None = None) -> Extent | None:
-    """``hrv``'s extent: the event's span, padded by settling, if the beat train changed."""
+    """``hrv``'s extent: the event's span, padded by settling, if the beat train changed.
+
+    ``x[0]`` is at ``x_t0_s`` on the event's timeline (required, as ``z_t0_s`` is for
+    :func:`compute_extent`). The extent is returned on the event's timeline.
+    """
     c = event.candidate
-    verdict = cardiac_operational_damage(x, fs, (c.start_s, c.stop_s), suppressed=suppressed,
-                                         detector=detector)
+    span = (c.start_s - x_t0_s, c.stop_s - x_t0_s)
+    verdict = cardiac_operational_damage(x, fs, span, suppressed=suppressed, detector=detector)
     if not verdict.changed:
         return None
     settle = consumer_settling("hrv", fs)
     assert settle is not None
     pad = settle.total_s
-    end = np.asarray(x).shape[0] / fs
+    end = x_t0_s + np.asarray(x).shape[0] / fs
     band = extent_consumers()["hrv"].band
-    return Extent("hrv", signal, band, max(0.0, c.start_s - pad), min(end, c.stop_s + pad),
+    return Extent("hrv", signal, band, max(x_t0_s, c.start_s - pad), min(end, c.stop_s + pad),
                   c.start_s, c.stop_s, pad, BANDS[band].window_s)

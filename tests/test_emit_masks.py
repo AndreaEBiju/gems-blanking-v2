@@ -1,108 +1,105 @@
-"""Task 15: per-consumer masks, the MATLAB file, provenance, QC gates."""
+"""Task 15: per-consumer masks, the MATLAB file, QC gates (provenance: test_emit_provenance)."""
 
 from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
 import numpy as np
 import pytest
 from gems_blanking_v2.detect import chain
 from gems_blanking_v2.emit import masks as mk
 from gems_blanking_v2.emit import qc
-from gems_blanking_v2.emit.provenance import MaskProvenance, ProvenanceError, model_spec_record
+from gems_blanking_v2.emit.provenance import MaskProvenance, ProvenanceError
 from gems_blanking_v2.extent import tolerance as tl
+from gems_blanking_v2.extent.grid import frame_sample_bounds, n_grid_frames, to_matlab_inclusive
 from gems_blanking_v2.extent.routing import RouteDecision
 from gems_blanking_v2.io.nan_interop import assert_no_zero_runs, find_zero_runs
-from gems_blanking_v2.types import Candidate, Event, TrainingMode
-from hypothesis import given, settings
-from hypothesis import strategies as st
+from gems_blanking_v2.types import Candidate, Event
 from scipy.io import loadmat
 
 from tests.conftest import make_band_z
 
 FS = 24414.0625
 DUR_S = 60.0
-N_FRAMES = int(DUR_S / 0.01)
+N_SAMPLES = int(DUR_S * FS)
+N_FRAMES = n_grid_frames(N_SAMPLES, FS)
 TOL = tl.ToleranceTable({"spikes": 4.0, "velocity": 4.0, "mmc": 3.0, "slow_wave": 3.0,
                          "breathing": 3.0}, source="synthetic test table")
-SIGNALS = {"spikes": ("L_T",), "slow_wave": ("stomach_ref",),
+SIGNALS = {"spikes": ("L_T",), "slow_wave": ("ANT1",), "mmc": ("ANT1",),
            "velocity": ("L_V1", "L_V3")}
 MODEL = {"mode": "pooled", "version": "0.3.0", "corpus_hash": "ab" * 16,
          "calibrator": "models/x/calibrator.json",
-         "trained_at": datetime(2026, 10, 8, tzinfo=UTC), "n_train_events": 1200,
-         "metrics": {"LOAO": {"f1": 0.88}}}
-
-def _settle(consumer: str) -> tl.ConsumerSettling:
-    s = tl.consumer_settling(consumer, FS)
-    assert s is not None
-    return s
+         "trained_at": datetime(2026, 10, 8, tzinfo=UTC), "n_train_events": 1200}
+OPEN = mk.EmitGate(held=False, reasons=(), retention_flagged=False, blank_held=False)
 
 
-
-def _prov(**kw: object) -> MaskProvenance:
-    base: dict[str, Any] = {"model": MODEL, "thresholds": {"tolerances": {"spikes": 4.0},
-                                                 "source": "synthetic"},
-                  "reference_values": {"L_T|300-3000": [1.2, 0.3]}, "code_commit": "c0ffee",
-                  "generation_sha": "0133349b3ebeff80", "routing_hash": "64c2e1ea",
-                  "created_at": "2026-10-08T05:00:00+00:00", "recording": "rec1",
-                  "settling_s": {"spikes": 0.00512}}
-    base.update(kw)
-    return MaskProvenance(**base)
+def _prov() -> MaskProvenance:
+    return MaskProvenance(model=MODEL, thresholds={"tolerances": {"spikes": 4.0}},
+                          reference_values={"L_T|300-3000": [1.2, 0.3]}, code_commit="c0ffee",
+                          generation_sha="0133349b3ebeff80", routing_hash="64c2e1ea",
+                          created_at="2026-10-08T05:00:00+00:00", recording="rec1")
 
 
 def test_emit_is_outside_the_generation_hash() -> None:
     mods = chain.generation_modules()
     for m in ("masks", "qc", "provenance"):
         assert f"gems_blanking_v2.emit.{m}" not in mods
+    assert "gems_blanking_v2.extent.grid" not in mods
 
 
-def _eng_only_masks() -> dict[Any, Any]:
-    """Build masks for an event over the ENG tolerance only (no slow_wave extent)."""
-    ev = Event(Candidate(19.5, 21.0, ("L_T",), ("300-3000",), 9.0, "electrical"),
+def _eng_only(t0: float = 0.0) -> tuple[dict[Any, Any], tl.Extent]:
+    """Masks for an event over the ENG tolerance only, in an epoch starting at ``t0``.
+
+    z is on the epoch's grid (frame 0 at ``t0``); the event is on the recording's timeline.
+    """
+    ev = Event(Candidate(t0 + 19.5, t0 + 21.0, ("L_T",), ("300-3000",), 9.0, "electrical"),
                "motion", float("nan"), "human")
     z = {("L_T", "300-3000"): make_band_z("300-3000", DUR_S, bumps=((20.0, 20.2, 12.0, "L_T"),),
                                           signal="L_T").z_max,
-         ("stomach_ref", "0-2"): make_band_z("0-2", DUR_S, signal="stomach_ref").z_max}
-    exts = []
-    decisions = []
-    for consumer, sig in (("spikes", "L_T"), ("slow_wave", "stomach_ref")):
-        e = tl.compute_extent(ev, z, consumer, signal=sig, tolerances=TOL, fs=FS, z_t0_s=0.0)
+         ("ANT1", "0-2"): make_band_z("0-2", DUR_S, signal="ANT1").z_max,
+         ("ANT1", "2-50"): make_band_z("2-50", DUR_S, signal="ANT1").z_max}
+    exts, decisions = [], []
+    spike_ext = None
+    for consumer, sig in (("spikes", "L_T"), ("slow_wave", "ANT1"), ("mmc", "ANT1")):
+        e = tl.compute_extent(ev, z, consumer, signal=sig, tolerances=TOL, fs=FS, z_t0_s=t0)
         if e is not None:
             exts.append(("ev1", e))
-            decisions.append(RouteDecision("ev1", consumer, "reject", "in band"))
+            decisions.append(RouteDecision("ev1", consumer, "reject", "x", "in_band"))
+            if consumer == "spikes":
+                spike_ext = e
+    assert spike_ext is not None
     spans = mk.spans_from_routing(exts, decisions)
-    return mk.build_masks(SIGNALS, spans, N_FRAMES)
+    return mk.build_masks(SIGNALS, spans, n_frames=N_FRAMES, t0_s=t0), spike_ext
 
 
 def test_masks_are_not_merged_across_consumers() -> None:
-    masks = _eng_only_masks()
+    masks, _ = _eng_only()
     spikes = masks[("spikes", "L_T", "300-3000")].invalid
-    slow = masks[("slow_wave", "stomach_ref", "0-2")].invalid
+    slow = masks[("slow_wave", "ANT1", "0-2")].invalid
     assert spikes.any() and not slow.any()
     assert not np.array_equal(spikes, slow)
 
 
 def test_velocity_is_absent_unless_task_18_is_present() -> None:
-    masks = _eng_only_masks()
+    masks, _ = _eng_only()
     assert not any(k[0] == "velocity" for k in masks)
     with_v = mk.build_masks(SIGNALS, [mk.MaskSpan("velocity", "L_V1", 1.0, 2.0, "x")],
-                            N_FRAMES, include_velocity=True)
+                            n_frames=N_FRAMES, t0_s=0.0, include_velocity=True)
     assert ("velocity", "L_V1", "300-3000") in with_v
 
 
 def test_velocity_mask_is_the_intersection_of_v1_and_v3_validity() -> None:
     spans = [mk.MaskSpan("velocity", "L_V1", 1.0, 2.0, "x"),
              mk.MaskSpan("velocity", "L_V3", 5.0, 6.0, "x")]
-    m = mk.build_masks(SIGNALS, spans, N_FRAMES, include_velocity=True)
+    m = mk.build_masks(SIGNALS, spans, n_frames=N_FRAMES, t0_s=0.0, include_velocity=True)
     v1, v3 = m[("velocity", "L_V1", "300-3000")], m[("velocity", "L_V3", "300-3000")]
     v = mk.velocity_mask(v1, v3)
     assert np.array_equal(~v.invalid, ~v1.invalid & ~v3.invalid)
     with pytest.raises(ValueError, match="velocity"):
-        mk.velocity_mask(m[("velocity", "L_V1", "300-3000")],
-                         _eng_only_masks()[("spikes", "L_T", "300-3000")])
+        mk.velocity_mask(v1, _eng_only()[0][("spikes", "L_T", "300-3000")])
 
 
 def test_only_masking_routes_mask_and_a_missing_decision_raises() -> None:
@@ -113,22 +110,70 @@ def test_only_masking_routes_mask_and_a_missing_decision_raises() -> None:
         mk.spans_from_routing([("e", ext)], [])
 
 
-def test_distrusted_spans_join_only_that_cuffs_spike_mask() -> None:
+def test_cuff_distrust_joins_only_that_cuffs_spike_mask() -> None:
     entry = {"spike": {"L": {"route": "multi", "distrusted_spans": [[0.0, 60.0]]},
-                       "R": {"route": "multi"}}, "hr": {"none": "x"}, "stomach_ref": {}}
-    spans = mk.distrusted_spike_spans(entry, region_start_s=100.0)
+                       "R": {"route": "distrusted", "why": "x"},
+                       "X": {"route": "multi"}}, "hr": {"none": "x"}, "stomach_ref": {}}
+    spans = mk.distrusted_spike_spans(entry, region_start_s=100.0, region_stop_s=700.0)
     assert [(s.consumer, s.signal, s.start_s, s.stop_s) for s in spans] == [
-        ("spikes", "L_T", 100.0, 160.0)]
+        ("spikes", "L_T", 100.0, 160.0), ("spikes", "R_T", 100.0, 700.0)]
+    m = mk.build_masks({"spikes": ("R_T",)}, [spans[1]], n_frames=60000, t0_s=100.0)
+    assert m[("spikes", "R_T", "300-3000")].invalid.all()  # wholly distrusted
     assert {s.consumer for s in mk.line_noise_spike_spans("R", [(0.0, 60.0)])} == {"spikes"}
+
+
+def test_a_recovery_epoch_starting_at_120_s_is_shifted_exactly_once(tmp_path: Path) -> None:
+    """Extents on the recording timeline, masks from t0 = 120 s, spans from the epoch start."""
+    masks, ext = _eng_only(t0=120.0)
+    m = masks[("spikes", "L_T", "300-3000")]
+    (a, b), = mk.masked_spans_s(m)
+    assert a <= ext.start_s and ext.stop_s <= b and a >= 120.0
+    path = mk.write_mask_file(tmp_path / "r.mat", masks, _prov(), fs=FS, n_samples=N_SAMPLES,
+                              epoch_start_s=120.0, gate=OPEN)
+    spans = loadmat(path)["blank_spikes_L_T"]
+    i0 = int(np.floor((ext.start_s - 120.0) / 0.01))
+    assert spans[0, 0] == frame_sample_bounds(i0, i0 + 1, FS)[0] + 1
+    assert spans[0, 0] < 21 * FS  # epoch-relative: about 20 s in, not 140 s
+    with pytest.raises(ValueError, match="grid starts at 120"):
+        mk.write_mask_file(tmp_path / "x.mat", masks, _prov(), fs=FS, n_samples=N_SAMPLES,
+                           epoch_start_s=0.0, gate=OPEN)
+
+
+def test_the_frame_count_must_match_the_epoch(tmp_path: Path) -> None:
+    masks, _ = _eng_only()
+    with pytest.raises(ValueError, match="frames for an epoch"):
+        mk.write_mask_file(tmp_path / "x.mat", masks, _prov(), fs=FS, n_samples=N_SAMPLES // 2,
+                           epoch_start_s=0.0, gate=OPEN)
+
+
+def test_sample_mask_and_matlab_spans_agree_to_the_inclusive_end() -> None:
+    """One conversion: frames 1001-1002 -> the same samples in Python and in MATLAB."""
+    inv = np.zeros(N_FRAMES, dtype=bool)
+    inv[1001:1003] = True
+    samples = mk.frames_to_samples(inv, FS, N_SAMPLES)
+    k0, k1 = frame_sample_bounds(1001, 1003, FS)
+    (span,) = mk.mask_sample_spans(inv, FS, N_SAMPLES)
+    assert span == (k0, k1)
+    (mat,) = to_matlab_inclusive([k0], [k1])
+    first, last = int(mat[0]), int(mat[1])  # 1-based inclusive
+    assert np.flatnonzero(samples)[0] == first - 1 and np.flatnonzero(samples)[-1] == last - 1
+    assert samples.sum() == last - first + 1
+    assert (first, last) == (244386, 244873)  # round(1001 g fs) + 1, round(1003 g fs)
+    with pytest.raises(ValueError, match="at least one sample"):
+        to_matlab_inclusive([5], [5])
+
+
+def test_one_sample_span_is_five_five() -> None:
+    assert to_matlab_inclusive([4], [5]).tolist() == [[5.0, 5.0]]
 
 
 def test_apply_mask_writes_nan_tapers_without_zeros_and_leaves_the_input() -> None:
     rng = np.random.default_rng(4)
-    x = rng.normal(0, 10, int(DUR_S * FS))
+    x = rng.normal(0, 10, N_SAMPLES)
     x.flags.writeable = False  # a loader's read-only view (invariant 17)
-    invalid = mk.mask_frames([(10.0, 10.5)], N_FRAMES)
+    invalid = mk.mask_frames([(10.0, 10.5)], N_FRAMES, t0_s=0.0)
     y = mk.apply_mask(x, FS, invalid)
-    i0, i1 = int(np.ceil(10.0 * FS)), int(np.ceil(10.5 * FS))
+    i0, i1 = frame_sample_bounds(1000, 1050, FS)
     assert np.isnan(y[i0:i1]).all() and np.isfinite(y[:i0]).all() and np.isfinite(y[i1:]).all()
     n = int(round(mk.TAPER_S * FS))
     w = y[i0 - n:i0] / x[i0 - n:i0]
@@ -139,131 +184,87 @@ def test_apply_mask_writes_nan_tapers_without_zeros_and_leaves_the_input() -> No
 
 def test_apply_mask_refuses_to_emit_a_zero_run() -> None:
     x = np.ones(int(FS))
-    x[100:200] = 0.0  # zeros in the input are not NaN and must not be emitted as a run
+    x[100:200] = 0.0
     with pytest.raises(ValueError, match="zero"):
         mk.apply_mask(x, FS, np.zeros(100, dtype=bool))
 
 
-def test_the_mask_file_has_no_zero_runs_and_one_span_set_per_consumer(tmp_path: Path) -> None:
-    masks = _eng_only_masks()
+def test_the_mask_file_has_no_zero_runs_one_span_set_per_consumer_and_r6(tmp_path: Path
+                                                                       ) -> None:
+    masks, _ = _eng_only()
+    masks[("mmc", "ANT1", "2-50")] = mk.ConsumerMask(
+        "mmc", "ANT1", "2-50", mk.mask_frames([(30.0, 31.0)], N_FRAMES, t0_s=0.0), 0.01, 0.0)
     path = mk.write_mask_file(tmp_path / "rec1_masks.mat", masks, _prov(), fs=FS,
-                              n_samples=int(DUR_S * FS),
+                              n_samples=N_SAMPLES, epoch_start_s=0.0, gate=OPEN,
                               events=[{"start": 19.5, "stop": 21.0, "judgement": "motion"}])
     m = loadmat(path)
     for name, value in m.items():
         if name.startswith("__") or value.dtype.kind in "U":
             continue
         assert_no_zero_runs(np.asarray(value, dtype=np.float64).ravel(), what=name)
-    assert {"blank_spikes_L_T", "blank_slow_wave_stomach_ref"} <= set(m)
-    assert m["blank_slow_wave_stomach_ref"].size == 0
-    spans = m["blank_spikes_L_T"]
-    pad = _settle("spikes").total_s
-    a = np.floor((20.0 - pad) / 0.01) * 0.01
-    assert spans[0, 0] == round(a * FS) + 1  # 1-based inclusive (invariant 15)
+    assert {"blank_spikes_L_T", "blank_slow_wave_ANT1", "blank_mmc_ANT1",
+            "notmeasured_mmc_ANT1"} <= set(m)
+    assert m["blank_slow_wave_ANT1"].size == 0
+    nm = m["notmeasured_mmc_ANT1"]
+    assert nm.shape == (1, 2)
+    assert nm[0, 0] == frame_sample_bounds(1500, 1501, FS)[0] + 1  # 30 s - 15 s
+    assert nm[0, 1] == frame_sample_bounds(4600, 4601, FS)[0]  # 31 s + 15 s, inclusive end
+    assert json.loads(str(m["gate_json"][0]))["held"] is False
     prov = MaskProvenance.from_json(str(m["provenance_json"][0]))
     assert prov.model["mode"] == "pooled"
 
 
 def test_a_mask_without_a_model_is_refused_on_write(tmp_path: Path) -> None:
     with pytest.raises(ProvenanceError, match="model"):
-        mk.write_mask_file(tmp_path / "x.mat", _eng_only_masks(), None, fs=FS,
-                           n_samples=int(DUR_S * FS))
-    with pytest.raises(ProvenanceError, match="model"):
-        _prov(model=None)
-    with pytest.raises(ProvenanceError, match="corpus_hash"):
-        _prov(model={k: v for k, v in MODEL.items() if k != "corpus_hash"})
+        mk.write_mask_file(tmp_path / "x.mat", _eng_only()[0], None, fs=FS,
+                           n_samples=N_SAMPLES, epoch_start_s=0.0, gate=OPEN)
     assert not list(tmp_path.iterdir())
 
 
-def test_provenance_names_the_model_rules() -> None:
-    with pytest.raises(ProvenanceError, match="POOLED"):
-        model_spec_record({**MODEL, "animal": "J"})
-    with pytest.raises(ProvenanceError, match="POOLED"):
-        model_spec_record({**MODEL, "mode": TrainingMode.PER_ANIMAL})
-    assert model_spec_record({**MODEL, "mode": "per_animal", "animal": "J"})["animal"] == "J"
-    for bad in ("C:/models/cal.json", "/abs/cal.json", "../cal.json", "G:\\x\\cal.json"):
-        with pytest.raises(ProvenanceError, match="calibrator"):
-            model_spec_record({**MODEL, "calibrator": bad})
-
-
-def test_provenance_accepts_a_model_spec_object() -> None:
-    """Task 12A's ModelSpec is not merged; any object with its attributes is accepted."""
-
-    class FakeSpec:
-        mode = TrainingMode.ADAPTED
-        animal = "J"
-        version = "1"
-        corpus_hash = "cd" * 16
-        calibrator = Path("models/a/cal.json")
-        trained_at = datetime(2026, 10, 8, tzinfo=UTC)
-        metrics: ClassVar = {"LOAO": {"f1": 0.9}}
-        n_train_events = 5
-
-    p = _prov(model=FakeSpec())
-    assert p.model["mode"] == "adapted" and p.model["calibrator"] == "models/a/cal.json"
-
-
-def _has_null(v: object) -> bool:
-    if v is None:
-        return True
-    if isinstance(v, dict):
-        return any(_has_null(x) for x in v.values())
-    if isinstance(v, list):
-        return any(_has_null(x) for x in v)
-    return False
-
-
-json_scalars = st.one_of(st.integers(-10**6, 10**6), st.text(max_size=8),
-                         st.floats(allow_nan=False, allow_infinity=False, width=32),
-                         st.booleans())
-
-
-@settings(max_examples=60, deadline=None)
-@given(thresholds=st.dictionaries(st.text(min_size=1, max_size=6), json_scalars, min_size=1,
-                                  max_size=4),
-       refs=st.dictionaries(st.text(min_size=1, max_size=6),
-                            st.lists(st.floats(allow_nan=False, allow_infinity=False,
-                                               width=32), max_size=3),
-                            min_size=1, max_size=4),
-       commit=st.text(alphabet="0123456789abcdef", min_size=7, max_size=40))
-def test_provenance_round_trips_exactly(
-    thresholds: dict[str, Any], refs: dict[str, Any], commit: str
-) -> None:
-    p = _prov(thresholds=thresholds, reference_values=refs, code_commit=commit)
-    text = p.to_json()
-    assert text.isascii()
-    assert not _has_null(json.loads(text))  # absent, never null (allow_nan=False bars NaN)
-    back = MaskProvenance.from_json(text)
-    assert back == p and back.to_json() == text
-    assert json.loads(text)["model"]["corpus_hash"] == MODEL["corpus_hash"]
-
-
-def test_provenance_absent_and_null_read_the_same_and_required_raises() -> None:
-    doc = json.loads(_prov().to_json())
-    doc["extra"] = None
-    assert MaskProvenance.from_json(json.dumps(doc)) == _prov()
-    del doc["routing_hash"]
-    with pytest.raises(ProvenanceError, match="routing_hash"):
-        MaskProvenance.from_json(json.dumps(doc))
+def test_the_event_table_carries_routes_judgement_and_model() -> None:
+    ev = Event(Candidate(1.0, 2.0, ("L_T",), ("300-3000", "100-300"), 9.0, "electrical"),
+               "motion", float("nan"), "human")
+    rows = mk.event_rows({"e": ev}, [RouteDecision("e", "spikes", "reject", "x"),
+                                     RouteDecision("e", "slow_wave", "correct", "y")], _prov())
+    (row,) = rows
+    assert row["routes"] == {"spikes": "reject", "slow_wave": "correct"}
+    assert row["bands"] == ["300-3000", "100-300"] and "p_motion" not in row
+    json.dumps(rows, allow_nan=False)
 
 
 # ---------------------------------------------------------------------------
-# QC
+# QC and the gate it enforces
 # ---------------------------------------------------------------------------
+
+
+def _masked(frac: float, consumer: str = "spikes", sig: str = "L_T") -> dict[Any, Any]:
+    return mk.build_masks({consumer: (sig,)},
+                          [mk.MaskSpan(consumer, sig, 0.0, frac * DUR_S, "x")],
+                          n_frames=N_FRAMES, t0_s=0.0)
 
 
 def test_the_retention_gate_fires_on_an_over_masked_recording() -> None:
-    over = mk.build_masks(SIGNALS, [mk.MaskSpan("spikes", "L_T", 0.0, 40.0, "x")], N_FRAMES)
+    over = _masked(0.7)
     v = qc.retention_gate(over, min_retention=0.5)
     assert v.flagged and list(v.below) == ["spikes|L_T|300-3000"]
-    assert not qc.retention_gate(_eng_only_masks(), min_retention=0.5).flagged
+    assert not qc.retention_gate(_eng_only()[0], min_retention=0.5).flagged
     with pytest.raises(ValueError, match="min_retention"):
         qc.retention_gate(over, min_retention=0.0)
 
 
-def _masked(frac: float) -> dict[Any, Any]:
-    return mk.build_masks({"spikes": ("L_T",)},
-                          [mk.MaskSpan("spikes", "L_T", 0.0, frac * DUR_S, "x")], N_FRAMES)
+def test_a_held_recording_is_written_only_with_a_release(tmp_path: Path) -> None:
+    over = _masked(0.7)
+    gate = qc.emit_gate(qc.blank_fraction_hold(over, {"spikes|L_T|300-3000": 0.1}),
+                        qc.retention_gate(over, min_retention=0.5))
+    assert gate.held and gate.retention_flagged and gate.blank_held
+    with pytest.raises(mk.RecordingHeldError, match="release"):
+        mk.write_mask_file(tmp_path / "x.mat", over, _prov(), fs=FS, n_samples=N_SAMPLES,
+                           epoch_start_s=0.0, gate=gate)
+    path = mk.write_mask_file(tmp_path / "x.mat", over, _prov(), fs=FS, n_samples=N_SAMPLES,
+                              epoch_start_s=0.0, gate=gate,
+                              release="Andrea 2026-10-08: anaesthesia lightened, keep")
+    g = json.loads(str(loadmat(path)["gate_json"][0]))
+    assert g["held"] and g["release"].startswith("Andrea") and g["reasons"]
 
 
 def test_a_blank_over_20_percent_is_held() -> None:
@@ -279,21 +280,47 @@ def test_a_blank_over_3x_the_animal_median_is_held() -> None:
     assert not qc.blank_fraction_hold(_masked(0.05), {"spikes|L_T|300-3000": 0.02}).held
 
 
-def test_an_unknown_animal_median_applies_the_20_percent_rule_alone() -> None:
-    assert not qc.blank_fraction_hold(_masked(0.10), {"spikes|L_T|300-3000": None}).held
+def test_a_zero_animal_median_is_floored() -> None:
+    """Median 0 would hold any blank at all; floored at 1%, 2% blank passes, 4% holds."""
+    assert not qc.blank_fraction_hold(_masked(0.02), {"spikes|L_T|300-3000": 0.0}).held
+    assert qc.blank_fraction_hold(_masked(0.04), {"spikes|L_T|300-3000": 0.0}).held
+
+
+def test_hr_consumers_are_keyed_by_consumer_and_band() -> None:
+    assert qc.median_key("hrv", "RVN2", "10-150") == "hrv|10-150"
+    assert qc.median_key("breathing", "LVN1", "0.5-3") == "breathing|0.5-3"
+    assert qc.median_key("spikes", "L_T", "300-3000") == "spikes|L_T|300-3000"
+    h = qc.blank_fraction_hold(_masked(0.10, "hrv", "LVN1"), {"hrv|10-150": 0.02})
+    assert h.held  # the median found under consumer|band whatever channel HR chose
+
+
+def test_an_unknown_median_is_always_reported() -> None:
+    h = qc.blank_fraction_hold(_masked(0.10), {"spikes|L_T|300-3000": None})
+    assert not h.held and any("median unknown" in n for n in h.notes)
     h = qc.blank_fraction_hold(_masked(0.30), {})
-    assert h.held and any("median unknown" in r for r in h.reasons)
+    assert h.held and any("median unknown" in n for n in h.notes)
+
+
+def test_top_reasons_count_reason_codes() -> None:
+    ds = [RouteDecision(f"e{i}", "spikes", "reject", f"peak {i} sigma", "in_band_eng")
+          for i in range(3)]
+    h = qc.blank_fraction_hold(_masked(0.30), {}, decisions=ds)
+    assert h.top_routes == (("in_band_eng", 3),)
 
 
 def test_the_qc_report_leaves_missing_quantities_absent() -> None:
+    masks = _eng_only()[0]
     r = qc.QcReport(recording="rec1", candidate_count=12,
-                    blank_fraction_by_band=qc.blank_fraction_by_band(_eng_only_masks()),
-                    retention=qc.retention_by_key(_eng_only_masks()), retention_flagged=False,
-                    held=False, rpeak_gap_fraction=float("nan"), best_hr_channel=None)
+                    blank_fraction_by_band=qc.blank_fraction_by_band(masks),
+                    retention=qc.retention_by_key(masks), retention_flagged=False,
+                    held=False, rpeak_gap_fraction=float("nan"), best_hr_channel=None,
+                    mmc_not_measured_fraction={"ANT1": 0.1},
+                    hold_notes=("animal median unknown for x",))
     rec = json.loads(r.to_json())
     for absent in ("rpeak_gap_fraction", "best_hr_channel", "low_confidence_velocity_windows"):
         assert absent not in rec
     assert rec["candidate_count"] == 12 and "spikes|L_T|300-3000" in rec["retention"]
+    assert rec["mmc_not_measured_fraction"] == {"ANT1": 0.1} and rec["hold_notes"]
 
 
 def test_the_longitudinal_table_is_one_animal_append_only(tmp_path: Path) -> None:
@@ -306,15 +333,3 @@ def test_the_longitudinal_table_is_one_animal_append_only(tmp_path: Path) -> Non
     assert raw.count(b"\n") == 2 and b"\r" not in raw
     with pytest.raises(ValueError, match="another animal"):
         qc.append_longitudinal(path, qc.LongitudinalRow("H", "s1", "x", {}, {}, {}, {}))
-
-
-def test_the_event_table_carries_routes_judgement_and_model() -> None:
-    ev = Event(Candidate(1.0, 2.0, ("L_T",), ("300-3000", "100-300"), 9.0, "electrical"),
-               "motion", float("nan"), "human")
-    rows = mk.event_rows({"e": ev}, [RouteDecision("e", "spikes", "reject", "x"),
-                                     RouteDecision("e", "slow_wave", "correct", "y")], _prov())
-    (row,) = rows
-    assert row["routes"] == {"spikes": "reject", "slow_wave": "correct"}
-    assert row["bands"] == ["300-3000", "100-300"] and "p_motion" not in row
-    assert row["model_version"] == "0.3.0"
-    json.dumps(rows, allow_nan=False)

@@ -10,8 +10,16 @@ Two gates, both refusing to emit a heavily masked recording silently:
   animal's median, is held - listed for Andrea with its top reasons and the hum features
   - and she releases or overrides it. "Total blank" is taken per consumer mask (masks
   are never merged, invariant 2): the recording is held if ANY consumer's blank does
-  either. An animal median that is unknown (``None``, e.g. the animal's first
-  recording) applies the 20% rule alone and says so.
+  either. Medians are keyed by :func:`median_key`: ``consumer|signal|band``, except
+  ``hrv`` and ``breathing``, whose signal is whichever channel the HR ranking chose in
+  that recording, so they are keyed ``consumer|band``. A median is floored at
+  :data:`HOLD_MEDIAN_FLOOR` before the 3x rule (otherwise an animal whose median is 0
+  holds every recording with any blank). A median that is unknown (``None``, e.g. the
+  animal's first recording) applies the 20% rule alone, and the report ALWAYS says so,
+  held or not.
+
+The two gates combine into :func:`emit_gate`, which ``emit.masks.write_mask_file``
+enforces: a held recording is written only with an explicit release.
 
 The QC report (:class:`QcReport`) carries what the spec lists; a quantity a recording
 does not have (velocity windows while task 18 is out, R5) is ABSENT from its record,
@@ -32,12 +40,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
-from gems_blanking_v2.emit.masks import ConsumerMask, MaskKey
+from gems_blanking_v2.emit.masks import ConsumerMask, EmitGate, MaskKey
 from gems_blanking_v2.extent.routing import RouteDecision
 from gems_blanking_v2.io.store import append_line
 
 __all__ = [
     "HOLD_BLANK_FRACTION",
+    "HOLD_MEDIAN_FLOOR",
     "HOLD_MEDIAN_RATIO",
     "BlankHold",
     "LongitudinalRow",
@@ -46,6 +55,8 @@ __all__ = [
     "append_longitudinal",
     "blank_fraction_by_band",
     "blank_fraction_hold",
+    "emit_gate",
+    "median_key",
     "retention_by_key",
     "retention_gate",
 ]
@@ -54,6 +65,18 @@ HOLD_BLANK_FRACTION: Final = 0.20
 """Ruling (c) item 5: a blank above 20% of the recording is held for Andrea."""
 HOLD_MEDIAN_RATIO: Final = 3.0
 """Ruling (c) item 5: a blank above 3x the animal's median is held for Andrea."""
+HOLD_MEDIAN_FLOOR: Final = 0.01
+"""The animal median is floored at 1% before the 3x rule: below that, 3x is under 3% of
+the recording, which is not the outlier the rule exists to catch. Chosen here, not
+ruled - provisional."""
+HR_KEYED_BY_BAND: Final[frozenset[str]] = frozenset({"hrv", "breathing"})
+
+
+def median_key(consumer: str, signal: str, band: str) -> str:
+    """Return the key an animal median is stored under (see the module docstring)."""
+    if consumer in HR_KEYED_BY_BAND:
+        return f"{consumer}|{band}"
+    return f"{consumer}|{signal}|{band}"
 
 
 def _key(k: MaskKey) -> str:
@@ -93,6 +116,7 @@ class BlankHold:
     blank_fraction: Mapping[str, float]
     top_routes: tuple[tuple[str, int], ...] = ()
     hum_features: Mapping[str, float] = field(default_factory=dict)
+    notes: tuple[str, ...] = ()
 
 
 def blank_fraction_hold(
@@ -101,28 +125,42 @@ def blank_fraction_hold(
 ) -> BlankHold:
     """Hold the recording if any consumer mask blanks > 20% or > 3x the animal's median.
 
-    ``animal_median`` maps ``consumer|signal|band`` to the animal's median blank fraction
-    for that mask, or ``None`` when unknown.
+    ``animal_median`` maps :func:`median_key` to the animal's median blank fraction for
+    that mask, or ``None`` when unknown. Top reasons are counted by routing reason code.
     """
-    frac = {k: 1.0 - r for k, r in retention_by_key(masks).items()}
+    frac = {_key(k): 1.0 - m.retention for k, m in sorted(masks.items())}
     reasons: list[str] = []
-    for k, f in frac.items():
+    unknown: list[str] = []
+    for (consumer, signal, band), m in sorted(masks.items()):
+        f = 1.0 - m.retention
+        k = _key((consumer, signal, band))
         if f > HOLD_BLANK_FRACTION:
             reasons.append(f"{k}: {100 * f:.1f}% blanked > {100 * HOLD_BLANK_FRACTION:.0f}%")
-        med = animal_median.get(k)
+        mk = median_key(consumer, signal, band)
+        med = animal_median.get(mk)
         if med is None:
+            unknown.append(mk)
             continue
-        if f > HOLD_MEDIAN_RATIO * med:
+        floor = max(float(med), HOLD_MEDIAN_FLOOR)
+        if f > HOLD_MEDIAN_RATIO * floor:
             reasons.append(f"{k}: {100 * f:.1f}% blanked > {HOLD_MEDIAN_RATIO:g} x the "
-                           f"animal median {100 * med:.1f}%")
-    unknown = sorted(k for k in frac if animal_median.get(k) is None)
+                           f"animal median {100 * floor:.1f}%")
     held = bool(reasons)
-    if held and unknown:
-        reasons.append(f"animal median unknown for {unknown}: the 3x rule was not applied")
-    routes = Counter(d.reason.split(":")[0] if d.route == "reject" else d.route
-                     for d in decisions if d.masks)
+    notes = tuple(f"animal median unknown for {mk}: the 3x rule was not applied"
+                  for mk in sorted(set(unknown)))
+    routes = Counter(d.reason_code or d.route for d in decisions if d.masks)
     return BlankHold(held, tuple(reasons), frac, tuple(routes.most_common(5)),
-                     dict(hum_features or {}))
+                     dict(hum_features or {}), notes)
+
+
+def emit_gate(hold: BlankHold, retention: RetentionVerdict) -> EmitGate:
+    """Combine the two gates into what ``write_mask_file`` enforces."""
+    reasons = list(hold.reasons)
+    if retention.flagged:
+        reasons += [f"{k}: retention {r:.3f} < {retention.min_retention:g}"
+                    for k, r in sorted(retention.below.items())]
+    return EmitGate(hold.held or retention.flagged, tuple(reasons), retention.flagged,
+                    hold.held)
 
 
 def _present(d: Mapping[str, Any]) -> dict[str, Any]:
@@ -156,11 +194,14 @@ class QcReport:
     low_confidence_velocity_windows: Sequence[Mapping[str, float]] | None = None
     rescue_rate_by_channel: Mapping[str, float] = field(default_factory=dict)
     resolution_s_by_band: Mapping[str, float] = field(default_factory=dict)
+    mmc_not_measured_fraction: Mapping[str, float] = field(default_factory=dict)
+    hold_notes: Sequence[str] = ()
 
     def to_record(self) -> dict[str, Any]:
         """JSON-ready, with absent keys for anything missing."""
         rec = asdict(self)
         rec["hold_reasons"] = list(self.hold_reasons)
+        rec["hold_notes"] = list(self.hold_notes)
         rec["sustained_review_queue"] = [dict(x) for x in self.sustained_review_queue]
         if self.low_confidence_velocity_windows is None:
             rec.pop("low_confidence_velocity_windows")

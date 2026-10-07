@@ -63,8 +63,8 @@ def _case(
     # Between z_exit (1.5) and the tolerance across the whole candidate; over it at the mark.
     eng = make_band_z("300-3000", 60.0, bumps=((cand[0], cand[1], 2.5, "L_T"),
                                                (mark[0], mark[1], 9.0, "L_T")), signal="L_T")
-    slow = make_band_z("0-2", 60.0, bumps=((cand[0], cand[1], 2.0, "s"),), signal="stomach_ref")
-    return ev, {("L_T", "300-3000"): eng.z_max, ("stomach_ref", "0-2"): slow.z_max}
+    slow = make_band_z("0-2", 60.0, bumps=((cand[0], cand[1], 2.0, "s"),), signal="ANT1")
+    return ev, {("L_T", "300-3000"): eng.z_max, ("ANT1", "0-2"): slow.z_max}
 
 
 @pytest.mark.parametrize(("cand", "mark"), [((18.0, 21.0), (19.4, 19.6)),
@@ -88,6 +88,6 @@ def test_the_spike_extent_follows_the_mark_not_the_candidate(
 
 def test_slow_consumers_report_their_resolution() -> None:
     ev, z = _case((18.0, 21.0), (19.4, 19.6))
-    assert tl.compute_extent(ev, z, "slow_wave", signal="stomach_ref", tolerances=TOL, fs=FS,
+    assert tl.compute_extent(ev, z, "slow_wave", signal="ANT1", tolerances=TOL, fs=FS,
                              z_t0_s=0.0) is None
     assert BANDS["0-2"].window_s == 7.5  # the resolution any slow_wave extent carries

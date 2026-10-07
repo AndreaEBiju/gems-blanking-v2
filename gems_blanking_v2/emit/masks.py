@@ -8,17 +8,30 @@ Rules applied:
   merge is inside ``velocity``, which needs ``V1`` AND ``V3`` valid
   (:func:`velocity_mask`); task 18 is out of this build (ruling (b) R5), so
   :func:`build_masks` emits no velocity mask unless asked.
+* **One timeline.** Extents, routing spans and distrusted spans are seconds on the
+  RECORDING's timeline. A mask's grid starts at its own ``t0_s`` (the epoch start on
+  that timeline): frame ``i`` covers ``[t0_s + i g, t0_s + (i + 1) g)``. The MATLAB file
+  indexes the epoch from its first sample, so every mask written must have
+  ``t0_s == epoch_start_s`` and exactly ``floor(n_samples / fs / g)`` frames - checked,
+  never assumed.
+* **One frame-to-sample conversion** (invariants 15, 33): ``extent.grid`` - the sample
+  mask, the MATLAB spans and the clip test all use it, so they agree on every boundary
+  sample, the inclusive END included.
 * **Masked samples are NaN, never 0** (hard invariant 1): :func:`apply_mask` writes NaN,
   and a cosine taper of :data:`TAPER_S` on the valid side of each boundary whose weight
-  never reaches zero; every emitted signal array is checked with
-  ``io.nan_interop.assert_no_zero_runs``.
+  never reaches zero; every emitted array is checked for exact-zero runs. **The taper is
+  Python-side only**: the MATLAB file carries blank spans, which cannot carry a taper,
+  and ``step1_bandpass.m`` treats every sample outside them as fully valid.
 * **The routing table's ``distrusted_spans``** (ruling 2026-10-03) become part of the
-  spike consumer's mask for that cuff, and a ``line_noise`` route's per-minute cuff
-  distrust (ruling (c) item 4) does too - for the spike consumer only.
-* **The index boundary converts once**: spans written for MATLAB are 1-based inclusive
-  samples via ``emit.hr_beats.to_blank_spans`` (invariant 15), the blankSpans
-  convention.
-* **A mask file whose provenance does not name a model is refused on write.**
+  spike consumer's mask for that cuff, a cuff distrusted outright (route
+  ``distrusted``) gets a wholly invalid spike mask, and a ``line_noise`` route's
+  per-minute cuff distrust (ruling (c) item 4) joins the spike mask - for the spike
+  consumer only.
+* **R6**: mmc output within +/-15 s of any of its blanks is "not measured"; those spans
+  are written beside the mmc masks (``notmeasured_mmc_<signal>``), not into them.
+* **The file is refused** when its provenance does not name a model, and when QC holds
+  the recording (retention gate, or the 20% / 3x blank hold) unless an explicit
+  ``release`` is given; the gate and the release are written into the file.
 
 OUTSIDE THE GENERATION HASH.
 """
@@ -37,18 +50,20 @@ import numpy.typing as npt
 from scipy.io import savemat
 
 from gems_blanking_v2.constants import GRID_S
-from gems_blanking_v2.emit.hr_beats import to_blank_spans
 from gems_blanking_v2.emit.provenance import MaskProvenance, ProvenanceError
+from gems_blanking_v2.extent.grid import frame_sample_bounds, n_grid_frames, to_matlab_inclusive
 from gems_blanking_v2.extent.routing import RouteDecision
-from gems_blanking_v2.extent.tolerance import Extent, extent_consumers
+from gems_blanking_v2.extent.tolerance import Extent, extent_consumers, mmc_not_measured_spans
 from gems_blanking_v2.io.nan_interop import assert_no_zero_runs
 from gems_blanking_v2.types import Event
 
 __all__ = [
     "TAPER_S",
     "ConsumerMask",
+    "EmitGate",
     "MaskKey",
     "MaskSpan",
+    "RecordingHeldError",
     "apply_mask",
     "build_masks",
     "distrusted_spike_spans",
@@ -56,7 +71,9 @@ __all__ = [
     "frames_to_samples",
     "line_noise_spike_spans",
     "mask_frames",
+    "mask_sample_spans",
     "masked_spans_s",
+    "mmc_not_measured",
     "spans_from_routing",
     "velocity_mask",
     "write_mask_file",
@@ -70,14 +87,17 @@ MaskKey = tuple[str, str, str]
 MATLAB_NAME_MAX: Final = 63
 """MATLAB's ``namelengthmax``."""
 
+T0_TOLERANCE_S: Final = 1e-9
+"""Two grid origins closer than this are the same origin (float noise only)."""
+
 TAPER_S: Final = 0.0075
 """Cosine taper on the valid side of each mask boundary, seconds: the middle of the
-spec's 5-10 ms."""
+spec's 5-10 ms. Applied by :func:`apply_mask` only (see the module docstring)."""
 
 
 @dataclass(frozen=True, slots=True)
 class MaskSpan:
-    """One span to mask for one consumer on one signal, seconds, half-open, with why."""
+    """One span to mask for one consumer on one signal: recording-timeline seconds."""
 
     consumer: str
     signal: str
@@ -88,13 +108,14 @@ class MaskSpan:
 
 @dataclass(frozen=True)
 class ConsumerMask:
-    """One consumer's mask on one signal: frames on the grid, ``True`` = invalid."""
+    """One consumer's mask on one signal: frames from ``t0_s``, ``True`` = invalid."""
 
     consumer: str
     signal: str
     band: str
     invalid: Bool
     grid_s: float
+    t0_s: float
 
     @property
     def key(self) -> MaskKey:
@@ -107,16 +128,17 @@ class ConsumerMask:
         return 1.0 - float(self.invalid.mean()) if self.invalid.size else math.nan
 
 
-def mask_frames(spans: Iterable[tuple[float, float]], n_frames: int,
+def mask_frames(spans: Iterable[tuple[float, float]], n_frames: int, *, t0_s: float,
                 grid_s: float = GRID_S) -> Bool:
-    """Frames overlapping any half-open span ``[a, b)``: frame ``i`` is ``[i g, (i+1) g)``."""
+    """Frames overlapping any span ``[a, b)`` (recording s); frame i is ``[t0 + i g, ...)``."""
     out = np.zeros(n_frames, dtype=bool)
     for a, b in spans:
         if not b > a:
             continue
-        i0 = max(0, int(math.floor(a / grid_s)))
-        i1 = min(n_frames, int(math.ceil(b / grid_s)))
-        out[i0:i1] = True
+        i0 = max(0, int(math.floor((a - t0_s) / grid_s)))
+        i1 = min(n_frames, int(math.ceil((b - t0_s) / grid_s)))
+        if i1 > i0:
+            out[i0:i1] = True
     return out
 
 
@@ -136,24 +158,27 @@ def spans_from_routing(extents: Iterable[tuple[str, Extent]],
             raise KeyError(msg)
         if d.masks:
             out.append(MaskSpan(ext.consumer, ext.signal, ext.start_s, ext.stop_s,
-                                f"{d.route}: {d.reason}"))
+                                d.reason_code or d.route))
     return out
 
 
-def distrusted_spike_spans(entry: Mapping[str, Any], region_start_s: float
-                           ) -> list[MaskSpan]:
-    """Return the routing entry's per-minute cuff distrust as spike-consumer spans.
+def distrusted_spike_spans(entry: Mapping[str, Any], *, region_start_s: float,
+                           region_stop_s: float) -> list[MaskSpan]:
+    """Return the routing entry's spike distrust as spike-consumer spans (recording s).
 
-    Ruling 2026-10-03 item 2: a cuff's ``distrusted_spans`` (region-relative, half-open
-    seconds) become part of the spike consumer's mask for that cuff - and of no other
-    consumer's. ``region_start_s`` places them on the recording's timeline.
+    Ruling 2026-10-03: a cuff's ``distrusted_spans`` (region-relative, half-open s) join
+    the spike consumer's mask for that cuff. A cuff whose route is ``distrusted`` outright
+    is invalid for the spike consumer over the whole region. No other consumer is touched.
     """
     out: list[MaskSpan] = []
     for cuff, s in sorted(entry.get("spike", {}).items()):
+        if s.get("route") == "distrusted":
+            out.append(MaskSpan("spikes", f"{cuff}_T", region_start_s, region_stop_s,
+                                "cuff_distrusted"))
+            continue
         for a, b in s.get("distrusted_spans", []):
             out.append(MaskSpan("spikes", f"{cuff}_T", region_start_s + float(a),
-                                region_start_s + float(b),
-                                "per-minute cuff distrust (ruling 2026-10-03)"))
+                                region_start_s + float(b), "per_minute_cuff_distrust"))
     return out
 
 
@@ -162,15 +187,14 @@ def line_noise_spike_spans(cuff: str, minutes_s: Iterable[tuple[float, float]]
     """Return line-noise minutes as spike-consumer mask spans for that cuff only.
 
     Ruling (c) item 4: the minutes where a cuff's mains-locked spike fraction exceeds its
-    threshold.
+    threshold (recording s).
     """
-    return [MaskSpan("spikes", f"{cuff}_T", float(a), float(b),
-                     "line noise: per-minute cuff distrust (ruling (c) 4)")
+    return [MaskSpan("spikes", f"{cuff}_T", float(a), float(b), "line_noise_cuff_minute")
             for a, b in minutes_s]
 
 
-def build_masks(signals: Mapping[str, Sequence[str]], spans: Iterable[MaskSpan],
-                n_frames: int, *, grid_s: float = GRID_S,
+def build_masks(signals: Mapping[str, Sequence[str]], spans: Iterable[MaskSpan], *,
+                n_frames: int, t0_s: float, grid_s: float = GRID_S,
                 include_velocity: bool = False) -> dict[MaskKey, ConsumerMask]:
     """One mask per ``(consumer, signal, band)`` from that consumer's spans alone.
 
@@ -191,8 +215,8 @@ def build_masks(signals: Mapping[str, Sequence[str]], spans: Iterable[MaskSpan],
             continue
         band = specs[consumer].band
         for sig in names:
-            m = ConsumerMask(consumer, sig, band,
-                             mask_frames(by.get((consumer, sig), []), n_frames, grid_s), grid_s)
+            inv = mask_frames(by.get((consumer, sig), []), n_frames, t0_s=t0_s, grid_s=grid_s)
+            m = ConsumerMask(consumer, sig, band, inv, grid_s, t0_s)
             out[m.key] = m
     return out
 
@@ -206,27 +230,43 @@ def velocity_mask(v1: ConsumerMask, v3: ConsumerMask) -> ConsumerMask:
             and v1.signal[:-3] == v3.signal[:-3]):
         msg = f"need one cuff's V1 and V3, got {v1.signal} and {v3.signal}"
         raise ValueError(msg)
-    if v1.invalid.shape != v3.invalid.shape:
+    if v1.invalid.shape != v3.invalid.shape or v1.t0_s != v3.t0_s:
         msg = "V1 and V3 masks must be on the same grid"
         raise ValueError(msg)
     return ConsumerMask("velocity", f"{v1.signal[:-3]}_V1V3", v1.band, v1.invalid | v3.invalid,
-                        v1.grid_s)
+                        v1.grid_s, v1.t0_s)
+
+
+def _runs(invalid: Bool) -> list[tuple[int, int]]:
+    d = np.diff(np.concatenate(([0], invalid.astype(np.int8), [0])))
+    return list(zip(np.flatnonzero(d == 1).tolist(), np.flatnonzero(d == -1).tolist(),
+                    strict=True))
+
+
+def mask_sample_spans(invalid: Bool, fs: float, n_samples: int, grid_s: float = GRID_S
+                      ) -> list[tuple[int, int]]:
+    """Return the invalid runs as 0-based half-open epoch samples, via ``extent.grid``.
+
+    A run reaching the last whole frame extends to ``n_samples``: the samples of the
+    dropped partial frame take the last frame's state.
+    """
+    out: list[tuple[int, int]] = []
+    for i0, i1 in _runs(invalid):
+        k0, k1 = frame_sample_bounds(i0, i1, fs, grid_s)
+        if i1 == invalid.size:
+            k1 = n_samples
+        k0, k1 = min(k0, n_samples), min(k1, n_samples)
+        if k1 > k0:
+            out.append((k0, k1))
+    return out
 
 
 def frames_to_samples(invalid: Bool, fs: float, n_samples: int, grid_s: float = GRID_S
                       ) -> Bool:
-    """Frame mask to sample mask: frame ``i`` covers samples ``[ceil(i g fs), ceil((i+1) g fs))``.
-
-    Samples after the last whole frame (the dropped partial frame) take the last frame's
-    state.
-    """
+    """Frame mask to sample mask, through the same conversion the MATLAB spans use."""
     out = np.zeros(n_samples, dtype=bool)
-    for i in np.flatnonzero(invalid):
-        a = int(math.ceil(i * grid_s * fs))
-        b = int(math.ceil((i + 1) * grid_s * fs))
-        out[a:min(b, n_samples)] = True
-    if invalid.size and invalid[-1]:
-        out[int(math.ceil(invalid.size * grid_s * fs)):] = True
+    for k0, k1 in mask_sample_spans(invalid, fs, n_samples, grid_s):
+        out[k0:k1] = True
     return out
 
 
@@ -234,10 +274,11 @@ def apply_mask(x: npt.ArrayLike, fs: float, invalid: Bool, *, grid_s: float = GR
                taper_s: float = TAPER_S, what: str = "masked signal") -> F64:
     """Return a copy of ``x`` with masked samples NaN and a cosine taper beside each run.
 
-    The taper weight ``0.5 (1 - cos(pi (d + 1) / (L + 1)))`` at distance ``d`` samples
-    from the run (``L`` = taper length) is strictly between 0 and 1, so the taper never
-    writes a zero. The output is checked for exact-zero runs (invariant 1). The input is
-    never modified (it may be a read-only view, invariant 17).
+    ``x[0]`` is the mask's frame-0 sample. The taper weight
+    ``0.5 (1 - cos(pi (d + 1) / (L + 1)))`` at distance ``d`` samples from the run
+    (``L`` = taper length) is strictly between 0 and 1, so it never writes a zero. The
+    output is checked for exact-zero runs (invariant 1). The input is never modified (it
+    may be a read-only view, invariant 17).
     """
     out = np.array(x, dtype=np.float64, copy=True)
     bad = frames_to_samples(invalid, fs, out.size, grid_s) | ~np.isfinite(out)
@@ -258,11 +299,36 @@ def apply_mask(x: npt.ArrayLike, fs: float, invalid: Bool, *, grid_s: float = GR
     return out
 
 
-def masked_spans_s(invalid: Bool, grid_s: float = GRID_S) -> list[tuple[float, float]]:
-    """Return the mask's invalid runs as half-open ``[a, b)`` seconds."""
-    d = np.diff(np.concatenate(([0], invalid.astype(np.int8), [0])))
-    return [(a * grid_s, b * grid_s) for a, b in
-            zip(np.flatnonzero(d == 1).tolist(), np.flatnonzero(d == -1).tolist(), strict=True)]
+def masked_spans_s(m: ConsumerMask) -> list[tuple[float, float]]:
+    """Return the mask's invalid runs as half-open recording-timeline seconds."""
+    return [(m.t0_s + a * m.grid_s, m.t0_s + b * m.grid_s) for a, b in _runs(m.invalid)]
+
+
+def mmc_not_measured(masks: Mapping[MaskKey, ConsumerMask]) -> dict[str, Bool]:
+    """R6: per mmc signal, the frames within +/-15 s of any of that signal's mmc blanks."""
+    out: dict[str, Bool] = {}
+    for (consumer, sig, _band), m in masks.items():
+        if consumer != "mmc":
+            continue
+        dur = m.invalid.size * m.grid_s
+        rel = [(a - m.t0_s, b - m.t0_s) for a, b in masked_spans_s(m)]
+        spans = [(m.t0_s + a, m.t0_s + b) for a, b in mmc_not_measured_spans(rel, dur)]
+        out[sig] = mask_frames(spans, m.invalid.size, t0_s=m.t0_s, grid_s=m.grid_s)
+    return out
+
+
+@dataclass(frozen=True)
+class EmitGate:
+    """QC's verdict for one recording (``emit.qc.emit_gate``): held or not, and why."""
+
+    held: bool
+    reasons: tuple[str, ...]
+    retention_flagged: bool
+    blank_held: bool
+
+
+class RecordingHeldError(RuntimeError):
+    """QC holds the recording; it is emitted only with an explicit release."""
 
 
 def event_rows(events: Mapping[str, Event], decisions: Iterable[RouteDecision],
@@ -300,37 +366,67 @@ def _matlab_name(prefix: str, consumer: str, signal: str) -> str:
     return name
 
 
+def _matlab_spans(invalid: Bool, fs: float, n_samples: int, grid_s: float, what: str) -> F64:
+    spans = mask_sample_spans(invalid, fs, n_samples, grid_s)
+    if not spans:
+        return np.zeros((0, 2), dtype=np.float64)
+    out = to_matlab_inclusive([a for a, _ in spans], [b for _, b in spans])
+    assert_no_zero_runs(out.ravel(), what=what)
+    return out
+
+
 def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
                     provenance: MaskProvenance | None, *, fs: float, n_samples: int,
-                    epoch_start_s: float = 0.0,
+                    epoch_start_s: float, gate: EmitGate, release: str | None = None,
                     events: Sequence[Mapping[str, Any]] = ()) -> Path:
-    """Write the masks as MATLAB blankSpans (1-based inclusive) with their provenance.
+    """Write the masks as MATLAB blank spans (1-based inclusive) with their provenance.
 
     One ``blank_<consumer>_<signal>`` (N x 2, 1-based inclusive samples into the epoch)
-    per mask key - never a merged one - plus ``provenance_json``, ``events_json`` (the
-    event table) and ``retention_json``. Refuses provenance that does not name a model,
-    and checks every numeric array for exact-zero runs (invariant 1).
+    per mask key - never a merged one - plus ``notmeasured_mmc_<signal>`` (R6),
+    ``provenance_json``, ``events_json``, ``retention_json`` and ``gate_json``.
+
+    Refuses: provenance that does not name a model; a held recording without a
+    ``release`` (who released it and why); a mask whose grid does not start at
+    ``epoch_start_s`` or does not have ``floor(n_samples / fs / grid)`` frames. Every
+    numeric array is checked for exact-zero runs (invariant 1).
     """
     if provenance is None:
         msg = "a mask file must carry provenance naming its model (task 15); none given"
         raise ProvenanceError(msg)
     provenance.validate()
+    if gate.held and not release:
+        msg = ("QC holds this recording (" + "; ".join(gate.reasons) + "); emit it only "
+               "with an explicit release naming who released it and why")
+        raise RecordingHeldError(msg)
     doc: dict[str, Any] = {}
     retention: dict[str, float] = {}
     for (consumer, signal, band), m in sorted(masks.items()):
-        spans_s = [(epoch_start_s + a, epoch_start_s + b)
-                   for a, b in masked_spans_s(m.invalid, m.grid_s)]
-        spans = to_blank_spans(np.asarray(spans_s, dtype=np.float64).reshape(-1, 2), fs,
-                               epoch_start_s, n_samples)
-        if spans.size:
-            assert_no_zero_runs(spans.ravel(), what=f"blank spans {consumer}/{signal}")
-        doc[_matlab_name("blank", consumer, signal)] = spans
+        if abs(m.t0_s - epoch_start_s) > T0_TOLERANCE_S:
+            msg = (f"{consumer}/{signal}: mask grid starts at {m.t0_s} s but the file indexes "
+                   f"the epoch from {epoch_start_s} s")
+            raise ValueError(msg)
+        want = n_grid_frames(n_samples, fs, m.grid_s)
+        if m.invalid.size != want:
+            msg = f"{consumer}/{signal}: {m.invalid.size} frames for an epoch of {want}"
+            raise ValueError(msg)
+        doc[_matlab_name("blank", consumer, signal)] = _matlab_spans(
+            m.invalid, fs, n_samples, m.grid_s, f"blank spans {consumer}/{signal}")
         retention[f"{consumer}|{signal}|{band}"] = m.retention
+    for sig, frames in sorted(mmc_not_measured(masks).items()):
+        doc[_matlab_name("notmeasured", "mmc", sig)] = _matlab_spans(
+            frames, fs, n_samples, masks[("mmc", sig, extent_consumers()["mmc"].band)].grid_s,
+            f"not-measured spans mmc/{sig}")
+    gate_doc: dict[str, Any] = {"held": gate.held, "reasons": list(gate.reasons),
+                                "retention_flagged": gate.retention_flagged,
+                                "blank_held": gate.blank_held}
+    if release:
+        gate_doc["release"] = release
     doc["provenance_json"] = provenance.to_json()
     doc["events_json"] = json.dumps(list(events), sort_keys=True, ensure_ascii=True,
                                     allow_nan=False)
     doc["retention_json"] = json.dumps(retention, sort_keys=True, ensure_ascii=True,
                                        allow_nan=False)
+    doc["gate_json"] = json.dumps(gate_doc, sort_keys=True, ensure_ascii=True)
     doc["fs"] = float(fs)
     doc["epochStart_s"] = float(epoch_start_s)
     doc["nSamples"] = float(n_samples)
