@@ -74,7 +74,7 @@ from scipy.stats import poisson
 
 from gems_blanking_v2.bands.envelope import _band_limit, _decimate_for
 from gems_blanking_v2.constants import BANDS, ENG_BAND, GRID_S, MAD_TO_SIGMA
-from gems_blanking_v2.extent.grid import frame_sample_bounds, n_grid_frames
+from gems_blanking_v2.extent.grid import T0_TOLERANCE_S, frame_sample_bounds, n_grid_frames
 from gems_blanking_v2.extent.tolerance import ToleranceTable, extent_consumers
 
 __all__ = [
@@ -308,7 +308,7 @@ def in_band_verdict(ev: EventEvidence, consumer: str, tolerances: ToleranceTable
         if tr is None:
             msg = f"{consumer} routes on the shared ENG trace; EventEvidence.eng is missing"
             raise ValueError(msg)
-        if tr.signal != ev.signal or abs(tr.t0_s - ev.x_t0_s) > 1e-9:  # noqa: PLR2004
+        if tr.signal != ev.signal or abs(tr.t0_s - ev.x_t0_s) > T0_TOLERANCE_S:
             msg = (f"the ENG trace is {tr.signal}@{tr.t0_s} s but the event reads "
                    f"{ev.signal}@{ev.x_t0_s} s: never one signal's sigma for another "
                    "(invariant 3)")

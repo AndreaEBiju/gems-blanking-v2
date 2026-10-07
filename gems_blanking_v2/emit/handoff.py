@@ -29,7 +29,7 @@ from scipy.io import savemat
 from gems_blanking_v2.emit.masks import ConsumerMask, MaskKey, mask_sample_spans, mmc_not_measured
 from gems_blanking_v2.emit.provenance import MaskProvenance, ProvenanceError
 from gems_blanking_v2.emit.qc import emit_gate
-from gems_blanking_v2.extent.grid import n_grid_frames, to_matlab_inclusive
+from gems_blanking_v2.extent.grid import T0_TOLERANCE_S, n_grid_frames, to_matlab_inclusive
 from gems_blanking_v2.extent.routing import RouteDecision
 from gems_blanking_v2.extent.tolerance import extent_consumers
 from gems_blanking_v2.io.nan_interop import assert_no_zero_runs
@@ -40,8 +40,6 @@ F64 = npt.NDArray[np.float64]
 Bool = npt.NDArray[np.bool_]
 MATLAB_NAME_MAX: Final = 63
 """MATLAB's ``namelengthmax``."""
-T0_TOLERANCE_S: Final = 1e-9
-"""Two grid origins closer than this are the same origin (float noise only)."""
 
 
 class RecordingHeldError(RuntimeError):
@@ -64,6 +62,31 @@ def _matlab_spans(invalid: Bool, fs: float, n_samples: int, grid_s: float, what:
     out = to_matlab_inclusive([a for a, _ in spans], [b for _, b in spans])
     assert_no_zero_runs(out.ravel(), what=what)
     return out
+
+
+def _check_coverage(masks: Mapping[MaskKey, ConsumerMask],
+                    signals: Mapping[str, Sequence[str]]) -> None:
+    """Raise unless ``masks`` cover exactly what the recording reads, on the right bands."""
+    consumers = extent_consumers()
+    required = sorted(c for c in consumers if c != "velocity")
+    absent = [c for c in required if c not in signals]
+    if absent:
+        msg = (f"signals must name every consumer the recording could read (an empty tuple "
+               f"where it reads none); missing {absent}")
+        raise ValueError(msg)
+    if not masks:
+        msg = "refusing to write a mask file with no masks"
+        raise ValueError(msg)
+    wrong_band = sorted(f"{c}/{s}: {b}" for c, s, b in masks if b != consumers[c].band)
+    if wrong_band:
+        msg = f"masks on the wrong band for their consumer: {wrong_band}"
+        raise ValueError(msg)
+    want_keys = {(c, s) for c, names in signals.items() if c != "velocity" for s in names}
+    have_keys = {(c, s) for c, s, _b in masks if c != "velocity"}
+    if want_keys != have_keys:
+        msg = (f"masks do not cover what this recording reads: missing "
+               f"{sorted(want_keys - have_keys)}, unexpected {sorted(have_keys - want_keys)}")
+        raise ValueError(msg)
 
 
 def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
@@ -92,12 +115,7 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
         msg = "a mask file must carry provenance naming its model (task 15); none given"
         raise ProvenanceError(msg)
     provenance.validate()
-    want_keys = {(c, s) for c, names in signals.items() if c != "velocity" for s in names}
-    have_keys = {(c, s) for c, s, _b in masks if c != "velocity"}
-    if want_keys != have_keys:
-        msg = (f"masks do not cover what this recording reads: missing "
-               f"{sorted(want_keys - have_keys)}, unexpected {sorted(have_keys - want_keys)}")
-        raise ValueError(msg)
+    _check_coverage(masks, signals)
     gate = emit_gate(masks, min_retention=min_retention, animal_median=animal_median,
                      decisions=decisions, hum_features=hum_features)
     if release is not None and not release.strip():

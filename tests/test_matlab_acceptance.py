@@ -56,6 +56,12 @@ def _processing_new() -> Path | None:
     return cand if (cand / "step1_bandpass.m").is_file() else None
 
 
+READS: dict[str, tuple[str, ...]] = {"spikes": ("L_T",), "slow_wave": ("ANT1",),
+                                     "mmc": ("ANT1",), "hrv": ("ANT1",),
+                                     "breathing": ("ANT1",), "velocity": ()}
+"""What the synthetic recording reads: every consumer named (HR on ANT1 here)."""
+
+
 def _masks() -> dict[mk.MaskKey, mk.ConsumerMask]:
     n = n_grid_frames(N_SAMPLES, FS)
     spans = [
@@ -64,8 +70,7 @@ def _masks() -> dict[mk.MaskKey, mk.ConsumerMask]:
         mk.MaskSpan("slow_wave", "ANT1", 20.0, 35.0, "in_band"),
         mk.MaskSpan("mmc", "ANT1", 40.0, 41.0, "in_band"),
     ]
-    sig = {"spikes": ("L_T",), "slow_wave": ("ANT1",), "mmc": ("ANT1",)}
-    return mk.build_masks(sig, spans, n_frames=n, t0_s=0.0)
+    return mk.build_masks(READS, spans, n_frames=n, t0_s=0.0)
 
 
 def test_matlab_step1_bandpass_honours_the_emitted_masks(tmp_path: Path) -> None:
@@ -82,8 +87,7 @@ def test_matlab_step1_bandpass_honours_the_emitted_masks(tmp_path: Path) -> None
                           routing_hash="test", created_at="2026-10-08T05:00:00+00:00",
                           recording="synthetic")
     medians = {f"{c}|{s}|{b}": 0.3 for c, s, b in masks}  # the real gate path (it holds)
-    reads = {"spikes": ("L_T",), "slow_wave": ("ANT1",), "mmc": ("ANT1",)}
-    mask_file = write_mask_file(tmp_path / "synthetic_masks.mat", masks, prov, signals=reads,
+    mask_file = write_mask_file(tmp_path / "synthetic_masks.mat", masks, prov, signals=READS,
                                 fs=FS,
                                 n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
                                 animal_median=medians,

@@ -135,6 +135,10 @@ def blank_fraction_hold(
     False, so a NaN would silently switch the 3x rule off. Top reasons are counted by
     routing reason code.
     """
+    for k, h in (hum_features or {}).items():
+        if not math.isfinite(float(h)):
+            msg = f"hum feature {k} is {h!r}: a feature shown to Andrea must be finite"
+            raise ValueError(msg)
     for k, v in animal_median.items():
         if v is not None and not (math.isfinite(float(v)) and 0.0 <= float(v) <= 1.0):
             msg = (f"animal median for {k} is {v!r}: a blank fraction must be finite and in "

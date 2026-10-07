@@ -38,12 +38,14 @@ MODEL = {"mode": "pooled", "version": "0.3.0", "corpus_hash": "ab" * 16,
 GATE: dict[str, Any] = {"min_retention": 0.5, "animal_median": {
     "spikes|L_T|300-3000": 0.02, "slow_wave|ANT1|0-2": 0.02, "mmc|ANT1|2-50": 0.02}}
 
-def _signals_of(masks: dict[Any, Any]) -> dict[str, tuple[str, ...]]:
-    """Return what a recording reads, as its masks cover it (coverage tested below)."""
-    out: dict[str, tuple[str, ...]] = {}
-    for c, sig, _b in masks:
-        out[c] = (*out.get(c, ()), sig)
-    return out
+READS: dict[str, tuple[str, ...]] = {"spikes": ("L_T",), "slow_wave": ("ANT1",),
+                                     "mmc": ("ANT1",), "hrv": ("RVN2",),
+                                     "breathing": ("RVN2",), "velocity": ()}
+"""What the synthetic recording reads - every consumer named, as the writer requires."""
+
+
+def _reads(**override: tuple[str, ...]) -> dict[str, tuple[str, ...]]:
+    return {**READS, **override}
 
 
 
@@ -83,7 +85,7 @@ def _eng_only(t0: float = 0.0) -> tuple[dict[Any, Any], tl.Extent]:
                 spike_ext = e
     assert spike_ext is not None
     spans = mk.spans_from_routing(exts, decisions)
-    return mk.build_masks(SIGNALS, spans, n_frames=N_FRAMES, t0_s=t0), spike_ext
+    return mk.build_masks(READS, spans, n_frames=N_FRAMES, t0_s=t0), spike_ext
 
 
 def test_masks_are_not_merged_across_consumers() -> None:
@@ -140,7 +142,7 @@ def test_a_recovery_epoch_starting_at_120_s_is_shifted_exactly_once(tmp_path: Pa
     (a, b), = mk.masked_spans_s(m)
     assert a <= ext.start_s and ext.stop_s <= b and a >= 120.0
     path = ho.write_mask_file(tmp_path / "r.mat", masks, _prov(),
-                              signals=_signals_of(masks), fs=FS, n_samples=N_SAMPLES,
+                              signals=READS, fs=FS, n_samples=N_SAMPLES,
                               epoch_start_s=120.0, **GATE)
     spans = loadmat(path)["blank_spikes_L_T"]
     i0 = int(np.floor((ext.start_s - 120.0) / 0.01))
@@ -148,7 +150,7 @@ def test_a_recovery_epoch_starting_at_120_s_is_shifted_exactly_once(tmp_path: Pa
     assert spans[0, 0] < 21 * FS  # epoch-relative: about 20 s in, not 140 s
     with pytest.raises(ValueError, match="grid starts at 120"):
         ho.write_mask_file(tmp_path / "x.mat", masks, _prov(),
-                           signals=_signals_of(masks), fs=FS, n_samples=N_SAMPLES,
+                           signals=READS, fs=FS, n_samples=N_SAMPLES,
                            epoch_start_s=0.0, **GATE)
 
 
@@ -156,7 +158,7 @@ def test_the_frame_count_must_match_the_epoch(tmp_path: Path) -> None:
     masks, _ = _eng_only()
     with pytest.raises(ValueError, match="frames for an epoch"):
         ho.write_mask_file(tmp_path / "x.mat", masks, _prov(),
-                           signals=_signals_of(masks), fs=FS, n_samples=N_SAMPLES // 2,
+                           signals=READS, fs=FS, n_samples=N_SAMPLES // 2,
                            epoch_start_s=0.0, **GATE)
 
 
@@ -209,7 +211,7 @@ def test_the_mask_file_has_no_zero_runs_one_span_set_per_consumer_and_r6(tmp_pat
     masks[("mmc", "ANT1", "2-50")] = mk.ConsumerMask(
         "mmc", "ANT1", "2-50", mk.mask_frames([(30.0, 31.0)], N_FRAMES, t0_s=0.0), 0.01, 0.0)
     path = ho.write_mask_file(tmp_path / "rec1_masks.mat", masks, _prov(),
-                              signals=_signals_of(masks), fs=FS,
+                              signals=READS, fs=FS,
                               n_samples=N_SAMPLES, epoch_start_s=0.0, **GATE,
                               events=[{"start": 19.5, "stop": 21.0, "judgement": "motion"}])
     m = loadmat(path)
@@ -232,7 +234,7 @@ def test_the_mask_file_has_no_zero_runs_one_span_set_per_consumer_and_r6(tmp_pat
 def test_a_mask_without_a_model_is_refused_on_write(tmp_path: Path) -> None:
     with pytest.raises(ProvenanceError, match="model"):
         ho.write_mask_file(tmp_path / "x.mat", _eng_only()[0], None,
-                           signals=_signals_of(_eng_only()[0]), fs=FS,
+                           signals=READS, fs=FS,
                            n_samples=N_SAMPLES, epoch_start_s=0.0, **GATE)
     assert not list(tmp_path.iterdir())
 
@@ -254,7 +256,7 @@ def test_the_event_table_carries_routes_judgement_and_model() -> None:
 
 
 def _masked(frac: float, consumer: str = "spikes", sig: str = "L_T") -> dict[Any, Any]:
-    return mk.build_masks({consumer: (sig,)},
+    return mk.build_masks(_reads(**{consumer: (sig,)}),
                           [mk.MaskSpan(consumer, sig, 0.0, frac * DUR_S, "x")],
                           n_frames=N_FRAMES, t0_s=0.0)
 
@@ -275,15 +277,15 @@ def test_a_held_recording_is_written_only_with_a_release(tmp_path: Path) -> None
     assert gate.held and gate.retention_flagged and gate.blank_held
     with pytest.raises(ho.RecordingHeldError, match="release"):
         ho.write_mask_file(tmp_path / "x.mat", over, _prov(),
-                           signals=_signals_of(over), fs=FS, n_samples=N_SAMPLES,
+                           signals=READS, fs=FS, n_samples=N_SAMPLES,
                            epoch_start_s=0.0, min_retention=0.5, animal_median=med)
     with pytest.raises(ValueError, match="blank string"):
         ho.write_mask_file(tmp_path / "x.mat", over, _prov(),
-                           signals=_signals_of(over), fs=FS, n_samples=N_SAMPLES,
+                           signals=READS, fs=FS, n_samples=N_SAMPLES,
                            epoch_start_s=0.0, min_retention=0.5, animal_median=med,
                            release="   ")
     path = ho.write_mask_file(tmp_path / "x.mat", over, _prov(),
-                              signals=_signals_of(over), fs=FS, n_samples=N_SAMPLES,
+                              signals=READS, fs=FS, n_samples=N_SAMPLES,
                               epoch_start_s=0.0, min_retention=0.5, animal_median=med,
                               release="Andrea 2026-10-08: anaesthesia lightened, keep")
     g = json.loads(str(loadmat(path)["gate_json"][0]))
@@ -364,11 +366,11 @@ def test_the_writer_computes_the_gate_from_the_masks(tmp_path: Path) -> None:
     over = _masked(0.7)
     with pytest.raises(ho.RecordingHeldError, match="retention"):
         ho.write_mask_file(tmp_path / "x.mat", over, _prov(),
-                           signals=_signals_of(over), fs=FS, n_samples=N_SAMPLES,
+                           signals=READS, fs=FS, n_samples=N_SAMPLES,
                            epoch_start_s=0.0, min_retention=0.5,
                            animal_median={"spikes|L_T|300-3000": 0.9})
     path = ho.write_mask_file(tmp_path / "ok.mat", _masked(0.01), _prov(),
-                              signals=_signals_of(_masked(0.01)), fs=FS,
+                              signals=READS, fs=FS,
                               n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
                               animal_median={})
     g = json.loads(str(loadmat(path)["gate_json"][0]))
@@ -382,7 +384,7 @@ def test_the_retention_gate_alone_holds_the_recording(tmp_path: Path) -> None:
     assert gate.held and gate.retention_flagged and not gate.blank_held
     with pytest.raises(ho.RecordingHeldError, match="retention"):
         ho.write_mask_file(tmp_path / "x.mat", m, _prov(),
-                           signals=_signals_of(m), fs=FS, n_samples=N_SAMPLES,
+                           signals=_reads(spikes=('L_T',)), fs=FS, n_samples=N_SAMPLES,
                            epoch_start_s=0.0, min_retention=0.9,
                            animal_median={"spikes|L_T|300-3000": 0.1})
 
@@ -390,10 +392,10 @@ def test_the_retention_gate_alone_holds_the_recording(tmp_path: Path) -> None:
 def test_the_writer_refuses_masks_that_leave_a_consumer_out(tmp_path: Path) -> None:
     """Omitting an over-blanked consumer (or passing {}) cannot pass the gate."""
     masks = {**_masked(0.01), **_masked(0.7, "slow_wave", "ANT1")}
-    reads = {"spikes": ("L_T",), "slow_wave": ("ANT1",)}
+    reads = READS
     only_spikes = {k: v for k, v in masks.items() if k[0] == "spikes"}
     for given in (only_spikes, {}):
-        with pytest.raises(ValueError, match="do not cover"):
+        with pytest.raises(ValueError, match=r"do not cover|no masks"):
             ho.write_mask_file(tmp_path / "x.mat", given, _prov(), signals=reads, fs=FS,
                                n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
                                animal_median={})
@@ -412,10 +414,49 @@ def test_a_non_finite_or_impossible_median_raises_naming_its_key(bad: float) -> 
 def test_held_recordings_carry_top_routes_and_hum_features(tmp_path: Path) -> None:
     over = _masked(0.3)
     ds = [RouteDecision("e", "spikes", "reject", "x", "in_band_eng")]
-    path = ho.write_mask_file(tmp_path / "x.mat", over, _prov(), signals=_signals_of(over),
+    path = ho.write_mask_file(tmp_path / "x.mat", over, _prov(), signals=READS,
                               fs=FS, n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
                               animal_median={}, decisions=ds,
                               hum_features={"line_ratio_max": 0.4},
                               release="Andrea: test release")
     g = json.loads(str(loadmat(path)["gate_json"][0]))
     assert g["top_routes"] == [["in_band_eng", 1]] and g["hum_features"] == {"line_ratio_max": 0.4}
+
+
+def test_the_writer_refuses_an_empty_or_partial_signals_map(tmp_path: Path) -> None:
+    """Signals built from the masks is the hole: they must come from the recording."""
+    with pytest.raises(ValueError, match="every consumer"):
+        ho.write_mask_file(tmp_path / "x.mat", {}, _prov(), signals={}, fs=FS,
+                           n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
+                           animal_median={})
+    with pytest.raises(ValueError, match="no masks"):
+        ho.write_mask_file(tmp_path / "x.mat", {}, _prov(),
+                           signals=dict.fromkeys(READS, ()), fs=FS, n_samples=N_SAMPLES,
+                           epoch_start_s=0.0, min_retention=0.5, animal_median={})
+    masks = _masked(0.01)
+    without_slow = {k: v for k, v in READS.items() if k != "slow_wave"}
+    with pytest.raises(ValueError, match="slow_wave"):
+        ho.write_mask_file(tmp_path / "x.mat", masks, _prov(), signals=without_slow, fs=FS,
+                           n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
+                           animal_median={})
+
+
+def test_a_mask_on_the_wrong_band_is_refused(tmp_path: Path) -> None:
+    masks = dict(_masked(0.01))
+    k = ("spikes", "L_T", "300-3000")
+    m = masks.pop(k)
+    masks[("spikes", "L_T", "100-300")] = mk.ConsumerMask("spikes", "L_T", "100-300", m.invalid,
+                                                          m.grid_s, m.t0_s)
+    with pytest.raises(ValueError, match="wrong band"):
+        ho.write_mask_file(tmp_path / "x.mat", masks, _prov(), signals=READS, fs=FS,
+                           n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
+                           animal_median={})
+
+
+def test_a_non_finite_hum_feature_raises_naming_it(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="line_plv_max"):
+        ho.write_mask_file(tmp_path / "x.mat", _masked(0.3), _prov(), signals=READS, fs=FS,
+                           n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
+                           animal_median={}, hum_features={"line_plv_max": float("nan")},
+                           release="Andrea: test")
+    assert not list(tmp_path.iterdir())
