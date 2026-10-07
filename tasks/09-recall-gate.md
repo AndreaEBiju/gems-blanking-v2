@@ -2085,9 +2085,29 @@ Andrea's confirmation now covers only the animal-alias table. The label-group ta
    - **(b) Andrea's day list**, a running list carried over and updated each morning:
      - each item with its estimated minutes, where she does it (Mac, Windows build machine, or reply to Claude), and what it unblocks;
      - **grouped by what can run in parallel:** items she can do while machine jobs run, and items independent of each other;
-     - **"Minimum today"**, marked clearly: the smallest set that keeps the build on track to finish by **Thursday 2026-10-15**, weekends included;
-     - **the critical path to 2026-10-15,** day by day (labelling sessions, nights, reviews), with slack in days. If today's minimum is missed, say what slips and the earliest new finish date.
+     - **"Minimum today"**, marked clearly: the smallest set that keeps the build on track to finish by **Wednesday 2026-10-14** (one week from 2026-10-07), weekends included;
+     - **the critical path to 2026-10-14,** day by day (labelling sessions, nights, reviews), with slack in days. If today's minimum is missed, say what slips and the earliest new finish date.
 5. **Through the day,** keep the day list current: tick items off when done, and add new ones as they appear (at the end of a NEEDS ANDREA message).
+
+### Note on ruling dates, 2026-10-07
+
+The rulings headed **2026-10-08**, **(b)** and **(c)** were written on **2026-10-07**; the build machine's clock is right. The headings stay as identifiers, because prompts already cite them. The finish date in (c) is corrected to **Wednesday 2026-10-14**, one week from 2026-10-07.
+
+### RULING 2026-10-08 (d) — line-noise criterion for the spike consumer
+
+**Measured:**
+- Line-ratio distributions are not bimodal around 0.10. On A, B, I and K, most minutes sit at 0.04–0.16, with a long tail.
+- Share of nerve channel-minutes with a significant mains-locked spike excess (Holm, α = 0.01):
+
+  | A | B | H | I | J | K | old |
+  |---|---|---|---|---|---|---|
+  | 11.6% | 11.9% | 5.3% | 4.7% | 3.3% | 2.2% | ≤ 4.9% |
+
+**Ruling:**
+1. **No line-ratio threshold.** The ratio has no natural cut, so it stays a classifier feature only and decides no routing.
+2. **The spike consumer's per-minute distrust (ruling (c) item 4) uses the statistical test itself:** a cuff-minute is distrusted for the spike consumer when its mains-locked spike excess is significant after Holm correction at α = 0.01. Nothing else is affected: no blanking, and other consumers keep the minute.
+3. **The cost is reported:** spike-consumer time lost to this rule per animal and cuff, next to the time lost to motion blanking.
+   - If a mains cleaner is later adopted under (b) 6, the test is re-run on the cleaned signal, and minutes that are no longer significant regain trust.
 
 ### Adapter-check findings, 2026-09-28
 
