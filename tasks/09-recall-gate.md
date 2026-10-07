@@ -1670,6 +1670,233 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
 
 4. **Round 13** is drawn after Andrea closes s4#m4.
 
+### GATE PASSED, 2026-10-07 — task 09 recall gate, verified
+
+**Record:** table `64c2e1ea`, generator `0133349b3ebeff80`. Rounds 3–14 are pooled; rounds 1–2 are tuning data.
+- **Damage-filtered gate (`run` convention): 529/534 covered target marks.** The one-sided 95% lower bound is 0.98041 (Clopper-Pearson; recomputed here), and the span bootstrap gives 0.98081. Both are ≥ 0.98. Point estimate 0.9906.
+- **Other conditions:**
+  - 30 baseline and 30 stim/recovery spans (≥ 3 each);
+  - pooled chance upper bound 0.865, a margin of +0.115;
+  - all 17 raw misses closed (13 `accepted_limitation`, 4 `not_target`);
+  - the table chain from `46ce9b0b` to `64c2e1ea` is unbroken, each link either an append with existing entries unchanged or a ruled change that names its parent.
+- **Reported alongside:** excluded = target 569/583 (0.9475); raw 613/630 (0.9465).
+
+**Caveat, to state in any write-up.** The bound was checked after every round and the audit stopped when it first crossed 0.98. Repeated looks make a nominal 95% bound optimistic.
+- A Bonferroni correction over the 12 evidence rounds gives a one-sided bound of **0.973** for 529/534. The pass rests on the pre-declared rule (a 95% bound ≥ 0.98, re-evaluated each round), not on a sequentially corrected bound.
+- The margin over 0.98 is 0.0004.
+- **The five gate misses are characterised:** sub-threshold events (z 2.1–2.8), the hum/mmc class, a spike deficit, and the QRS-flagged brief mark. No unexplained class remains.
+
+**Ruling:**
+1. **Task 09 is passed under its pre-declared rule.** No retroactive tightening and no relaxation.
+2. **Tasks 11–15 may be built.** Their order and timing are Andrea's decision, given quals and her downstream processing.
+3. **Rounds may continue as further evidence, but they are not required.** Any later round is reported against the same rule.
+
+### RULING 2026-10-07 (b) — full-build plan approved; R1–R9 decided
+
+**The plan** (artifact `PU7DbzYLHZPYkN8XQvxVAk`) is approved as the order of work: preflight → tasks 11 and 10 → Night 1 (candidate replay + features) → Change 1 screen → labelling A → 12/12A → Night 2 → labelling B → Night 3 → model choice → 13/14/15 → Nights 4–5 (inference + masks) → Night 6 (MATLAB) → task 19. The standing working rule applies throughout: a status line on every message, long jobs overnight, never idle, a morning summary, and questions to Andrea any time 10:00–01:00.
+
+**R1 — evaluation design: accepted.**
+- **Leave-one-animal-out (LOAO) over A, B and H.** Each is scored once, on its own audit spans, by a model trained on the old cohort, Andrea's judgments, and the other two animals' spans.
+- **Mode choice (A/B/C) uses only old-cohort LOAO and within-animal held-out data.** The new-cohort LOAO scores are reported, not tuned on.
+- **I, J and K are the prospective test set.** No I/J/K labels enter training. Their audit spans are test-only. Any mode-B adaptation labels drawn from them are stored separately from evaluation labels and never overlap them in time.
+- **The new-cohort random sample (about 120):** drawn from A/B/H it is training data; drawn from I/J/K it is test-only. The build records which.
+- Three test animals is a small set. Report per-animal results, not just a pooled number.
+
+**R2 — features on available signals: agreed.** Where a cohort lacks a signal (common-mode features on the 5-channel old cohort), the feature is missing and flagged, never imputed. The classifier must accept missing values natively or by an explicit missing-indicator.
+
+**R3 — label unit is the core, not the candidate.**
+- A core is labelled motion if **≥ 50% of its own duration** overlaps a mark.
+- A core touching a mark with **< 50% overlap is unjudged** and excluded from training and scoring.
+- A core touching **no mark inside an exhaustive audit span** is a negative.
+- **Old cohort:** marks are positives only, so cores not matched to a mark are unjudged, not negatives.
+- This is what stops long candidates from being learned as wholly motion: only the core that a mark actually covers carries the label. Extent (task 13) is learned separately, per consumer.
+
+**R4 — task 19 runs headless now: agreed.** Acceptance is computed and reported without the review GUI. The GUI can follow after quals.
+
+**R5 — tasks 17 (video) and 18 (conduction velocity) are out of this build: agreed.** Video stays noted as the future direct check for the stomach analyses (2026-10-06).
+
+**R6 — mmc within ±15 s of any blank is reported as "not measured": agreed.** No change to `extract_mmc.m`. The ±15 s figure is the 30 s moving threshold's half-width (2026-10-06); task 13 carries it as a sensitivity, not a fix.
+
+**R7 — the routing table is fixed input: agreed.** Table `64c2e1ea` is read byte for byte; generator hash stays `0133349b3ebeff80`. Any routing change needs a change record and a ruling, as before.
+
+**R8 — errata (spec text that predates later rulings):**
+1. **ENG band is 300–3000 Hz** (A.5b), not 300–5000. Stale text: every `300–5000` below this ruling — three in the task 11/12 features (the 100–300 ÷ 300–5000 ratio), one in task 14 and one in task 19 (find them by searching for `300–5000`). The one in task 18 is also stale but out of scope (R5). Feature names and code use 300–3000; the build reports any place the old band survives in code.
+2. **The mmc consumer reads ANT1–3 directly**, not the detection derivation's `stomach_ref` (a common average that removes most of the shared slow wave). `stomach_ref` stays a detection input only.
+3. Where these erratum lines conflict with older spec text, this ruling wins.
+
+**R9 — fixed before any training:**
+- **Calibration:** expected calibration error ≤ 0.05 on held-out data.
+- **Mode C beats mode B** only if its F1 is higher by **≥ 0.03** and the 95% CI of the difference excludes 0.
+- **Folds with fewer than 20 positives** are reported separately and do not decide the mode.
+- **Uncertainty:** 1,000 cluster-bootstrap resamples, clustered by recording (old cohort) or span (new cohort).
+- These thresholds are written to the run record before Night 2 and are not changed after results are seen.
+
+**Andrea's time:** about 3 hours in total across the build. First item, day 2: confirm the old-cohort animal alias table (about 5 minutes).
+
+### RULING 2026-10-07 (c) — periodic line noise is not motion; recordings with residual line noise must not be lost to blanking
+
+**Andrea, 2026-10-07:** some **new-cohort** recordings carry substantial **periodic** line noise (a continuous oscillation, not impulses) that her 60 Hz notch does not remove. She does not want them wasted by the model treating them as artifact.
+
+**Why a 60 Hz notch can leave periodic noise (to be confirmed by item 1):**
+- **Harmonics.** Andrea notches 60 Hz only. Mains pickup is rarely a pure sine, and 120, 180, … Hz pass untouched; in the ENG band the relevant ones are 300–3000 Hz (harmonics 5–50).
+- **Frequency drift or a narrow notch.** Mains wanders by a few hundredths of a Hz, and a narrow notch misses a line that has moved or whose amplitude waxes and wanes.
+- **A non-mains source.** Equipment (pumps, supplies, a stimulator, the TDT environment) can inject a line at an unrelated frequency.
+- The new cohort's abdominal ground with no reference makes large common-mode pickup likely.
+- Separately, the old cohort's mains contamination of spike trains is narrow impulses (0.12–0.16 ms); items 1 and 4 cover that case too.
+- Adding harmonic notches is not the fix: a 120 Hz IIR notch rings inside the ENG band at large excursions (Change 3).
+
+**Principle (adopted):** line noise, mains or otherwise, is a recording-quality problem, not motion. **It is never a reason to blank.** Where it harms a consumer, the outcome is correction or per-minute distrust for that consumer, never a blank applied to every consumer.
+
+**Rulings:**
+
+1. **Hum inventory, Night 1 (measure only).** For every recording, per channel and per minute:
+   - **every narrowband periodic line, at any frequency** (spectral peaks ≥ 10 dB above the local floor, 0.1 Hz resolution), with its frequency, whether it is a 60 Hz harmonic, its stability over the recording, and its amplitude;
+   - the line ratio (power in all detected lines up to 3 kHz ÷ band power), on the raw and the 60 Hz-notched signal;
+   - impulsive versus sinusoidal (crest factor of the line-phase-locked average);
+   - common-mode fraction across the three contacts of a cuff and across all nine channels;
+   - the fraction of detected spikes phase-locked to mains (inter-event histogram at 1/60 and 1/30 s; phase-locking value).
+   Report a ranked list of affected recordings for Andrea, with which animals, channels, frequencies and minutes are affected, plus a spectrum plot for the worst five. Also report whether these lines currently trigger candidates (amplitude modulation) or only inflate the noise floor (lower sensitivity).
+
+2. **Line-noise features in task 11.** Add the line ratio, the line phase-locking value and the common-mode fraction as features, so the classifier can tell stationary, mains-locked energy from transient motion.
+
+3. **Hum gets its own label.** The Change 1 screen gains **key 4 = line noise**: not motion.
+   - Candidates that are mains-locked, have no motion signature, and score high on the mains features are pre-labelled `line_noise` by rule and shown to Andrea only if the model is uncertain about them.
+   - `line_noise` counts as a negative for the motion classifier.
+   - At least one hum recording per affected animal is included in labelling set A.
+
+4. **Routing (task 14).** A core whose dominant evidence is mains (fixed thresholds proposed by the build from the inventory, set before Night 2) **never routes to `reject`.** It routes per consumer:
+   - **spike consumer:** a per-minute distrust of that cuff where the mains-locked spike fraction exceeds the threshold (extends 2026-10-03 per-minute cuff trust; implements the mains-locked flag proposed earlier);
+   - **HR:** the existing hum-lock persistence test applies (2026-10-02);
+   - **stomach:** the existing ANT1 notch rule applies (2026-10-01 (b)).
+   Every other consumer keeps the minute.
+
+5. **Blank-fraction safety net (task 15 QC).** A recording whose total blank exceeds **20%**, or **3× its animal's median**, is **not emitted silently**. It is held, listed for Andrea with the top reasons, and the hum features shown. She releases or overrides it.
+
+6. **Cleaning methods: measure, do not adopt.** *(Superseded by ruling (d): the candidates are now the lab's Experiment 11 mains method, as is and with fixes, against Andrea's notch; Zapline-plus is dropped.)* On the inventory's hum recordings, plus five clean recordings as harm controls, compare against Andrea's notch:
+   - (a) **phase-locked template subtraction:** a running average of the waveform over the last 1–2 s of the line's cycles, with its frequency tracked, subtracted from the signal. It removes the fundamental and every harmonic at once without ringing, because nerve and stomach activity is not locked to the line's phase and averages out. For a non-mains line, the same method at that line's period; or (a′) a tracked sinusoid fit (frequency, amplitude and phase re-estimated every 1 s) at each detected line.
+   - (b) **Zapline-plus** (a spatial filter across all nine channels, restricted to the detected line frequencies).
+   Report: residual mains ratio; spike counts and mains-locked fraction before and after; HR beat train and slow-wave peaks before and after; **on the clean controls, every consumer output must be unchanged within its tolerance.** Detection keeps raw inputs (invariant 43). Adopting either method changes what Andrea's consumers read, so **adoption is her decision**, made with these numbers.
+
+7. **No effect on the gate.** Table `64c2e1ea` and hash `0133349b3ebeff80` are unchanged. Items 2–5 are built under tasks 11, 14, 15 and 16 as part of the approved plan.
+
+### RULING 2026-10-07 (d) — the lab's Experiment 11 cleaners: mains (computational Hum-Bug) and cardiac attenuation, measured as candidates
+
+**Source.** BIONICs-lab `ML_for_Pain_Afferents`, `Experiments/Experiment 11/code` (a colleague's sural-nerve work, TDT RZ5D, 4-contact cuffs, 24.4 kHz). Andrea's copy is on her portable SSD (`lab_code/ML_for_Pain_Afferents`). It is lab code: **never push it to any of Andrea's repos**; reference it by path and credit it.
+- **Mains:** `mains_clearing/mains_clearing.py` (`clean_mains`, the library form of v5).
+- **Cardiac:** `cardiac_clearing/cardiac_clearing_v12.py` (v12 = v11 + figure styling; the algorithm is v8/v11). Note: the cardiac README describes only v1–v3; the docstrings are authoritative.
+
+**What the mains method does (read from the code).** Per channel, with no cross-channel operation:
+1. Welch PSD (8 s segments); for each 60·k Hz harmonic up to `max_harmonic_hz` (default 2000), find the peak within ±3 Hz, keep it if ≥ 5 dB above the local floor, and refine its frequency by parabolic interpolation (handles drift, e.g. 2159.3 Hz instead of 2160).
+2. Per harmonic, a retention factor α so the cleaned PSD lands at **local floor + 3 dB**, not below it (no spectral hole).
+3. CleanLine regression: 1 s Hann windows, 75% overlap; least-squares sin/cos fit at the detected frequencies; (1 − α) of the fit subtracted; overlap-add.
+
+**What the cardiac method does.** Beats are detected across channels (MAD threshold with k = 12 on a throwaway mains-cleaned copy, cross-channel coincidence, three classification votes, template rescue). Then, **per channel**: epochs −15/+20 ms, each beat aligned within ±4 ms to a median template, a per-beat least-squares amplitude clipped to [0, 3], subtraction with a Tukey taper, and an over-subtraction guard. Beats the attenuator cannot cover are blanked ±15/20 ms. Order: band-pass 50–5000 → cardiac → mains.
+
+**Fit to this project:**
+- **Both preserve channel independence**, as Andrea's conduction-velocity analysis needs. That is better than Zapline-plus, which mixes channels; **Zapline-plus is dropped from (c) item 6.**
+- **The mains method addresses the likely cause of Andrea's residual periodic noise:** harmonics her 60 Hz-only notch leaves, with drift, and without the ringing of IIR notches (Change 3).
+- **The cardiac method could recover spike-consumer time.** Peri-R blanking and hump-cuff distrust currently remove a large share: in rounds 3–5, 36.4% of spike-consumer time was distrusted, 24.9% of time from hump cuffs without a count-gated HR train. Attenuation keeps data that blanking deletes (the colleague's figure: blanking retains 82%).
+
+**Gaps to close before use here:**
+1. **Validation so far is spectral and one-recording** (Rat9, one or two channels, 30–110 s). For mains: harmonic level against its own floor and off-harmonic distortion. For cardiac: the residual of the cardiac-triggered average, which is **flat by construction** when the template is built from the same beats, and "neural fidelity" measured only in beat-free segments, where the attenuator does nothing. In that figure, classic template subtraction scores the same as the proposed method. Spike-level outcomes are not tested.
+2. **What the subtraction removes (corrected 2026-10-07, after Andrea's reading).** The method subtracts a *reconstruction*: the per-channel median of the aligned beats, scaled per beat. It does not remove everything in the epoch. Activity that is not phase-locked to the beat averages out of the median and survives. That includes cardiac-modulated afferent firing whose spikes jitter by milliseconds from beat to beat, because the beat-triggered average of jittered biphasic spikes is close to zero. The earlier claim here, that a −15/+20 ms epoch would remove the vagal cardiac-locked physiology, was wrong as stated.
+   - **The remaining risk is narrow:** a component locked to the beat with sub-millisecond jitter and present on most beats enters the median and is subtracted. The QRS leak is exactly such a component (that is why it works). A tightly locked neural component would be too; the H t05 L +14.25 ms, 0.5 ms-wide component is the test case.
+   - **Andrea's proposal to low-pass the template to 100 Hz is not adopted.** The part of the cardiac artifact that creates false spikes is its > 300 Hz content: the QRS edges, measured −5.0 to +2.3 ms on H t05 L at > 300 Hz. The spike consumer's 300–3000 Hz filter already removes everything below 100 Hz. A template limited to 100 Hz would leave the spike band unchanged, so it would protect nothing and fix nothing there.
+   - **The epoch is measured, not fixed:** both the colleague's −15/+20 ms and the QRS-limited epoch, decided by the injected locked-spike test below.
+3. **Their 50 Hz high-pass would destroy the stomach and slow consumers.** So the mains replica is **estimated on a band-passed copy and subtracted from the unfiltered signal.** The replica holds only sinusoids ≥ 60 Hz, so everything else is untouched.
+4. **Detected lines are restricted to 60·k.** Extend detection to any line found by the (c) item 1 inventory (non-mains lines), using the same α and regression.
+5. **`max_harmonic_hz` = 3000** for ENG (the band edge); 2000 for stomach channels.
+6. **Not robust to transients** (their README says so). A motion artifact inside a 1 s window biases the fit and spreads a sinusoidal error across ±0.5 s, into clean neighbouring data. **Fit with zero weight on samples inside candidate cores** (weighted least squares). This project has the cores; the colleague's did not.
+7. **Beat source.** Use Andrea's count-gated beat train where it exists. Use the colleague's detector where none exists, and report agreement (match within ±2 ms) where both exist. This is the hump-cuff case: a recording with no count-gated train might gain a cardiac route.
+8. **The HR consumer never reads cardiac-attenuated signals.** Detection keeps raw inputs (invariant 43). Table `64c2e1ea` and hash `0133349b3ebeff80` are unchanged: this is consumer-side cleaning only.
+
+**Measurement (report only; nothing adopted).** On the (c) inventory's affected recordings, plus 5 clean controls, across ≥ 3 animals and both cohorts:
+- **Mains (replaces (c) item 6):** Andrea's 60 Hz notch, the colleague's method as is, and the colleague's method with fixes 3–6. Report:
+  - residual line ratio;
+  - spike counts and mains-locked spike fraction;
+  - slow-wave peaks and mmc;
+  - **injected synthetic spikes** (her measured waveform, at 1–5/s, placed at random including next to motion cores): recovery and false positives;
+  - on clean controls, every consumer within tolerance.
+- **Cardiac (new):** on spike-consumer cuffs, peri-R blanking (current), and attenuation with each epoch (colleague's −15/+20 ms; QRS-limited). Report:
+  - the peri-R crossing-rate histogram before and after (must be flat within the QRS envelope);
+  - **injected beat-locked spikes:** her measured spike waveform added at +5 to +40 ms after each R, on a random 30–70% of beats, with jitter SD of 0.2, 0.5, 1, 2 and 5 ms. Report recovery per jitter level and epoch. This measures where locked physiology starts being removed;
+  - the H t05 L +14.25 ms component, before and after;
+  - injected-spike recovery inside and outside beat windows;
+  - spike-consumer time recovered per cuff;
+  - the hump-cuff distrust that could be lifted.
+- **Compute cost** per recording, for planning Nights 4–5.
+- **Adoption of either is Andrea's decision,** with these numbers. If adopted, it enters as a ruled change to the spike-consumer and stomach input derivations, recorded with a change record, and Andrea's MATLAB is not modified.
+
+### RULING 2026-10-07 (e) — separating cardiac leak from cardiac-locked vagal firing above 300 Hz
+
+**The confound (Andrea):** beat-locked activity above 300 Hz on the nerve may be electrical leak of the QRS (to remove) or vagal firing locked to the cardiac cycle (to keep). Frequency cannot separate them, because both have energy above 300 Hz. The current peri-R route blanks every excess crossing in the QRS window, so it removes both.
+
+**The dimensions that do separate them:**
+
+| Signature | QRS leak (volume-conducted) | Cardiac-locked vagal firing |
+|---|---|---|
+| Phase-locking | same waveform every beat, sub-ms locked | spikes jitter by ms (dispersion of conduction velocity over the heart-to-neck path, receptor timing); not every beat |
+| Beat-triggered **average** | large (coherent) | ≈ 0 |
+| Beat-triggered **variance / envelope** (after the average is removed) | ≈ 0, except misfit residual shaped like the template or its derivative | elevated (rate locked, waveform not) |
+| Lag from R | inside the QRS envelope (e.g. −5.0 to +2.3 ms, H t05 L) | after pulse ejection and transit, mostly beyond ~10 ms |
+| Across the 3 contacts of a cuff | simultaneous (zero lag); amplitude differs | propagates: lag of 1.5 mm ÷ CV (≈ 0.05–1.5 ms; fast A fibres are near one sample at 24.4 kHz, so sub-sample cross-correlation is needed), afferent direction caudal → rostral (contact 3 → 1) |
+| Stomach channels, other cuff | present with the same timing | absent |
+| Detached contact (no nerve) | present | absent |
+
+**Method (measure only):**
+1. **Decompose** each spike-consumer cuff's 300–3000 Hz signal around each beat into the coherent part (the per-channel aligned median template, scaled per beat: the (d) attenuation) and the residual. Extend the per-beat fit to [template, d/dt template], so that timing and scale misfit of the leak is not mistaken for residual activity.
+2. **On the residual**, compute the beat-triggered envelope (RMS) and crossing-rate histogram against lag, with a permutation null (beats shifted by random fractions of RR).
+3. **For every significant residual component** (a lag bin above the null at α = 0.01, with the bin-family correction), test:
+   - (a) inter-contact lag and direction by cross-correlating the residual across contacts within that bin: a non-zero, consistent, afferent-direction lag = neural;
+   - (b) whether the same component appears on the stomach channels and on the contralateral cuff (= electrical);
+   - (c) whether it appears on detached contacts in the same recording (A t04 LVN3, B t01 1_1 bl LVN3, and any found by the detached rule) (= electrical);
+   - (d) its lag from R;
+   - (e) whether its beat-by-beat strength covaries with R amplitude on the ECG lead (electrical) or not.
+   Classify each component as **leak**, **neural**, or **unresolved**, and list the evidence for each.
+4. **Check the coherent part too, before subtracting it.** The template should show zero inter-contact lag and appear on the stomach and detached channels. If any segment of the template propagates like a nerve signal (a tightly synchronised volley), that segment is reported and **not** subtracted.
+5. **Report per cuff:**
+   - components, their class and evidence;
+   - the H t05 L +14.25 ms component explicitly;
+   - spike-consumer time that peri-R blanking would remove, against what attenuation removes.
+   This answers the confound quantitatively. The injected locked-spike test in (d) calibrates step 3's sensitivity.
+
+**What follows if it holds:** attenuation removes only the coherent leak, so cardiac-locked firing is kept and becomes measurable (a residual beat-locked rate, a candidate physiological readout). Peri-R blanking would then be replaced for cuffs where the tests of rulings (d) and (e) pass. That is Andrea's decision, made with the numbers.
+
+**Definitive control, for the thesis and not this build:** blocking or cutting the nerve between the cuff and the heart abolishes afferent firing but not the leak.
+
+### RULING 2026-10-07 (f) — cardiac artifact shape varies across time and channels: adaptive reconstructions, and confound tests that do not depend on subtraction
+
+**Andrea, 2026-10-07:** average-template subtraction has been tested in this lab and does not work well, because cardiac artifacts vary in shape across time and across channels. That is why the Hum-Bug-based removal was developed.
+
+**What the Experiment 11 code does (read from the code, 2026-10-07):**
+- **The Hum-Bug replica is the mains method** (`mains_clearing.py`: sinusoidal regression at mains harmonics).
+- **The cardiac method in v6–v12 and `cardiac_clearing.py` is a per-channel median template**, one per block, aligned and amplitude-fit per beat, with a taper and an over-subtraction guard. **v4** used locally adaptive templates instead: the K = 3 nearest beats on Ch9, a per-channel scale, then a K = 5 per-channel residual template.
+- Andrea should confirm with the colleague whether a Hum-Bug-style cardiac version exists outside the repo. If it does, it joins the comparison below.
+
+**Across channels:** every candidate is per channel, so shape differences between channels are not a problem.
+
+**Across time: three adaptive reconstructions, measured against the colleague's block-median.** All are per channel and use the same beat source as (d):
+- (A) **block median** (the colleague's v12; baseline);
+- (B) **local template:** the median of the K nearest beats in time (K = 5, 9, 15), plus a per-beat [template, d/dt template] fit for amplitude and timing;
+- (C) **R-locked harmonic regression (a cardiac Hum-Bug):** each RR interval is time-warped to a unit cycle, harmonics of the cardiac cycle are fitted up to 500 Hz in a sliding window of N beats (N = 5, 9, 15), and the fit is unwarped and subtracted. This is the mains method's adaptive regression with the beat train as the fundamental, so it follows heart-rate changes beat by beat.
+
+**The trade-off, and how it is set:** the more adaptive the model (small K or N, more components), the better it tracks real changes in leak shape, and the more of any beat-locked firing it can absorb. Leak changes slowly and smoothly: with respiration (about 6 beats per breath), posture and contact. Firing jitters randomly from beat to beat. A model pooling ≥ 5 beats cannot follow beat-to-beat random jitter.
+- The injected locked-spike test of (d) is run for every variant and every K or N.
+- **The most adaptive setting that keeps injected-spike recovery ≥ 0.9 at jitter ≥ 1 ms is the operating point.** These thresholds are fixed before the results are seen.
+
+**Score each variant** on:
+- residual leak, measured where leak alone exists: **detached contacts** and the **stomach channels' > 300 Hz band**, as the beat-locked RMS ratio after/before;
+- the residual's peri-R crossing-rate histogram inside the QRS envelope;
+- injected-spike recovery;
+- spike-consumer time kept.
+If no variant clears both the residual-leak and recovery criteria on a cuff, that cuff stays on peri-R blanking.
+
+**The confound tests of (e) do not need subtraction to work.** Run tests 3(a)–(e) of (e) also on the **unsubtracted** beat-locked activity (crossing-rate histogram and envelope against lag, per contact):
+- inter-contact lag and direction;
+- presence on detached contacts, stomach channels and the other cuff;
+- lag from R.
+This classifies each beat-locked component as leak or neural even if every subtraction method fails. It also decides what peri-R blanking may remove: only components classified as leak.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
