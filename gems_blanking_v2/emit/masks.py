@@ -48,7 +48,12 @@ import numpy.typing as npt
 from gems_blanking_v2.constants import GRID_S
 from gems_blanking_v2.extent.grid import frame_sample_bounds
 from gems_blanking_v2.extent.routing import RouteDecision
-from gems_blanking_v2.extent.tolerance import Extent, extent_consumers, mmc_not_measured_spans
+from gems_blanking_v2.extent.tolerance import (
+    OUT_OF_BUILD_CONSUMERS,
+    Extent,
+    extent_consumers,
+    mmc_not_measured_spans,
+)
 from gems_blanking_v2.io.nan_interop import assert_no_zero_runs
 from gems_blanking_v2.types import Event
 
@@ -200,7 +205,7 @@ def build_masks(signals: Mapping[str, Sequence[str]], spans: Iterable[MaskSpan],
         by.setdefault((sp.consumer, sp.signal), []).append((sp.start_s, sp.stop_s))
     out: dict[MaskKey, ConsumerMask] = {}
     for consumer, names in signals.items():
-        if consumer == "velocity" and not include_velocity:
+        if consumer in OUT_OF_BUILD_CONSUMERS and not include_velocity:
             continue
         band = specs[consumer].band
         for sig in names:

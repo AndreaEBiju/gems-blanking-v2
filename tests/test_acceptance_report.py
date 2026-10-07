@@ -290,12 +290,13 @@ def test_row7_reports_the_failing_consumer_not_the_largest_coefficient() -> None
 
 def test_rows_1_and_7_default_to_the_expected_consumers() -> None:
     r1 = ar.row1_candidate_recall([_inj(True, "spikes")] * 100, {"r": 10})
+    others = ["breathing", "hrv", "mmc", "slow_wave"]  # exactly: velocity is not expected
     assert r1.status is ar.Status.NOT_COMPUTABLE
-    assert all(c in r1.reason for c in CONSUMERS if c != "spikes")
+    assert r1.reason == f"missing input: injections above the tolerance of {others}"
     r7 = ar.row7_coverage_confound(make_confound_rows(0.0), has_coverage=True,
                                    equivalence_margin=0.01)
     assert r7.status is ar.Status.NOT_COMPUTABLE
-    assert all(c in r7.reason for c in CONSUMERS if c != "spikes")
+    assert r7.reason == f"missing input: blank fractions for {others}"
 
 
 def test_row7_refuses_without_coverage() -> None:

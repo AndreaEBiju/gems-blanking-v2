@@ -725,11 +725,11 @@ MODE_C_MARGIN: Final = 0.03
 """R9: mode C beats mode B only if its F1 is higher by >= 0.03 and the CI excludes 0."""
 MODE_LETTERS: Final[Mapping[str, TrainingMode]] = {
     "A": TrainingMode.POOLED, "B": TrainingMode.ADAPTED, "C": TrainingMode.PER_ANIMAL}
-B_VS_C_CORPORA: Final[frozenset[str]] = frozenset({"old_cohort_loao", "within_animal"})
-"""R1: mode choice uses only old-cohort LOAO and within-animal held-out data."""
 CORPUS_COHORTS: Final[Mapping[str, frozenset[str]]] = {
     "old_cohort_loao": frozenset({"old"}), "within_animal": frozenset({"old", "new"})}
 """The cohorts each B-vs-C corpus can come from: old-cohort LOAO is old by definition."""
+B_VS_C_CORPORA: Final[frozenset[str]] = frozenset(CORPUS_COHORTS)
+"""R1: mode choice uses only old-cohort LOAO and within-animal held-out data."""
 CLUSTER_UNIT: Final[Mapping[str, str]] = {"old": "recording", "new": "span"}
 """R9: the bootstrap cluster per cohort."""
 
@@ -754,7 +754,11 @@ class Comparison:
 
 
 def _finite_diff(record: Mapping[str, Any], what: str) -> tuple[float, tuple[float, float]]:
-    """``f1_diff`` and ``ci95`` (two numbers) as floats; raises unless all are finite."""
+    """Return ``f1_diff`` and ``ci95`` as floats, checked.
+
+    Raises unless ``ci95`` is a sequence of two numbers (not a string) and all three
+    values are finite.
+    """
     ci = record["ci95"]
     if isinstance(ci, (str, bytes)) or not isinstance(ci, Sequence) or len(ci) != 2:  # noqa: PLR2004
         msg = f"{what} ci95 must be two numbers, got {ci!r}"
