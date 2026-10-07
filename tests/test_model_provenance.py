@@ -96,7 +96,17 @@ def test_provenance_json_carries_spec_corpus_thresholds_record_and_code(
             assert c["n_motion"] + c["n_not_motion"] == c["n_events"]
         assert "package_sha256" in prov["code"]
     pooled = next(s for s in reg.specs() if s.mode is TrainingMode.POOLED)
-    comp = pv.read_provenance(reg.provenance_path(pooled).parent)["corpus"]
+    pprov = pv.read_provenance(reg.provenance_path(pooled).parent)
+    cal = pprov["calibration"]
+    assert cal["kind"] == "isotonic" and cal["protocol"] == "LOAO"
+    assert cal["targets"] == ["new:A", "new:B"]
+    assert "per-target pooled LOAO" in cal["fitted_on"] and "NOT of this final" in cal["fitted_on"]
+    assert cal["n_predictions"] == int(table["animal_key"].isin(["new:A", "new:B"]).sum())
+    for spec in reg.specs():
+        c = pv.read_provenance(reg.provenance_path(spec).parent)["calibration"]
+        if spec.mode is not TrainingMode.POOLED:
+            assert c["targets"] == [spec.animal]
+    comp = pprov["corpus"]
     old = [c for c in comp if c["animal_key"] == "old:F"]
     assert {c["tier"] for c in old} == {"1", "2a"}
     assert sum(c["n_events"] for c in old) == int((table["cohort"] == "old").sum())
@@ -126,10 +136,17 @@ def test_w_adapt_is_present_exactly_for_mode_b(
     _t, _o, reg, record = run
     pooled = next(s for s in reg.specs() if s.mode is TrainingMode.POOLED)
     adapted = next(s for s in reg.specs() if s.mode is TrainingMode.ADAPTED)
+    cal = {"kind": "isotonic", "fitted_on": "x", "protocol": "LOAO", "targets": [],
+           "n_predictions": 0}
     with pytest.raises(ValueError, match="w_adapt"):
-        pv.build_provenance(pooled, corpus=[], record_path=record, w_adapt=3.0)
+        pv.build_provenance(pooled, corpus=[], record_path=record, w_adapt=3.0,
+                            calibration=cal)
     with pytest.raises(ValueError, match="w_adapt"):
-        pv.build_provenance(adapted, corpus=[], record_path=record, w_adapt=None)
+        pv.build_provenance(adapted, corpus=[], record_path=record, w_adapt=None,
+                            calibration=cal)
+    with pytest.raises(ValueError, match="calibration disclosure"):
+        pv.build_provenance(pooled, corpus=[], record_path=record, w_adapt=None,
+                            calibration={"kind": "isotonic"})
 
 
 def test_registration_needs_a_user_and_a_full_calibrated_pass(tmp_path: Path) -> None:

@@ -67,6 +67,9 @@ def _prov(reg: rg.Registry, spec: rg.ModelSpec) -> dict[str, object]:
     record = ev.write_run_record(reg.store.root / "run_record.json", run_id="t")
     return build_provenance(spec, corpus=corpus_composition(_TABLE, None), record_path=record,
                             w_adapt=3.0 if spec.mode is TrainingMode.ADAPTED else None,
+                            calibration={"kind": "isotonic", "fitted_on": "test",
+                                         "protocol": "LOAO", "targets": [],
+                                         "n_predictions": 0},
                             code={"package_sha256": "0" * 64})
 
 

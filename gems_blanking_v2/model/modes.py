@@ -739,8 +739,18 @@ def _register_finals(table: pd.DataFrame, preds: pd.DataFrame, *,
                          calibrator=calibrator_relpath(mid), trained_at=datetime.now(UTC),
                          metrics={protocol: _protocol_metrics(held)},
                          n_train_events=int(rows.size))
+        held_targets = sorted(set(held["target"].astype(str)))
+        fitted_on = (
+            "held-out predictions of the per-target pooled LOAO models (one model per "
+            "target, each trained without that target); NOT of this final model, which is "
+            "trained on every row" if mode is TrainingMode.POOLED else
+            f"held-out predictions of this target's {protocol} folds; NOT of this final "
+            "model, which is trained on all of the target's rows")
         prov = build_provenance(spec, corpus=corpus_composition(corpus_rows, old_tiers),
-                                record_path=record_path, w_adapt=w)
+                                record_path=record_path, w_adapt=w, calibration={
+                                    "kind": CALIBRATION_KIND, "fitted_on": fitted_on,
+                                    "protocol": protocol, "targets": held_targets,
+                                    "n_predictions": len(held)})
         out.append(registry.register(spec, booster, cal, user=user, provenance=prov,
                                      corpus_id=run_id))
 

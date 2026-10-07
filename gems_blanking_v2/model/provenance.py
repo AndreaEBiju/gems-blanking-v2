@@ -7,6 +7,9 @@ One file per model, in the model's own directory, written once with the model:
   its ``model_id``;
 * ``corpus``: composition per animal key x old-cohort tier, with label counts;
 * ``w_adapt``: mode B only - **absent** for any other mode (never ``null``);
+* ``calibration``: what the calibrator was fitted on - always held-out predictions of
+  the mode's evaluation folds, never of the final model itself (for POOLED: the
+  per-target pooled LOAO models' held-out predictions, with the targets named);
 * ``thresholds``: the protocol as the run record wrote it (R9, decision probability,
   ECE bins, ``w_adapt`` grid, calibration kind, the INTERPRETATION notes), read from the
   record file, not restated from code;
@@ -113,14 +116,23 @@ def _record(record_path: Path) -> tuple[dict[str, Any], str]:
 
 
 def build_provenance(spec: ModelSpec, *, corpus: list[dict[str, Any]], record_path: Path,
-                     w_adapt: float | None, code: Mapping[str, Any] | None = None
-                     ) -> dict[str, Any]:
-    """Assemble one model's provenance. ``w_adapt`` must be given exactly for mode B."""
+                     w_adapt: float | None, calibration: Mapping[str, Any],
+                     code: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Assemble one model's provenance. ``w_adapt`` must be given exactly for mode B.
+
+    ``calibration`` (required) says what the calibrator was fitted on: ``kind``,
+    ``fitted_on``, ``protocol``, ``targets`` and ``n_predictions``.
+    """
     from gems_blanking_v2.types import TrainingMode  # noqa: PLC0415 - local, light
 
     is_b = TrainingMode(spec.mode) is TrainingMode.ADAPTED
     if is_b != (w_adapt is not None):
         msg = f"w_adapt is required for an adapted model and absent otherwise ({spec.mode})"
+        raise ValueError(msg)
+    need = ("kind", "fitted_on", "protocol", "targets", "n_predictions")
+    gap = [k for k in need if k not in calibration]
+    if gap:
+        msg = f"calibration disclosure lacks {gap}"
         raise ValueError(msg)
     rec, sha = _record(record_path)
     missing = [k for k in _PROTOCOL_KEYS if k not in rec]
@@ -130,6 +142,7 @@ def build_provenance(spec: ModelSpec, *, corpus: list[dict[str, Any]], record_pa
     out: dict[str, Any] = {
         "model": spec.to_dict(), "model_id": spec.model_id, "unvalidated": spec.unvalidated,
         "corpus": list(corpus),
+        "calibration": dict(calibration),
         "thresholds": {k: rec[k] for k in _PROTOCOL_KEYS},
         "run_record": {"run_id": rec["run_id"], "sha256": sha},
         "code": dict(code) if code is not None else code_provenance(),
