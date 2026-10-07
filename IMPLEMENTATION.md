@@ -5341,7 +5341,7 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
 
 ### RULING 2026-10-07 (b) — full-build plan approved; R1–R9 decided
 
-**The plan** (artifact `PU7DbzYLHZPYkN8XQvxVAk`) is approved as the order of work: preflight → tasks 11 and 10 → Night 1 (candidate replay + features) → Change 1 screen → labelling A → 12/12A → Night 2 → labelling B → Night 3 → model choice → 13/14/15 → Nights 4–5 (inference + masks) → Night 6 (MATLAB) → task 19. The standing working rule applies throughout: a status line on every message, long jobs overnight, never idle, a morning summary, and questions to Andrea any time 10:00–01:00.
+**The plan** (artifact `PU7DbzYLHZPYkN8XQvxVAk`) is approved as the order of work: preflight → tasks 11 and 10 → Night 1 (candidate replay + features) → Change 1 screen → labelling A → 12/12A → Night 2 → labelling B → Night 3 → model choice → 13/14/15 → Nights 4–5 (inference + masks) → Night 6 (MATLAB) → task 19. The standing working rule applies throughout: a status line on every message, long jobs overnight, never idle, a morning summary, and questions to Andrea any time 10:00–01:00. *(Hours and night start superseded by RULING 2026-10-08 (c): 09:00–00:30, night run at 00:30.)*
 
 **R1 — evaluation design: accepted.**
 - **Leave-one-animal-out (LOAO) over A, B and H.** Each is scored once, on its own audit spans, by a model trained on the old cohort, Andrea's judgments, and the other two animals' spans.
@@ -5709,6 +5709,33 @@ Andrea's confirmation now covers only the animal-alias table. The label-group ta
    - Adoption remains Andrea's decision.
 7. **Line-noise thresholds:** not fixed yet. Report the distribution of line ratio per channel and minute (histogram, per animal) and the share of minutes whose mains-locked spike fraction exceeds chance at α = 0.01 with family correction. The threshold for item 4 of (c) is ruled after that is seen. "Affected" at 57% is not a blanking decision, since line noise never blanks.
 8. **Labelling:** set A plus the hum add-on is ready for Andrea after the alias check. The I/J/K test items in set A are evaluation-only (R1).
+
+### RULING 2026-10-08 (c) — the standing working rule (replaces earlier statements of it)
+
+**Andrea, 2026-10-08:** hours are 09:00–00:30. The night run starts without waiting for "goodnight". The morning summary comes with a running task list for her day.
+
+1. **Andrea's hours: 09:00–00:30, her local time** (US Eastern, the build machine's system clock). Ask her anything in those hours.
+   - Use plain local time, not `TZ=America/New_York`: Git Bash on the build machine has no timezone database and silently falls back to GMT.
+2. **The night run starts automatically at 00:30** every night with the queued night work. "Goodnight" before 00:30 starts it earlier.
+   - The queue is prepared during the day, so 00:30 never finds it empty.
+   - If something blocks the night work, the blocker and a fallback job (the next unblocked measurement or build item) are named before 23:00.
+3. **Unchanged:**
+   - a status line on every message (RUNNING / NEEDS ANDREA / DONE, with an ETA in her time);
+   - never idle: when blocked, take the next unblocked item;
+   - long jobs overnight;
+   - push one at a time, merge (never rebase), hash frozen;
+   - all standing constraints.
+4. **The morning report is ready by 08:45.** It has two parts.
+   - **(a) Night summary:**
+     - what finished, failed or is still running;
+     - results and the questions that need rulings, ranked;
+     - anything stuck on a permission prompt or the usage limit.
+   - **(b) Andrea's day list**, a running list carried over and updated each morning:
+     - each item with its estimated minutes, where she does it (Mac, Windows build machine, or reply to Claude), and what it unblocks;
+     - **grouped by what can run in parallel:** items she can do while machine jobs run, and items independent of each other;
+     - **"Minimum today"**, marked clearly: the smallest set that keeps the build on track to finish by **Thursday 2026-10-15**, weekends included;
+     - **the critical path to 2026-10-15,** day by day (labelling sessions, nights, reviews), with slack in days. If today's minimum is missed, say what slips and the earliest new finish date.
+5. **Through the day,** keep the day list current: tick items off when done, and add new ones as they appear (at the end of a NEEDS ANDREA message).
 
 ### Adapter-check findings, 2026-09-28
 
