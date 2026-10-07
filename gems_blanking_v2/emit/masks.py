@@ -29,41 +29,37 @@ Rules applied:
   consumer only.
 * **R6**: mmc output within +/-15 s of any of its blanks is "not measured"; those spans
   are written beside the mmc masks (``notmeasured_mmc_<signal>``), not into them.
-* **The file is refused** when its provenance does not name a model, and when QC holds
-  the recording (retention gate, or the 20% / 3x blank hold) unless an explicit
-  ``release`` is given; the gate and the release are written into the file.
+* **The MATLAB file** is written by ``emit.handoff.write_mask_file``, which computes
+  the QC gate from the masks itself and refuses a held recording without a release.
 
 OUTSIDE THE GENERATION HASH.
 """
 
 from __future__ import annotations
 
-import json
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import numpy as np
 import numpy.typing as npt
-from scipy.io import savemat
 
 from gems_blanking_v2.constants import GRID_S
-from gems_blanking_v2.emit.provenance import MaskProvenance, ProvenanceError
-from gems_blanking_v2.extent.grid import frame_sample_bounds, n_grid_frames, to_matlab_inclusive
+from gems_blanking_v2.extent.grid import frame_sample_bounds
 from gems_blanking_v2.extent.routing import RouteDecision
 from gems_blanking_v2.extent.tolerance import Extent, extent_consumers, mmc_not_measured_spans
 from gems_blanking_v2.io.nan_interop import assert_no_zero_runs
 from gems_blanking_v2.types import Event
 
+if TYPE_CHECKING:
+    from gems_blanking_v2.emit.provenance import MaskProvenance
+
 __all__ = [
     "TAPER_S",
     "ConsumerMask",
-    "EmitGate",
     "MaskKey",
     "MaskSpan",
-    "RecordingHeldError",
     "apply_mask",
     "build_masks",
     "distrusted_spike_spans",
@@ -76,7 +72,6 @@ __all__ = [
     "mmc_not_measured",
     "spans_from_routing",
     "velocity_mask",
-    "write_mask_file",
 ]
 
 F64 = npt.NDArray[np.float64]
@@ -86,9 +81,6 @@ MaskKey = tuple[str, str, str]
 
 MATLAB_NAME_MAX: Final = 63
 """MATLAB's ``namelengthmax``."""
-
-T0_TOLERANCE_S: Final = 1e-9
-"""Two grid origins closer than this are the same origin (float noise only)."""
 
 TAPER_S: Final = 0.0075
 """Cosine taper on the valid side of each mask boundary, seconds: the middle of the
@@ -317,20 +309,6 @@ def mmc_not_measured(masks: Mapping[MaskKey, ConsumerMask]) -> dict[str, Bool]:
     return out
 
 
-@dataclass(frozen=True)
-class EmitGate:
-    """QC's verdict for one recording (``emit.qc.emit_gate``): held or not, and why."""
-
-    held: bool
-    reasons: tuple[str, ...]
-    retention_flagged: bool
-    blank_held: bool
-
-
-class RecordingHeldError(RuntimeError):
-    """QC holds the recording; it is emitted only with an explicit release."""
-
-
 def event_rows(events: Mapping[str, Event], decisions: Iterable[RouteDecision],
                provenance: MaskProvenance) -> list[dict[str, Any]]:
     """Build the event table: one row per event with its routing per consumer.
@@ -355,88 +333,3 @@ def event_rows(events: Mapping[str, Event], decisions: Iterable[RouteDecision],
             row["p_motion"] = ev.p_motion
         rows.append(row)
     return rows
-
-
-def _matlab_name(prefix: str, consumer: str, signal: str) -> str:
-    name = f"{prefix}_{consumer}_{signal}"
-    if (not name.replace("_", "").isalnum() or len(name) > MATLAB_NAME_MAX
-            or not name[0].isalpha()):
-        msg = f"{name!r} is not a MATLAB variable name"
-        raise ValueError(msg)
-    return name
-
-
-def _matlab_spans(invalid: Bool, fs: float, n_samples: int, grid_s: float, what: str) -> F64:
-    spans = mask_sample_spans(invalid, fs, n_samples, grid_s)
-    if not spans:
-        return np.zeros((0, 2), dtype=np.float64)
-    out = to_matlab_inclusive([a for a, _ in spans], [b for _, b in spans])
-    assert_no_zero_runs(out.ravel(), what=what)
-    return out
-
-
-def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
-                    provenance: MaskProvenance | None, *, fs: float, n_samples: int,
-                    epoch_start_s: float, gate: EmitGate, release: str | None = None,
-                    events: Sequence[Mapping[str, Any]] = ()) -> Path:
-    """Write the masks as MATLAB blank spans (1-based inclusive) with their provenance.
-
-    One ``blank_<consumer>_<signal>`` (N x 2, 1-based inclusive samples into the epoch)
-    per mask key - never a merged one - plus ``notmeasured_mmc_<signal>`` (R6),
-    ``provenance_json``, ``events_json``, ``retention_json`` and ``gate_json``.
-
-    Refuses: provenance that does not name a model; a held recording without a
-    ``release`` (who released it and why); a mask whose grid does not start at
-    ``epoch_start_s`` or does not have ``floor(n_samples / fs / grid)`` frames. Every
-    numeric array is checked for exact-zero runs (invariant 1).
-    """
-    if provenance is None:
-        msg = "a mask file must carry provenance naming its model (task 15); none given"
-        raise ProvenanceError(msg)
-    provenance.validate()
-    if gate.held and not release:
-        msg = ("QC holds this recording (" + "; ".join(gate.reasons) + "); emit it only "
-               "with an explicit release naming who released it and why")
-        raise RecordingHeldError(msg)
-    doc: dict[str, Any] = {}
-    retention: dict[str, float] = {}
-    for (consumer, signal, band), m in sorted(masks.items()):
-        if abs(m.t0_s - epoch_start_s) > T0_TOLERANCE_S:
-            msg = (f"{consumer}/{signal}: mask grid starts at {m.t0_s} s but the file indexes "
-                   f"the epoch from {epoch_start_s} s")
-            raise ValueError(msg)
-        want = n_grid_frames(n_samples, fs, m.grid_s)
-        if m.invalid.size != want:
-            msg = f"{consumer}/{signal}: {m.invalid.size} frames for an epoch of {want}"
-            raise ValueError(msg)
-        doc[_matlab_name("blank", consumer, signal)] = _matlab_spans(
-            m.invalid, fs, n_samples, m.grid_s, f"blank spans {consumer}/{signal}")
-        retention[f"{consumer}|{signal}|{band}"] = m.retention
-    for sig, frames in sorted(mmc_not_measured(masks).items()):
-        doc[_matlab_name("notmeasured", "mmc", sig)] = _matlab_spans(
-            frames, fs, n_samples, masks[("mmc", sig, extent_consumers()["mmc"].band)].grid_s,
-            f"not-measured spans mmc/{sig}")
-    gate_doc: dict[str, Any] = {"held": gate.held, "reasons": list(gate.reasons),
-                                "retention_flagged": gate.retention_flagged,
-                                "blank_held": gate.blank_held}
-    if release:
-        gate_doc["release"] = release
-    doc["provenance_json"] = provenance.to_json()
-    doc["events_json"] = json.dumps(list(events), sort_keys=True, ensure_ascii=True,
-                                    allow_nan=False)
-    doc["retention_json"] = json.dumps(retention, sort_keys=True, ensure_ascii=True,
-                                       allow_nan=False)
-    doc["gate_json"] = json.dumps(gate_doc, sort_keys=True, ensure_ascii=True)
-    doc["fs"] = float(fs)
-    doc["epochStart_s"] = float(epoch_start_s)
-    doc["nSamples"] = float(n_samples)
-    path = Path(path)
-    tmp = path.with_name(f".{path.name}.tmp")
-    try:
-        with tmp.open("wb") as fh:  # a handle, so savemat cannot append ".mat" to the name
-            savemat(fh, doc, do_compression=True)
-        tmp.replace(path)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-    return path

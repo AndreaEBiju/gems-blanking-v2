@@ -3,7 +3,7 @@ function check_step1_masks(maskFile, signalFile, outFile)
 %
 %   check_step1_masks(maskFile, signalFile, outFile)
 %
-% Reads a mask file written by gems_blanking_v2.emit.masks.write_mask_file and a
+% Reads a mask file written by gems_blanking_v2.emit.handoff.write_mask_file and a
 % synthetic signal file (variables y: N x nCh, fs, channelLabels), applies every
 % blank_<consumer>_<signal> span set to its signal as NaN (1-based inclusive
 % [start stop] rows, the blankSpans convention), runs Andrea's step1_bandpass on the
@@ -11,6 +11,13 @@ function check_step1_masks(maskFile, signalFile, outFile)
 %
 % READ-ONLY with respect to processing_new: it only calls step1_bandpass and
 % pipeline_params from the path. Nothing is written anywhere but outFile.
+
+    % The step1_bandpass under test must be Andrea's, in processing_new - a stray copy
+    % (e.g. beside this harness) would shadow it and the test would check nothing.
+    where = which('step1_bandpass');
+    [pdir, ~, ~] = fileparts(where);
+    [~, leaf] = fileparts(pdir);
+    assert(strcmp(leaf, 'processing_new'), 'step1_bandpass resolves to %s, not processing_new', where);
 
     M = load(maskFile);
     S = load(signalFile);
@@ -68,6 +75,7 @@ function check_step1_masks(maskFile, signalFile, outFile)
     out.max_zero_run_filtered = max_zero_run(f);
     out.max_zero_run_input = max_zero_run(x);
     out.band = [D.bandInfo.low D.bandInfo.high];
+    out.step1_from = where;
 
     fid = fopen(outFile, 'w', 'n', 'UTF-8');
     fwrite(fid, jsonencode(out), 'char');
