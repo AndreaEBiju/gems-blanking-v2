@@ -435,7 +435,7 @@ def test_the_writer_refuses_an_empty_or_partial_signals_map(tmp_path: Path) -> N
                            epoch_start_s=0.0, min_retention=0.5, animal_median={})
     masks = _masked(0.01)
     without_slow = {k: v for k, v in READS.items() if k != "slow_wave"}
-    with pytest.raises(ValueError, match="slow_wave"):
+    with pytest.raises(ValueError, match=r"every consumer.*slow_wave"):
         ho.write_mask_file(tmp_path / "x.mat", masks, _prov(), signals=without_slow, fs=FS,
                            n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
                            animal_median={})
@@ -465,3 +465,26 @@ def test_a_non_finite_hum_feature_raises_naming_it(tmp_path: Path) -> None:
 def test_the_test_reads_cover_exactly_the_expected_consumers() -> None:
     assert set(READS) - set(tl.OUT_OF_BUILD_CONSUMERS) == set(tl.expected_consumers())
 
+
+def test_an_unknown_consumer_is_a_value_error_naming_it(tmp_path: Path) -> None:
+    masks = dict(_masked(0.01))
+    k = next(iter(masks))
+    odd = {**masks, ("not_a_consumer", k[1], k[2]): masks[k]}
+    with pytest.raises(ValueError, match=r"unknown consumers.*not_a_consumer"):
+        ho.write_mask_file(tmp_path / "x.mat", odd, _prov(), signals=READS, fs=FS,
+                           n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
+                           animal_median={})
+    with pytest.raises(ValueError, match=r"unknown consumers.*not_a_consumer"):
+        ho.write_mask_file(tmp_path / "x.mat", masks, _prov(),
+                           signals={**READS, "not_a_consumer": ("L_T",)}, fs=FS,
+                           n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
+                           animal_median={})
+
+
+def test_a_recording_need_not_name_a_consumer_out_of_this_build(tmp_path: Path) -> None:
+    """Velocity is out (task 18, R5): signals without it is complete, not a refusal."""
+    no_velocity = {k: v for k, v in READS.items() if k not in tl.OUT_OF_BUILD_CONSUMERS}
+    assert "velocity" in READS and "velocity" not in no_velocity
+    path = ho.write_mask_file(tmp_path / "r.mat", _masked(0.01), _prov(), signals=no_velocity,
+                              fs=FS, n_samples=N_SAMPLES, epoch_start_s=0.0, **GATE)
+    assert path.is_file()

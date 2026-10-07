@@ -81,6 +81,11 @@ def _check_coverage(masks: Mapping[MaskKey, ConsumerMask],
     if not masks:
         msg = "refusing to write a mask file with no masks"
         raise ValueError(msg)
+    unknown = sorted(({c for c, _s, _b in masks} - set(consumers))
+                     | (set(signals) - set(consumers)))
+    if unknown:
+        msg = f"unknown consumers {unknown}; the consumers are {sorted(consumers)}"
+        raise ValueError(msg)
     wrong_band = sorted(f"{c}/{s}: {b}" for c, s, b in masks if b != consumers[c].band)
     if wrong_band:
         msg = f"masks on the wrong band for their consumer: {wrong_band}"
@@ -110,8 +115,11 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
     excepted while task 18 is out), so the gate cannot be passed by leaving an
     over-blanked consumer out.
 
-    Refuses: provenance that does not name a model; masks that do not cover ``signals``;
-    a held recording (gate computed here, from ``masks``) without a non-blank
+    Refuses: provenance that does not name a model; ``signals`` that does not name every
+    consumer of :func:`~gems_blanking_v2.extent.tolerance.expected_consumers`; an empty
+    ``masks``; a consumer (in ``masks`` or ``signals``) that is not in the tolerance
+    table; a mask on a band other than its consumer's; masks that do not cover
+    ``signals``; a held recording (gate computed here, from ``masks``) without a non-blank
     ``release``; a mask whose grid does not start at
     ``epoch_start_s`` or does not have ``floor(n_samples / fs / grid)`` frames. Every
     numeric array is checked for exact-zero runs (invariant 1).
