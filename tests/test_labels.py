@@ -128,6 +128,23 @@ def test_the_loader_drops_unjudged_unsure_test_animals_and_unknown_sources() -> 
     assert "J" not in set(out["animal"])
 
 
+def _old_rows() -> pd.DataFrame:
+    rows = [(f"o{k}", "L", "old", 0, 1, "motion", "inherited", "mark_overlap", "train", "human")
+            for k in range(1, 5)]
+    return pd.DataFrame(rows, columns=list(lb.LABEL_COLUMNS))
+
+
+def test_old_cohort_rows_follow_the_tiers_of_ruling_i() -> None:
+    t = _old_rows()
+    tiers = {"o1": 1, "o2": 2, "o3": 0}  # o4 is absent from the map
+    assert lb.training_rows(t)["recording"].tolist() == []  # no map, no old rows
+    assert lb.training_rows(t, old_tiers=tiers)["recording"].tolist() == ["o1"]
+    both = lb.training_rows(t, old_tiers=tiers, include_tier2=True)
+    assert both["recording"].tolist() == ["o1", "o2"]
+    # new-cohort rows never depend on the old-cohort tiers
+    assert len(lb.training_rows(_table(), old_tiers={})) == 2
+
+
 def test_model_labels_need_an_explicit_opt_in() -> None:
     t = _table()
     t.loc[0, "label_source"] = "model"

@@ -237,12 +237,18 @@ def recording_label_source(value: str | None) -> LabelSource:
     return value  # type: ignore[return-value]
 
 
-def training_rows(table: pd.DataFrame, *, allow_model_labels: bool = False) -> pd.DataFrame:
+def training_rows(table: pd.DataFrame, *, allow_model_labels: bool = False,
+                  old_tiers: Mapping[str, int] | None = None,
+                  include_tier2: bool = False) -> pd.DataFrame:
     """Return the rows task 12 may train on, with a binary ``y`` (1 = motion).
 
     Drops ``unjudged`` and ``unsure`` (never negatives), every test-set row and animal
     (R1), and every recording whose ``label_source`` is ``unknown`` - or ``model`` /
     ``mixed`` unless ``allow_model_labels`` (an opt-in the caller records in provenance).
+
+    Old-cohort rows (ruling 2026-10-07 (i)) are kept only for recordings in ``old_tiers``
+    with tier 1, or tier 2 when ``include_tier2``; a recording absent from the map, or with
+    tier 0, is excluded - never assumed certain. ``old_tiers=None`` keeps no old-cohort row.
     Raises naming the column if a required column is missing.
     """
     missing = [c for c in LABEL_COLUMNS if c not in table.columns]
@@ -257,6 +263,10 @@ def training_rows(table: pd.DataFrame, *, allow_model_labels: bool = False) -> p
             & (table["label_set"] == "train")
             & ~table["animal"].isin(TEST_ANIMALS)
             & table["label_source"].isin(ok_src))
+    allowed = {1, 2} if include_tier2 else {1}
+    tiers = old_tiers or {}
+    old_ok = table["recording"].map(lambda r: tiers.get(r, 0) in allowed)
+    keep &= (table["cohort"] != "old") | old_ok
     out = table.loc[keep].copy()
     out["y"] = (out["judgement"] == "motion").astype(np.int8)
     return out
