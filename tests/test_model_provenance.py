@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import numpy as np
 import pandas as pd
@@ -384,6 +384,26 @@ def test_an_incomplete_shap_build_is_never_moved_into_place(
         sr.write_shap_review(reg, target, table, fs=fs, top_k=2)
     mdir = reg.store.model_dir(target.model_id)
     assert not (mdir / "shap").exists()
+    assert not list(mdir.glob("shap.building-*"))
+
+
+def test_the_deepest_shap_build_path_fits_under_a_windows_style_root(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("platform.node", lambda: "a-very-long-workstation-name.lab.example")
+    monkeypatch.setattr("os.getpid", lambda: 4294967295)  # the largest Windows PID
+    store = GemsStore(PureWindowsPath(  # type: ignore[arg-type]
+        r"G:\Shared drives\BIONICs Lab_ Enteric Interfaces Team"))
+    out_dir = store.model_dir("a" * 32) / "shap"
+    build = sr.build_dir(out_dir)
+    host = build.name.removeprefix("shap.building-").rsplit("-", 1)[0]
+    assert len(host) <= sr.HOST_CHARS
+    deepest = build / (sr.REVIEW_NAME + ".raw")
+    assert store.check_path_length(deepest) is None
+    assert len(str(deepest)) < 260
+    long_store = GemsStore(PureWindowsPath("G:\\" + "x" * 200))  # type: ignore[arg-type]
+    msg = long_store.check_path_length(sr.build_dir(long_store.model_dir("a" * 32) / "shap")
+                                       / (sr.REVIEW_NAME + ".raw"))
+    assert msg is not None and "Windows limit" in msg
 
 
 @pytest.mark.skipif(not _detector_review_available(), reason="GEMSBlanking not available")

@@ -243,6 +243,12 @@ def test_loao_folds_assert_span_scoring_in_place(monkeypatch: pytest.MonkeyPatch
         md.loao_folds(t, ["new:A"])
 
 
+def test_prepare_table_requires_label_source() -> None:
+    raw = make_feature_table({"new": ("A",)}, n_recordings=1, cores_per_recording=4, seed=26)
+    with pytest.raises(ValueError, match="label_source"):
+        md.prepare_table(raw.drop(columns="label_source"))
+
+
 def test_one_recording_is_one_animal_of_one_cohort() -> None:
     raw = make_feature_table({"new": ("A",)}, n_recordings=1, cores_per_recording=6, seed=15)
     raw.loc[0, "animal"] = "B"  # never silently last-wins

@@ -41,7 +41,8 @@ from gems_blanking_v2.model.modes import refuse_test_rows
 from gems_blanking_v2.model.registry import ModelSpec, Registry
 from gems_blanking_v2.model.train import feature_columns, predict_raw
 
-__all__ = ["CONTEXT_S", "REVIEW_NAME", "TOP_FEATURES_NAME", "review_samples",
+__all__ = ["CONTEXT_S", "HOST_CHARS", "REVIEW_NAME", "TOP_FEATURES_NAME", "build_dir",
+           "review_samples",
            "write_shap_review"]
 
 REVIEW_NAME: Final = "review.html"
@@ -133,8 +134,21 @@ def write_shap_review(registry: Registry, spec: ModelSpec, cores: pd.DataFrame, 
                           _top_features_html(spec, booster.feature_name(), mean_abs, top_n,
                                              len(cores)))
 
+    too_long = registry.store.check_path_length(build_dir(out_dir) / (REVIEW_NAME + ".raw"))
+    if too_long:  # rule 5: fail with a clear message, not an OSError deep in a write
+        raise ValueError(too_long)
     _publish(out_dir, write)
     return out_dir
+
+
+HOST_CHARS: Final = 15
+"""Host part of a build directory name, truncated (keeps the deepest path short, rule 5)."""
+
+
+def build_dir(out_dir: Path) -> Path:
+    """Return this process's own build directory: ``shap.building-<host>-<pid>``."""
+    host = safe_component(platform.node(), "host")[:HOST_CHARS].rstrip(". ") or "host"
+    return out_dir.with_name(f"shap.building-{host}-{os.getpid()}")
 
 
 def _publish(out_dir: Path, write: Callable[[Path], None]) -> None:
@@ -146,8 +160,7 @@ def _publish(out_dir: Path, write: Callable[[Path], None]) -> None:
     ``shap/``. A leftover from a killed process is harmless: it is never read, and every
     build uses its own name (host + PID). The build must hold both pages before the move.
     """
-    build = out_dir.with_name(
-        f"shap.building-{safe_component(platform.node(), 'host')}-{os.getpid()}")
+    build = build_dir(out_dir)
     if build.exists():
         shutil.rmtree(build)
     build.mkdir(parents=True)
