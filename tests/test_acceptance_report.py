@@ -13,6 +13,11 @@ from gems_blanking_v2.emit import masks as mk
 from gems_blanking_v2.emit.handoff import write_mask_file
 from gems_blanking_v2.emit.provenance import MaskProvenance
 from gems_blanking_v2.extent.grid import n_grid_frames
+from gems_blanking_v2.io.registry_log import RegistryAction, RegistryEvent
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
+from tests.conftest import make_confound_rows, make_eng
 
 FS = 2000.0
 DUR_S = 60.0
@@ -22,6 +27,11 @@ MODEL = {"mode": "pooled", "version": "0.3.0", "corpus_hash": "ab" * 16,
          "calibrator": "models/x/cal.json"}
 IJK = {("new", "I"): [(20, 21), (20, 21)], ("new", "J"): [(15, 16), (15, 15)],
        ("new", "K"): [(10, 12), (10, 13)]}
+READS: dict[str, tuple[str, ...]] = {"spikes": ("L_T",), "slow_wave": ("ANT1",),
+                                     "mmc": ("ANT1",), "hrv": ("RVN2",),
+                                     "breathing": ("RVN2",), "velocity": ()}
+CONSUMERS = ["spikes", "mmc", "slow_wave", "breathing", "hrv"]
+"""Expected consumers: the tolerance table's, velocity excepted (R5)."""
 TRAIN = [("new", "A"), ("new", "B"), ("new", "H"), ("old", "J")]
 
 
@@ -30,13 +40,26 @@ def test_acceptance_is_outside_the_generation_hash() -> None:
 
 
 def _all_not_computable() -> list[ar.Row]:
-    return [ar.row1_candidate_recall(None, None), ar.row2_class_balance(None),
+    return [ar.row1_candidate_recall(None, None, consumers=CONSUMERS),
+            ar.row2_class_balance(None),
             ar.row3_no_zeros(None, None, None), ar.row4_cardiac_scope(None),
             ar.row5_retention(None, None), ar.row6_cross_animal(None, scoring_corpus=None),
-            ar.row7_coverage_confound(None, has_coverage=True, equivalence_margin=None),
+            ar.row7_coverage_confound(None, has_coverage=True, equivalence_margin=None,
+                                      consumers=CONSUMERS),
             ar.row8_downstream(None, None, None), ar.row9_velocity(),
             ar.row10_mode_comparison(None, None, comparisons=None, animals=["H"]),
             ar.row11_model_routing(None, None, None, None), ar.row12_calibration(None, None)]
+
+
+def _promoted(*models: str, demoted: tuple[str, ...] = ()) -> list[RegistryEvent]:
+    ev = []
+    for i, m in enumerate(models):
+        ev.append(RegistryEvent(f"2026-10-0{i + 1}T00:00:00+00:00", "u", RegistryAction.TRAINED, m))
+        ev.append(RegistryEvent(f"2026-10-0{i + 1}T01:00:00+00:00", "u", RegistryAction.PROMOTED,
+                                m))
+    for m in demoted:
+        ev.append(RegistryEvent("2026-10-09T00:00:00+00:00", "u", RegistryAction.DEMOTED, m))
+    return ev
 
 
 def test_a_row_without_its_input_is_not_computable_and_names_it() -> None:
@@ -82,19 +105,20 @@ def _inj(det: bool, *consumers: str, rec: str = "r") -> ar.Injection:
 def test_row1_is_per_consumer() -> None:
     inj = ([_inj(True, "spikes", "hrv")] * 98 + [_inj(False, "spikes", "hrv")] * 2
            + [_inj(False)] * 50)
-    r = ar.row1_candidate_recall(inj, {"r": 2500})
+    two = ["spikes", "hrv"]
+    r = ar.row1_candidate_recall(inj, {"r": 2500}, consumers=two)
     assert r.status is ar.Status.PASS and r.value == pytest.approx(0.98)
     assert r.detail["n_below_every_tolerance"] == 50
     # spikes fine, slow_wave not: one consumer under 98% fails the row
     bad = inj + [_inj(False, "slow_wave")] * 5 + [_inj(True, "slow_wave")] * 95
-    rb = ar.row1_candidate_recall(bad, {"r": 10})
+    rb = ar.row1_candidate_recall(bad, {"r": 10}, consumers=[*two, "slow_wave"])
     assert rb.status is ar.Status.FAIL and rb.detail["recall_by_consumer"]["slow_wave"] == 0.95
-    assert ar.row1_candidate_recall(inj, {"r": 3001}).status is ar.Status.FAIL
+    assert ar.row1_candidate_recall(inj, {"r": 3001}, consumers=two).status is ar.Status.FAIL
 
 
 def test_row1_needs_a_candidate_count_for_every_injected_recording() -> None:
     inj = [_inj(True, "spikes", rec="r1"), _inj(True, "spikes", rec="r2")]
-    r = ar.row1_candidate_recall(inj, {"r1": 10})
+    r = ar.row1_candidate_recall(inj, {"r1": 10}, consumers=['spikes'])
     assert r.status is ar.Status.NOT_COMPUTABLE and "r2" in r.reason
 
 
@@ -107,8 +131,7 @@ def test_row2_class_balance() -> None:
 
 
 def test_row3_zeros_on_matlab_side_taper_on_python_side() -> None:
-    rng = np.random.default_rng(1)
-    x = rng.normal(0, 10, N_SAMPLES)
+    x = make_eng(FS, DUR_S, seed=1).signal
     inv = mk.mask_frames([(10.0, 11.0), (30.0, 30.5)], N_FRAMES, t0_s=0.0)
     y = mk.apply_mask(x, FS, inv)
     yout = x.copy()
@@ -123,8 +146,7 @@ def test_row3_zeros_on_matlab_side_taper_on_python_side() -> None:
 
 
 def test_row3_ignores_boundaries_beside_pre_existing_nan() -> None:
-    rng = np.random.default_rng(2)
-    x = rng.normal(0, 10, N_SAMPLES)
+    x = make_eng(FS, DUR_S, seed=2).signal.copy()
     x[19000:21000] = np.nan  # a dropout in the original
     inv = mk.mask_frames([(10.5, 11.0)], N_FRAMES, t0_s=0.0)
     y = mk.apply_mask(x, FS, inv)
@@ -159,8 +181,7 @@ def _masks(eng: float, slow: float, slow2: float | None = None
              mk.MaskSpan("slow_wave", "ANT1", 0.0, slow * DUR_S, "x"),
              mk.MaskSpan("breathing", "RVN2", 0.0, (slow if slow2 is None else slow2) * DUR_S,
                          "x")]
-    return mk.build_masks({"spikes": ("L_T",), "slow_wave": ("ANT1",), "breathing": ("RVN2",)},
-                          spans, n_frames=N_FRAMES, t0_s=0.0)
+    return mk.build_masks(READS, spans, n_frames=N_FRAMES, t0_s=0.0)
 
 
 def test_row5_eng_retention_above_slow_bands_and_baseline() -> None:
@@ -202,32 +223,10 @@ def test_row6_refuses_non_test_animals_and_a_leaky_scoring_model() -> None:
 # row 7 ---------------------------------------------------------------------
 
 
-def _confound_rows(coef: float, *, n: int = 120, seed: int = 3, consumer: str = "spikes",
-                   modes: bool = True) -> list[ar.BlankRow]:
-    """Coverage and mode both correlate with condition and carry their own effects.
-
-    stim_recovery recordings have lower coverage and are more often scored by the
-    adapted model; coverage (-0.05 per unit) and adapted mode (+0.02) change the blank
-    fraction on their own. Only a regression that carries both recovers ``coef``.
-    """
-    rng = np.random.default_rng(seed)
-    rows = []
-    for i in range(n):
-        stim = i % 2 == 1
-        cov = rng.uniform(0.55, 0.8) if stim else rng.uniform(0.75, 1.0)
-        adapted = modes and rng.uniform() < (0.7 if stim else 0.2)
-        frac = (0.10 + coef * stim - 0.05 * cov + 0.02 * adapted + rng.normal(0, 0.002))
-        dur, excl = 1200.0, 120.0 if stim else 0.0
-        rows.append(ar.BlankRow(f"r{i}", consumer, "stim_recovery" if stim else "baseline",
-                                "adapted" if adapted else "pooled", frac * (dur - excl), dur,
-                                excl, float(cov)))
-    rows.append(ar.BlankRow("low", consumer, "baseline", "pooled", 600.0, 1200.0, 0.0, 0.3))
-    return rows
-
-
 def test_row7_recovers_a_known_coefficient_only_with_its_covariates() -> None:
-    rows = _confound_rows(0.04)
-    r = ar.row7_coverage_confound(rows, has_coverage=True, equivalence_margin=None)
+    rows = make_confound_rows(0.04)
+    r = ar.row7_coverage_confound(rows, has_coverage=True, equivalence_margin=None,
+                                  consumers=['spikes'])
     d = r.detail["spikes"]
     assert r.status is ar.Status.FAIL  # blanking depends on condition: the confound
     assert d["coef"] == pytest.approx(0.04, abs=0.003) and d["mode_is_factor"]
@@ -240,46 +239,50 @@ def test_row7_recovers_a_known_coefficient_only_with_its_covariates() -> None:
 
 
 def test_row7_never_passes_without_a_ruled_margin() -> None:
-    null = ar.row7_coverage_confound(_confound_rows(0.0), has_coverage=True,
-                                     equivalence_margin=None)
+    null = ar.row7_coverage_confound(make_confound_rows(0.0), has_coverage=True,
+                                     equivalence_margin=None, consumers=['spikes'])
     assert null.status is ar.Status.NOT_COMPUTABLE and "margin not ruled" in null.reason
     assert null.detail["spikes"]["ci95"][0] <= 0 <= null.detail["spikes"]["ci95"][1]
-    ruled = ar.row7_coverage_confound(_confound_rows(0.0), has_coverage=True,
-                                      equivalence_margin=0.01)
+    ruled = ar.row7_coverage_confound(make_confound_rows(0.0), has_coverage=True,
+                                      equivalence_margin=0.01, consumers=['spikes'])
     assert ruled.status is ar.Status.PASS
 
 
 def test_row7_runs_per_consumer() -> None:
-    rows = _confound_rows(0.0, consumer="spikes") + _confound_rows(0.05, consumer="slow_wave",
-                                                                   seed=4)
-    r = ar.row7_coverage_confound(rows, has_coverage=True, equivalence_margin=0.01)
+    rows = (make_confound_rows(0.0, consumer="spikes")
+            + make_confound_rows(0.05, consumer="slow_wave", seed=4))
+    r = ar.row7_coverage_confound(rows, has_coverage=True, equivalence_margin=0.01,
+                                  consumers=['spikes', 'slow_wave'])
     assert r.status is ar.Status.FAIL and set(r.detail) == {"spikes", "slow_wave"}
     assert r.detail["slow_wave"]["coef"] == pytest.approx(0.05, abs=0.003)
 
 
 def test_row7_refuses_without_coverage() -> None:
     with pytest.raises(ar.CoverageMissingError, match="hasCoverage"):
-        ar.row7_coverage_confound(_confound_rows(0.0), has_coverage=False,
-                                  equivalence_margin=None)
-    rows = [*_confound_rows(0.0), ar.BlankRow("x", "spikes", "baseline", "pooled", 1.0, 100.0,
+        ar.row7_coverage_confound(make_confound_rows(0.0), has_coverage=False,
+                                  equivalence_margin=None, consumers=['spikes'])
+    rows = [*make_confound_rows(0.0), ar.BlankRow("x", "spikes", "baseline", "pooled", 1.0, 100.0,
                                               0.0, None)]
     with pytest.raises(ar.CoverageMissingError):
-        ar.row7_coverage_confound(rows, has_coverage=True, equivalence_margin=None)
+        ar.row7_coverage_confound(rows, has_coverage=True, equivalence_margin=None,
+                                  consumers=['spikes'])
 
 
 def test_row7_names_confounded_terms_and_leaves_p_absent_when_exact() -> None:
-    rows = _confound_rows(0.0, modes=False)
+    rows = make_confound_rows(0.0, modes=False)
     tied = [ar.BlankRow(x.recording, x.consumer, x.condition,
                         "adapted" if x.condition == "stim_recovery" else "pooled",
                         x.motion_blank_s, x.duration_s, x.excluded_s, x.coverage) for x in rows]
-    r = ar.row7_coverage_confound(tied, has_coverage=True, equivalence_margin=None)
+    r = ar.row7_coverage_confound(tied, has_coverage=True, equivalence_margin=None,
+                                  consumers=['spikes'])
     assert r.status is ar.Status.NOT_COMPUTABLE and "confounded terms" in r.reason
-    few = _confound_rows(0.0, n=8)
+    few = make_confound_rows(0.0, n=8)
     assert "dof" in ar.row7_coverage_confound(few, has_coverage=True,
-                                              equivalence_margin=0.01).reason
+                                              equivalence_margin=0.01, consumers=['spikes']).reason
     exact = [ar.BlankRow(f"r{i}", "spikes", "stim_recovery" if i % 2 else "baseline", "pooled",
                          60.0, 1200.0, 0.0, 0.6 + 0.01 * i) for i in range(30)]
-    d = ar.row7_coverage_confound(exact, has_coverage=True, equivalence_margin=0.01)
+    d = ar.row7_coverage_confound(exact, has_coverage=True, equivalence_margin=0.01,
+                                  consumers=['spikes'])
     assert "p" not in d.detail["spikes"] or d.detail["spikes"]["se"] > 0
 
 
@@ -313,7 +316,8 @@ def test_row8_all_up_and_variance_down() -> None:
 
 def _bvc(diff: float, lo: float, hi: float, **kw: object) -> dict[str, object]:
     return {"f1_diff": diff, "ci95": [lo, hi], "n_resamples": 1000, "cluster_unit": "recording",
-            "excluded_folds": ["old:L"], "corpus": "old_cohort_loao", **kw}
+            "excluded_folds": ["old:L"], "corpus": "old_cohort_loao", "cohort": "old",
+            "matched_event_control": {"f1_diff": diff, "ci95": [lo, hi]}, **kw}
 
 
 @pytest.fixture
@@ -325,7 +329,7 @@ def curves(tmp_path: Path) -> dict[tuple[str, str], Path]:
 
 def test_row10_catches_a_vs_c_however_named(curves: dict[tuple[str, str], Path]) -> None:
     ok = [ar.Comparison("B", "C", "reported"), ar.Comparison("A", "C", "not_comparable")]
-    assert ar.row10_mode_comparison(curves, _bvc(0.05, 0.01, 0.09), comparisons=ok,
+    assert ar.row10_mode_comparison(curves, _bvc(0.01, -0.02, 0.04), comparisons=ok,
                                     animals=["H", "B"]).status is ar.Status.PASS
     for a, b in (("A", "C"), ("pooled", "per_animal"), ("PER_ANIMAL", "pooled")):
         bad = [ar.Comparison(a, b, "reported")]
@@ -335,9 +339,10 @@ def test_row10_catches_a_vs_c_however_named(curves: dict[tuple[str, str], Path])
 
 def test_row10_r9_rule_at_its_boundaries(curves: dict[tuple[str, str], Path]) -> None:
     def verdict(diff: float, lo: float) -> tuple[str, bool]:
-        d = ar.row10_mode_comparison(curves, _bvc(diff, lo, 0.1), comparisons=[],
-                                     animals=["H", "B"]).detail
-        return d["verdict"], d["task11_investigation_triggered"]
+        r = ar.row10_mode_comparison(curves, _bvc(diff, lo, 0.1), comparisons=[],
+                                     animals=["H", "B"])
+        assert (r.status is ar.Status.FAIL) == r.detail["task11_investigation_triggered"]
+        return r.detail["verdict"], r.detail["task11_investigation_triggered"]
 
     assert verdict(0.05, 0.01) == ("C beats B", True)
     assert verdict(0.03, 0.001) == ("C beats B", True)  # exactly the margin wins
@@ -376,8 +381,7 @@ def _write(folder: Path, name: str, model: dict[str, str], routing: str = "64c2e
                           created_at="2026-10-08T05:00:00+00:00", recording=name)
     masks = _masks(0.01, 0.01)
     return write_mask_file(folder / f"{name}.mat", masks, prov,
-                           signals={"spikes": ("L_T",), "slow_wave": ("ANT1",),
-                                    "breathing": ("RVN2",)},
+                           signals=READS,
                            fs=FS, n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
                            animal_median={})
 
@@ -409,11 +413,12 @@ def test_row12_every_shipped_model_needs_held_out_data() -> None:
     p = rng.uniform(0, 1, 20000)
     calibrated = (rng.uniform(0, 1, p.size) < p).astype(float)
     overconfident = (rng.uniform(0, 1, p.size) < 0.5).astype(float)
-    ok = ar.row12_calibration(["m1"], {"m1": (p, calibrated)})
+    ok = ar.row12_calibration(_promoted("m1"), {"m1": (p, calibrated)})
     assert ok.status is ar.Status.PASS and (ok.value or 1) < 0.02
-    bad = ar.row12_calibration(["m1", "m2"], {"m1": (p, calibrated), "m2": (p, overconfident)})
+    bad = ar.row12_calibration(_promoted("m1", "m2"),
+                               {"m1": (p, calibrated), "m2": (p, overconfident)})
     assert bad.status is ar.Status.FAIL and bad.value == pytest.approx(0.25, abs=0.02)
-    gap = ar.row12_calibration(["m1", "m3"], {"m1": (p, calibrated)})
+    gap = ar.row12_calibration(_promoted("m1", "m3"), {"m1": (p, calibrated)})
     assert gap.status is ar.Status.NOT_COMPUTABLE and "m3" in gap.reason
     ece, curve = ar.expected_calibration_error([0.9, 0.9], [1.0, 0.0])
     assert ece == pytest.approx(0.4) and curve[0]["n"] == 2
@@ -421,8 +426,125 @@ def test_row12_every_shipped_model_needs_held_out_data() -> None:
 
 def test_a_full_synthetic_report_round_trips_to_json() -> None:
     rows = _all_not_computable()
-    rows[0] = ar.row1_candidate_recall([_inj(True, "spikes")] * 100, {"r": 10})
+    rows[0] = ar.row1_candidate_recall([_inj(True, "spikes")] * 100, {"r": 10},
+                                       consumers=["spikes"])
     rep = ar.build_report(rows, ar.Disagreements(), code_commit="c", generation_sha="g")
     doc = json.loads(rep.to_json())
     assert doc["rows"][0]["status"] == "pass" and doc["rows"][0]["value"] == 1.0
     assert "| 1 | candidate_recall | pass |" in rep.to_markdown()
+
+
+# ---------------------------------------------------------------------------
+# re-review holes, each probed and closed
+# ---------------------------------------------------------------------------
+
+
+def test_row1_and_row7_name_expected_consumers_without_data() -> None:
+    r1 = ar.row1_candidate_recall([_inj(True, "spikes")] * 100, {"r": 10}, consumers=CONSUMERS)
+    assert r1.status is ar.Status.NOT_COMPUTABLE and "hrv" in r1.reason
+    r7 = ar.row7_coverage_confound(make_confound_rows(0.0), has_coverage=True,
+                                   equivalence_margin=0.01, consumers=CONSUMERS)
+    assert r7.status is ar.Status.NOT_COMPUTABLE and "blank fractions for" in r7.reason
+    assert "mmc" in r7.reason
+
+
+def test_row2_rejects_impossible_counts() -> None:
+    with pytest.raises(ValueError, match="0 <= motion <= judged"):
+        ar.row2_class_balance({"a": (11, 10)})
+    with pytest.raises(ValueError, match="0 <= motion <= judged"):
+        ar.row2_class_balance({"a": (-1, 10)})
+
+
+def test_row3_without_any_boundary_is_not_computable() -> None:
+    x = make_eng(FS, DUR_S, seed=3).signal
+    r = ar.row3_no_zeros([("y", x)], [("p", x, x)], FS)
+    assert r.status is ar.Status.NOT_COMPUTABLE
+
+
+def test_row4_an_unknown_status_raises() -> None:
+    with pytest.raises(ValueError, match="not one of"):
+        ar.row4_cardiac_scope([_v("300-3000", "error"), _v("0.5-3"), _v("0-2")])
+
+
+def test_row5_uses_the_same_recordings_for_eng_and_baseline() -> None:
+    masks = {"a": _masks(0.30, 0.40), "b": _masks(0.01, 0.40)}
+    r = ar.row5_retention(masks, {"a": 0.75})  # only "a" has a baseline
+    assert r.value == pytest.approx(0.70) and r.status is ar.Status.FAIL  # not b's 0.99
+
+
+def test_row6_needs_two_spans_a_corpus_and_ignores_letter_case() -> None:
+    one = {**IJK, ("new", "K"): [(10, 12)]}
+    r = ar.row6_cross_animal(one, scoring_corpus=TRAIN)
+    assert r.status is ar.Status.NOT_COMPUTABLE and "new:K" in r.reason
+    assert ar.row6_cross_animal(IJK, scoring_corpus=[]).status is ar.Status.NOT_COMPUTABLE
+    with pytest.raises(ValueError, match="trained on test animals"):
+        ar.row6_cross_animal(IJK, scoring_corpus=[*TRAIN, ("NEW", "j")])
+    lower = {("new", a.lower()): v for (_c, a), v in IJK.items()}
+    assert ar.row6_cross_animal(lower, scoring_corpus=TRAIN).status is ar.Status.PASS
+
+
+def test_motion_inside_the_excluded_epoch_is_not_counted() -> None:
+    spans = [mk.MaskSpan("spikes", "L_T", 0.0, 120.0, "excluded_epoch"),
+             mk.MaskSpan("spikes", "L_T", 100.0, 130.0, "clip")]
+    assert ar.masked_motion_seconds(spans, 600.0) == pytest.approx(10.0)
+
+
+def test_row10_needs_animals_cluster_unit_by_cohort_and_a_matched_control(
+    curves: dict[tuple[str, str], Path]
+) -> None:
+    good = _bvc(0.01, -0.02, 0.04)
+    assert ar.row10_mode_comparison(curves, good, comparisons=[],
+                                    animals=[]).status is ar.Status.NOT_COMPUTABLE
+    with pytest.raises(ValueError, match="clusters by"):
+        ar.row10_mode_comparison(curves, {**good, "cluster_unit": "span"}, comparisons=[],
+                                 animals=["H", "B"])
+    with pytest.raises(ValueError, match="clusters by"):
+        ar.row10_mode_comparison(curves, {**good, "cohort": "new"}, comparisons=[],
+                                 animals=["H", "B"])
+    no_ctrl = ar.row10_mode_comparison(curves, {**good, "matched_event_control": None},
+                                       comparisons=[], animals=["H", "B"])
+    assert no_ctrl.status is ar.Status.NOT_COMPUTABLE and "invariant 13" in no_ctrl.reason
+    c_wins = ar.row10_mode_comparison(curves, _bvc(0.05, 0.01, 0.09), comparisons=[],
+                                      animals=["H", "B"])
+    assert c_wins.status is ar.Status.FAIL and "task 11" in c_wins.reason
+
+
+def test_row11_checks_the_reruns_routing_hash_and_recording(tmp_path: Path) -> None:
+    files = {r: _write(tmp_path / "run1", r, MODEL) for r in ("r1", "r2")}
+    log = {"r1": MODEL, "r2": MODEL}
+    rlog = {"r1": "64c2e1ea", "r2": "64c2e1ea"}
+    stray = {"r1": _write(tmp_path / "run2", "r9", MODEL),
+             "r2": _write(tmp_path / "run2", "r2", MODEL)}
+    r = ar.row11_model_routing(files, log, rlog, stray)
+    assert r.status is ar.Status.FAIL and "r9" in r.detail["problems"]["r1"]
+    other_routing = {"r1": _write(tmp_path / "run3", "r1", MODEL, routing="deadbeef"),
+                     "r2": stray["r2"]}
+    r = ar.row11_model_routing(files, log, rlog, other_routing)
+    assert r.status is ar.Status.FAIL and "routing" in r.detail["problems"]["r1"]
+    r = ar.row11_model_routing(files, log, {"r2": "64c2e1ea"}, stray)
+    assert "no routing-table hash logged" in r.detail["problems"]["r1"]
+
+
+def test_row12_needs_promotion_and_enough_held_out_data() -> None:
+    p = np.full(500, 0.5)
+    y = np.tile([0.0, 1.0], 250)
+    gone = ar.row12_calibration(_promoted("m1", demoted=("m1",)), {"m1": (p, y)})
+    assert gone.status is ar.Status.NOT_COMPUTABLE and "promoted" in gone.reason
+    tiny = ar.row12_calibration(_promoted("m1"), {"m1": ([0.9, 0.1], [1.0, 0.0])})
+    assert tiny.status is ar.Status.NOT_COMPUTABLE and "m1" in tiny.reason
+
+
+@settings(max_examples=40, deadline=None)
+@given(numbers=st.lists(st.one_of(st.none(), st.floats(allow_nan=True, allow_infinity=True)),
+                        min_size=12, max_size=12),
+       statuses=st.lists(st.sampled_from(list(ar.Status)), min_size=12, max_size=12))
+def test_the_report_json_round_trips_without_nan(numbers: list[float | None],
+                                                 statuses: list[ar.Status]) -> None:
+    rows = [ar.Row(i + 1, f"r{i + 1}", statuses[i], "c", numbers[i], {"x": numbers[i]})
+            for i in range(12)]
+    rep = ar.build_report(rows, ar.Disagreements(), code_commit="c", generation_sha="g")
+    text = rep.to_json()
+    doc = json.loads(text)
+    assert json.loads(json.dumps(doc, allow_nan=False)) == doc
+    for r, n in zip(doc["rows"], numbers, strict=True):
+        assert ("value" in r) == (n is not None and np.isfinite(n))

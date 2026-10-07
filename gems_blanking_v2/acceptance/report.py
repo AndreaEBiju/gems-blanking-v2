@@ -42,7 +42,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, get_args
 
 import numpy as np
 import numpy.typing as npt
@@ -53,7 +53,9 @@ from gems_blanking_v2.constants import ENG_BAND
 from gems_blanking_v2.emit.masks import TAPER_S, ConsumerMask, MaskKey, MaskSpan
 from gems_blanking_v2.emit.provenance import MaskProvenance, ProvenanceError
 from gems_blanking_v2.io.nan_interop import find_zero_runs
+from gems_blanking_v2.io.registry_log import RegistryEvent, replay
 from gems_blanking_v2.model.labels import animal_key, is_test_animal
+from gems_blanking_v2.physio.cardiac_window import CardiacStatus
 from gems_blanking_v2.types import TrainingMode
 
 __all__ = [
@@ -162,8 +164,14 @@ class Injection:
 
 
 def row1_candidate_recall(injections: Sequence[Injection] | None,
-                          candidates_per_recording: Mapping[str, int] | None) -> Row:
-    """Per consumer, >= 98% of injections above its tolerance detected; <= 3000 candidates."""
+                          candidates_per_recording: Mapping[str, int] | None, *,
+                          consumers: Sequence[str]) -> Row:
+    """Per consumer, >= 98% of injections above its tolerance detected; <= 3000 candidates.
+
+    ``consumers`` is the EXPECTED set (the tolerance table's consumers, velocity excepted
+    while task 18 is out, R5); one with no injection above its tolerance is not
+    computable, named - a consumer missing from the data is never silently passed.
+    """
     cond = (f"for every consumer, >= {ROW1_RECALL:.0%} of injected synthetics above that "
             f"consumer's tolerance produce a candidate; <= {ROW1_MAX_CANDIDATES} "
             "candidates per injected recording")
@@ -176,12 +184,15 @@ def row1_candidate_recall(injections: Sequence[Injection] | None,
     if lacking:
         return _not_computable(1, "candidate_recall", cond,
                                f"candidate counts for injected recordings {lacking}")
-    consumers = sorted({c for i in injections for c in i.above_tolerance_of})
     if not consumers:
+        return _not_computable(1, "candidate_recall", cond, "the expected consumer set")
+    seen = {c for i in injections for c in i.above_tolerance_of}
+    unseen = sorted(set(consumers) - seen)
+    if unseen:
         return _not_computable(1, "candidate_recall", cond,
-                               "no injection is above any consumer's tolerance")
+                               f"injections above the tolerance of {unseen}")
     recall = {}
-    for c in consumers:
+    for c in sorted(consumers):
         mine = [i for i in injections if c in i.above_tolerance_of]
         recall[c] = sum(i.detected for i in mine) / len(mine)
     worst = max(candidates_per_recording[r] for r in {i.recording for i in injections})
@@ -210,6 +221,10 @@ def row2_class_balance(labelled: Mapping[str, tuple[int, int]] | None) -> Row:
     if not labelled:
         return _not_computable(2, "class_balance", cond,
                                "judged cores in exhaustive audit spans (task 10 labels)")
+    bad = sorted(r for r, (a, b) in labelled.items() if not 0 <= a <= b)
+    if bad:
+        msg = f"row 2 needs 0 <= motion <= judged per recording; violated for {bad}"
+        raise ValueError(msg)
     tp = sum(a for a, _ in labelled.values())
     n = sum(b for _, b in labelled.values())
     if n == 0:
@@ -278,6 +293,10 @@ def row3_no_zeros(matlab_yout: Sequence[tuple[str, F64]] | None,
     for _name, x, y in python_out:
         b, t = _boundaries_tapered(np.asarray(x, np.float64), np.asarray(y, np.float64), fs)
         bounds, taps = bounds + b, taps + t
+    if bounds == 0:
+        return Row(3, "no_zeros", Status.NOT_COMPUTABLE, cond, None,
+                   {"matlab_arrays": len(matlab_yout), "arrays_with_zero_runs": runs},
+                   "missing input: a Python output with at least one mask boundary")
     ok = not runs and taps == bounds
     return Row(3, "no_zeros", Status.PASS if ok else Status.FAIL, cond, float(len(runs)),
                {"matlab_arrays": len(matlab_yout), "arrays_with_zero_runs": runs,
@@ -289,6 +308,7 @@ def row3_no_zeros(matlab_yout: Sequence[tuple[str, F64]] | None,
 # ---------------------------------------------------------------------------
 
 ROW4_BANDS_FLAT: Final[tuple[str, ...]] = (ENG_BAND, "0.5-3", "0-2")
+CARDIAC_STATUSES: Final[frozenset[str]] = frozenset(get_args(CardiacStatus))
 
 
 def row4_cardiac_scope(verdicts: Sequence[Mapping[str, str]] | None) -> Row:
@@ -309,6 +329,10 @@ def row4_cardiac_scope(verdicts: Sequence[Mapping[str, str]] | None) -> Row:
     if absent:
         return _not_computable(4, "cardiac_scope", cond, f"verdicts for band(s) {absent}")
     rel = [v for v in verdicts if v["band"] in ROW4_BANDS_FLAT]
+    unknown = sorted({v["status"] for v in rel} - CARDIAC_STATUSES)
+    if unknown:
+        msg = f"cardiac verdict status {unknown} is not one of {sorted(CARDIAC_STATUSES)}"
+        raise ValueError(msg)
     measured = [f"{v['channel']}/{v['band']}" for v in rel if v["status"] == "measured"]
     blind = [f"{v['channel']}/{v['band']}" for v in rel
              if v["status"] in ("unresolvable", "not_applicable")]
@@ -342,9 +366,14 @@ def row5_retention(masks: Mapping[str, Mapping[MaskKey, ConsumerMask]] | None,
             "retention higher than the slow bands (0.5-3, 0-2)")
     if not masks:
         return _not_computable(5, "retention", cond, "emitted masks per recording")
+    overlap = [r for r in masks if baseline_retention and r in baseline_retention]
+    if not overlap or baseline_retention is None:
+        return _not_computable(5, "retention", cond,
+                               "baseline retention for the recordings whose masks are given")
     by_band: dict[str, list[float]] = {}
     per: dict[str, float] = {}
-    for rec, ms in masks.items():
+    for rec in overlap:  # every median over the SAME recordings as the baseline
+        ms = masks[rec]
         for (c, s, b), m in ms.items():
             by_band.setdefault(b, []).append(m.retention)
             per[f"{rec}|{c}|{s}|{b}"] = m.retention
@@ -353,10 +382,6 @@ def row5_retention(masks: Mapping[str, Mapping[MaskKey, ConsumerMask]] | None,
     absent = [b for b in SLOW_BANDS if b not in by_band]
     if absent:
         return _not_computable(5, "retention", cond, f"slow-band masks {absent}")
-    overlap = [r for r in masks if baseline_retention and r in baseline_retention]
-    if not overlap or baseline_retention is None:
-        return _not_computable(5, "retention", cond,
-                               "baseline retention for the recordings whose masks are given")
     med = {b: float(np.median(v)) for b, v in by_band.items()}
     base = float(np.median([baseline_retention[r] for r in overlap]))
     slow = {b: med[b] for b in SLOW_BANDS}
@@ -372,6 +397,8 @@ def row5_retention(masks: Mapping[str, Mapping[MaskKey, ConsumerMask]] | None,
 # row 6 - cross-animal (R1: new-cohort I/J/K, individually, span bootstrap)
 # ---------------------------------------------------------------------------
 
+MIN_SPANS: Final = 2
+"""A span cluster bootstrap needs at least two spans."""
 BOOTSTRAP_RESAMPLES: Final = 1000
 """R9: 1,000 cluster-bootstrap resamples, clustered by span (new cohort)."""
 
@@ -403,12 +430,14 @@ def row6_cross_animal(per_animal: Mapping[tuple[str, str], Sequence[tuple[int, i
         return _not_computable(6, "cross_animal", cond,
                                "blind-test events per test animal from a model "
                                "trained without them")
-    if scoring_corpus is None:
+    corpus = [(str(c).lower(), str(a).upper()) for c, a in (scoring_corpus or [])]
+    if not corpus:
         return _not_computable(6, "cross_animal", cond, "the scoring model's training corpus")
-    leaked = sorted(animal_key(c, a) for c, a in scoring_corpus if is_test_animal(c, a))
+    leaked = sorted(animal_key(c, a) for c, a in corpus if is_test_animal(c, a))
     if leaked:
         msg = f"the scoring model trained on test animals {leaked} (R1)"
         raise ValueError(msg)
+    per_animal = {(str(c).lower(), str(a).upper()): v for (c, a), v in per_animal.items()}
     for cohort, animal in per_animal:
         if not is_test_animal(cohort, animal):
             msg = f"{animal_key(cohort, animal)} is not in R1's test set; it cannot be in row 6"
@@ -417,14 +446,14 @@ def row6_cross_animal(per_animal: Mapping[tuple[str, str], Sequence[tuple[int, i
     for i, ((c, a), spans) in enumerate(sorted(per_animal.items())):
         f, n = sum(x for x, _ in spans), sum(y for _, y in spans)
         entry: dict[str, Any] = {"found": f, "total": n, "n_spans": len(spans)}
-        if n:
+        if n and len(spans) >= MIN_SPANS:
             entry["recall"] = f / n
             entry["ci95"] = list(_span_bootstrap(spans, seed + i))
         detail[animal_key(c, a)] = entry
     missing = sorted({"new:I", "new:J", "new:K"} - {k for k, v in detail.items() if "recall" in v})
     if missing:
         return Row(6, "cross_animal", Status.NOT_COMPUTABLE, cond, None, detail,
-                   f"missing input: blind-test events for {missing}")
+                   f"missing input: blind-test events in >= {MIN_SPANS} spans for {missing}")
     return Row(6, "cross_animal", Status.PASS, cond, None, detail)
 
 
@@ -456,13 +485,17 @@ def masked_motion_seconds(spans: Iterable[MaskSpan], duration_s: float) -> float
 
     Motion = the allow-listed reason codes; protocol, cardiac, cuff distrust and
     line-noise spans are left out; an unknown reason code raises (it would otherwise be
-    silently counted or silently dropped).
+    silently counted or silently dropped). Motion lying inside an ``excluded_epoch`` span
+    is subtracted: that time is not at risk (the denominator excludes it too).
     """
     if not duration_s > 0:
         msg = f"duration must be positive, got {duration_s}"
         raise ValueError(msg)
     ivs = []
+    excluded = []
     for s in spans:
+        if s.reason == "excluded_epoch":
+            excluded.append((max(0.0, s.start_s), min(duration_s, s.stop_s)))
         if s.reason in NON_MOTION_REASONS:
             continue
         if s.reason not in MOTION_REASONS and not s.reason.startswith(MOTION_REASON_PREFIX):
@@ -471,13 +504,27 @@ def masked_motion_seconds(spans: Iterable[MaskSpan], duration_s: float) -> float
         a, b = max(0.0, s.start_s), min(duration_s, s.stop_s)
         if b > a:
             ivs.append((a, b))
-    total, end = 0.0, -math.inf
-    for a0, b in sorted(ivs):
-        a = max(a0, end)
-        if b > a:
-            total += b - a
-            end = b
-    return total
+    return _union_length(ivs) - _overlap_length(ivs, excluded)
+
+
+def _merge(ivs: Iterable[tuple[float, float]]) -> list[tuple[float, float]]:
+    out: list[tuple[float, float]] = []
+    for a, b in sorted(i for i in ivs if i[1] > i[0]):
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
+def _union_length(ivs: Iterable[tuple[float, float]]) -> float:
+    return sum(b - a for a, b in _merge(ivs))
+
+
+def _overlap_length(ivs: Iterable[tuple[float, float]],
+                    other: Iterable[tuple[float, float]]) -> float:
+    m, o = _merge(ivs), _merge(other)
+    return sum(max(0.0, min(b, d) - max(a, c)) for a, b in m for c, d in o)
 
 
 @dataclass(frozen=True, slots=True)
@@ -552,8 +599,8 @@ def _confound_one(rows: Sequence[BlankRow]) -> dict[str, Any]:
     return out
 
 
-def row7_coverage_confound(rows: Sequence[BlankRow] | None, *, has_coverage: bool,
-                           equivalence_margin: float | None) -> Row:
+def row7_coverage_confound(rows: Sequence[BlankRow] | None, *, has_coverage: bool,  # noqa: PLR0911
+                           equivalence_margin: float | None, consumers: Sequence[str]) -> Row:
     """Regress motion blank fraction on condition, per consumer, with coverage (and mode).
 
     REFUSES (raises :class:`CoverageMissingError`) when ``has_coverage`` is false or any
@@ -571,15 +618,21 @@ def row7_coverage_confound(rows: Sequence[BlankRow] | None, *, has_coverage: boo
     if not rows:
         return _not_computable(7, "coverage_confound", cond,
                                "motion blank per recording x consumer with condition and mode")
-    per = {c: _confound_one([r for r in rows if r.consumer == c])
-           for c in sorted({r.consumer for r in rows})}
+    if not consumers:
+        return _not_computable(7, "coverage_confound", cond, "the expected consumer set")
+    unseen = sorted(set(consumers) - {r.consumer for r in rows})
+    if unseen:
+        return _not_computable(7, "coverage_confound", cond, f"blank fractions for {unseen}")
+    per = {c: _confound_one([r for r in rows if r.consumer == c]) for c in sorted(consumers)}
     blocked = {c: d["not_computable"] for c, d in per.items() if "not_computable" in d}
     if blocked:
         return Row(7, "coverage_confound", Status.NOT_COMPUTABLE, cond, None, per,
                    f"not computable for {sorted(blocked)}: {blocked}")
     worst = max(per.values(), key=lambda d: abs(d["coef"]))
-    if any(d["ci95"][0] > 0 or d["ci95"][1] < 0 for d in per.values()):
-        return Row(7, "coverage_confound", Status.FAIL, cond, worst["coef"], per)
+    failing = [d for d in per.values() if d["ci95"][0] > 0 or d["ci95"][1] < 0]
+    if failing:
+        top = max(failing, key=lambda d: abs(d["coef"]))
+        return Row(7, "coverage_confound", Status.FAIL, cond, top["coef"], per)
     if equivalence_margin is None:
         return Row(7, "coverage_confound", Status.NOT_COMPUTABLE, cond, worst["coef"], per,
                    "equivalence margin not ruled: the CI includes 0, which is not evidence "
@@ -643,6 +696,8 @@ MODE_C_MARGIN: Final = 0.03
 MODE_LETTERS: Final[Mapping[str, TrainingMode]] = {
     "A": TrainingMode.POOLED, "B": TrainingMode.ADAPTED, "C": TrainingMode.PER_ANIMAL}
 B_VS_C_CORPORA: Final[frozenset[str]] = frozenset({"old_cohort_loao", "within_animal"})
+CLUSTER_UNIT: Final[Mapping[str, str]] = {"old": "recording", "new": "span"}
+"""R9: the bootstrap cluster per cohort."""
 """R1: mode choice uses only old-cohort LOAO and within-animal held-out data."""
 
 
@@ -665,7 +720,7 @@ class Comparison:
     status: str
 
 
-def row10_mode_comparison(curves: Mapping[tuple[str, str], Path] | None,  # noqa: PLR0911
+def row10_mode_comparison(curves: Mapping[tuple[str, str], Path] | None,  # noqa: PLR0911, PLR0912
                           b_vs_c: Mapping[str, Any] | None, *,
                           comparisons: Sequence[Comparison] | None,
                           animals: Sequence[str]) -> Row:
@@ -681,6 +736,8 @@ def row10_mode_comparison(curves: Mapping[tuple[str, str], Path] | None,  # noqa
             "(R9: C wins iff F1 +0.03 and CI excludes 0), task 11 triggered if C wins")
     if comparisons is None:
         return _not_computable(10, "mode_comparison", cond, "the list of reported comparisons")
+    if not animals:
+        return _not_computable(10, "mode_comparison", cond, "the animals the modes cover")
     for cmp in comparisons:
         pair = {_mode(cmp.a), _mode(cmp.b)}
         if cmp.status not in ("reported", "not_comparable"):
@@ -701,7 +758,8 @@ def row10_mode_comparison(curves: Mapping[tuple[str, str], Path] | None,  # noqa
                                f"learning curves {absent + gone}")
     if not b_vs_c:
         return _not_computable(10, "mode_comparison", cond, "the B-vs-C comparison record")
-    fields = ("f1_diff", "ci95", "n_resamples", "cluster_unit", "excluded_folds", "corpus")
+    fields = ("f1_diff", "ci95", "n_resamples", "cluster_unit", "excluded_folds", "corpus",
+              "cohort", "matched_event_control")
     lacking = [f for f in fields if f not in b_vs_c]
     if lacking:
         return _not_computable(10, "mode_comparison", cond, f"B-vs-C fields {lacking}")
@@ -709,14 +767,29 @@ def row10_mode_comparison(curves: Mapping[tuple[str, str], Path] | None,  # noqa
         msg = (f"B-vs-C must be {BOOTSTRAP_RESAMPLES} resamples on {sorted(B_VS_C_CORPORA)} "
                f"(R9, R1); got {b_vs_c['n_resamples']} on {b_vs_c['corpus']!r}")
         raise ValueError(msg)
+    unit = CLUSTER_UNIT.get(str(b_vs_c["cohort"]))
+    if unit is None or b_vs_c["cluster_unit"] != unit:
+        msg = (f"R9 clusters by recording (old cohort) or span (new cohort); got "
+               f"{b_vs_c['cluster_unit']!r} for cohort {b_vs_c['cohort']!r}")
+        raise ValueError(msg)
+    control = b_vs_c["matched_event_control"]
+    if not isinstance(control, Mapping) or "f1_diff" not in control or "ci95" not in control:
+        return _not_computable(10, "mode_comparison", cond,
+                               "a matched-event-count control for B vs C (invariant 13)")
     diff = float(b_vs_c["f1_diff"])
     lo, hi = (float(x) for x in b_vs_c["ci95"])
     c_wins = diff >= MODE_C_MARGIN and lo > 0
+    if c_wins:
+        return Row(10, "mode_comparison", Status.FAIL, cond, diff,
+                   {"verdict": "C beats B", "ci95": [lo, hi], "matched_event_control": control,
+                    "task11_investigation_triggered": True},
+                   "PER_ANIMAL beating ADAPTED is a task 11 feature-invariance bug, not a "
+                   "result to ship (CLAUDE.md, task 12)")
     return Row(10, "mode_comparison", Status.PASS, cond, diff,
                {"verdict": "C beats B" if c_wins else "C does not beat B", "ci95": [lo, hi],
                 "n_curves": len(curves), "cluster_unit": b_vs_c["cluster_unit"],
                 "excluded_folds": list(b_vs_c["excluded_folds"]), "corpus": b_vs_c["corpus"],
-                "task11_investigation_triggered": c_wins})
+                "matched_event_control": control, "task11_investigation_triggered": False})
 
 
 # ---------------------------------------------------------------------------
@@ -735,7 +808,7 @@ def _provenance_of(mask_file: Path) -> MaskProvenance:
     return MaskProvenance.from_json(str(m["provenance_json"][0]))
 
 
-def row11_model_routing(mask_files: Mapping[str, Path] | None,
+def row11_model_routing(mask_files: Mapping[str, Path] | None,  # noqa: PLR0912
                         assignments: Mapping[str, Mapping[str, Any]] | None,
                         routing_log: Mapping[str, str] | None,
                         rerun_files: Mapping[str, Path] | None) -> Row:
@@ -772,10 +845,17 @@ def row11_model_routing(mask_files: Mapping[str, Path] | None,
             problems[rec] = "no logged model choice"
         elif model != {k: chosen.get(k) for k in MODEL_FIELDS}:
             problems[rec] = "mask names a different model from the logged choice"
-        elif prov.routing_hash != routing_log.get(rec):
+        elif rec not in routing_log:
+            problems[rec] = "no routing-table hash logged for this recording"
+        elif prov.routing_hash != routing_log[rec]:
             problems[rec] = "mask names a different routing table from the log"
+        elif not prov.recording == again.recording == rec:
+            problems[rec] = (f"provenance names recording {prov.recording!r} / re-run "
+                             f"{again.recording!r}, not {rec!r}")
         elif {k: again.model.get(k) for k in MODEL_FIELDS} != model:
             problems[rec] = "a re-run used a different model"
+        elif again.routing_hash != routing_log[rec]:
+            problems[rec] = "a re-run used a different routing table"
     return Row(11, "model_routing", Status.FAIL if problems else Status.PASS, cond,
                float(len(problems)), {"n_recordings": len(mask_files), "problems": problems})
 
@@ -787,6 +867,8 @@ def row11_model_routing(mask_files: Mapping[str, Path] | None,
 ECE_MAX: Final = 0.05
 """R9: expected calibration error <= 0.05 on held-out data."""
 ECE_BINS: Final = 10
+MIN_HELD_OUT: Final = 100
+"""Fewest held-out cores per model for an ECE to mean anything (10 per bin). Provisional."""
 
 
 def expected_calibration_error(p: npt.ArrayLike, y: npt.ArrayLike, n_bins: int = ECE_BINS
@@ -810,13 +892,21 @@ def expected_calibration_error(p: npt.ArrayLike, y: npt.ArrayLike, n_bins: int =
     return float(ece), curve
 
 
-def row12_calibration(shipped: Sequence[str] | None,
+def row12_calibration(registry_events: Sequence[RegistryEvent] | None,
                       held_out: Mapping[str, tuple[npt.ArrayLike, npt.ArrayLike]] | None) -> Row:
-    """Every SHIPPED model (from the registry) has ECE <= 0.05 on held-out data (R9)."""
+    """Every SHIPPED model has ECE <= 0.05 on held-out data (R9).
+
+    Shipped = promoted after replaying the registry log (``io.registry_log.replay``).
+    A model with fewer than :data:`MIN_HELD_OUT` held-out cores is not computable: with
+    two samples the ECE can be 0.
+    """
     cond = f"every shipped model calibrated on held-out data; ECE <= {ECE_MAX} (R9)"
+    shipped = sorted(m for m, st in replay(list(registry_events or [])).items()
+                     if st.is_promoted)
     if not shipped:
-        return _not_computable(12, "calibration", cond, "the shipped-model list (registry)")
-    lacking = sorted(m for m in shipped if not held_out or m not in held_out)
+        return _not_computable(12, "calibration", cond, "a promoted model in the registry log")
+    lacking = sorted(m for m in shipped if not held_out or m not in held_out
+                     or np.asarray(held_out[m][0]).size < MIN_HELD_OUT)
     if lacking:
         return _not_computable(12, "calibration", cond, f"held-out data for {lacking}")
     assert held_out is not None
