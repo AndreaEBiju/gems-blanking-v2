@@ -74,7 +74,7 @@ def code_provenance() -> dict[str, Any]:
 
 def corpus_composition(table: pd.DataFrame, old_tiers: Mapping[str, str] | None
                        ) -> list[dict[str, Any]]:
-    """Label counts per animal key x tier of a training corpus.
+    """Label counts (and label_source counts) per animal key x tier of a training corpus.
 
     New-cohort rows carry no tier (the key is absent). Every old-cohort recording must
     have a tier in ``old_tiers``; one without raises, naming it - an old label of unknown
@@ -95,15 +95,21 @@ def corpus_composition(table: pd.DataFrame, old_tiers: Mapping[str, str] | None
     if missing:
         msg = f"old-cohort recording(s) without a tier: {sorted(missing)[:5]}"
         raise ValueError(msg)
+    if "label_source" not in table.columns:
+        msg = "corpus table lacks label_source; every label's source is recorded"
+        raise ValueError(msg)
     d = pd.DataFrame({"animal_key": keys, "tier": tiers,
                       "recording": table["recording"].astype(str).to_numpy(),
-                      "y": table["y"].astype(int).to_numpy()})
+                      "y": table["y"].astype(int).to_numpy(),
+                      "label_source": table["label_source"].astype(str).to_numpy()})
     rows = []
     for (key, tier), g in d.groupby(["animal_key", "tier"], dropna=False, sort=True):
         row: dict[str, Any] = {"animal_key": str(key), "n_events": len(g),
                                "n_motion": int(g["y"].sum()),
                                "n_not_motion": int((g["y"] == 0).sum()),
-                               "n_recordings": int(g["recording"].nunique())}
+                               "n_recordings": int(g["recording"].nunique()),
+                               "label_source": {str(k): int(v) for k, v in
+                                                g["label_source"].value_counts().items()}}
         if isinstance(tier, str):
             row["tier"] = tier
         rows.append(row)

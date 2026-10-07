@@ -567,7 +567,8 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
               train_size: int | None = None, seed: int = 0,
               rounds: int = NUM_BOOST_ROUND, adapt_rounds: int = ADAPT_ROUNDS,
               registry: Registry | None = None, user: str = "",
-              old_tiers: Mapping[str, str] | None = None) -> ModeRun:
+              old_tiers: Mapping[str, str] | None = None,
+              label_opt_ins: Mapping[str, object] | None = None) -> ModeRun:
     """Train and score every requested mode for every target, in one pass.
 
     Requires an existing run record (R9 thresholds written before training). ``table``
@@ -596,6 +597,16 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
             raise ValueError(msg)
         if train_size is not None or calibration is None:
             msg = "only a full, calibrated pass registers models (no train_size, calibration on)"
+            raise ValueError(msg)
+        if set(modes) != set(TrainingMode) or sorted(map(float, w_adapt_grid)) != sorted(
+                W_ADAPT_GRID):
+            msg = ("a registering pass trains all three modes over the full recorded w_adapt "
+                   f"grid {list(W_ADAPT_GRID)} (task 12: train all three, always)")
+            raise ValueError(msg)
+        if label_opt_ins is None or not {"allow_model_labels", "keep_tiers"} <= set(
+                label_opt_ins):
+            msg = ("a registering pass records the label opt-ins it trained under: "
+                   "label_opt_ins={'allow_model_labels': ..., 'keep_tiers': [...]}")
             raise ValueError(msg)
     if calibration not in (None, CALIBRATION_KIND):
         msg = f"calibration {calibration!r} is not the recorded kind {CALIBRATION_KIND!r}"
@@ -693,7 +704,8 @@ def run_modes(table: pd.DataFrame, *, targets: Sequence[str], record_path: Path,
             table, preds, y=y, w_all=w_all, train_on=train_on, priors=priors,
             modes=modes, targets=targets, w_adapt_grid=w_adapt_grid,
             adapt_rounds=adapt_rounds, record_path=record_path, registry=registry,
-            user=user, old_tiers=old_tiers, refusals=refusals)
+            user=user, old_tiers=old_tiers, label_opt_ins=label_opt_ins or {},
+            refusals=refusals)
     return ModeRun(predictions=preds, refusals=tuple(refusals), corpus=pd.DataFrame(corpus),
                    registered=tuple(registered))
 
@@ -706,8 +718,21 @@ def _protocol_metrics(g: pd.DataFrame) -> dict[str, float]:
             "ece_raw": ece(g["raw"].to_numpy(), g["y"].to_numpy())}
     cal = g["p_cal"].notna().to_numpy()
     if cal.any():
-        vals["ece_cal"] = ece(g["p_cal"].to_numpy()[cal], g["y"].to_numpy()[cal])
+        yc = g["y"].to_numpy()[cal]
+        pc = g["p_cal"].to_numpy()[cal]
+        sc = scores(yc, pc >= DECISION_P)
+        vals.update({"ece_cal": ece(pc, yc), "f1_cal": sc.f1, "precision_cal": sc.precision,
+                     "recall_cal": sc.recall, "n_cal": float(sc.n)})
     return {k: float(v) for k, v in vals.items() if np.isfinite(v)}
+
+
+METRIC_BASIS: Final[dict[str, str]] = {
+    "f1/precision/recall": "the model's own decision, raw P(motion) >= DECISION_P",
+    "f1_cal/precision_cal/recall_cal": ("cross-fitted calibrated p_cal >= DECISION_P, on the "
+                                        "n_cal rows a calibrator could be fitted for"),
+    "ece_raw": "ECE of raw P(motion)", "ece_cal": "ECE of cross-fitted calibrated p_cal",
+}
+"""The decision basis of every metric a registered model carries (written to provenance)."""
 
 
 def _register_finals(table: pd.DataFrame, preds: pd.DataFrame, *,
@@ -718,6 +743,7 @@ def _register_finals(table: pd.DataFrame, preds: pd.DataFrame, *,
                      w_adapt_grid: Sequence[float], adapt_rounds: int,
                      record_path: Path, registry: Registry, user: str,
                      old_tiers: Mapping[str, str] | None,
+                     label_opt_ins: Mapping[str, object],
                      refusals: list[Refusal]) -> list[str]:
     """Train, calibrate and register the final model of each evaluated mode."""
     run_id = str(json.loads(Path(record_path).read_text(encoding="utf-8"))["run_id"])
@@ -751,6 +777,15 @@ def _register_finals(table: pd.DataFrame, preds: pd.DataFrame, *,
                                     "kind": CALIBRATION_KIND, "fitted_on": fitted_on,
                                     "protocol": protocol, "targets": held_targets,
                                     "n_predictions": len(held)})
+        prov["label_opt_ins"] = {"allow_model_labels": bool(
+            label_opt_ins["allow_model_labels"]), "keep_tiers": sorted(
+            map(str, label_opt_ins["keep_tiers"]))}  # type: ignore[call-overload]
+        prov["metric_basis"] = dict(METRIC_BASIS)
+        if mode is TrainingMode.POOLED:
+            prov["metrics_note"] = (
+                f"metrics are {protocol} (each target scored by a model trained without it); "
+                "this final model includes every animal key: "
+                + ", ".join(sorted(set(corpus_rows["animal_key"].astype(str)))))
         out.append(registry.register(spec, booster, cal, user=user, provenance=prov,
                                      corpus_id=run_id))
 
@@ -768,6 +803,10 @@ def _register_finals(table: pd.DataFrame, preds: pd.DataFrame, *,
             if not held.empty and np.unique(y[t_rows]).size == 2:  # noqa: PLR2004
                 put(TrainingMode.PER_ANIMAL, target, train_on(t_rows), t_rows, held,
                     PROTOCOL[TrainingMode.PER_ANIMAL], None)
+            else:
+                refusals.append(Refusal(str(TrainingMode.PER_ANIMAL), target,
+                                        "no held-out predictions or one-class labels",
+                                        "final"))
         if TrainingMode.ADAPTED in modes and target in priors:
             prior, prior_rows = priors[target]
             for wa in w_adapt_grid:

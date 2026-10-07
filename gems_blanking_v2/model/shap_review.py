@@ -23,6 +23,8 @@ Written into ``models/<id>/shap/`` once (a second write raises), atomically.
 from __future__ import annotations
 
 import html
+import os
+import shutil
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
@@ -33,10 +35,13 @@ import pandas as pd
 from gems_blanking_v2.io.detector_core import import_detector_module
 from gems_blanking_v2.io.store import atomic_write_bytes, atomic_write_text
 from gems_blanking_v2.model.evaluate import DECISION_P
+from gems_blanking_v2.model.labels import NEGATIVE_JUDGEMENTS
+from gems_blanking_v2.model.modes import _refuse_test_rows
 from gems_blanking_v2.model.registry import ModelSpec, Registry
 from gems_blanking_v2.model.train import feature_columns, predict_raw
 
-__all__ = ["CONTEXT_S", "REVIEW_NAME", "TOP_FEATURES_NAME", "write_shap_review"]
+__all__ = ["CONTEXT_S", "REVIEW_NAME", "TOP_FEATURES_NAME", "review_samples",
+           "write_shap_review"]
 
 REVIEW_NAME: Final = "review.html"
 TOP_FEATURES_NAME: Final = "top_features.html"
@@ -62,16 +67,30 @@ def write_shap_review(registry: Registry, spec: ModelSpec, cores: pd.DataFrame, 
                       fs: Mapping[str, float], top_k: int = 20, top_n: int = 25) -> Path:
     """Write ``review.html`` and ``top_features.html`` for a registered model.
 
-    ``cores`` holds judged cores (``recording``, ``start_s``, ``stop_s``, ``y`` and the
-    model's feature columns); ``fs`` maps each recording to its sample rate. Returns the
-    ``shap`` directory. Raises if it exists already, if a recording has no ``fs``, or if
-    the GEMSBlanking checkout is unavailable (``FileNotFoundError`` / ``ImportError``).
+    ``cores`` holds JUDGED cores (``recording``, ``cohort``, ``animal``, ``label_set``,
+    ``start_s``, ``stop_s``, ``judgement`` and the model's feature columns); ``fs`` maps
+    each recording to its sample rate. A disagreement is a core whose judgement is a
+    negative (:data:`~gems_blanking_v2.model.labels.NEGATIVE_JUDGEMENTS`) that the model
+    calls motion; an ``unjudged`` or ``unsure`` core is refused, never read as a negative
+    (invariant 9), and test-set cores are refused (R1). Returns the ``shap`` directory,
+    built in a temporary sibling and moved into place, so a failed build leaves nothing
+    behind. Raises if it exists already, if a recording has no ``fs``, or if the
+    GEMSBlanking checkout is unavailable (``FileNotFoundError`` / ``ImportError``).
     """
     review = import_detector_module("review")
     out_dir = registry.store.model_dir(spec.model_id) / "shap"
     if out_dir.exists():
         msg = f"{out_dir} exists; a model's SHAP review is written once"
         raise FileExistsError(msg)
+    if "judgement" not in cores.columns:
+        msg = "cores need a judgement column; y alone cannot tell unjudged from negative"
+        raise ValueError(msg)
+    judged = {"motion", *NEGATIVE_JUDGEMENTS}
+    bad = sorted(set(cores["judgement"].astype(str)) - judged)
+    if bad:
+        msg = f"cores with judgement {bad} are not judged; refused (invariant 9)"
+        raise ValueError(msg)
+    _refuse_test_rows(cores)
     no_fs = sorted(set(cores["recording"].astype(str)) - set(fs))
     if no_fs:
         msg = f"no fs for recording(s) {no_fs[:5]}; it is read, never assumed"
@@ -79,37 +98,58 @@ def write_shap_review(registry: Registry, spec: ModelSpec, cores: pd.DataFrame, 
     booster = registry.booster(spec)
     x = cores[feature_columns(cores, booster.feature_name())].astype(np.float64)
     p = registry.calibrator(spec).apply(predict_raw(booster, x))
-    y = cores["y"].to_numpy().astype(int)
+    negative = cores["judgement"].isin(NEGATIVE_JUDGEMENTS).to_numpy()
     _top, shap_all, _base = review.compute_shap_for_windows(booster, x, top_n=3)
     mean_abs = np.mean(np.abs(np.asarray(shap_all, dtype=np.float64)), axis=0)
 
-    idx = np.flatnonzero((y == 0) & (p >= DECISION_P))
+    idx = np.flatnonzero(negative & (p >= DECISION_P))
     idx = idx[np.argsort(-p[idx], kind="stable")][:top_k]
     dis, plots = [], []
     for i in idx:
         r = cores.iloc[int(i)]
         f = float(fs[str(r["recording"])])
         a, b = float(r["start_s"]), float(r["stop_s"])
+        centre, c0, c1 = review_samples(a, b, f)
         dis.append(review.Disagreement(
-            recording_id=str(r["recording"]),
-            position_sample=round(0.5 * (a + b) * f) + 1, model_prob=float(p[i]), label=0,
-            fs=f, context_start=max(1, round((a - CONTEXT_S) * f) + 1),
-            context_end=round((b + CONTEXT_S) * f), feature_row_index=int(i)))
+            recording_id=str(r["recording"]), position_sample=centre,
+            model_prob=float(p[i]), label=0, fs=f, context_start=c0, context_end=c1,
+            feature_row_index=int(i)))
         plots.append(f"<p>core [{a:.3f}, {b:.3f}) s - review built from the core feature "
                      "table; the signal is not loaded here.</p>")
     shap_top = (review.compute_shap_for_windows(booster, x.iloc[idx], top_n=3)[0]
                 if len(idx) else [])
-    out_dir.mkdir(parents=True)
-    tmp = out_dir / (REVIEW_NAME + ".tmp")
-    review.generate_review_html(
-        spec.model_id, disagreements=dis, shap_top=shap_top, channel_plots=plots,
-        model_version=f"{spec.version} {spec.mode} {spec.animal or 'all'}",
-        threshold_used=float(DECISION_P), output_path=tmp)
-    # generate_review_html writes in text mode, which is CRLF on Windows; the page itself
-    # is built with "\n" only, so undoing the translation restores it exactly (rule 10).
-    atomic_write_bytes(out_dir / REVIEW_NAME, tmp.read_bytes().replace(b"\r\n", b"\n"))
-    tmp.unlink()
-    atomic_write_text(out_dir / TOP_FEATURES_NAME,
-                      _top_features_html(spec, booster.feature_name(), mean_abs, top_n,
-                                         len(cores)))
+    build = out_dir.with_name(f"shap.building-{os.getpid()}")
+    if build.exists():
+        shutil.rmtree(build)
+    build.mkdir(parents=True)
+    try:
+        tmp = build / (REVIEW_NAME + ".raw")
+        review.generate_review_html(
+            spec.model_id, disagreements=dis, shap_top=shap_top, channel_plots=plots,
+            model_version=f"{spec.version} {spec.mode} {spec.animal or 'all'}",
+            threshold_used=float(DECISION_P), output_path=tmp)
+        # generate_review_html writes in text mode, which is CRLF on Windows; the page is
+        # built with "\n" only, so undoing the translation restores it exactly (rule 10).
+        atomic_write_bytes(build / REVIEW_NAME, tmp.read_bytes().replace(b"\r\n", b"\n"))
+        tmp.unlink()
+        atomic_write_text(build / TOP_FEATURES_NAME,
+                          _top_features_html(spec, booster.feature_name(), mean_abs, top_n,
+                                             len(cores)))
+        os.replace(build, out_dir)  # noqa: PTH105 - a directory move, atomic or nothing
+    except BaseException:
+        shutil.rmtree(build, ignore_errors=True)
+        raise
     return out_dir
+
+
+def review_samples(start_s: float, stop_s: float, fs: float) -> tuple[int, int, int]:
+    """Our 0-based half-open ``[start_s, stop_s)`` as ``Disagreement``'s 1-based samples.
+
+    Returns ``(centre, context_start, context_end)``: the 1-based sample of the core's
+    centre, and the 1-based INCLUSIVE context ``[start - CONTEXT_S, stop + CONTEXT_S)``
+    (invariant 15: 0-based ``k`` is 1-based ``k + 1``; a half-open stop sample ``s`` is
+    the inclusive 1-based ``s``). The context start is clipped at sample 1.
+    """
+    centre = round(0.5 * (start_s + stop_s) * fs) + 1
+    return (centre, max(1, round((start_s - CONTEXT_S) * fs) + 1),
+            round((stop_s + CONTEXT_S) * fs))
