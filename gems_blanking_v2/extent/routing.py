@@ -127,7 +127,11 @@ LINE_NOISE_ACTIONS: Final[Mapping[str, str]] = {
     "mmc": "ant1_notch_rule",
     "slow_wave": "ant1_notch_rule",
 }
-"""Ruling (c) item 4: what each consumer does with a mains-dominant core. None rejects."""
+"""Ruling (c) item 4: what each consumer does with a mains-dominant core. None rejects.
+
+The spike consumer's ``per_minute_cuff_distrust`` is not decided per core: RULING
+2026-10-08 (d) 2 decides it per cuff-minute by the mains-lock test on T
+(``emit.line_distrust``), and it is carried beside the spike mask, never in it."""
 
 
 @dataclass(frozen=True, slots=True)

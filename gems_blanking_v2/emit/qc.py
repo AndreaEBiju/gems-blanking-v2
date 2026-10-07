@@ -30,6 +30,11 @@ never ``null`` or ``NaN``. The per-animal longitudinal table (tripole weights, p
 template amplitude, noise floor per session) is appended one canonical JSON line per
 session to a file the caller owns (:func:`append_longitudinal`).
 
+**Spike-consumer time lost per cuff (RULING 2026-10-08 (d) 3)** -
+:func:`spike_time_lost` - reports the time the line-distrust rule (``emit.line_distrust``)
+takes from the spike consumer beside the time its mask blanks, per spike signal. The
+line distrust is NOT blank: it is not in the masks, so it never enters the gates above.
+
 OUTSIDE THE GENERATION HASH.
 """
 
@@ -43,7 +48,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
-from gems_blanking_v2.emit.masks import ConsumerMask, MaskKey
+from gems_blanking_v2.emit.line_distrust import LineDistrustRecord
+from gems_blanking_v2.emit.masks import ConsumerMask, MaskKey, mask_frames
 from gems_blanking_v2.extent.routing import RouteDecision
 from gems_blanking_v2.io.store import append_line
 
@@ -63,6 +69,7 @@ __all__ = [
     "median_key",
     "retention_by_key",
     "retention_gate",
+    "spike_time_lost",
 ]
 
 HOLD_BLANK_FRACTION: Final = 0.20
@@ -235,6 +242,8 @@ class QcReport:
     resolution_s_by_band: Mapping[str, float] = field(default_factory=dict)
     mmc_not_measured_fraction: Mapping[str, float] = field(default_factory=dict)
     hold_notes: Sequence[str] = ()
+    spike_time_lost: Mapping[str, Mapping[str, float | int]] = field(default_factory=dict)
+    """:func:`spike_time_lost`: per spike signal, mask blank vs line distrust (ruling (d) 3)."""
 
     def to_record(self) -> dict[str, Any]:
         """JSON-ready, with absent keys for anything missing."""
@@ -258,6 +267,41 @@ def blank_fraction_by_band(masks: Mapping[MaskKey, ConsumerMask]) -> dict[str, f
     for (_c, _s, band), m in masks.items():
         by.setdefault(band, []).append(1.0 - m.retention)
     return {b: float(sum(v) / len(v)) for b, v in sorted(by.items())}
+
+
+def spike_time_lost(masks: Mapping[MaskKey, ConsumerMask], line_distrust: LineDistrustRecord
+                    ) -> dict[str, dict[str, float | int]]:
+    """Spike-consumer time lost per spike signal: its mask's blank beside the line distrust.
+
+    Counted in the mask's own 10 ms frames, so the three times add up on one grid:
+    ``mask_blank_s`` (frames the spike mask blanks - motion and ruled cuff distrust),
+    ``line_distrust_s`` (frames overlapping a distrusted minute), ``line_distrust_only_s``
+    (distrusted and not already blanked) and ``total_lost_s`` (either), each also as a
+    fraction of ``epoch_s``; plus the record's minute counts. The record must cover
+    exactly the spike masks' signals.
+    """
+    spike = {sig: m for (c, sig, _b), m in masks.items() if c == "spikes"}
+    if set(spike) != set(line_distrust.signals):
+        msg = (f"the line-distrust record covers {sorted(line_distrust.signals)} but the spike "
+               f"masks are {sorted(spike)}")
+        raise ValueError(msg)
+    out: dict[str, dict[str, float | int]] = {}
+    for sig, m in sorted(spike.items()):
+        n = m.invalid.size
+        epoch_s = n * m.grid_s
+        ld = mask_frames(line_distrust.distrusted_spans(sig), n, t0_s=m.t0_s, grid_s=m.grid_s)
+        row: dict[str, float | int] = {
+            "epoch_s": epoch_s,
+            "mask_blank_s": float(m.invalid.sum()) * m.grid_s,
+            "line_distrust_s": float(ld.sum()) * m.grid_s,
+            "line_distrust_only_s": float((ld & ~m.invalid).sum()) * m.grid_s,
+            "total_lost_s": float((ld | m.invalid).sum()) * m.grid_s}
+        for k in ("mask_blank_s", "line_distrust_s", "line_distrust_only_s", "total_lost_s"):
+            row[k.removesuffix("_s") + "_frac"] = (float(row[k]) / epoch_s if epoch_s > 0
+                                                   else math.nan)
+        row.update(line_distrust.counts(sig))
+        out[sig] = row
+    return out
 
 
 @dataclass(frozen=True)

@@ -23,10 +23,12 @@ Rules applied:
   Python-side only**: the MATLAB file carries blank spans, which cannot carry a taper,
   and ``step1_bandpass.m`` treats every sample outside them as fully valid.
 * **The routing table's ``distrusted_spans``** (ruling 2026-10-03) become part of the
-  spike consumer's mask for that cuff, a cuff distrusted outright (route
-  ``distrusted``) gets a wholly invalid spike mask, and a ``line_noise`` route's
-  per-minute cuff distrust (ruling (c) item 4) joins the spike mask - for the spike
-  consumer only.
+  spike consumer's mask for that cuff, and a cuff distrusted outright (route
+  ``distrusted``) gets a wholly invalid spike mask - for the spike consumer only.
+* **Line noise never enters a mask.** The spike consumer's per-minute distrust for
+  mains-locked spikes (ruling 2026-10-07 (c) item 4, decided by the test of RULING
+  2026-10-08 (d) 2) is its own record (``emit.line_distrust``), carried beside the spike
+  mask in the handoff and never merged into it.
 * **R6**: mmc output within +/-15 s of any of its blanks is "not measured"; those spans
   are written beside the mmc masks (``notmeasured_mmc_<signal>``), not into them.
 * **The MATLAB file** is written by ``emit.handoff.write_mask_file``, which computes
@@ -70,7 +72,6 @@ __all__ = [
     "distrusted_spike_spans",
     "event_rows",
     "frames_to_samples",
-    "line_noise_spike_spans",
     "mask_frames",
     "mask_sample_spans",
     "masked_spans_s",
@@ -176,17 +177,6 @@ def distrusted_spike_spans(entry: Mapping[str, Any], *, region_start_s: float,
     return out
 
 
-def line_noise_spike_spans(cuff: str, minutes_s: Iterable[tuple[float, float]]
-                           ) -> list[MaskSpan]:
-    """Return line-noise minutes as spike-consumer mask spans for that cuff only.
-
-    Ruling (c) item 4: the minutes where a cuff's mains-locked spike fraction exceeds its
-    threshold (recording s).
-    """
-    return [MaskSpan("spikes", f"{cuff}_T", float(a), float(b), "line_noise_cuff_minute")
-            for a, b in minutes_s]
-
-
 def build_masks(signals: Mapping[str, Sequence[str]], spans: Iterable[MaskSpan], *,
                 n_frames: int, t0_s: float, grid_s: float = GRID_S,
                 include_velocity: bool = False) -> dict[MaskKey, ConsumerMask]:
@@ -194,11 +184,17 @@ def build_masks(signals: Mapping[str, Sequence[str]], spans: Iterable[MaskSpan],
 
     ``signals`` maps each consumer to the signals it reads in this recording (every one
     gets a mask, all-valid if nothing touched it). A span for a consumer or signal not
-    listed raises. Velocity is skipped unless ``include_velocity`` (task 18, R5).
+    listed raises, and so does a line-noise span (reason ``line_noise*``): line noise is
+    never a blank (ruling 2026-10-07 (c)); its spike distrust is ``emit.line_distrust``'s
+    own record. Velocity is skipped unless ``include_velocity`` (task 18, R5).
     """
     specs = extent_consumers()
     by: dict[tuple[str, str], list[tuple[float, float]]] = {}
     for sp in spans:
+        if sp.reason.startswith("line_noise"):
+            msg = (f"{sp.consumer}/{sp.signal}: a line-noise span ({sp.reason}) never enters a "
+                   "mask; the spike consumer's line distrust is its own record")
+            raise ValueError(msg)
         if sp.consumer not in signals or sp.signal not in signals[sp.consumer]:
             msg = f"span for {sp.consumer}/{sp.signal}, which this recording does not read"
             raise KeyError(msg)

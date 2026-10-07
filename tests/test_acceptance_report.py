@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 from gems_blanking_v2.acceptance import report as ar
 from gems_blanking_v2.detect import chain
+from gems_blanking_v2.emit import line_distrust as ld
 from gems_blanking_v2.emit import masks as mk
 from gems_blanking_v2.emit.handoff import write_mask_file
 from gems_blanking_v2.emit.provenance import MaskProvenance
@@ -445,6 +446,16 @@ def test_row10_refuses_non_finite_differences(curves: dict[tuple[str, str], Path
 # row 11 --------------------------------------------------------------------
 
 
+def _ld(name: str) -> ld.LineDistrustRecord:
+    """Return a line-distrust record for the handoff, decided from one untested minute.
+
+    FS here (2 kHz) cannot carry the spike band, so there is no signal to test.
+    """
+    rows = (ld.MinuteTest("L_T", 0, 0.0, DUR_S, "untested_few_spikes", 3),)
+    return ld.decide(rows, recording=name, fs=FS, epoch_start_s=0.0, n_samples=N_SAMPLES,
+                     family="recording")
+
+
 def _write(folder: Path, name: str, model: dict[str, str], routing: str = "64c2e1ea") -> Path:
     folder.mkdir(parents=True, exist_ok=True)
     prov = MaskProvenance(model=model, thresholds={"source": "test"},
@@ -454,6 +465,7 @@ def _write(folder: Path, name: str, model: dict[str, str], routing: str = "64c2e
     masks = _masks(0.01, 0.01)
     return write_mask_file(folder / f"{name}.mat", masks, prov,
                            signals=READS,
+                           line_distrust=_ld(name),
                            fs=FS, n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
                            animal_median={})
 
