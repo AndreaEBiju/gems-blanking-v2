@@ -135,7 +135,7 @@ def test_line_noise_never_routes_to_reject(consumer: str) -> None:
 
 def test_line_noise_actions_follow_ruling_c_item_4() -> None:
     a = rt.LINE_NOISE_ACTIONS
-    assert a["spikes"] == "per_minute_cuff_distrust"
+    assert a["spikes"] == "line_distrust_record"  # carried beside the mask (ruling (d) 2)
     assert a["hrv"] == "hum_lock_persistence_test"
     assert a["mmc"] == a["slow_wave"] == "ant1_notch_rule"
     assert "reject" not in a.values()

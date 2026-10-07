@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 from pathlib import Path
 
@@ -446,14 +447,23 @@ def test_row10_refuses_non_finite_differences(curves: dict[tuple[str, str], Path
 # row 11 --------------------------------------------------------------------
 
 
-def _ld(name: str) -> ld.LineDistrustRecord:
-    """Return a line-distrust record for the handoff, decided from one untested minute.
+FS_HANDOFF = 24414.0625
+"""The mask file is written at the TDT rate: a spike consumer cannot exist at this module's
+2 kHz (its 300-3000 Hz band is above Nyquist), so a handoff carrying one at 2 kHz would be
+an impossible fixture (invariant 25)."""
+N_HANDOFF = int(round(DUR_S * FS_HANDOFF))
+assert n_grid_frames(N_HANDOFF, FS_HANDOFF) == N_FRAMES  # the same masks fit both rates
 
-    FS here (2 kHz) cannot carry the spike band, so there is no signal to test.
-    """
-    rows = (ld.MinuteTest("L_T", 0, 0.0, DUR_S, "untested_few_spikes", 3),)
-    return ld.decide(rows, recording=name, fs=FS, epoch_start_s=0.0, n_samples=N_SAMPLES,
-                     family="recording")
+
+@functools.cache
+def _eng_t() -> np.ndarray:
+    return make_eng(FS_HANDOFF, DUR_S + 0.1, seed=4).signal[:N_HANDOFF]
+
+
+def _ld(name: str) -> ld.LineDistrustRecord:
+    """Return the line-distrust record for the handoff, tested on a synthetic raw T."""
+    return ld.cuff_minute_distrust({"L_T": _eng_t()}, FS_HANDOFF, recording=name,
+                                   epoch_start_s=0.0, family="recording")
 
 
 def _write(folder: Path, name: str, model: dict[str, str], routing: str = "64c2e1ea") -> Path:
@@ -466,7 +476,8 @@ def _write(folder: Path, name: str, model: dict[str, str], routing: str = "64c2e
     return write_mask_file(folder / f"{name}.mat", masks, prov,
                            signals=READS,
                            line_distrust=_ld(name),
-                           fs=FS, n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
+                           fs=FS_HANDOFF, n_samples=N_HANDOFF, epoch_start_s=0.0,
+                           min_retention=0.5,
                            animal_median={})
 
 

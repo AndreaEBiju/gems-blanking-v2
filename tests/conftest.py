@@ -1905,6 +1905,24 @@ def make_mains_spike_contacts(fs: float, dur_s: float, *, locked_minutes: tuple[
     return out[0], out[1], out[2]
 
 
+def make_spike_pair(fs: float, dur_s: float, *, gap_samples: int, amp_uv: float = 200.0,
+                    noise_uv: float = 1.0, seed: int = 0) -> tuple[F64, int, int]:
+    """Return white noise with two one-sample negative impulses ``gap_samples`` apart.
+
+    Returns ``(signal, k1, k2)``. Two equal impulses make the filtered trace symmetric
+    about their midpoint, so while they dwarf the noise its two minima sit at ``k1`` and
+    ``k2`` exactly (the test asserts it): the refractory boundary can be tested to the
+    sample.
+    """
+    rng = np.random.default_rng(seed)
+    x = rng.normal(0.0, noise_uv, _n_samples(fs, dur_s))
+    k1 = x.size // 2
+    k2 = k1 + gap_samples
+    x[k1] -= amp_uv
+    x[k2] -= amp_uv
+    return x, k1, k2
+
+
 def make_spike_times(dur_s: float, *, rate_hz: float, locked_keep: float = 0.0,
                      seed: int = 0) -> F64:
     """Return spike TIMES only (s), for statistics of the lock test without a signal.

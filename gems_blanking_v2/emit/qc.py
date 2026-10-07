@@ -34,6 +34,8 @@ session to a file the caller owns (:func:`append_longitudinal`).
 :func:`spike_time_lost` - reports the time the line-distrust rule (``emit.line_distrust``)
 takes from the spike consumer beside the time its mask blanks, per spike signal. The
 line distrust is NOT blank: it is not in the masks, so it never enters the gates above.
+The handoff writes it into ``gate_json`` (``spike_time_lost``), and
+:func:`spike_time_lost_by_animal` sums it per animal x cuff - the ruling's cost table.
 
 OUTSIDE THE GENERATION HASH.
 """
@@ -70,6 +72,7 @@ __all__ = [
     "retention_by_key",
     "retention_gate",
     "spike_time_lost",
+    "spike_time_lost_by_animal",
 ]
 
 HOLD_BLANK_FRACTION: Final = 0.20
@@ -296,12 +299,54 @@ def spike_time_lost(masks: Mapping[MaskKey, ConsumerMask], line_distrust: LineDi
             "line_distrust_s": float(ld.sum()) * m.grid_s,
             "line_distrust_only_s": float((ld & ~m.invalid).sum()) * m.grid_s,
             "total_lost_s": float((ld | m.invalid).sum()) * m.grid_s}
-        for k in ("mask_blank_s", "line_distrust_s", "line_distrust_only_s", "total_lost_s"):
-            row[k.removesuffix("_s") + "_frac"] = (float(row[k]) / epoch_s if epoch_s > 0
-                                                   else math.nan)
+        _add_fractions(row)
         row.update(line_distrust.counts(sig))
         out[sig] = row
     return out
+
+
+_LOST_SECONDS: Final = ("mask_blank_s", "line_distrust_s", "line_distrust_only_s",
+                        "total_lost_s")
+_LOST_SUMMED: Final = ("epoch_s", *_LOST_SECONDS, "minutes_tested", "minutes_untested",
+                       "minutes_distrusted")
+
+
+def _add_fractions(row: dict[str, float | int]) -> None:
+    """Each lost time as a fraction of ``epoch_s``; absent (not NaN) for an empty epoch."""
+    epoch_s = float(row["epoch_s"])
+    for k in _LOST_SECONDS:
+        if epoch_s > 0:
+            row[k.removesuffix("_s") + "_frac"] = float(row[k]) / epoch_s
+
+
+def spike_time_lost_by_animal(
+    rows: Iterable[tuple[str, str, Mapping[str, Mapping[str, float | int]]]],
+) -> dict[str, dict[str, dict[str, float | int]]]:
+    """Ruling (d) 3's cost table: spike-consumer time lost per animal and cuff.
+
+    ``rows`` are ``(animal, recording, spike_time_lost(...))`` per recording. Seconds and
+    minute counts are summed per ``animal`` x spike signal (one per cuff), with
+    ``n_recordings``; fractions are recomputed from the sums (time-weighted, never a mean
+    of fractions), so the line-distrust loss sits beside the mask's (motion) loss. A
+    recording given twice for one animal raises: a duplicate would count its time twice.
+    """
+    seen: set[tuple[str, str]] = set()
+    out: dict[str, dict[str, dict[str, float | int]]] = {}
+    for animal, recording, lost in rows:
+        if (animal, recording) in seen:
+            msg = f"{animal} {recording}: given twice; its time would be counted twice"
+            raise ValueError(msg)
+        seen.add((animal, recording))
+        for sig, row in lost.items():
+            agg = out.setdefault(animal, {}).setdefault(
+                sig, dict.fromkeys(("n_recordings", *_LOST_SUMMED), 0))
+            agg["n_recordings"] = int(agg["n_recordings"]) + 1
+            for k in _LOST_SUMMED:
+                agg[k] = agg[k] + row[k]
+    for by_sig in out.values():
+        for agg in by_sig.values():
+            _add_fractions(agg)
+    return {a: dict(sorted(s.items())) for a, s in sorted(out.items())}
 
 
 @dataclass(frozen=True)

@@ -33,6 +33,26 @@ neither is distrusted. A minute holding any non-finite sample is ``untested_non_
 (the measurement skipped those too), and a flat one ``untested_no_signal`` (invariant 41:
 no statistic is reported from an input carrying no signal).
 
+**T must be RAW - unmasked.** The test reads T as the consumer would before any blank:
+a masked T (NaN over motion spans) silently turns every minute holding a blank into
+``untested_non_finite``, so the rule would never see them. The parameter is named
+``raw_t``, and an input whose NaN runs all start and end exactly on the 10 ms mask grid
+(what ``emit.masks.apply_mask`` produces, and a genuine acquisition gap almost never
+does) is refused as masked - a cheap check, not a proof.
+
+**Two deliberate differences from the measurement**, both documented here so they are
+not mistaken for drift:
+
+* **Minute edges round, the measurement floored.** ``hum_inventory`` cut minute ``m`` at
+  ``int(60 m fs)`` samples from the file start; here a time becomes a sample through
+  ``extent.grid.seconds_to_sample`` (``round``), the one conversion every emitted span
+  uses (invariant 33). An edge can therefore sit one sample later (``60 fs = 1464843.75``
+  -> 1464844, not 1464843); one sample in 1.46 million changes no count.
+* **A raw flat check.** Before filtering, a minute whose own MAD is 0 is
+  ``untested_no_signal``. The measurement had only the filtered-sigma check, which a
+  constant minute passes: filtering turns its rounding noise into a tiny but positive
+  sigma and then into hundreds of "spikes" (found in testing).
+
 **The Holm family is an explicit, required argument** (:data:`Family`) with no default,
 because the table that produced the ruling used every tested channel-minute of the
 animal, and at emission time that needs all of the animal's recordings first:
@@ -75,8 +95,13 @@ import numpy.typing as npt
 from scipy.signal import butter, sosfiltfilt
 from scipy.stats import binom
 
-from gems_blanking_v2.constants import MAD_TO_SIGMA
-from gems_blanking_v2.extent.grid import to_matlab_inclusive
+from gems_blanking_v2.constants import GRID_S, MAD_TO_SIGMA
+from gems_blanking_v2.extent.grid import (
+    T0_TOLERANCE_S,
+    frame_sample_bounds,
+    seconds_to_sample,
+    to_matlab_inclusive,
+)
 
 __all__ = [
     "ALPHA",
@@ -98,6 +123,7 @@ __all__ = [
     "detect_spikes",
     "holm_reject",
     "lock_test",
+    "lock_test_parameters",
     "minute_tests",
 ]
 
@@ -156,7 +182,9 @@ def detect_spikes(y_minute: npt.ArrayLike, fs: float) -> F64 | None:
     """
     x = np.asarray(y_minute, dtype=np.float64)
     if x.size < 3 or not float(np.median(np.abs(x - np.median(x)))) > 0:  # noqa: PLR2004
-        return None  # flat (or empty): filtering would turn rounding noise into "spikes"
+        # Flat (or empty). Deliberately stricter than the measurement (module docstring):
+        # filtering would turn rounding noise into a positive sigma and then "spikes".
+        return None
     sos = butter(FILTER_ORDER, [BAND_HZ[0] / (fs / 2), BAND_HZ[1] / (fs / 2)],
                  btype="bandpass", output="sos")
     y = sosfiltfilt(sos, x)
@@ -272,15 +300,46 @@ class MinuteTest:
 
 
 def _sample(t_s: float, epoch_start_s: float, fs: float, n_samples: int) -> int:
-    """Sample index of time ``t_s`` in the epoch (the grid's rounding convention)."""
-    return min(max(int(round((t_s - epoch_start_s) * fs)), 0), n_samples)
+    """Sample index of recording time ``t_s`` in the epoch, clipped to ``[0, n_samples]``."""
+    return min(max(seconds_to_sample(t_s - epoch_start_s, fs), 0), n_samples)
 
 
 def minute_sample_bounds(start_s: float, stop_s: float, *, epoch_start_s: float, fs: float,
                          n_samples: int) -> tuple[int, int]:
-    """0-based half-open epoch samples of ``[start_s, stop_s)`` - the one conversion."""
+    """0-based half-open epoch samples of ``[start_s, stop_s)``, via ``extent.grid``.
+
+    Rounds, where the measurement floored: an edge may sit one sample later (module
+    docstring).
+    """
     return (_sample(start_s, epoch_start_s, fs, n_samples),
             _sample(stop_s, epoch_start_s, fs, n_samples))
+
+
+def _on_mask_grid(k: int, fs: float) -> bool:
+    """Whether sample ``k`` is a 10 ms frame boundary under ``extent.grid``'s conversion."""
+    i = int(round(k / (GRID_S * fs)))
+    return frame_sample_bounds(i, i, fs)[0] == k
+
+
+def _refuse_masked(name: str, x: F64, fs: float) -> None:
+    """Refuse T whose interior NaN runs all start and end on the mask grid: it was masked."""
+    bad = ~np.isfinite(x)
+    if not bad.any():
+        return
+    d = np.diff(np.concatenate(([0], bad.astype(np.int8), [0])))
+    runs = [(int(a), int(b)) for a, b in zip(np.flatnonzero(d == 1), np.flatnonzero(d == -1),
+                                             strict=True) if a > 0 and b < x.size]
+    if runs and all(_on_mask_grid(a, fs) and _on_mask_grid(b, fs) for a, b in runs):
+        msg = (f"{name}: every NaN run starts and ends on the 10 ms mask grid - this T looks "
+               "masked. The mains-lock test reads RAW T; a masked one makes every blanked "
+               "minute untested")
+        raise ValueError(msg)
+
+
+def _check_fs(fs: float) -> None:
+    if not fs > 2 * BAND_HZ[1]:
+        msg = f"fs {fs} Hz cannot carry the {BAND_HZ[0]:g}-{BAND_HZ[1]:g} Hz spike band"
+        raise ValueError(msg)
 
 
 def _check_signal_names(names: Iterable[str]) -> None:
@@ -291,21 +350,22 @@ def _check_signal_names(names: Iterable[str]) -> None:
             raise ValueError(msg)
 
 
-def minute_tests(signals: Mapping[str, npt.ArrayLike], fs: float, *, epoch_start_s: float,
+def minute_tests(raw_t: Mapping[str, npt.ArrayLike], fs: float, *, epoch_start_s: float,
                  cleaner: MainsCleaner | None = None) -> tuple[MinuteTest, ...]:
-    """Pass 1: test every cuff-minute that overlaps the epoch, on T.
+    """Pass 1: test every cuff-minute that overlaps the epoch, on RAW T.
 
-    ``signals`` maps ``<cuff>_T`` to T over the emitted epoch (microvolts; sample 0 at
-    ``epoch_start_s`` on the recording's timeline). The inputs are never modified
-    (invariant 17); a ``cleaner`` receives a copy.
+    ``raw_t`` maps ``<cuff>_T`` to the cuff's tripole over the emitted epoch, **raw and
+    unmasked** (microvolts; sample 0 at ``epoch_start_s`` on the recording's timeline):
+    a masked T would make every blanked minute untested, so input that looks masked is
+    refused (module docstring). The inputs are never modified (invariant 17); a
+    ``cleaner`` receives a copy.
     """
-    _check_signal_names(signals)
-    if not fs > 2 * BAND_HZ[1]:
-        msg = f"fs {fs} Hz cannot carry the {BAND_HZ[0]:g}-{BAND_HZ[1]:g} Hz spike band"
-        raise ValueError(msg)
+    _check_signal_names(raw_t)
+    _check_fs(fs)
     out: list[MinuteTest] = []
-    for name in sorted(signals):
-        x = np.asarray(signals[name], dtype=np.float64)
+    for name in sorted(raw_t):
+        x = np.asarray(raw_t[name], dtype=np.float64)
+        _refuse_masked(name, x, fs)
         if cleaner is not None:
             x = np.asarray(cleaner(np.array(x, copy=True), fs), dtype=np.float64)
         n = int(x.size)
@@ -445,6 +505,22 @@ class MinuteResult:
             raise ValueError(msg)
 
 
+def lock_test_parameters() -> dict[str, Any]:
+    """Return the test's parameters as structured provenance fields (JSON-ready)."""
+    return {"signal": "T", "input": "raw, unmasked",
+            "band_hz": list(BAND_HZ),
+            "filter": {"design": "butter", "order": FILTER_ORDER, "output": "sos",
+                       "apply": "sosfiltfilt", "span": "minute"},
+            "sigma": "1.4826 * MAD of the filtered minute",
+            "spike_polarity": "negative", "spike_threshold_sigma": SPIKE_SIGMA,
+            "refractory_s": REFRACTORY_S,
+            "lock_periods_s": list(LOCK_PERIODS_S), "lock_tolerance_s": LOCK_TOLERANCE_S,
+            "chance": "poisson, lam = n / (t_last - t_first)",
+            "test": "one-sided binomial, P(X >= k | n - 1, p0)", "correction": "holm",
+            "min_spikes": MIN_SPIKES, "minute_s": MINUTE_S,
+            "min_partial_minute_s": MIN_PARTIAL_S}
+
+
 _ROW_FLOATS: Final = ("start_s", "stop_s", "p0", "p")
 _ROW_INTS: Final = ("n_spikes", "k_locked")
 
@@ -518,16 +594,10 @@ class LineDistrustRecord:
 
     @property
     def provenance(self) -> dict[str, Any]:
-        """What made the decision: rule, test, alpha, family, input, cleaner."""
+        """What made the decision: rule, test version, alpha, family, parameters, cleaner."""
         rec: dict[str, Any] = {
             "rule": self.rule, "test_version": self.test_version, "alpha": self.alpha,
-            "family": dict(self.family), "consumer": "spikes",
-            "input": (f"cuff tripole T, {BAND_HZ[0]:g}-{BAND_HZ[1]:g} Hz Butterworth order "
-                      f"{FILTER_ORDER} sosfiltfilt per minute; negative peaks < "
-                      f"-{SPIKE_SIGMA:g} robust sigma; {REFRACTORY_S * 1e3:g} ms refractory"),
-            "test": (f"one-sided binomial on intervals within +/-{LOCK_TOLERANCE_S * 1e3:g} ms "
-                     "of 1/60 s or 1/30 s, Poisson chance; Holm"),
-            "min_spikes": MIN_SPIKES}
+            "family": dict(self.family), "consumer": "spikes", "parameters": lock_test_parameters()}
         if self.cleaner is not None:
             rec["cleaner"] = self.cleaner
         return rec
@@ -582,15 +652,46 @@ class LineDistrustRecord:
                 msg = f"line-distrust record: required field {key!r} is absent"
                 raise ValueError(msg)
         prov = doc["provenance"]
-        for key in ("rule", "test_version", "alpha", "family"):
+        for key in ("rule", "test_version", "alpha", "family", "parameters"):
             if prov.get(key) is None:
                 msg = f"line-distrust provenance: required field {key!r} is absent"
                 raise ValueError(msg)
-        return cls(doc["recording"], float(doc["fs"]), float(doc["epoch_start_s"]),
-                   int(doc["n_samples"]), prov["family"],
-                   tuple(_unrow(r) for r in doc["minutes"]), prov.get("cleaner"),
-                   prov["test_version"], float(prov["alpha"]), prov["rule"],
-                   tuple(doc["signals"]))
+        rec = cls(doc["recording"], float(doc["fs"]), float(doc["epoch_start_s"]),
+                  int(doc["n_samples"]), prov["family"],
+                  tuple(_unrow(r) for r in doc["minutes"]), prov.get("cleaner"),
+                  prov["test_version"], float(prov["alpha"]), prov["rule"],
+                  tuple(doc["signals"]))
+        if prov["parameters"] != lock_test_parameters():
+            msg = (f"line-distrust record made with other test parameters than "
+                   f"{TEST_VERSION}'s: {prov['parameters']!r}")
+            raise ValueError(msg)
+        return rec
+
+
+P_MATCH_RTOL: Final = 1e-12
+"""Relative tolerance for a pass-2 p-value to match the animal table's (float noise only)."""
+
+
+def _check_tests(tests: Sequence[MinuteTest], *, fs: float, epoch_start_s: float,
+                 n_samples: int) -> None:
+    """Refuse an impossible rate, an empty epoch, duplicate rows and rows outside the epoch."""
+    _check_fs(fs)
+    if not n_samples > 0:
+        msg = f"an epoch must hold samples, got n_samples={n_samples}"
+        raise ValueError(msg)
+    e1 = epoch_start_s + n_samples / fs
+    seen: set[tuple[str, int]] = set()
+    for t in tests:
+        key = (t.signal, t.minute)
+        if key in seen:
+            msg = f"{t.signal} minute {t.minute} appears twice"
+            raise ValueError(msg)
+        seen.add(key)
+        if not (t.start_s >= epoch_start_s - T0_TOLERANCE_S
+                and t.stop_s <= e1 + T0_TOLERANCE_S and t.stop_s > t.start_s):
+            msg = (f"{t.signal} minute {t.minute} [{t.start_s}, {t.stop_s}) is not inside the "
+                   f"epoch [{epoch_start_s}, {e1})")
+            raise ValueError(msg)
 
 
 def decide(tests: Sequence[MinuteTest], *, recording: str, fs: float, epoch_start_s: float,
@@ -598,14 +699,17 @@ def decide(tests: Sequence[MinuteTest], *, recording: str, fs: float, epoch_star
     """Pass 2: Holm at :data:`ALPHA` over ``family``; distrust this recording's rejections.
 
     ``family`` has no default (see the module docstring). With an :class:`AnimalPTable`,
-    the table must hold exactly this recording's tested p-values, under the same test
-    version and cleaner, or this raises.
+    the table must hold exactly this recording's tested p-values (to a relative 1e-12),
+    under the same test version and cleaner, or this raises. Also refuses an ``fs`` that
+    cannot carry the band, an empty epoch, a ``(signal, minute)`` row twice, and a row
+    outside the epoch.
     """
     given: object = family  # checked at run time too: the type is not a guarantee
     if not (isinstance(given, AnimalPTable) or given == "recording"):
         msg = (f"family must be 'recording' or an AnimalPTable, got {given!r}: which one "
                "applies is Andrea's call, so there is no default")
         raise ValueError(msg)
+    _check_tests(tests, fs=fs, epoch_start_s=epoch_start_s, n_samples=n_samples)
     tested = {(recording, t.signal, t.minute): t.p for t in tests if t.status == "tested"}
     if isinstance(family, AnimalPTable):
         if family.test_version != TEST_VERSION or family.cleaner != cleaner:
@@ -613,10 +717,12 @@ def decide(tests: Sequence[MinuteTest], *, recording: str, fs: float, epoch_star
                    f"{family.cleaner!r}; this pass is {TEST_VERSION} / {cleaner!r}")
             raise ValueError(msg)
         mine = {k: v for k, v in family.pvalues.items() if k[0] == recording}
-        if mine != tested:
+        differ = sorted(k for k in set(mine) & set(tested)
+                        if not math.isclose(mine[k], tested[k], rel_tol=P_MATCH_RTOL,
+                                            abs_tol=0.0))[:3]
+        if set(mine) != set(tested) or differ:
             missing = sorted(set(tested) - set(mine))[:3]
             extra = sorted(set(mine) - set(tested))[:3]
-            differ = sorted(k for k in set(mine) & set(tested) if mine[k] != tested[k])[:3]
             msg = (f"{recording}: the animal table does not hold exactly this recording's "
                    f"tested p-values (missing {missing}, extra {extra}, differing {differ}); "
                    "pass 1 and pass 2 did not test the same thing")
@@ -637,20 +743,20 @@ def decide(tests: Sequence[MinuteTest], *, recording: str, fs: float, epoch_star
                               rows, cleaner)
 
 
-def cuff_minute_distrust(signals: Mapping[str, npt.ArrayLike], fs: float, *, recording: str,
+def cuff_minute_distrust(raw_t: Mapping[str, npt.ArrayLike], fs: float, *, recording: str,
                          epoch_start_s: float, family: Family,
                          cleaner: MainsCleaner | None = None) -> LineDistrustRecord:
-    """Both passes for one recording: :func:`minute_tests` then :func:`decide`.
+    """Both passes for one recording: :func:`minute_tests` (on RAW T) then :func:`decide`.
 
     With an :class:`AnimalPTable` family, the table must come from pass 1 over the
     animal's recordings, this one included (see :func:`decide`).
     """
-    _check_signal_names(signals)
-    lengths = {int(np.asarray(x).size) for x in signals.values()}
+    _check_signal_names(raw_t)
+    lengths = {int(np.asarray(x).size) for x in raw_t.values()}
     if len(lengths) != 1:
         msg = f"every cuff's T must cover the same epoch; got lengths {sorted(lengths)}"
         raise ValueError(msg)
-    tests = minute_tests(signals, fs, epoch_start_s=epoch_start_s, cleaner=cleaner)
+    tests = minute_tests(raw_t, fs, epoch_start_s=epoch_start_s, cleaner=cleaner)
     return decide(tests, recording=recording, fs=fs, epoch_start_s=epoch_start_s,
                   n_samples=lengths.pop(), family=family,
                   cleaner=None if cleaner is None else cleaner.name)

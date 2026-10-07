@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from gems_blanking_v2.acceptance import report as ar
 from gems_blanking_v2.derive.derivations import tripole
 from gems_blanking_v2.detect import chain
 from gems_blanking_v2.emit import handoff as ho
@@ -24,10 +25,12 @@ from scipy.io import loadmat
 from tests.conftest import (
     make_mains_spike_contacts,
     make_mains_spike_t,
+    make_spike_pair,
     make_spike_times,
 )
 
 FS = 24414.0625
+N60 = int(round(60.0 * FS))
 READS: dict[str, tuple[str, ...]] = {"spikes": ("L_T",), "slow_wave": ("ANT1",),
                                      "mmc": ("ANT1",), "hrv": ("RVN2",),
                                      "breathing": ("RVN2",), "velocity": ()}
@@ -180,22 +183,22 @@ def test_the_family_argument_is_required_and_named() -> None:
         ld.cuff_minute_distrust(sig, FS, recording="r", epoch_start_s=0.0)  # type: ignore[call-arg]
     with pytest.raises(TypeError, match="family"):
         ld.decide(_rows({0: 0.001}), recording="r", fs=FS, epoch_start_s=0.0,  # type: ignore[call-arg]
-                  n_samples=int(60 * FS))
+                  n_samples=N60)
     for bad in ("animal", None, {"kind": "recording"}):
         with pytest.raises(ValueError, match="family must be"):
             ld.decide(_rows({0: 0.001}), recording="r", fs=FS, epoch_start_s=0.0,
-                      n_samples=int(60 * FS), family=bad)  # type: ignore[arg-type]
+                      n_samples=N60, family=bad)  # type: ignore[arg-type]
 
 
 def test_the_family_decides_the_correction() -> None:
     """A p of 0.005 survives Holm alone, but not in an animal family of eleven."""
     mine = _rows({0: 0.005})
-    rec = ld.decide(mine, recording="r1", fs=FS, epoch_start_s=0.0, n_samples=int(60 * FS),
+    rec = ld.decide(mine, recording="r1", fs=FS, epoch_start_s=0.0, n_samples=N60,
                     family="recording")
     assert _distrusted(rec, "L_T") == {0}
     others = {f"r{i}": _rows({0: 0.5}) for i in range(2, 12)}
     table = ld.AnimalPTable.from_tests("new:A", {"r1": mine, **others})
-    rec = ld.decide(mine, recording="r1", fs=FS, epoch_start_s=0.0, n_samples=int(60 * FS),
+    rec = ld.decide(mine, recording="r1", fs=FS, epoch_start_s=0.0, n_samples=N60,
                     family=table)
     assert _distrusted(rec, "L_T") == set()
     assert rec.family == {"kind": "animal", "animal": "new:A", "size": 11,
@@ -262,7 +265,7 @@ def test_a_cleaner_re_runs_the_test_and_minutes_regain_trust() -> None:
 # the record, the handoff, QC, provenance
 # ---------------------------------------------------------------------------
 
-N3 = int(round(180.0 * FS))
+N3 = math.ceil(180.0 * FS)  # the epoch holds all three whole minutes
 N3_FRAMES = n_grid_frames(N3, FS)
 
 
@@ -348,7 +351,7 @@ def test_the_handoff_refuses_a_missing_or_mismatched_record(tmp_path: Path) -> N
         _write(tmp_path, masks, ld.decide(_rows({0: 0.5}, "R_T"), recording="rec1", fs=FS,
                                           epoch_start_s=0.0, n_samples=N3, family="recording"))
     with pytest.raises(ValueError, match="samples from"):
-        _write(tmp_path, masks, ld.decide(_rows({0: 0.5}), recording="rec1", fs=FS,
+        _write(tmp_path, masks, ld.decide(_rows({1: 0.5}), recording="rec1", fs=FS,
                                           epoch_start_s=60.0, n_samples=N3, family="recording"))
     with pytest.raises(ValueError, match="is for 'other'"):
         _write(tmp_path, masks, _rec3("other"))
@@ -372,7 +375,13 @@ def test_provenance_records_the_rule_and_round_trips(tmp_path: Path) -> None:
     assert sld["rule"] == "RULING 2026-10-08 (d) item 2" and sld["alpha"] == 0.01
     assert sld["family"] == {"kind": "recording", "size": 2}
     assert sld["test_version"] == ld.TEST_VERSION and sld["consumer"] == "spikes"
-    assert "cleaner" not in sld and "T" in sld["input"]
+    assert "cleaner" not in sld
+    par = sld["parameters"]
+    assert par["signal"] == "T" and par["input"] == "raw, unmasked"
+    assert par["band_hz"] == [300.0, 3000.0] and par["filter"]["order"] == 4
+    assert par["spike_threshold_sigma"] == 4.5 and par["refractory_s"] == 0.001
+    assert par["lock_periods_s"] == [1 / 60, 1 / 30] and par["lock_tolerance_s"] == 0.001
+    assert par["min_spikes"] == 10 and par["correction"] == "holm"
     assert MaskProvenance.from_json(prov.to_json()) == prov
     # the writer's copy and the record agree, so passing it in explicitly is accepted
     again = _write(tmp_path, _spike_mask([]), line, prov=_prov(spike_line_distrust=sld),
@@ -396,8 +405,9 @@ def test_the_record_round_trips_exactly(ps: list[float | None], cleaner: str | N
         else:
             rows.append(ld.MinuteTest("R_T", m, t0 + 60.0 * m, t0 + 60.0 * m + 60.0, "tested",
                                       200, 7, 0.04, p))
+    n = math.ceil(60.0 * len(ps) * FS) + 1  # an epoch holding every row
     rec = ld.decide(tuple(rows), recording="r" + chr(0x2028) + "x", fs=FS, epoch_start_s=t0,
-                    n_samples=N3, family="recording", cleaner=cleaner)
+                    n_samples=n, family="recording", cleaner=cleaner)
     text = rec.to_json()
     assert text.isascii() and "NaN" not in text and "null" not in text
     assert ld.LineDistrustRecord.from_json(text) == rec
@@ -419,3 +429,135 @@ def test_a_record_missing_a_required_field_raises_naming_it() -> None:
     doc["minutes"][0]["status"] = None
     with pytest.raises(ValueError, match="'status'"):
         ld.LineDistrustRecord.from_json(json.dumps(doc))
+    doc = json.loads(_rec3().to_json())
+    doc["provenance"]["parameters"]["refractory_s"] = 0.002
+    with pytest.raises(ValueError, match="other test parameters"):
+        ld.LineDistrustRecord.from_json(json.dumps(doc))
+
+
+# ---------------------------------------------------------------------------
+# review fixes: golden statistic, refractory, raw T, decide's checks, cost table
+# ---------------------------------------------------------------------------
+
+
+def test_the_lock_statistic_matches_a_hand_made_train_exactly() -> None:
+    """Golden values: k, p0 and p against closed forms computed here, independently.
+
+    Intervals (s): 1/30 x3 and 1/60 + 0.9 ms x2 are locked; 1/60 + 1.001 ms (just over the
+    1 ms tolerance), 1/60 + 1.5 ms x2 and 1/60 - 1.2 ms are not; plus four unlocked
+    fillers. (An interval EXACTLY 1 ms off is float-fragile after a cumulative sum, so the
+    boundary is probed at +/-1 us of it.)
+    """
+    p60, p30 = 1.0 / 60.0, 1.0 / 30.0
+    locked = [p30, p30, p30, p60 + 0.0009, p60 + 0.0009]
+    unlocked = [p60 + 0.001001, p60 + 0.0015, p60 + 0.0015, p60 - 0.0012,
+                0.05, 0.07, 0.11, 0.2]
+    t = 1.0 + np.concatenate([[0.0], np.cumsum(locked + unlocked)])
+    st_ = ld.lock_test(t)
+    n, m, k = t.size, t.size - 1, len(locked)
+    assert (st_.n_spikes, st_.k_locked) == (n, k)
+    lam = n / (t[-1] - t[0])
+    tau = 0.001
+    p0 = sum(math.exp(-lam * (per - tau)) - math.exp(-lam * (per + tau)) for per in (p60, p30))
+    assert st_.p0 == pytest.approx(p0, rel=1e-12)
+    p = sum(math.comb(m, j) * p0 ** j * (1 - p0) ** (m - j) for j in range(k, m + 1))
+    assert st_.p == pytest.approx(p, rel=1e-9)
+
+
+@pytest.mark.parametrize(("offset", "kept"), [(0, 2), (-1, 1), (1, 2)])
+def test_the_refractory_keeps_a_peak_exactly_one_refractory_later(offset: int, kept: int
+                                                                  ) -> None:
+    gap = int(0.001 * FS)
+    x, k1, k2 = make_spike_pair(FS, 60.0, gap_samples=gap + offset, seed=0)
+    k = np.round(ld.detect_spikes(x, FS) * FS).astype(int)
+    near = k[(k > k1 - 100) & (k < k2 + 100)].tolist()
+    assert near == [k1, k2][:kept]
+
+
+def test_masked_t_is_refused_and_a_raw_gap_is_not() -> None:
+    raw = make_mains_spike_t(FS, 120.0, seed=14).signal
+    invalid = mk.mask_frames([(10.0, 10.5), (70.0, 72.0)], n_grid_frames(raw.size, FS),
+                             t0_s=0.0)
+    masked = mk.apply_mask(raw, FS, invalid)
+    with pytest.raises(ValueError, match="looks masked"):
+        ld.minute_tests({"L_T": masked}, FS, epoch_start_s=0.0)
+    gap = raw.copy()
+    gap[1234567:1240000] = np.nan  # an acquisition gap: not on the 10 ms grid
+    tests = ld.minute_tests({"L_T": gap}, FS, epoch_start_s=0.0)
+    assert [t.status for t in tests] == ["untested_non_finite", "tested", "not_assessable_short"]
+
+
+def test_decide_refuses_impossible_inputs() -> None:
+    with pytest.raises(ValueError, match="cannot carry"):
+        ld.decide(_rows({0: 0.5}), recording="r", fs=2000.0, epoch_start_s=0.0,
+                  n_samples=120000, family="recording")
+    with pytest.raises(ValueError, match="must hold samples"):
+        ld.decide((), recording="r", fs=FS, epoch_start_s=0.0, n_samples=0,
+                  family="recording")
+    with pytest.raises(ValueError, match="appears twice"):
+        ld.decide(_rows({0: 0.5}) * 2, recording="r", fs=FS, epoch_start_s=0.0,
+                  n_samples=N60, family="recording")
+    with pytest.raises(ValueError, match="not inside the epoch"):
+        ld.decide(_rows({0: 0.5, 1: 0.5}), recording="r", fs=FS, epoch_start_s=0.0,
+                  n_samples=N60, family="recording")
+    with pytest.raises(ValueError, match="not inside the epoch"):
+        ld.decide(_rows({0: 0.5}), recording="r", fs=FS, epoch_start_s=30.0,
+                  n_samples=N60, family="recording")
+
+
+def test_the_two_pass_match_tolerates_float_noise_only() -> None:
+    mine = _rows({0: 0.001, 1: 0.5})
+    others = {"r2": _rows({0: 0.5}), "r3": _rows({0: 0.5})}
+    table = ld.AnimalPTable.from_tests("new:A", {"r1": mine, **others})
+    n = N3
+
+    def _with(scale: float) -> ld.AnimalPTable:
+        pv = dict(table.pvalues)
+        pv[("r1", "L_T", 0)] *= scale
+        return ld.AnimalPTable("new:A", pv)
+
+    rec = ld.decide(mine, recording="r1", fs=FS, epoch_start_s=0.0, n_samples=n,
+                    family=_with(1.0 + 1e-14))
+    assert _distrusted(rec, "L_T") == {0}
+    with pytest.raises(ValueError, match="did not test the same thing"):
+        ld.decide(mine, recording="r1", fs=FS, epoch_start_s=0.0, n_samples=n,
+                  family=_with(1.0 + 1e-9))
+
+
+def test_the_handoff_reports_the_cost_in_gate_json(tmp_path: Path) -> None:
+    masks = _spike_mask([(10.0, 20.0), (70.0, 75.0)])
+    line = _rec3()
+    g = json.loads(str(loadmat(_write(tmp_path, masks, line))["gate_json"][0]))
+    assert g["spike_time_lost"] == json.loads(json.dumps(qc.spike_time_lost(masks, line)))
+    assert g["spike_time_lost"]["L_T"]["line_distrust_only_s"] == pytest.approx(55.0)
+    assert g["held"] is False  # reported, never gating
+
+
+def test_the_cost_table_sums_per_animal_and_cuff() -> None:
+    a1 = qc.spike_time_lost(_spike_mask([(10.0, 20.0), (70.0, 75.0)]), _rec3())
+    a2 = qc.spike_time_lost(_spike_mask([(0.0, 30.0)]),
+                            ld.decide(_rows({0: 0.5, 1: 0.5, 2: 0.5}), recording="rec2",
+                                      fs=FS, epoch_start_s=0.0, n_samples=N3,
+                                      family="recording"))
+    b1 = qc.spike_time_lost(_spike_mask([]), _rec3())
+    table = qc.spike_time_lost_by_animal([("new:A", "rec1", a1), ("new:A", "rec2", a2),
+                                          ("new:B", "rec1", b1)])
+    a = table["new:A"]["L_T"]
+    epoch = 2 * N3_FRAMES * 0.01
+    assert a["n_recordings"] == 2 and a["epoch_s"] == pytest.approx(epoch)
+    assert a["mask_blank_s"] == pytest.approx(15.0 + 30.0)
+    assert a["line_distrust_s"] == pytest.approx(60.0)
+    assert a["total_lost_s"] == pytest.approx(70.0 + 30.0)
+    assert a["line_distrust_frac"] == pytest.approx(60.0 / epoch)  # time-weighted
+    assert a["mask_blank_frac"] == pytest.approx(45.0 / epoch)
+    assert (a["minutes_tested"], a["minutes_untested"], a["minutes_distrusted"]) == (5, 1, 1)
+    assert table["new:B"]["L_T"]["mask_blank_s"] == 0.0
+    assert table["new:B"]["L_T"]["line_distrust_s"] == pytest.approx(60.0)
+    with pytest.raises(ValueError, match="given twice"):
+        qc.spike_time_lost_by_animal([("new:A", "rec1", a1), ("new:A", "rec1", a1)])
+
+
+def test_a_line_noise_reason_is_unknown_to_the_motion_accounting() -> None:
+    with pytest.raises(ValueError, match="unknown mask reason"):
+        ar.masked_motion_seconds(
+            [mk.MaskSpan("spikes", "L_T", 0.0, 60.0, "line_noise_cuff_minute")], 600.0)
