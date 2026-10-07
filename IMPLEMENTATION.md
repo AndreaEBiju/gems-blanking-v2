@@ -5526,7 +5526,7 @@ That is **not** a reason to relax the gate (see "Do not"). It is a reason to che
 **Across time: three adaptive reconstructions, measured against the colleague's block-median.** All are per channel and use the same beat source as (d):
 - (A) **block median** (the colleague's v12; baseline);
 - (B) **local template:** the median of the K nearest beats in time (K = 5, 9, 15), plus a per-beat [template, d/dt template] fit for amplitude and timing;
-- (C) **R-locked harmonic regression (a cardiac Hum-Bug):** each RR interval is time-warped to a unit cycle, harmonics of the cardiac cycle are fitted up to 500 Hz in a sliding window of N beats (N = 5, 9, 15), and the fit is unwarped and subtracted. This is the mains method's adaptive regression with the beat train as the fundamental, so it follows heart-rate changes beat by beat.
+- (C) **R-locked harmonic regression (a cardiac Hum-Bug):** each RR interval is time-warped to a unit cycle, harmonics of the cardiac cycle are fitted up to 3000 Hz *(500 Hz before ruling (g), which also changes the warp to R-anchored piecewise)* in a sliding window of N beats (N = 5, 9, 15), and the fit is unwarped and subtracted. This is the mains method's adaptive regression with the beat train as the fundamental, so it follows heart-rate changes beat by beat.
 
 **The trade-off, and how it is set:** the more adaptive the model (small K or N, more components), the better it tracks real changes in leak shape, and the more of any beat-locked firing it can absorb. Leak changes slowly and smoothly: with respiration (about 6 beats per breath), posture and contact. Firing jitters randomly from beat to beat. A model pooling ≥ 5 beats cannot follow beat-to-beat random jitter.
 - The injected locked-spike test of (d) is run for every variant and every K or N.
@@ -5544,6 +5544,23 @@ If no variant clears both the residual-leak and recovery criteria on a cuff, tha
 - presence on detached contacts, stomach channels and the other cuff;
 - lag from R.
 This classifies each beat-locked component as leak or neural even if every subtraction method fails. It also decides what peri-R blanking may remove: only components classified as leak.
+
+### RULING 2026-10-07 (g) — variant (C) corrected; night order keeps the critical path
+
+**1. (C)'s 500 Hz cap was an error, carried over from the colleague's README** (a description of their sural spectra, not a design requirement). The build is right: a 500 Hz cap cannot remove leak between 500 and 3000 Hz, which is the same argument (d) made against a 100 Hz template.
+- **(C) is capped at 3000 Hz (the ENG band edge) and counts toward the operating rule.** No separate (C′); the 500 Hz version is dropped.
+
+**2. (C) does not stretch the QRS.** QRS duration does not scale with RR; diastole does. Uniform RR warping would stretch the QRS in proportion to RR, which at a few percent of HRV misplaces its edges by ~0.2 ms and spoils the > 1 kHz fit.
+- **Warp:** R-anchored and piecewise. A fixed segment around R (−20 to +40 ms) is kept in real time; only the rest of the cycle is warped.
+- **Implementation:** with an orthogonal Fourier basis on a uniform grid, least-squares harmonic fit over N cycles equals the band-limited mean of those cycles. So compute (C) as the local mean of the N nearest R-anchored, piecewise-warped cycles, low-passed at the cap. This is not a full regression with ~1,000 regressors. Report the equivalence check on one recording: the regression and the mean-of-cycles must agree to < 1% residual RMS.
+- With this warp, (C) and (B) differ mainly outside the fixed segment, plus mean versus median and the [template, d/dt] fit. Report them side by side; if they agree within noise, say so.
+
+**3. Night order: the critical path first.** Andrea's labelling depends on Night 1 as planned: candidate replay, features, and the line-noise inventory of (c) item 1. The cardiac and mains measurement of (d)–(f) affects only tasks 13/14, so it does not displace them.
+- It runs in machine time left over by Night 1 (concurrently if cores allow without slowing Night 1), otherwise on Night 2.
+- The one-recording check runs in the daytime.
+- The plan must not slip a day for it.
+
+**4. Experiment 11 code.** Andrea brings the SSD to the build machine, or copies `Experiment 11\code` to a local, non-synced, non-git folder there. It is never placed in Google Drive folders that are git repos or shared, and never committed. Until then, build (B), (C), the injection test, scoring, and the (e) tests on the unsubtracted signal; (A) and the colleague's detector follow when the code arrives.
 
 ### Adapter-check findings, 2026-09-28
 
