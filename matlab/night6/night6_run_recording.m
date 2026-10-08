@@ -176,7 +176,11 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
     end
     R.functions = function_provenance();
     R.params = params();
-    base = sprintf('%s_%s', src.session, src.epoch_tag);
+    % Labels are the epoch tag alone: the folder already names animal, session and
+    % model, and Windows MAX_PATH is 260 (cross-platform rule 5) - the smoke run's
+    % first version, <session>_<epoch>_spikes_input.mat, reached ~306 and save failed.
+    base = src.epoch_tag;
+    check_path_budget(outDir, base);
     o.beatsEpochFile = '';
     if any(strcmp({plan.runs.call}, 'HR_BR_HRVAnalysis_beats'))
         % Her function reads heartlocs + fs from a FILE, 1-based into the signal it is
@@ -198,15 +202,38 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
         try
             X = night6_consumer_input(plan, S.signal, r);
             run.inputs = summarise(X, r.signals);
-            if ~o.DryRun
-                d0 = dir(outDir);
-                run.condition_label = call_one(r, X, plan, base, outDir, o);
-                d1 = dir(outDir);
-                run.outputs = setdiff({d1.name}, {d0.name});
+            % Invariant 41: an input with no valid sample is refused by name, never
+            % handed to a function that would fail on it (or answer from nothing).
+            % Spike channels are independent, so a dead one is dropped and the rest run.
+            empty = all(isnan(X), 1);
+            if strcmp(r.call, 'detectSortNerveSpikesECAP') && any(empty) && ~all(empty)
+                run.dropped_no_valid_samples = r.signals(empty);
+                X = X(:, ~empty);
+                r.signals = r.signals(~empty);
             end
-            run.status = 'ok';
-            for c = r.consumers
-                R.consumers.(c{1}).status = ternary(o.DryRun, 'planned', 'ran');
+            empty = all(isnan(X), 1);
+            if any(empty)
+                why = sprintf('no valid sample in [%s]: blanked for the whole epoch', ...
+                              strjoin(r.signals(empty), ' '));
+                run.status = 'skipped_no_valid_samples';
+                run.reason = why;
+                for c = r.consumers
+                    R.consumers.(c{1}).status = 'skipped_no_valid_samples';
+                    R.consumers.(c{1}).reason = why;
+                end
+                fprintf('[night6] %s %s: %s [%s] skipped - %s\n', src.session, ...
+                        src.epoch_tag, r.call, strjoin(r.consumers, ','), why);
+            else
+                if ~o.DryRun
+                    d0 = dir(outDir);
+                    run.condition_label = call_one(r, X, plan, base, outDir, o);
+                    d1 = dir(outDir);
+                    run.outputs = setdiff({d1.name}, {d0.name});
+                end
+                run.status = 'ok';
+                for c = r.consumers
+                    R.consumers.(c{1}).status = ternary(o.DryRun, 'planned', 'ran');
+                end
             end
         catch ME
             failed = true;
@@ -241,7 +268,7 @@ function label = call_one(r, X, plan, base, outDir, o)
     switch r.call
         case 'detectSortNerveSpikesECAP'
             label = base;
-            f = write_input(fullfile(outDir, [label '_spikes_input.mat']), X, fs);
+            f = write_input(fullfile(outDir, [label '_spikes_in.mat']), X, fs);
             cleanup = onCleanup(@() drop(f, o.KeepInputs)); %#ok<NASGU>
             S = P.spikes;
             labels = r.signals;
@@ -276,7 +303,7 @@ function label = call_one(r, X, plan, base, outDir, o)
                 W.smoothWindow, figs, outDir, label, [], W.edgeBufferSec);
         case 'extract_mmc'
             label = base;
-            f = write_input(fullfile(outDir, [label '_mmc_input.mat']), X, fs);
+            f = write_input(fullfile(outDir, [label '_mmc_in.mat']), X, fs);
             cleanup = onCleanup(@() drop(f, o.KeepInputs)); %#ok<NASGU>
             extract_mmc(f, '', struct('gastricCols', 1:3, ...
                 'rpeakTimes', plan.beats.heartlocs / fs));
@@ -347,6 +374,18 @@ function s = summarise(X, signals)
             e.nan_runs = [find(d == 1), find(d == -1) - 1];   % 1-based inclusive rows
         end
         s{j} = e;
+    end
+end
+
+function check_path_budget(outDir, base)
+% Fail with a clear message, before any work, if the deepest file this epoch can
+% write would exceed Windows MAX_PATH. PATH_MARGIN covers the longest suffix the
+% calls append to a label (measured in the smoke run; see the commit message).
+    PATH_MARGIN = 60;
+    deepest = numel(fullfile(outDir, base)) + PATH_MARGIN;
+    if ispc && deepest > 259
+        error('night6:maxPath', ['outputs under %s could reach %d characters, over ' ...
+              'Windows MAX_PATH (260): choose a shorter OutRoot'], outDir, deepest);
     end
 end
 

@@ -74,7 +74,7 @@ READS_B: dict[str, tuple[str, ...]] = {"spikes": ("L_T",), "slow_wave": GASTRIC,
                                        "velocity": ()}
 SPANS_A = [mk.MaskSpan("spikes", "L_T", 1.003, 1.4, "in_band"),
            mk.MaskSpan("spikes", "L_T", 6.0, 6.5, "in_band"),
-           mk.MaskSpan("spikes", "R_T", 2.0, 2.2, "in_band"),
+           mk.MaskSpan("spikes", "R_T", 0.0, 10.1, "in_band"),  # dead: dropped, L_T runs
            mk.MaskSpan("slow_wave", "ANT3", 0.5, 1.5, "in_band"),
            mk.MaskSpan("slow_wave", "ANT1", 7.0, 8.0, "in_band"),
            mk.MaskSpan("mmc", "ANT2", 3.0, 3.9, "in_band"),
@@ -83,6 +83,7 @@ SPANS_A = [mk.MaskSpan("spikes", "L_T", 1.003, 1.4, "in_band"),
            mk.MaskSpan("hrv", HR, 8.1, 8.3, "in_band"),
            mk.MaskSpan("breathing", HR, 2.5, 3.0, "in_band")]  # differs from hrv: 2 runs
 SPANS_B = [mk.MaskSpan("spikes", "L_T", 4.0, 4.5, "in_band"),
+           mk.MaskSpan("slow_wave", "ANT2", 0.0, 10.1, "in_band"),  # dead: run refused (inv. 41)
            mk.MaskSpan("mmc", "ANT3", 9.0, 9.9, "in_band")]
 NOT_COMPUTED = {"hrv": "no count-gated beat train (synthetic)",
                 "breathing": "no count-gated beat train (synthetic)"}
@@ -261,7 +262,12 @@ def _check_epoch(key: str, e: dict[str, Any], root: Path, out_root: Path) -> Non
             assert cons[c]["status"] == "skipped_not_computed"
             assert cons[c]["reason"] == NOT_COMPUTED[c]
         assert cons["mmc"]["status"] == "skipped_no_rpeaks"
-    else:  # hrv and breathing: one call, two masks, so two runs (invariant 2)
+        assert cons["slow_wave"]["status"] == "skipped_no_valid_samples"
+        assert "ANT2" in cons["slow_wave"]["reason"]
+        assert cons["spikes"]["status"] == "planned"
+    else:  # R_T dead: dropped, L_T still planned; hrv/breathing: two masks, two runs
+        assert np.atleast_1d(rec["runs"][0]["dropped_no_valid_samples"]).tolist() == ["R_T"]
+        assert cons["spikes"]["status"] == "planned"
         want_runs[1:1] = [("HR_BR_HRVAnalysis_beats", ["hrv"]),
                           ("HR_BR_HRVAnalysis_beats", ["breathing"])]
         want_runs.append(("extract_mmc", ["mmc"]))
@@ -278,6 +284,9 @@ def _check_epoch(key: str, e: dict[str, Any], root: Path, out_root: Path) -> Non
             got = np.asarray(inp.get("nan_runs", []), dtype=np.int64).reshape(-1, 2)
             assert got.tolist() == _runs(want), (key, consumer, sig)
             assert inp["n_nan"] == int(want.sum())
+            if want.all():
+                assert "first_valid_row" not in inp  # absent, never null
+                continue
             row = inp["first_valid_row"]
             assert row == int(np.flatnonzero(~want)[0]) + 1
             file_sample = inp["first_valid_value_V"] / (COEF[sig] * 1e-6)
