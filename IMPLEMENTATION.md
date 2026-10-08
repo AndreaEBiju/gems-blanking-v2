@@ -5794,6 +5794,31 @@ The rulings headed **2026-10-08**, **(b)** and **(c)** were written on **2026-10
    - **Night 6 MATLAB** (Andrea, 2026-10-08): a **new wrapper in its own folder, outside processing_new**, reads the mask files, slices by `epochStart_s`, maps the `_minus_` HR-channel names, and calls Andrea's existing functions unchanged. No file in processing_new is edited or committed.
    - **A failed recording does not block its animal's pass 2.** Holm runs over the recordings that completed, and the family size and exclusions are recorded. The failed recording gets no masks and is listed.
 
+### RULING 2026-10-08 (g) — the sweep's mmc R-peak units; mmc callers; zero-label calibration for I/J/K
+
+**Measured (build, 2026-10-08):**
+- **mmc R-peak units:** `tolerance_sweep.m` (processing_new, unedited) passes `rpeakVar='heartlocs'` to `extract_mmc`. `heartlocs` holds sample indices, but `rpeakUnits` defaults to `'seconds'`. So the R-peaks land past the end of the signal, and cardiac blanking was effectively off whenever an mmc tolerance was measured. The recovered config drops mmc from the replicate pass only, so `mmc_burst` still appears in the seed-depth cells.
+- **The full sweep re-run takes about 14–15 h,** not 6.6 h, and peaks at about 42 GB. If `tolscratch` is not found, Night 3 runs the sweep alone and routing pauses. That gives a **Mon 10-12** finish with 2 days of slack, against Sun 10-11 if `tolscratch` is found.
+- **Zero-label pooled model (mode A):** no recalibration fitted on other animals reaches ECE ≤ 0.05 for A, B or H. Best ECE: A 0.28–0.32, B 0.08–0.10, H 0.15–0.17. Motion rates differ widely (A ~6%, B 25%, H 49%). Platt and isotonic fitted on all other targets fail the cohort probe; raw, temperature and the threshold pass it.
+- **No old-cohort recordings** are in the Nights 4–5 inference list or the production routing table.
+
+**Rulings:**
+
+1. **The sweep re-run runs as is (option a):** same seeds and config, and it must reproduce the original 1710 and 105 counts or stop.
+   - Every mmc or `mmc_burst` value in the regenerated `consumer_tolerances.json` is flagged in its provenance: `measured with cardiac blanking off (rpeakUnits defect)`.
+   - **A corrected mmc-only measurement follows the re-run.** A sweep-side wrapper, outside processing_new, passes the R-peaks in the unit `extract_mmc` is told (invariant 14: units are declared). It runs on the same cells and seeds. Cost it first; it must not delay the inference night. Report both mmc values side by side.
+   - **Andrea chooses which mmc value the production masks use.** Until she does, the flagged value is used and the masks' provenance says so.
+2. **Check every `extract_mmc` caller for the same unit mismatch.**
+   - **The Night 6 wrapper:** confirm it passes R-peaks with an explicit `rpeakUnits` that matches what it passes. Add a test that fails if the units disagree; revert-check it.
+   - **processing_new, read only:** list every caller of `extract_mmc` (and any other function taking `rpeakUnits`), and say for each whether the unit passed matches the unit declared. Report it to Andrea, because it may affect mmc results she already has. Nothing in processing_new is edited.
+3. **Zero-label calibration for I/J/K: ruling (f) item 2 cannot be met as written for mode A.** Before Andrea decides, measure two more zero-label options, scored leave-one-animal-out on A, B and H exactly like the diagnosis:
+   - **(i) prior-shift correction:** estimate the target animal's motion rate from its own unlabelled scores by EM (Saerens et al., 2002), then adjust the other-animal calibrator to that rate;
+   - **(ii) the other-animal F1 threshold,** already measured.
+   - For each, report audit-span F1 with CI, ECE, the cohort probe, recall of target marks and blanked time per consumer.
+   - **The alternative is adaptation labels for I/J/K** (ruling (f) item 7). That means about 30 cores per animal, drawn apart from the evaluation spans and never scored against them (R1). Cost it in Andrea's minutes and say what it would do to the critical path.
+   - **Andrea chooses** among these at model-choice time. Nothing is adopted before then.
+4. **mmc on recordings with no beat train:** Andrea's question, as the builder proposed. Report the count once routing finishes. Ruling (f) gives HR and HRV "not computed" only; it says nothing about mmc.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
