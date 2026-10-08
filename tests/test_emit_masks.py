@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import hypothesis
 import numpy as np
 import pytest
 from gems_blanking_v2.detect import chain
@@ -522,3 +523,39 @@ def test_a_recording_need_not_name_a_consumer_out_of_this_build(tmp_path: Path) 
                               line_distrust=_ld(),
                               fs=FS, n_samples=N_SAMPLES, epoch_start_s=0.0, **GATE)
     assert path.is_file()
+
+
+# --- pairs-lead HR channels in MATLAB variable names (ruling 2026-10-02 (c); invariant 22) ---
+
+_NAME = hypothesis.strategies.from_regex(r"[A-Z]{1,4}[0-9]?|[LR]_(T|V[123])", fullmatch=True)
+
+
+@hypothesis.given(_NAME, hypothesis.strategies.one_of(hypothesis.strategies.none(), _NAME))
+def test_a_signal_token_round_trips_exactly(a: str, b: str | None) -> None:
+    name = a if b is None else f"{a}-{b}"
+    tok = ho.matlab_signal_token(name)
+    assert "-" not in tok
+    assert ho.signal_from_matlab_token(tok) == name
+
+
+def test_a_name_that_cannot_round_trip_is_refused() -> None:
+    for bad in ("A_minus_B", "A-B-C"):
+        with pytest.raises(ValueError, match="unambiguous"):
+            ho.matlab_signal_token(bad)
+
+
+def test_a_pairs_lead_hr_channel_is_written_and_loads(tmp_path: Path) -> None:
+    """33 of the 55 routing-table recordings read HR on a pairs lead such as LVN2-RVN2."""
+    lead = "LVN2-RVN2"
+    reads = _reads(hrv=(lead,), breathing=(lead,))
+    masks = mk.build_masks(reads, [mk.MaskSpan("hrv", lead, 1.0, 2.0, "x")],
+                           n_frames=N_FRAMES, t0_s=0.0)
+    path = ho.write_mask_file(tmp_path / "p.mat", masks, _prov(), signals=reads, fs=FS,
+                              line_distrust=_ld(), n_samples=N_SAMPLES, epoch_start_s=0.0,
+                              **GATE)
+    m = loadmat(str(path))
+    assert "blank_hrv_LVN2_minus_RVN2" in m and "blank_breathing_LVN2_minus_RVN2" in m
+    lo, hi = frame_sample_bounds(100, 200, FS)
+    np.testing.assert_array_equal(m["blank_hrv_LVN2_minus_RVN2"],
+                                  to_matlab_inclusive([lo], [hi]))
+    assert m["blank_breathing_LVN2_minus_RVN2"].size == 0
