@@ -11,6 +11,8 @@ The file holds one ``blank_<consumer>_<signal>`` (N x 2, 1-based inclusive sampl
 the epoch, via ``extent.grid`` - invariant 15) per mask key, never a merged one, plus
 ``notmeasured_mmc_<signal>`` (R6), ``provenance_json``, ``events_json``,
 ``retention_json`` and ``gate_json``. Provenance that does not name a model is refused.
+``<signal>`` is :func:`matlab_signal_token` of the signal name: a pairs-lead HR channel
+``LVN2-RVN2`` is written ``LVN2_minus_RVN2`` (``-`` is illegal in a MATLAB name).
 
 **Spike-consumer line distrust (RULINGS 2026-10-08 (d) 2, (e) Q2).** Distrusted minutes
 are NaN in the spike consumer's input only: ``blank_spikes_<cuff>_T`` is the union of the
@@ -55,20 +57,47 @@ from gems_blanking_v2.extent.tolerance import (
 )
 from gems_blanking_v2.io.nan_interop import assert_no_zero_runs
 
-__all__ = ["RecordingHeldError", "write_mask_file"]
+__all__ = ["PAIR_LEAD_TOKEN", "RecordingHeldError", "matlab_signal_token",
+           "signal_from_matlab_token", "write_mask_file"]
 
 F64 = npt.NDArray[np.float64]
 Bool = npt.NDArray[np.bool_]
 MATLAB_NAME_MAX: Final = 63
 """MATLAB's ``namelengthmax``."""
+PAIR_LEAD_TOKEN: Final = "_minus_"
+"""How a cross-site pairs lead ``"<plus>-<minus>"`` (``physio.hr_pairs.PairLead.name``;
+adopted for HR by ruling 2026-10-02 (c)) appears inside a MATLAB variable name, where
+``-`` is illegal: ``LVN2-RVN2`` -> ``LVN2_minus_RVN2``."""
 
 
 class RecordingHeldError(RuntimeError):
     """QC holds the recording; it is emitted only with an explicit release."""
 
 
+def matlab_signal_token(signal: str) -> str:
+    """Return the one canonical form of a signal name in a MATLAB variable name (inv. 22).
+
+    A pairs lead ``"<plus>-<minus>"`` becomes ``"<plus>_minus_<minus>"``; every other name
+    is unchanged. Exactly reversible by :func:`signal_from_matlab_token`: a name that
+    already contains :data:`PAIR_LEAD_TOKEN`, or more than one ``-``, is refused rather
+    than written ambiguously.
+    """
+    if PAIR_LEAD_TOKEN in signal or signal.count("-") > 1:
+        msg = f"signal name {signal!r} has no unambiguous MATLAB form"
+        raise ValueError(msg)
+    return signal.replace("-", PAIR_LEAD_TOKEN)
+
+
+def signal_from_matlab_token(token: str) -> str:
+    """Inverse of :func:`matlab_signal_token`."""
+    if token.count(PAIR_LEAD_TOKEN) > 1 or "-" in token:
+        msg = f"{token!r} is not a MATLAB signal token"
+        raise ValueError(msg)
+    return token.replace(PAIR_LEAD_TOKEN, "-")
+
+
 def _matlab_name(prefix: str, consumer: str, signal: str) -> str:
-    name = f"{prefix}_{consumer}_{signal}"
+    name = f"{prefix}_{consumer}_{matlab_signal_token(signal)}"
     if (not name.replace("_", "").isalnum() or len(name) > MATLAB_NAME_MAX
             or not name[0].isalpha()):
         msg = f"{name!r} is not a MATLAB variable name"
