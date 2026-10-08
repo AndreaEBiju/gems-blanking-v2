@@ -559,3 +559,29 @@ def test_a_pairs_lead_hr_channel_is_written_and_loads(tmp_path: Path) -> None:
     np.testing.assert_array_equal(m["blank_hrv_LVN2_minus_RVN2"],
                                   to_matlab_inclusive([lo], [hi]))
     assert m["blank_breathing_LVN2_minus_RVN2"].size == 0
+
+
+def test_hr_not_computed_is_marked_and_refused_while_read(tmp_path: Path) -> None:
+    """RULING 2026-10-08 (f) 6: no beat train -> hrv and breathing marked, never read."""
+    reads = _reads(hrv=(), breathing=())
+    why = "no count-gated beat train passed (routing entry hr.none)"
+    nc = {"hrv": why, "breathing": why}
+    masks = mk.build_masks(reads, [], n_frames=N_FRAMES, t0_s=0.0)
+    path = ho.write_mask_file(tmp_path / "n.mat", masks, _prov(), signals=reads, fs=FS,
+                              line_distrust=_ld(), n_samples=N_SAMPLES, epoch_start_s=0.0,
+                              not_computed=nc, **GATE)
+    m = loadmat(str(path))
+    assert json.loads(str(m["notcomputed_json"][0])) == nc
+    assert not any(k.startswith(("blank_hrv", "blank_breathing")) for k in m)
+    plain = ho.write_mask_file(tmp_path / "p.mat", _masked(0.01), _prov(), signals=READS,
+                               fs=FS, line_distrust=_ld(), n_samples=N_SAMPLES,
+                               epoch_start_s=0.0, **GATE)
+    assert json.loads(str(loadmat(str(plain))["notcomputed_json"][0])) == {}
+    with pytest.raises(ValueError, match="reads nothing"):
+        ho.write_mask_file(tmp_path / "x.mat", _masked(0.01), _prov(), signals=READS, fs=FS,
+                           line_distrust=_ld(), n_samples=N_SAMPLES, epoch_start_s=0.0,
+                           not_computed={"hrv": why}, **GATE)
+    with pytest.raises(ValueError, match="known consumer and a reason"):
+        ho.write_mask_file(tmp_path / "y.mat", masks, _prov(), signals=reads, fs=FS,
+                           line_distrust=_ld(), n_samples=N_SAMPLES, epoch_start_s=0.0,
+                           not_computed={"hrv": " "}, **GATE)

@@ -158,6 +158,19 @@ def _check_coverage(masks: Mapping[MaskKey, ConsumerMask],
         raise ValueError(msg)
 
 
+def _check_not_computed(not_computed: Mapping[str, str],
+                        signals: Mapping[str, Sequence[str]]) -> None:
+    """Raise unless each not-computed consumer is known, has a reason and reads nothing."""
+    for consumer, why in not_computed.items():
+        if consumer not in expected_consumers() or not str(why).strip():
+            msg = f"not_computed needs a known consumer and a reason, got {consumer!r}: {why!r}"
+            raise ValueError(msg)
+        if signals.get(consumer):
+            msg = (f"{consumer} is marked not computed but reads {list(signals[consumer])}; "
+                   "a consumer that is not computed reads nothing")
+            raise ValueError(msg)
+
+
 def _with_line_distrust(provenance: MaskProvenance, line_distrust: LineDistrustRecord | None,
                         *, signals: Mapping[str, Sequence[str]], fs: float, n_samples: int,
                         epoch_start_s: float) -> MaskProvenance:
@@ -216,8 +229,15 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
                     decisions: Iterable[RouteDecision] = (),
                     hum_features: Mapping[str, float] | None = None,
                     release: str | None = None,
-                    events: Sequence[Mapping[str, Any]] = ()) -> Path:
+                    events: Sequence[Mapping[str, Any]] = (),
+                    not_computed: Mapping[str, str] | None = None) -> Path:
     """Write the masks as MATLAB blank spans with their provenance and QC gate.
+
+    ``not_computed`` maps a consumer the recording cannot run to the reason (RULING
+    2026-10-08 (f) 6: no beat train passed, so no beats file - ``hrv`` and ``breathing``,
+    the two outputs of one HR_BR call, are not computed). Such a consumer must read no
+    signal here. It is written as ``notcomputed_json`` (always present; ``{}`` when every
+    consumer runs) so the MATLAB side skips it rather than raising.
 
     ``signals`` maps each consumer to the signals it reads in this recording (as for
     ``build_masks``); the masks must cover exactly those consumer x signal pairs (velocity
@@ -241,6 +261,7 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
         raise ProvenanceError(msg)
     provenance.validate()
     _check_coverage(masks, signals)
+    _check_not_computed(not_computed or {}, signals)
     provenance = _with_line_distrust(provenance, line_distrust, signals=signals, fs=fs,
                                      n_samples=n_samples, epoch_start_s=epoch_start_s)
     gate = emit_gate(masks, min_retention=min_retention, animal_median=animal_median,
@@ -294,9 +315,10 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
                                        allow_nan=False)
     doc["gate_json"] = json.dumps(gate_doc, sort_keys=True, ensure_ascii=True,
                                   allow_nan=False)
-    doc["fs"] = float(fs)
-    doc["epochStart_s"] = float(epoch_start_s)
-    doc["nSamples"] = float(n_samples)
+    doc.update({"notcomputed_json": json.dumps(dict(not_computed or {}), sort_keys=True,
+                                               ensure_ascii=True),
+                "fs": float(fs), "epochStart_s": float(epoch_start_s),
+                "nSamples": float(n_samples)})
     path = Path(path)
     tmp = path.with_name(f".{path.name}.tmp")
     try:
