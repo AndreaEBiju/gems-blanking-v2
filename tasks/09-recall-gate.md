@@ -2143,7 +2143,7 @@ The rulings headed **2026-10-08**, **(b)** and **(c)** were written on **2026-10
    - **No amplifier rail is declared, so the clip route stays off.** Record this; flat-run features still apply.
    - **hrv beat-train test window ±10 s:** accepted.
    - **3× hold: the animal median excludes the recording itself** (leave-one-out).
-   - **Night 6 MATLAB:** slices by `epochStart_s` and accepts the `_minus_` HR-channel naming. This is a local change in processing_new only, never committed.
+   - **Night 6 MATLAB** (Andrea, 2026-10-08): a **new wrapper in its own folder, outside processing_new**, reads the mask files, slices by `epochStart_s`, maps the `_minus_` HR-channel names, and calls Andrea's existing functions unchanged. No file in processing_new is edited or committed.
    - **A failed recording does not block its animal's pass 2.** Holm runs over the recordings that completed, and the family size and exclusions are recorded. The failed recording gets no masks and is listed.
 
 ### Adapter-check findings, 2026-09-28
