@@ -539,7 +539,8 @@ def test_a_signal_token_round_trips_exactly(a: str, b: str | None) -> None:
 
 
 def test_a_name_that_cannot_round_trip_is_refused() -> None:
-    for bad in ("A_minus_B", "A-B-C"):
+    # "A_minus-B" -> "A_minus_minus_B", which reads back as "A-minus_B": overlapping tokens
+    for bad in ("A_minus_B", "A-B-C", "A_minus-B"):
         with pytest.raises(ValueError, match="unambiguous"):
             ho.matlab_signal_token(bad)
 

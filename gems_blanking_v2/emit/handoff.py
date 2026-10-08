@@ -80,12 +80,17 @@ def matlab_signal_token(signal: str) -> str:
     A pairs lead ``"<plus>-<minus>"`` becomes ``"<plus>_minus_<minus>"``; every other name
     is unchanged. Exactly reversible by :func:`signal_from_matlab_token`: a name that
     already contains :data:`PAIR_LEAD_TOKEN`, or more than one ``-``, is refused rather
-    than written ambiguously.
+    than written ambiguously - and so is any other name whose token would not read back
+    (``d_minus-fa`` -> ``d_minus_minus_fa``, which reads back as ``d-minus_fa``: the
+    replacement overlaps the text before it). Found by the Night 6 cross-boundary
+    round trip; the MATLAB twin is ``matlab/night6/night6_token_from_signal.m``.
     """
-    if PAIR_LEAD_TOKEN in signal or signal.count("-") > 1:
+    token = signal.replace("-", PAIR_LEAD_TOKEN)
+    if (PAIR_LEAD_TOKEN in signal or signal.count("-") > 1
+            or token.count(PAIR_LEAD_TOKEN) > 1 or token.replace(PAIR_LEAD_TOKEN, "-") != signal):
         msg = f"signal name {signal!r} has no unambiguous MATLAB form"
         raise ValueError(msg)
-    return signal.replace("-", PAIR_LEAD_TOKEN)
+    return token
 
 
 def signal_from_matlab_token(token: str) -> str:
