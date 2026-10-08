@@ -5769,6 +5769,31 @@ The rulings headed **2026-10-08**, **(b)** and **(c)** were written on **2026-10
 - **Q4, missing samples:** the finite stretches of a minute are tested if together they reach 30 s. Otherwise the minute is untested.
 - **Q5, spikes during motion:** spikes inside the spike consumer's motion-blanked spans are excluded from the mains-lock test, because the consumer never sees them.
 
+### RULING 2026-10-08 (f) — inference-night (Nights 4–5) questions
+
+1. **Consumer tolerances.** `consumer_tolerances.json` is written by `tolerance_analyze.py` (Step 9 stage 4) into its scratch folder.
+   - Search the build machine's scratch areas and Drive for it. If it is absent, regenerate it with `tolerance_analyze.py` from the stored sweep outputs; do not re-run the sweep.
+   - **Mapping to the extent code's band log-z.** For each consumer, inject each artifact kind at that consumer's tolerance amplitude into the sweep host recordings. Run the frozen detection chain, and take the band log-z it produces in that consumer's band. The consumer's threshold is the **minimum over kinds** (conservative).
+   - Report the table: consumer, band, tolerance in σ, mapped z, and the kind that set it.
+2. **P(motion) threshold: 0.5 on the calibrated probability,** fixed now and not tuned on results. On calibrated output, 0.5 means "more likely motion than not". Report, at 0.3 and 0.7: audit-span recall of target marks, and blanked time per consumer.
+3. **Minimum retention: 80% per consumer per recording.** This is the same as the 20% blank hold; the 3× rule stays. A recording below it is held, not emitted silently.
+4. **Where masks go:** in the store, beside each recording's `meta.json`, under `masks/<model-hash>/`. Never overwrite an existing folder. Write a provenance file per folder, naming the model, calibrator, thresholds, code commit and generation hash.
+5. **The 307 "pre" recordings (no bl/sr condition).** Andrea, 2026-10-08: they are recorded before the trials start, to monitor through HRV when the animal reaches a reduced-stress state. They are like a baseline but not paired to any stim_rec file.
+   - **Treat them as baseline-type recordings:** whole file, no stim epoch, all consumers, masks emitted.
+   - **Night 6 MATLAB runs all analyses on them** (Andrea, 2026-10-08), and never pairs them with a stim_rec.
+   - Report them as a separate condition, `pre`, never merged into `bl`.
+6. **The 710 recordings outside routing table 64c2e1ea:**
+   - **They are routed by the same frozen generator and rules** (HR channel selection with the transient-harm veto, pairs lead, count gate, per-minute storage, peri-R extents, cuff trust).
+   - **These routes go in a separate production routing table** that names 64c2e1ea as its parent ruleset. 64c2e1ea itself is unchanged.
+   - **Where no beat train passes,** the HR consumer gets no beats file. The MATLAB handoff marks HR and HRV "not computed" for that recording, and the MATLAB side skips them rather than raising. The same applies to the 3 routing entries with no HR train.
+7. **I/J/K:** no adaptation labels exist for them (set B excluded them), so their production masks use the **zero-label model (mode A)**. Their evaluation spans are scored only by models that never saw them. Whether to collect separate adaptation labels for I/J/K is decided after Night 2's results.
+8. **Smaller items:**
+   - **No amplifier rail is declared, so the clip route stays off.** Record this; flat-run features still apply.
+   - **hrv beat-train test window ±10 s:** accepted.
+   - **3× hold: the animal median excludes the recording itself** (leave-one-out).
+   - **Night 6 MATLAB:** slices by `epochStart_s` and accepts the `_minus_` HR-channel naming. This is a local change in processing_new only, never committed.
+   - **A failed recording does not block its animal's pass 2.** Holm runs over the recordings that completed, and the family size and exclusions are recorded. The failed recording gets no masks and is listed.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
