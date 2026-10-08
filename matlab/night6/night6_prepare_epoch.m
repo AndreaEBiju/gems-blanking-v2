@@ -140,6 +140,13 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
             error('night6:beatChannel', '%s reads %s but the beats were found on %s', ...
                   cn{1}, st.signals{1}, plan.beats.beatChannel);
         end
+        if isempty(plan.beats.heartlocs)
+            % Invariant 41: the HR call on an empty beat train would answer from nothing.
+            plan.consumers.(cn{1}).status = 'skipped_no_beats_in_epoch';
+            plan.consumers.(cn{1}).reason = sprintf(['the beats file has %d beats, none ' ...
+                'inside this epoch: HR_BR_HRVAnalysis_beats is not called on an empty ' ...
+                'train'], plan.beats.nWholeFile);
+        end
     end
     if strcmp(plan.consumers.mmc.status, 'to_run') && ...
             (isempty(plan.beats) || isempty(plan.beats.heartlocs))

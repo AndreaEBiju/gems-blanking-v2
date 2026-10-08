@@ -81,10 +81,16 @@ function records = night6_run_recording(maskFolder, varargin)
         recFile = fullfile(o.OutRoot, animal, session, modelId, tag, 'night6_record.json');
         if ~o.Force && isfile(recFile)
             R = jsondecode(fileread(recFile));
-            if isfield(R, 'status') && strcmp(R.status, 'complete')
+            % Resume only what was made from THIS mask file: a rewritten mask file
+            % (same name, new content) must rerun, not be reported as done.
+            same = isfield(R, 'mask_file_sha256') && strcmp(R.mask_file_sha256, ...
+                sha256_file(fullfile(files(k).folder, files(k).name)));
+            if isfield(R, 'status') && strcmp(R.status, 'complete') && same
                 records{k} = R;
                 todo(k) = false;
                 fprintf('[night6] %s %s: complete, skipped (resumable)\n', session, tag);
+            elseif isfield(R, 'status') && strcmp(R.status, 'complete')
+                fprintf('[night6] %s %s: complete for another mask file, rerun\n', session, tag);
             end
         end
     end
@@ -108,7 +114,17 @@ function records = night6_run_recording(maskFolder, varargin)
     for k = find(todo)
         tag = erase(files(k).name, '_masks.mat');
         outDir = fullfile(o.OutRoot, animal, session, modelId, tag);
-        if ~isfolder(outDir), mkdir(outDir); end
+        if isfolder(outDir)
+            % Never write beside a previous attempt: stale files would sit next to the
+            % new outputs, and an overwritten file would be missed by the outputs
+            % diff. The old folder is moved aside (<epoch>.old<k>), not deleted.
+            j = 1;
+            while isfolder(sprintf('%s.old%d', outDir, j)), j = j + 1; end
+            movefile(outDir, sprintf('%s.old%d', outDir, j));
+            fprintf('[night6] %s %s: previous attempt moved to %s.old%d\n', session, tag, ...
+                    tag, j);
+        end
+        mkdir(outDir);
         maskFile = fullfile(files(k).folder, files(k).name);
         src = struct('gems_root', o.GemsRoot, 'meta_file', metaFile, 'sig_file', sigFile, ...
                      'sig_load_s', loadS, 'animal', animal, 'session', session, ...
@@ -208,6 +224,9 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
             empty = all(isnan(X), 1);
             if strcmp(r.call, 'detectSortNerveSpikesECAP') && any(empty) && ~all(empty)
                 run.dropped_no_valid_samples = r.signals(empty);
+                R.consumers.spikes.dropped_no_valid_samples = r.signals(empty);
+                R.consumers.spikes.reason = sprintf(['[%s] dropped: no valid sample, ' ...
+                    'blanked for the whole epoch'], strjoin(r.signals(empty), ' '));
                 X = X(:, ~empty);
                 r.signals = r.signals(~empty);
             end
@@ -352,6 +371,12 @@ function F = function_provenance()
         end
         F.(name{1}) = struct('path', p, 'sha256', sha256_file(p));
     end
+    % Not called, but params() copies their constants: their hashes say which
+    % version of each driver the parameters were taken from.
+    for name = {'batch_spike_detect', 'batch_process'}
+        p = which(name{1});
+        F.(name{1}) = struct('path', p, 'sha256', sha256_file(p), 'role', 'parameter source');
+    end
 end
 
 function s = summarise(X, signals)
@@ -442,16 +467,31 @@ end
 
 function write_json(f, R)
 % UTF-8, \n line endings, atomic (cross-platform rules 10, 11). jsonencode writes a
-% NaN as null; a missing value must be an absent key, so a null is refused.
+% NaN or Inf as null; a missing value must be an absent key, so any non-finite
+% number anywhere in the record is refused before encoding.
+    assert_finite(R, 'record', f);
     txt = jsonencode(R, 'PrettyPrint', true);
-    if ~isempty(regexp(txt, ':\s*null', 'once'))
-        error('night6:null', 'refusing to write null (a NaN) into %s', f);
-    end
     tmp = [f '.tmp'];
     fid = fopen(tmp, 'w', 'n', 'UTF-8');
     fwrite(fid, strrep(txt, sprintf('\r\n'), newline), 'char');
     fclose(fid);
     movefile(tmp, f, 'f');
+end
+
+function assert_finite(v, where, f)
+    if isnumeric(v) && ~all(isfinite(v(:)))
+        error('night6:nonFinite', 'refusing to write NaN/Inf at %s into %s', where, f);
+    elseif isstruct(v)
+        for i = 1:numel(v)
+            for fn = fieldnames(v)'
+                assert_finite(v(i).(fn{1}), sprintf('%s(%d).%s', where, i, fn{1}), f);
+            end
+        end
+    elseif iscell(v)
+        for i = 1:numel(v)
+            assert_finite(v{i}, sprintf('%s{%d}', where, i), f);
+        end
+    end
 end
 
 function o = ternary(c, a, b)

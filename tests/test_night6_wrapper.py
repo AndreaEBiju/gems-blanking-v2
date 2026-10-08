@@ -66,6 +66,8 @@ GASTRIC = ("ANT1", "ANT2", "ANT3")
 HR = "LVN2-RVN2"
 SESSION_A = "syn_a_t01_bl_100000_20260101T150000Z"
 SESSION_B = "syn_b_pre01_110000_20260101T160000Z"
+SESSION_C = "syn_c_t01_bl_120000_20260101T170000Z"
+SESSIONS = (SESSION_A, SESSION_B, SESSION_C)
 READS_A: dict[str, tuple[str, ...]] = {"spikes": ("L_T", "R_T"), "slow_wave": GASTRIC,
                                        "mmc": GASTRIC, "hrv": (HR,), "breathing": (HR,),
                                        "velocity": ()}
@@ -135,9 +137,12 @@ def _store(root: Path) -> dict[str, Any]:
     idx = np.arange(1, N_FILE + 1, dtype=np.float64)
     (root / "rec").mkdir(parents=True)
     expect: dict[str, Any] = {}
-    for session, reads, spans, epochs, nc in (
-            (SESSION_A, READS_A, SPANS_A, EPOCHS_A, None),
-            (SESSION_B, READS_B, SPANS_B, ((0.0, N_FILE),), NOT_COMPUTED)):
+    for session, reads, spans, epochs, nc, beats in (
+            (SESSION_A, READS_A, SPANS_A, EPOCHS_A, None, BEATS_S),
+            (SESSION_B, READS_B, SPANS_B, ((0.0, N_FILE),), NOT_COMPUTED, None),
+            # a beats file whose beats all lie before this epoch: HR refused (inv. 41)
+            (SESSION_C, READS_A, SPANS_A, ((6.0, N_FILE - round(6.0 * FS)),), None,
+             BEATS_S[BEATS_S < 3.5])):
         sdir = root / "data" / "T" / session
         mdir = sdir / "masks" / MODEL
         mdir.mkdir(parents=True)
@@ -148,13 +153,13 @@ def _store(root: Path) -> dict[str, Any]:
                 "source_path": f"rec/{session}_sig.mat"}
         (sdir / "meta.json").write_text(json.dumps(meta), encoding="utf-8", newline="\n")
         extra: dict[str, Any] = {"condition": "baseline" if nc is None else "pre"}
-        if nc is None:
-            write_hr_beats(sdir / f"{session}_beats.mat", BEATS_S, fs=FS, epoch_start_s=0.0,
+        if beats is not None:
+            write_hr_beats(sdir / f"{session}_beats.mat", beats, fs=FS, epoch_start_s=0.0,
                            n_samples=N_FILE, channel=HR, source="synthetic",
-                           gap_after=np.arange(BEATS_S.size) % 7 == 3,
+                           gap_after=np.arange(beats.size) % 7 == 3,
                            blank_spans_s=BEAT_BLANK_S)
             extra["beats_file"] = {"hrv_beats": f"data/T/{session}/{session}_beats.mat"}
-        else:
+        elif nc is not None:
             extra["hr_channel"] = {"not_computed": nc["hrv"]}
         for start, n in epochs:
             masks = _write_epoch(mdir, session, reads, spans, start, n, extra, nc)
@@ -215,7 +220,11 @@ def test_night6_wrapper_slices_masks_and_skips(tmp_path: Path) -> None:
     case = {"tokens": names, "signals": names, "round_in": rounds,
             "gems_root": root.as_posix(), "units": "uV", "out_root": out_root.as_posix(),
             "mask_folders": [(root / "data" / "T" / s / "masks" / MODEL).as_posix()
-                             for s in (SESSION_A, SESSION_B)]}
+                             for s in SESSIONS],
+            "resume": {"mask_folder": (root / "data" / "T" / SESSION_A / "masks" / MODEL)
+                       .as_posix(),
+                       "out_dir": (out_root / "T" / SESSION_A / MODEL).as_posix(),
+                       "keep_tag": "e0", "stale_tag": "e5"}}
     case_file, res_file = tmp_path / "case.json", tmp_path / "result.json"
     case_file.write_text(json.dumps(case, ensure_ascii=True), encoding="utf-8", newline="\n")
     cmd = (f"addpath('{pnew.as_posix()}'); addpath('{NIGHT6.as_posix()}'); "
@@ -225,12 +234,30 @@ def test_night6_wrapper_slices_masks_and_skips(tmp_path: Path) -> None:
                           timeout=900, check=False)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
     res = json.loads(res_file.read_text(encoding="utf-8"))
-    assert res["errors"] == ["", ""], res["errors"]
+    assert res["errors"] == ["", "", ""], res["errors"]
+    assert res["resume_error"] == ""
 
     _check_tokens(names, res)
     assert res["rounded"] == [round(v) for v in rounds]
     for key, e in expect.items():
         _check_epoch(key, e, root, out_root)
+    _check_resume(out_root / "T" / SESSION_A / MODEL)
+
+
+def _check_resume(base: Path) -> None:
+    """Check the resume pass: same mask file skipped; another mask file's record rerun aside."""
+    kept = base / "e0"  # complete for THIS mask file: skipped, untouched
+    assert json.loads((kept / "night6_record.json").read_text(encoding="utf-8"))["status"] \
+        == "complete"
+    assert (kept / "stale_marker.txt").is_file()
+    assert not (base / "e0.old1").exists()
+    old, new = base / "e5.old1", base / "e5"  # complete for ANOTHER mask file: rerun
+    assert (old / "stale_marker.txt").is_file()
+    assert json.loads((old / "night6_record.json").read_text(encoding="utf-8"))[
+        "mask_file_sha256"] == "deadbeef"
+    assert not (new / "stale_marker.txt").exists()  # nothing stale beside the new outputs
+    assert json.loads((new / "night6_record.json").read_text(encoding="utf-8"))["status"] \
+        == "dry_run"
 
 
 def _check_tokens(names: list[str], res: dict[str, Any]) -> None:
@@ -251,7 +278,8 @@ def _check_epoch(key: str, e: dict[str, Any], root: Path, out_root: Path) -> Non
     rec = json.loads((out_root / "T" / session / MODEL / tag / "night6_record.json")
                      .read_text(encoding="utf-8"))
     i0 = round(e["start"] * FS)
-    assert rec["status"] == "dry_run"
+    # A/e0 is marked complete by the harness's resume pass (and then skipped)
+    assert rec["status"] == ("complete" if key == f"{SESSION_A}/e0" else "dry_run")
     assert rec["epoch"]["start_sample_0based"] == i0
     assert rec["epoch"]["n_samples"] == e["n"]
     cons = rec["consumers"]
@@ -265,9 +293,17 @@ def _check_epoch(key: str, e: dict[str, Any], root: Path, out_root: Path) -> Non
         assert cons["slow_wave"]["status"] == "skipped_no_valid_samples"
         assert "ANT2" in cons["slow_wave"]["reason"]
         assert cons["spikes"]["status"] == "planned"
-    else:  # R_T dead: dropped, L_T still planned; hrv/breathing: two masks, two runs
+    else:  # R_T dead: dropped, L_T still planned
         assert np.atleast_1d(rec["runs"][0]["dropped_no_valid_samples"]).tolist() == ["R_T"]
+        assert np.atleast_1d(cons["spikes"]["dropped_no_valid_samples"]).tolist() == ["R_T"]
         assert cons["spikes"]["status"] == "planned"
+    if session == SESSION_C:  # beats file, none in the epoch: HR and mmc refused
+        for c in ("hrv", "breathing"):
+            assert cons[c]["status"] == "skipped_no_beats_in_epoch"
+            assert "none inside this epoch" in cons[c]["reason"]
+        assert cons["mmc"]["status"] == "skipped_no_rpeaks"
+        assert "beats" not in rec or "epoch_file" not in rec["beats"]
+    if session == SESSION_A:  # hrv/breathing: two masks, two runs
         want_runs[1:1] = [("HR_BR_HRVAnalysis_beats", ["hrv"]),
                           ("HR_BR_HRVAnalysis_beats", ["breathing"])]
         want_runs.append(("extract_mmc", ["mmc"]))

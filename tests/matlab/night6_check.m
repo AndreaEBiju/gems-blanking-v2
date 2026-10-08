@@ -26,6 +26,29 @@ function night6_check(caseFile, outFile)
             out.errors{k} = sprintf('%s: %s', ME.identifier, ME.message);
         end
     end
+    % Resume: mark one epoch complete (right hash), one complete for ANOTHER mask file
+    % (wrong hash), leave a stale file in both, and run that mask folder again.
+    if isfield(C, 'resume')
+        Rz = C.resume;
+        for tag = {Rz.keep_tag, Rz.stale_tag}
+            d = fullfile(Rz.out_dir, tag{1});
+            f = fullfile(d, 'night6_record.json');
+            txt = strrep(fileread(f), '"status": "dry_run"', '"status": "complete"');
+            if strcmp(tag{1}, Rz.stale_tag)
+                txt = regexprep(txt, '"mask_file_sha256": "[0-9a-f]+"', ...
+                                '"mask_file_sha256": "deadbeef"');
+            end
+            fid = fopen(f, 'w', 'n', 'UTF-8'); fwrite(fid, txt, 'char'); fclose(fid);
+            fid = fopen(fullfile(d, 'stale_marker.txt'), 'w'); fwrite(fid, 'x'); fclose(fid);
+        end
+        try
+            night6_run_recording(Rz.mask_folder, 'GemsRoot', C.gems_root, 'Units', C.units, ...
+                'OutRoot', C.out_root, 'DryRun', true, 'CodeCommit', 'test');
+            out.resume_error = '';
+        catch ME
+            out.resume_error = sprintf('%s: %s', ME.identifier, ME.message);
+        end
+    end
     fid = fopen(outFile, 'w', 'n', 'UTF-8');
     fwrite(fid, jsonencode(out), 'char');
     fclose(fid);

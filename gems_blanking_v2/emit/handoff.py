@@ -320,8 +320,10 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
                                        allow_nan=False)
     doc["gate_json"] = json.dumps(gate_doc, sort_keys=True, ensure_ascii=True,
                                   allow_nan=False)
-    doc.update({"notcomputed_json": json.dumps(dict(not_computed or {}), sort_keys=True,
-                                               ensure_ascii=True),
+    doc.update({"notcomputed_json": json.dumps({k: str(v) for k, v in
+                                                (not_computed or {}).items()},
+                                               sort_keys=True, ensure_ascii=True,
+                                               allow_nan=False),
                 "fs": float(fs), "epochStart_s": float(epoch_start_s),
                 "nSamples": float(n_samples)})
     path = Path(path)
