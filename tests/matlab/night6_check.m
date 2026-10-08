@@ -49,6 +49,22 @@ function night6_check(caseFile, outFile)
             out.resume_error = sprintf('%s: %s', ME.identifier, ME.message);
         end
     end
+    % mmc R-peak units (RULING 2026-10-08 (g) 2): Andrea's extract_mmc, unchanged, on a
+    % small synthetic input with the options the wrapper builds. It reports the R-peak
+    % samples it actually used (qc.rpeakT) and the cardiac-blanked fraction.
+    if isfield(C, 'mmc_units')
+        U = C.mmc_units;
+        try
+            op = night6_mmc_opts(U.beats_file, U.fs, U.n);
+            op.save = false;
+            mm = extract_mmc(U.input_file, U.beats_file, op);
+            out.mmc_rpeak_samples = round(mm.qc.rpeakT(:)' * U.fs);
+            out.mmc_pct_blanked = mm.qc.pctBlanked;
+            out.mmc_error = '';
+        catch ME
+            out.mmc_error = sprintf('%s: %s', ME.identifier, ME.message);
+        end
+    end
     fid = fopen(outFile, 'w', 'n', 'UTF-8');
     fwrite(fid, jsonencode(out), 'char');
     fclose(fid);

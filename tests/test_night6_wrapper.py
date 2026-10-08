@@ -217,14 +217,16 @@ def test_night6_wrapper_slices_masks_and_skips(tmp_path: Path) -> None:
     rounds = [0.5, 1.5, 2.5, -0.5, -1.5, -2.5, 3.4999, 2.5000000001, 1e15 + 0.5,
               5.0 * FS, 132.0 * FS, 4.0 * FS, 122070.5, 122071.5]
     out_root = tmp_path / "out"
-    case = {"tokens": names, "signals": names, "round_in": rounds,
+    mmc_units = _mmc_units_case(tmp_path)
+    case: dict[str, Any] = {"tokens": names, "signals": names, "round_in": rounds,
             "gems_root": root.as_posix(), "units": "uV", "out_root": out_root.as_posix(),
             "mask_folders": [(root / "data" / "T" / s / "masks" / MODEL).as_posix()
                              for s in SESSIONS],
             "resume": {"mask_folder": (root / "data" / "T" / SESSION_A / "masks" / MODEL)
                        .as_posix(),
                        "out_dir": (out_root / "T" / SESSION_A / MODEL).as_posix(),
-                       "keep_tag": "e0", "stale_tag": "e5"}}
+                       "keep_tag": "e0", "stale_tag": "e5"},
+            "mmc_units": mmc_units}
     case_file, res_file = tmp_path / "case.json", tmp_path / "result.json"
     case_file.write_text(json.dumps(case, ensure_ascii=True), encoding="utf-8", newline="\n")
     cmd = (f"addpath('{pnew.as_posix()}'); addpath('{NIGHT6.as_posix()}'); "
@@ -242,6 +244,40 @@ def test_night6_wrapper_slices_masks_and_skips(tmp_path: Path) -> None:
     for key, e in expect.items():
         _check_epoch(key, e, root, out_root)
     _check_resume(out_root / "T" / SESSION_A / MODEL)
+    _check_mmc_units(mmc_units, res)
+
+
+MMC_FS = 2000.0
+MMC_N = 80_000  # 40 s
+MMC_HALF = round(25 / 1000 * MMC_FS)  # extract_mmc's default cardiacBlankMs = 25
+
+
+def _mmc_units_case(tmp: Path) -> dict[str, Any]:
+    """Write a small gastric input and its beats file for the mmc R-peak unit check."""
+    rng = np.random.default_rng(23)
+    beats_s = np.cumsum(rng.uniform(0.15, 0.19, 300))
+    beats_s = beats_s[beats_s < (MMC_N - 2 * MMC_HALF) / MMC_FS]
+    beats = write_hr_beats(tmp / "mmc_beats.mat", beats_s, fs=MMC_FS, epoch_start_s=0.0,
+                           n_samples=MMC_N, channel=HR, source="synthetic")
+    savemat(tmp / "mmc_in.mat", {"yOut": rng.normal(0.0, 20e-6, (MMC_N, 3)), "fs": MMC_FS})
+    return {"beats_file": beats.as_posix(), "input_file": (tmp / "mmc_in.mat").as_posix(),
+            "fs": MMC_FS, "n": MMC_N}
+
+
+def _check_mmc_units(u: dict[str, Any], res: dict[str, Any]) -> None:
+    """Check extract_mmc blanked around the stored beats: samples declared as samples.
+
+    With the unit wrong, extract_mmc reads sample indices as seconds and every R-peak
+    moves by a factor of fs - to the last sample - so both checks fail.
+    """
+    assert res["mmc_error"] == "", res["mmc_error"]
+    heartlocs = loadmat(u["beats_file"])["heartlocs"].ravel().astype(np.int64)
+    assert np.atleast_1d(res["mmc_rpeak_samples"]).tolist() == heartlocs.tolist()
+    blanked = np.zeros(MMC_N, dtype=bool)
+    for h in heartlocs:  # 1-based: rows h-half .. h+half
+        blanked[max(h - MMC_HALF, 1) - 1:min(h + MMC_HALF, MMC_N)] = True
+    want = 100.0 * blanked.mean()
+    assert res["mmc_pct_blanked"] == pytest.approx([want] * 3, rel=1e-12)
 
 
 def _check_resume(base: Path) -> None:

@@ -198,8 +198,8 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
     base = src.epoch_tag;
     check_path_budget(outDir, base);
     o.beatsEpochFile = '';
-    if any(strcmp({plan.runs.call}, 'HR_BR_HRVAnalysis_beats'))
-        % Her function reads heartlocs + fs from a FILE, 1-based into the signal it is
+    if any(ismember({plan.runs.call}, {'HR_BR_HRVAnalysis_beats', 'extract_mmc'}))
+        % Both calls read heartlocs + fs from a FILE, 1-based into the signal they are
         % given - so the whole-file beats are re-based to this epoch and written here.
         o.beatsEpochFile = fullfile(outDir, [base '_beats_epoch.mat']);
         B = plan.beats;
@@ -324,8 +324,8 @@ function label = call_one(r, X, plan, base, outDir, o)
             label = base;
             f = write_input(fullfile(outDir, [label '_mmc_in.mat']), X, fs);
             cleanup = onCleanup(@() drop(f, o.KeepInputs)); %#ok<NASGU>
-            extract_mmc(f, '', struct('gastricCols', 1:3, ...
-                'rpeakTimes', plan.beats.heartlocs / fs));
+            % R-peaks by file + DECLARED unit, checked (RULING 2026-10-08 (g) 2).
+            extract_mmc(f, o.beatsEpochFile, night6_mmc_opts(o.beatsEpochFile, fs, plan.n));
         otherwise
             error('night6:call', 'no call %s', r.call);
     end
@@ -355,7 +355,8 @@ function P = params()
                          'source', ['batch_process.m P.sw_* (= T / tolerance_sweep); NOT ' ...
                                     'run_continuous.m (lowPassOn false, 2 Hz, order 4, window 10, buffer 3)']);
     P.mmc = struct('gastricCols', [1 2 3], 'rpeak_source', ...
-                   'stored beats (heartlocs/fs) as opts.rpeakTimes', 'other', 'extract_mmc defaults');
+                   ['epoch beats file: rpeakVar heartlocs, rpeakUnits samples, rpeakFs fs ' ...
+                    '(night6_mmc_opts, unit checked)'], 'other', 'extract_mmc defaults');
 end
 
 function F = function_provenance()
