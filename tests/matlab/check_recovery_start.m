@@ -89,7 +89,8 @@ function r = reader_case(K)
 end
 
 function r = run_case(K)
-    args0 = {'GemsRoot', K.gems_root, 'Units', 'uV', 'DryRun', true, 'CodeCommit', 'test'};
+    args00 = {'GemsRoot', K.gems_root, 'Units', 'uV', 'DryRun', true, 'CodeCommit', 'test'};
+    args0 = [args00, {'SlowWaveRate', 'full'}];
     args = [args0, {'RecoveryTrimMode', 'mask_to_electrical_drop_outputs'}];
     r = struct();
     r.without = attempt(@() night6_run_recording(K.mask_folder, 'OutRoot', K.out_a, args{:}));
@@ -122,6 +123,27 @@ function r = run_case(K)
                               K.other_starts_file, args{:});
     r.resume_old_mode = R4{1}.status;
     r.mode_recorded = R4{1}.recovery_trim_mode;
+    % RULING 2026-10-09 (c) 6: the slow-wave rate is required, and part of the resume key
+    modeArgs = [args00, {'RecoveryStarts', K.other_starts_file, 'RecoveryTrimMode', ...
+                         'mask_to_electrical_drop_outputs'}];
+    r.no_rate = attempt(@() night6_run_recording(K.mask_folder, 'OutRoot', K.out_a, ...
+        modeArgs{:}));
+    r.bad_rate = attempt(@() night6_run_recording(K.mask_folder, 'OutRoot', K.out_a, ...
+        modeArgs{:}, 'SlowWaveRate', 'decimated7'));
+    Rc = jsondecode(fileread(recFile));
+    Rc.status = 'complete';
+    write(recFile, Rc);
+    R5 = night6_run_recording(K.mask_folder, 'OutRoot', K.out_b, modeArgs{:}, ...
+                              'SlowWaveRate', 'full');
+    r.resume_same_rate = R5{1}.status;
+    Rc = jsondecode(fileread(recFile));
+    Rc.status = 'complete';
+    Rc.slow_wave_rate.name = 'decimated78';
+    write(recFile, Rc);
+    R6 = night6_run_recording(K.mask_folder, 'OutRoot', K.out_b, modeArgs{:}, ...
+                              'SlowWaveRate', 'full');
+    r.resume_other_rate = R6{1}.status;
+    r.rate_recorded = R6{1}.slow_wave_rate.name;
 end
 
 function s = attempt(f)
@@ -158,7 +180,8 @@ function r = trim_case(K)
 % variables (oracle_fractions) and of the recomputed averages (oracle_recomputed) check
 % the valid fractions and the averages. The marker each trimmed file carries is checked
 % against the same oracle, exactly.
-    args = {'GemsRoot', K.gems_root, 'Units', 'uV', 'CodeCommit', 'test'};
+    args = {'GemsRoot', K.gems_root, 'Units', 'uV', 'CodeCommit', 'test', ...
+            'SlowWaveRate', 'full'};
     mode = 'mask_to_electrical_drop_outputs';
     rng(0, 'twister');
     Rd = night6_run_recording(K.mask_folder, 'OutRoot', K.out_drop, 'RecoveryStarts', ...
@@ -879,7 +902,7 @@ function r = unit_case(K)
     slowWaveRateTime = p3(Lsw) / fs; slowWaveRateSeries = [1; 2; 3]; avgSlowWave = 7; %#ok<NASGU>
     rateWinSec = K.sw_w / fs; %#ok<NASGU>
     save(fullfile(d, 'e2_swm_ANT1_slowWaves_ANT1.mat'), 'slowWaveRateTime', ...
-         'slowWaveRateSeries', 'avgSlowWave', 'rateWinSec', 'invalidMask');
+         'slowWaveRateSeries', 'avgSlowWave', 'rateWinSec', 'invalidMask', 'fs');
     % spikes_v2 (v7.3): a struct array (per channel), co-indexed drop, cells, sigma windows
     % and CV2 bins over the channel's own invalid runs
     Lst = L('spikes.spike_times.filled_or_filtered');

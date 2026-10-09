@@ -27,7 +27,7 @@ function night6_check(caseFile, outFile)
         try
             night6_run_recording(folders{k}, 'GemsRoot', C.gems_root, 'Units', C.units, ...
                 'OutRoot', C.out_root, 'DryRun', true, 'CodeCommit', 'test', ...
-                'RecoveryTrimMode', 'mask_to_electrical_drop_outputs');
+                'RecoveryTrimMode', 'mask_to_electrical_drop_outputs', 'SlowWaveRate', 'full');
             out.errors{k} = '';
         catch ME
             out.errors{k} = sprintf('%s: %s', ME.identifier, ME.message);
@@ -51,7 +51,7 @@ function night6_check(caseFile, outFile)
         try
             night6_run_recording(Rz.mask_folder, 'GemsRoot', C.gems_root, 'Units', C.units, ...
                 'OutRoot', C.out_root, 'DryRun', true, 'CodeCommit', 'test', ...
-                'RecoveryTrimMode', 'mask_to_electrical_drop_outputs');
+                'RecoveryTrimMode', 'mask_to_electrical_drop_outputs', 'SlowWaveRate', 'full');
             out.resume_error = '';
         catch ME
             out.resume_error = sprintf('%s: %s', ME.identifier, ME.message);
@@ -81,7 +81,7 @@ function night6_check(caseFile, outFile)
         try
             night6_run_recording(Fb.mask_folder, 'GemsRoot', C.gems_root, 'Units', C.units, ...
                 'OutRoot', Fb.out_root, 'DryRun', true, 'CodeCommit', 'test', ...
-                'RecoveryTrimMode', 'mask_to_electrical_drop_outputs', ...
+                'RecoveryTrimMode', 'mask_to_electrical_drop_outputs', 'SlowWaveRate', 'full', ...
                 'Step1aFallback', Fb.file_ok);
             out.fallback_error = '';
         catch ME

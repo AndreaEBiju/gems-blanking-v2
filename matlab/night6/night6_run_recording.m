@@ -61,6 +61,11 @@ function records = night6_run_recording(maskFolder, varargin)
 %               the starts file's output time map). A missing, unknown or withdrawn mode
 %               ((A) 'mask_to_own_start') is refused by name before any work; the mode is
 %               in every record, and a stim_recovery epoch made under another mode reruns.
+%   SlowWaveRate  REQUIRED, no default (night6_slow_wave_rates; RULING 2026-10-09 (c) 6):
+%               'full' or 'decimated78', the rate slowWaveAnalysis_new runs at. Either way
+%               each run passes its masked spans as blankIdx as well as NaN
+%               (night6_call_slow_wave). Missing or unknown is refused by name before any
+%               work; the rate is in every record, and an epoch made at another rate reruns.
     ip = inputParser;
     ip.addRequired('maskFolder', @(x) ischar(x) || isstring(x));
     ip.addParameter('GemsRoot', '', @(x) ischar(x) || isstring(x));
@@ -77,6 +82,7 @@ function records = night6_run_recording(maskFolder, varargin)
                     'step1a_fallback.json'), @(x) ischar(x) || isstring(x));
     ip.addParameter('RecoveryStarts', '', @(x) ischar(x) || isstring(x));
     ip.addParameter('RecoveryTrimMode', '', @(x) ischar(x) || isstring(x));
+    ip.addParameter('SlowWaveRate', '', @(x) ischar(x) || isstring(x));
     ip.parse(maskFolder, varargin{:});
     o = ip.Results;
     for req = {'GemsRoot', 'Units', 'OutRoot'}
@@ -89,6 +95,7 @@ function records = night6_run_recording(maskFolder, varargin)
     o.fallback = night6_step1a_fallback(o.Step1aFallback);   % read before any work
     o.RecoveryTrimMode = night6_check_trim_mode(o.RecoveryTrimMode);   % (k) 2: required
     o.RS = night6_recovery_start(o.RecoveryStarts);          % (k) 2; [] when not declared
+    [~, o.SW] = night6_slow_wave_rates(o.SlowWaveRate);       % (c) 6: required, by name
 
     maskFolder = char(o.maskFolder);
     [~, modelId] = fileparts(strip_sep(maskFolder));
@@ -115,7 +122,9 @@ function records = night6_run_recording(maskFolder, varargin)
             % (same name, new content) must rerun, not be reported as done.
             same = isfield(R, 'mask_file_sha256') && strcmp(R.mask_file_sha256, ...
                 night6_sha256_file(fullfile(files(k).folder, files(k).name))) ...
-                && same_recovery_start(R, o.RS, o.RecoveryTrimMode);
+                && same_recovery_start(R, o.RS, o.RecoveryTrimMode) ...
+                && isfield(R, 'slow_wave_rate') && isstruct(R.slow_wave_rate) ...
+                && strcmp(R.slow_wave_rate.name, o.SW.name);   % (c) 6: same rate
             if isfield(R, 'status') && strcmp(R.status, 'complete') && same
                 records{k} = R;
                 todo(k) = false;
@@ -178,6 +187,8 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
     R.mask_file_sha256 = night6_sha256_file(maskFile);
     R.units = o.Units;
     R.recovery_trim_mode = o.RecoveryTrimMode;   % (k) 2: declared, never defaulted
+    R.slow_wave_rate = struct('name', o.SW.name, 'factors', o.SW.factors, ...
+                              'factor', o.SW.factor);   % (c) 6: declared, never defaulted
     R.dry_run = logical(o.DryRun);
     R.matlab = version;
     R.started = char(datetime('now', 'TimeZone', 'local', 'Format', 'yyyy-MM-dd''T''HH:mm:ssXXX'));
@@ -421,14 +432,20 @@ function [label, extra] = call_one(r, X, plan, base, outDir, o)
         case 'slowWaveAnalysis_new'
             % One ANT channel at a time: X carries mask r.maskSignal on all three
             % columns; only the kept channels' outputs survive (night6_keep_slow_wave).
+            % RULING 2026-10-09 (c) 6: the run's masked spans go in as blankIdx too, at
+            % the declared rate (night6_call_slow_wave).
             label = sprintf('%s_swm_%s', base, r.maskSignal);
-            W = P.slow_wave;
-            d0 = dir(outDir);
-            slowWaveAnalysis_new(X, W.lowPassOn, W.lowPassCutoff, W.lowPassOrder, fs, ...
-                W.smoothWindow, figs, outDir, label, [], W.edgeBufferSec);
-            d1 = dir(outDir);
-            extra.slow_wave = night6_keep_slow_wave(outDir, label, base, r.signals, r.keep, ...
-                r.maskSignal, setdiff({d1.name}, {d0.name}));
+            m = plan.masks(strcmp({plan.masks.consumer}, 'slow_wave') ...
+                           & strcmp({plan.masks.signal}, r.maskSignal));
+            if numel(m) ~= 1
+                error('night6:mask', 'expected one slow_wave mask for %s, found %d', ...
+                      r.maskSignal, numel(m));
+            end
+            S = night6_call_slow_wave(X, fs, P.slow_wave, outDir, label, base, r.signals, ...
+                r.keep, r.maskSignal, m.spans, o.SlowWaveRate, figs);
+            extra.slow_wave = S.slow_wave;
+            extra.blank_idx = S.blank_idx;
+            extra.slow_wave_rate = S.slow_wave_rate;
         case 'extract_mmc'
             label = base;
             f = write_input(fullfile(outDir, [label '_mmc_in.mat']), X, fs);
@@ -456,6 +473,8 @@ function P = params()
                   'source', 'batch_process.m P.hr_* (= run_continuous.m, = T)');
     P.slow_wave = struct('lowPassOn', true, 'lowPassCutoff', 0.15, 'lowPassOrder', 2, ...
                          'smoothWindow', 5, 'edgeBufferSec', 15, ...
+                         'blankIdx', ['each run''s masked spans (night6_call_slow_wave; ' ...
+                                      'RULING 2026-10-09 (c) 6)'], ...
                          'source', ['batch_process.m P.sw_* (= T / tolerance_sweep); NOT ' ...
                                     'run_continuous.m (lowPassOn false, 2 Hz, order 4, window 10, buffer 3)']);
     P.mmc = struct('gastricCols', [1 2 3], 'rpeak_source', ...
@@ -471,7 +490,9 @@ function F = function_provenance()
     ours = {'process_dataset_v2', 'night6_v2_steps', 'night6_v2_params', ...
             'night6_step1a_fallback', 'night6_sha256_file', 'night6_recovery_start', ...
             'night6_recovery_lead_in', 'night6_recovery_trim_outputs', ...
-            'night6_trim_modes', 'night6_check_trim_mode', 'night6_edge_settling'};
+            'night6_trim_modes', 'night6_check_trim_mode', 'night6_edge_settling', ...
+            'night6_slow_wave_rates', 'night6_check_decimation', 'night6_decimate_masked', ...
+            'night6_call_slow_wave', 'night6_keep_slow_wave'};
     hers = [setdiff({C.name}, ours, 'stable'), night6_v2_steps(), ...
             {'step1a_blank_cardiac', 'pipeline_params', 'bulk_load_one'}];   % step1a: (j) 1 fallback
     here = fileparts(mfilename('fullpath'));

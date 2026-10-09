@@ -474,8 +474,19 @@ function fr = fraction(vf, val, stamp, k, S0, fs, what)
             W = width(vf, S0, what);
             valid = ~logical(resolve_scalar(S0, strsplit(vf.validity, '.'), what));
             N = numel(valid);
-            c = round(double(stamp(:)) * fs) + 1;
-            h = round(W * fs / 2);
+            % her rows are at the rate she ran at (her saved fs): the epoch's, or fs / 78
+            % when Night 6 ran her decimated (RULING 2026-10-09 (c) 6)
+            fv = fs;
+            if isfield(vf, 'rate') && ~isempty(vf.rate)
+                fv = double(resolve_scalar(S0, strsplit(vf.rate, '.'), what));
+                q = fs / fv;
+                if ~(fv > 0 && fv <= fs && abs(q - round(q)) < 1e-9 * q)
+                    error('night6:trimShape', '%s: her rate %.6f Hz is not the epoch''s %.6f / k', ...
+                          what, fv, fs);
+                end
+            end
+            c = round(double(stamp(:)) * fv) + 1;
+            h = round(W * fv / 2);
             fr = shape(window_frac(valid(:), max(1, c - h), min(N, c + h)), val, what);
         case 'mmc_rate_window'  % extract_mmc.m:284-290
             W = width(vf, S0, what);

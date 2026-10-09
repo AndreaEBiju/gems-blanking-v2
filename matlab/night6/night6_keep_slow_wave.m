@@ -1,7 +1,17 @@
-function kept = night6_keep_slow_wave(outDir, label, base, signals, keep, maskSignal, newFiles)
+function kept = night6_keep_slow_wave(outDir, label, base, signals, keep, maskSignal, ...
+                                      newFiles, dec)
 % NIGHT6_KEEP_SLOW_WAVE  Keep only the analysed channels' outputs of one slow-wave run.
 %
 %   kept = night6_keep_slow_wave(outDir, label, base, signals, keep, maskSignal, newFiles)
+%   kept = night6_keep_slow_wave(..., dec)    the run was decimated (night6_call_slow_wave)
+%
+% DECIMATED (dec non-empty, RULING 2026-10-09 (c) 6): her peak rows are at the called rate;
+% each kept file's slowWavePeakLocs is mapped back to EPOCH rows at the source rate,
+% (j - 1) dec.factor + 1 - decimated row j is source row (j - 1) R + 1 exactly
+% (night6_decimate_masked) - so every reader, and the trim, sees one convention whatever
+% the rate. Her own rows are kept in the added variable decimation (with the factor, both
+% rates, the source spans and the rule). Her time series, masks and seconds stay at the
+% called rate, with her own t and fs: no sample is made up (invariant 8).
 %
 % Andrea, 2026-10-09: slow wave runs one ANT channel at a time. The run that applied
 % maskSignal's mask to all three columns (signals, her column order) is valid ONLY for
@@ -41,6 +51,12 @@ function kept = night6_keep_slow_wave(outDir, label, base, signals, keep, maskSi
         out.slowWaveRateSeries = S.slowWaveRateSeries(:, ci);
         out.avgSlowWave = S.avgSlowWave(ci);
         out.slowWavePeakLocs = S.slowWavePeakLocs{ci};
+        if nargin >= 8 && ~isempty(dec)
+            d = dec;
+            d.peak_locs_called = out.slowWavePeakLocs;
+            out.slowWavePeakLocs = (double(out.slowWavePeakLocs) - 1) * dec.factor + 1;
+            out.decimation = d;
+        end
         out.sw_implausibleFraction = S.sw_implausibleFraction(ci);
         out.channel = s{1};
         out.channelColumn = ci;

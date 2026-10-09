@@ -15,6 +15,8 @@ function summary = night6_batch(listFile, nWorkers, varargin)
 %     "recovery_trim_mode": "<mode>",       (REQUIRED, no default: mode (B),
 %                                            mask_to_electrical_drop_outputs - see
 %                                            RecoveryTrimMode; (A) is refused by name)
+%     "slow_wave_rate": "<rate>",           (REQUIRED, no default: 'full' | 'decimated78',
+%                                            RULING 2026-10-09 (c) 6; night6_slow_wave_rates)
 %     "recordings": [ {"mask_folder": "data/A/<session>/masks/<model-id>",
 %                      "meta_file": "..."} ] }   (meta_file optional)
 % A relative path is POSIX and resolves against gems_root (cross-platform rule 2).
@@ -28,7 +30,8 @@ function summary = night6_batch(listFile, nWorkers, varargin)
 %
 % Refused AT BATCH START, by name, before any recording is loaded (RULING 2026-10-08
 % (k) 2; review of be402a1): a missing, unknown or withdrawn recovery_trim_mode
-% ('night6:recoveryTrimMode'; (A) names RULING 2026-10-09 item 6); any listed mask folder holding a stim_recovery epoch
+% ('night6:recoveryTrimMode'; (A) names RULING 2026-10-09 item 6); a missing or unknown
+% slow_wave_rate ('night6:slowWaveRate', RULING 2026-10-09 (c) 6); any listed mask folder holding a stim_recovery epoch
 % when no recovery_starts is declared ('night6:recoveryStarts' - the conditions are read
 % from the mask files' provenance only, never from the signals); and an unreadable or
 % malformed recovery_starts file (night6_recovery_start, read once here).
@@ -43,6 +46,9 @@ function summary = night6_batch(listFile, nWorkers, varargin)
     mode = '';
     if isfield(L, 'recovery_trim_mode'), mode = L.recovery_trim_mode; end
     mode = night6_check_trim_mode(mode);   % (k) 2: required, refused by name here
+    swRate = '';
+    if isfield(L, 'slow_wave_rate'), swRate = L.slow_wave_rate; end
+    [~, SW] = night6_slow_wave_rates(swRate);   % (c) 6: required, refused by name here
     here = fileparts(mfilename('fullpath'));
     pnew = fullfile(here, '..', '..', '..', 'processing_new');
     if isfield(L, 'processing_new'), pnew = L.processing_new; end
@@ -68,7 +74,7 @@ function summary = night6_batch(listFile, nWorkers, varargin)
     args = {'GemsRoot', L.gems_root, 'Units', L.units, 'OutRoot', L.out_root, ...
             'CodeCommit', commit, 'Label', label, 'DryRun', opt.DryRun, ...
             'Figures', opt.Figures, 'Force', opt.Force, 'RecoveryStarts', starts, ...
-            'RecoveryTrimMode', mode};
+            'RecoveryTrimMode', mode, 'SlowWaveRate', SW.name};
     status = cell(1, n); wall = zeros(1, n);
     t0 = tic;
     fprintf('[night6] %d recording(s), %d worker(s), commit %s\n', n, nWorkers, commit);
@@ -90,7 +96,8 @@ function summary = night6_batch(listFile, nWorkers, varargin)
         end
     end
     summary = struct('list_file', listFile, 'n', n, 'workers', nWorkers, 'commit', commit, ...
-                     'wall_s', toc(t0), 'label', label, 'recovery_trim_mode', mode);
+                     'wall_s', toc(t0), 'label', label, 'recovery_trim_mode', mode, ...
+                     'slow_wave_rate', SW.name);
     summary.recordings = cellfun(@(f, s, w) struct('mask_folder', f, 'status', s, 'wall_s', w), ...
                                  folders, status, num2cell(wall), 'UniformOutput', false);
     summary.n_ok = nnz(strcmp(status, 'ok'));

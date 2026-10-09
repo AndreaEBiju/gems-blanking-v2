@@ -320,7 +320,7 @@ def _batch_lists(tmp: Path, st: dict[str, Any], starts: str) -> dict[str, Any]:
     """Batch lists the batch must refuse at its start: no mode, a bad one, (A), no starts."""
     pnew = _processing_new()
     base = {"gems_root": (tmp / "store").as_posix(), "units": "uV",
-            "out_root": (tmp / "batch_out").as_posix(),
+            "out_root": (tmp / "batch_out").as_posix(), "slow_wave_rate": "full",
             "processing_new": "" if pnew is None else pnew.as_posix(),
             "recordings": [{"mask_folder": Path(st["mask_folder"]).relative_to(
                 tmp / "store").as_posix()}]}
@@ -329,9 +329,14 @@ def _batch_lists(tmp: Path, st: dict[str, Any], starts: str) -> dict[str, Any]:
                         ("bad_mode", {"recovery_starts": starts,
                                       "recovery_trim_mode": "trim_it_all"}),
                         ("mode_a", {"recovery_starts": starts, "recovery_trim_mode": MODE_A}),
-                        ("no_starts", {"recovery_trim_mode": MODE_B})):
+                        ("no_starts", {"recovery_trim_mode": MODE_B}),
+                        ("no_rate", {"recovery_starts": starts, "recovery_trim_mode": MODE_B,
+                                     "slow_wave_rate": None}),
+                        ("bad_rate", {"recovery_starts": starts, "recovery_trim_mode": MODE_B,
+                                      "slow_wave_rate": "decimated7"})):
         f = tmp / f"batch_{name}.json"
-        f.write_text(json.dumps({**base, **extra}), encoding="utf-8", newline="\n")
+        doc = {k: v for k, v in {**base, **extra}.items() if v is not None}
+        f.write_text(json.dumps(doc), encoding="utf-8", newline="\n")
         lists.append({"name": name, "file": f.as_posix()})
     return {"lists": lists}
 
@@ -518,6 +523,12 @@ def test_night6_trims_in_mode_b_to_the_sample(  # noqa: PLR0915 - one MATLAB run
     assert run["resume_other"] == "dry_run"   # another starts file: rerun
     assert run["resume_old_mode"] == "dry_run"   # a record made under (A): rerun
     assert run["mode_recorded"] == MODE_B
+    # RULING 2026-10-09 (c) 6: the slow-wave rate is required and is part of the resume key
+    assert run["no_rate"]["error"] == run["bad_rate"]["error"] == "night6:slowWaveRate"
+    assert "no default" in run["no_rate"]["message"]
+    assert run["resume_same_rate"] == "complete"     # same rate: skipped
+    assert run["resume_other_rate"] == "dry_run"     # made at another rate: rerun
+    assert run["rate_recorded"] == "full"
     assert rec["recovery_trim_mode"] == MODE_B
     for name in ("no_mode", "bad_mode", "mode_a"):
         assert run[name]["error"] == "night6:recoveryTrimMode", run[name]
@@ -528,8 +539,11 @@ def test_night6_trims_in_mode_b_to_the_sample(  # noqa: PLR0915 - one MATLAB run
     for name, ident in (("no_mode", "night6:recoveryTrimMode"),
                         ("bad_mode", "night6:recoveryTrimMode"),
                         ("mode_a", "night6:recoveryTrimMode"),
-                        ("no_starts", "night6:recoveryStarts")):
+                        ("no_starts", "night6:recoveryStarts"),
+                        ("no_rate", "night6:slowWaveRate"),
+                        ("bad_rate", "night6:slowWaveRate")):
         assert b[name]["error"] == ident, (name, b[name])
+    assert "decimated7" in b["bad_rate"]["message"]
     assert "trim_it_all" in b["bad_mode"]["message"]
     assert "RULING 2026-10-09 item 6" in b["mode_a"]["message"]
     assert "no recovery_starts declared" in b["no_starts"]["message"]
@@ -854,7 +868,7 @@ def test_run_epoch_always_hands_the_starts_to_the_planner() -> None:
             in code)
     batch = (NIGHT6 / "night6_batch.m").read_text(encoding="utf-8")
     assert "'RecoveryStarts', starts" in batch
-    assert "'RecoveryTrimMode', mode}" in batch
+    assert "'RecoveryTrimMode', mode, 'SlowWaveRate', SW.name}" in batch
 
 
 def test_the_trim_modes_are_one_list_on_both_sides() -> None:
@@ -983,6 +997,12 @@ def test_mode_b_cuts_her_real_outputs_per_variable(  # noqa: PLR0915 - one run
         assert a["start_sample0"] == own[c] and a["output_rows_before_start"] == own[c] - I0
     runs = [x for x in rd["runs"] if x["status"] == "ok"]
     assert runs and all("recovery_trim" in x for x in runs)
+    # RULING 2026-10-09 (c) 6: every slow-wave run hands her its masked spans as blankIdx
+    # (the electrical lead-in at least), at the declared full rate
+    sw = [x for x in runs if x["call"] == "slowWaveAnalysis_new"]
+    assert sw and all(x["blank_idx"]["n_spans"] >= 1 and x["slow_wave_rate"]["name"] == "full"
+                      and x["blank_idx"]["fs"] == FS for x in sw)
+    assert rd["slow_wave_rate"]["name"] == "full"
     assert all("recovery_trim" in x for x in rr["runs"] if x["status"] == "ok")
     files = {f["file"]: f for f in r["files"]}
     kinds = {f["kind"] for f in files.values()}

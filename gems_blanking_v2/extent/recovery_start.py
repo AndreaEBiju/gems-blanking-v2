@@ -797,7 +797,8 @@ VALID_FRACTION_KINDS: Final[Mapping[str, str]] = {
                  "~invalidMask (:226, saved)",
     "sw_window": "slowWaveAnalysis_new: rows max(1, c - round(W fs / 2)) .. min(N, c + "
                  "round(W fs / 2)), c = the centre row (:229, :246-247); valid = ~invalidMask "
-                 "(:97, saved)",
+                 "(:97, saved); fs = the rate she ran at, her saved fs (``rate``): the epoch's, "
+                 "or fs / 78 when Night 6 runs her decimated (RULING 2026-10-09 (c) 6)",
     "mmc_rate_window": "extract_mmc event_rate: rows max(1, floor((c - W/2) fs) + 1) .. min(N, "
                        "floor((c + W/2) fs)) (:287-288); valid = ~isnan(mmc.signal(:, ch)) "
                        "(:284, as the call saved it), per channel",
@@ -821,7 +822,9 @@ class ValidFraction:
 
     ``variable`` is her own variable (kind ``her``); ``width`` the variable holding the
     window length in seconds (or ``width_s``, a constant of her code); ``validity`` the
-    variable the input validity is read from. Paths are dotted, in the same file.
+    variable the input validity is read from; ``rate`` the variable holding the sample
+    rate of the validity rows when it may differ from the epoch's (her saved ``fs``: slow
+    wave can run decimated, RULING 2026-10-09 (c) 6). Paths are dotted, in the same file.
     """
 
     kind: VFKind
@@ -830,6 +833,7 @@ class ValidFraction:
     width: str = ""
     width_s: float | None = None
     validity: str = ""
+    rate: str = ""
 
 
 RecomputeKind = Literal["mean_omitnan", "mean_well_sampled", "count", "events_per_valid_s"]
@@ -1013,7 +1017,7 @@ _VF_WIN = ValidFraction("hr_window", f"{_HR_BR}:873-876", width="winSec",
 _VF_SE = ValidFraction("hr_window", f"{_HR_BR}:923-925 (seconds on RR_times; rows as :875-876)",
                        width="sampEnWinSec", validity="invalidMask")
 _VF_SW = ValidFraction("sw_window", f"{_SW}:229, :246-247", width="rateWinSec",
-                       validity="invalidMask")
+                       validity="invalidMask", rate="fs")
 _VF_MMC_RATE = ValidFraction("mmc_rate_window", f"{_MMC}:284-290", width="mmc.params.W",
                              validity="mmc.signal")
 _VF_DELAY = ValidFraction("mmc_delay_window", f"{_MMC}:259-268", width="mmc.params.delayW",
@@ -1176,8 +1180,10 @@ _HR_VARS = (
 _SW_VARS = (
     *_many("slowWaves", "parameter",
            "blankIdx edgeBufferSec rateWinSec minStretchSec minPeaksInStretch fs window "
-           "windowlen channel channelColumn maskSignal keptFrom",
-           f"{_SW}:340-345; matlab/night6/night6_keep_slow_wave.m"),
+           "windowlen channel channelColumn maskSignal keptFrom decimation",
+           f"{_SW}:340-345; matlab/night6/night6_keep_slow_wave.m (decimation: only when "
+           "Night 6 ran her decimated - the factor, both rates, her own peak rows, the "
+           "source spans; slowWavePeakLocs is then mapped back to epoch rows)"),
     *_many("slowWaves", "input", "invalidMask edgeMask", f"{_SW}:97, :111-118"),
     _recomputed("slowWaves", "avgSlowWave", f"{_SW}:283",
                 Recompute("mean_omitnan", "slowWaveRateSeries")),
@@ -1297,7 +1303,7 @@ def _check_valid_fraction(kind: str, path: str, vf: ValidFraction,
     if sib in decl:
         msg = f"{where}: the sibling {sib!r} would overwrite a declared variable"
         raise ValueError(msg)
-    for ref in (vf.width, vf.validity):
+    for ref in (vf.width, vf.validity, vf.rate):
         if ref and not _root_declared(decl, ref):
             msg = f"{where}: valid fraction reads {ref!r}, not declared in {kind}"
             raise ValueError(msg)
@@ -1309,6 +1315,8 @@ def _check_valid_fraction(kind: str, path: str, vf: ValidFraction,
         d["width"] = vf.width
     if vf.width_s is not None:
         d["width_s"] = vf.width_s
+    if vf.rate:
+        d["rate"] = vf.rate
     return d
 
 
