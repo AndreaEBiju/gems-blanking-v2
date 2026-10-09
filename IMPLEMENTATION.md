@@ -5819,6 +5819,52 @@ The rulings headed **2026-10-08**, **(b)** and **(c)** were written on **2026-10
    - **Andrea chooses** among these at model-choice time. Nothing is adopted before then.
 4. **mmc on recordings with no beat train:** Andrea's question, as the builder proposed. Report the count once routing finishes. Ruling (f) gives HR and HRV "not computed" only; it says nothing about mmc.
 
+### RULING 2026-10-08 (h) — Night 6 wrapper questions: Andrea's answers and the measurements she asked for
+
+**Decided (Andrea, 2026-10-08):**
+1. **The mask file carries each epoch's exact start sample.** MATLAB never converts seconds to samples (invariant 15).
+2. **Slow wave runs one channel at a time.** For ANT channel *i*, the wrapper applies channel *i*'s mask to all three ANT columns, so the function's joint `any(isnan)` mask equals mask *i*. Only channel *i*'s outputs are kept. `slowWaveAnalysis_new` is called unchanged.
+
+**Measure before Andrea decides:**
+
+3. **Slow-wave settings: choose by physiology, then apply one setting to every recording.** Andrea's instruction: test which low-pass and/or smoothing gives slow waves that agree with normal rat physiology.
+   - **Candidates:**
+     - `batch_process` (low-pass 0.15 Hz, order 2, 5 s smoothing, 15 s edge);
+     - `run_continuous` (low-pass off; 10 s smoothing, 3 s edge);
+     - low-pass only; smoothing only;
+     - a small grid around each (cutoff 0.1–0.3 Hz, order 2–4, smoothing 2–10 s).
+     - All are passed as arguments to her function, never by editing it.
+   - **Criteria, fixed before results:**
+     - (a) **Spectral agreement:** the peak-detected rate agrees with the dominant frequency of the same channel's spectrum (0.03–0.2 Hz, Welch, same 60 s windows). This check does not depend on any setting.
+     - (b) **Physiological range:** the rate lies within the rat gastric slow-wave range. Take the range from the literature with citations, and write it down before any result is seen.
+     - (c) **No spurious peaks:** a low fraction of implausible rates (> 8 cpm) and of doublets.
+     - (d) **Channel agreement:** the three ANT channels agree with each other.
+   - **Data:** clean baseline epochs from A, B and H, plus I/J/K, which are allowed here because this is not model evaluation.
+   - **Report:**
+     - per-candidate scores;
+     - 3 example panels per animal (raw, filtered, detected peaks, spectrum) for Andrea to eyeball;
+     - the ranking.
+   - **Andrea chooses.**
+   - **If the choice differs from `batch_process`,** the slow-wave tolerance was measured with other settings. Cost a slow-wave-only tolerance pass with the chosen settings, and show the critical-path effect.
+4. **Speed check (invariant 35):** slow wave is about 60% of Night 6, and per-channel calls triple it.
+   - Test whether decimating before the call, done in the wrapper, gives the same results as full rate. Use zero-phase FIR decimation; a decimated sample is masked if any of its source samples is masked; any fill is temporary and reverted to NaN.
+   - **Equivalence criteria, fixed before results:** peak times within 0.1 s, rate within 0.1 cpm, on 5 recordings.
+   - Report the time saved. Do not adopt it without equivalence.
+5. **Spike method: a full comparison of `detectSortNerveSpikesECAP` and the `process_dataset` pipeline,** read only, from the current processing_new.
+   - **Step by step, with file and line references:** filtering, threshold rule and its σ estimate, polarity, refractory period, sorting or clustering, ECAP and stimulus handling, NaN handling, outputs and units.
+   - **On real data:** run both on clean baseline epochs from 3 recordings (A, B and H). Report spike counts and rates, the fraction matched within ±0.5 ms, unmatched spikes in each direction, and waveform overlays.
+   - Say which method the sweep's spike tolerance was measured with.
+   - **Andrea chooses.**
+6. **Recovery start, not a fixed 132 s.** Andrea sets 120 s of stim, but the real on and off times can be offset by hardware delays.
+   - Explain where 132 s came from.
+   - Report the stim on and off times detected from the stim monitor channels (the 03B edge code) for every stim_rec file: the distribution of duration and offset against 120 s.
+   - **Proposal for Andrea:** recovery starts at each file's own detected stim-off plus a settling buffer, which needs a stated basis. A file whose edges cannot be detected is listed and held, never assumed (invariant 41).
+7. **mmc with no beat train: diagnose before Andrea decides.** The beat train is already shared across consumers. A recording lands on this list only if no channel or pair produced a train passing the count gate.
+   - For each of the 30 (and the final count), report the channels and pairs tried, the best candidate's beat count against the gate range, and why each failed.
+   - Plot 3 examples, and check whether the "pre" files (B: 21) fail on the gate's upper bound (high heart rate before trials) rather than on signal quality.
+   - Report only: the routing rules are frozen.
+8. **HRV and breathing as two calls:** waiting for Andrea, after the explanation.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
