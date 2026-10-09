@@ -224,7 +224,7 @@ def test_the_numbers_are_the_sums_of_their_parts() -> None:
     """
     q = rs.beat_decimation_factor(FS)
     assert q == 12
-    beats = 10 * q / FS + impulse_settling_s(CONSUMER_FILTERS["hrv"], FS / q) + 0.375
+    beats = 10 * q / FS + HR_EDGE_S + 0.375  # the HR band MEASURED at a NaN edge
     mmc_ev = beats + 0.050 + 1.1594 + 0.5
     want = {
         "spikes": 0.007782 + 15.0,                       # CV2 kept, (c) 3 (c)
@@ -242,8 +242,10 @@ def test_the_numbers_are_the_sums_of_their_parts() -> None:
     assert rs.analysis_settling("slow_wave", FS).binding_output.startswith("slow-wave peak")
     # the values reported (2026-10-09, cohort fs), to the microsecond
     got = {k: round(rs.analysis_settling(k, FS).settling_s or -1, 6) for k in want}
-    assert got == {"spikes": 15.007782, "hrv": 0.520981, "breathing": 1.520981,
-                   "slow_wave": 16.666973, "mmc": 22.230381}
+    # hrv and breathing (and mmc, which reads the beats) moved with the HR-band edge settling
+    # (0.141 s one-way impz -> 0.2374 s measured): was 0.520981 / 1.520981 / 22.230381
+    assert got == {"spikes": 15.007782, "hrv": 0.617315, "breathing": 1.617315,
+                   "slow_wave": 16.666973, "mmc": 22.326715}
 
 
 def test_a_stage_that_skips_nan_adds_nothing_and_its_reach_is_still_reported() -> None:
@@ -267,12 +269,24 @@ def test_a_stage_that_skips_nan_adds_nothing_and_its_reach_is_still_reported() -
 
 
 def test_the_measured_edges_are_the_filters_and_carry_their_files() -> None:
-    """(c) 1-2: the spike and mmc filters reach their MEASURED edge settling, not impz."""
+    """(c) 1-2: spike, mmc and HR-band filters reach their MEASURED edge settling, not impz.
+
+    The HR band (the beat detector's, read by hrv, breathing and mmc, and the heart-band
+    trace) reaches its measured 0.2374 s (Andrea's item 2b answers).
+    """
     rec = {r["analysis"]: r for r in rs.table_record(FS)}
-    for name, value in (("spikes", 0.007782), ("mmc", 1.1594)):
+    for name, value in (("spikes", 0.007782), ("mmc", 1.1594), ("hrv", None),
+                        ("breathing", None)):
         st = [s for o in rec[name]["outputs"] for s in o["stages"]
               if s["kind"] == "filter at a NaN edge, measured"]
-        assert st and all(s["counted_s"] == value and s["measurement"]["files"] for s in st)
+        hr = [s for s in st if "beat detector" in s["what"] or "her 10-150" in s["what"]]
+        own = [s for s in st if s not in hr]
+        assert (own if value is not None else hr), name
+        assert all(s["counted_s"] == value and s["measurement"]["files"] for s in own)
+        assert all(s["counted_s"] == HR_EDGE_S and s["measurement"]["files"] for s in hr)
+        assert (name == "spikes") == (not hr), name  # every beat reader carries the band
+    assert not [s for o in rec["hrv"]["outputs"] for s in o["stages"]
+                if "10-150" in s["what"] and s["kind"] == "filter impulse response"]
     assert rs.BEAT_SPACING_S == 0.375
     doc = rs.recovery_starts_document([], fs=FS)
     assert doc["settling_rules"] == rs.RULING_SETTLING
@@ -485,6 +499,11 @@ def test_b_is_the_one_mode_and_a_is_refused_by_name() -> None:
     assert set(rs.TRIM_CLASSES) == {"valid_only", "filled_or_filtered"}
 
 
+HR_EDGE_S = 0.2374
+"""The 10-150 Hz heart band at a NaN edge (edgepad/hr_edge_settling*.json), written here as a
+number, not read from the map."""
+
+
 def _independent_reaches() -> dict[str, float]:
     """Each reach from the MEASURED settlings and her constants (not the map).
 
@@ -493,14 +512,14 @@ def _independent_reaches() -> dict[str, float]:
     wave peaks 6 s, mmc grouping 0.5 s) add; (d) 3: the mmc rate adds its 5 s look-back.
     """
     q = 12
-    beats = 10 * q / FS + impulse_settling_s(CONSUMER_FILTERS["hrv"], FS / q) + 0.375
+    beats = 10 * q / FS + HR_EDGE_S + 0.375           # FIR + HR band at a NaN edge + spacing
     band = 0.007782                                   # step1 at a NaN edge (measured)
     mmc_sig = beats + 0.050 + 1.1594                  # whole blank + band at a NaN edge
     mmc_ev = mmc_sig + 0.0 + 0.0 + 0.5                # median, MAD skip NaN; grouping
     sw = impulse_settling_s(CONSUMER_FILTERS["slow_wave"], FS) + 5.0 / 2
     return {"band": band, "wave": band + 0.0015, "env": band + 0.010 / 2, "beats": beats,
             "troughs": beats + 1.0,
-            "trace": impulse_settling_s(CONSUMER_FILTERS["hrv"], FS), "sw": sw,
+            "trace": HR_EDGE_S, "sw": sw, "cv2": band + 30.0 / 2,
             "sw_peaks": sw + 6.0, "sw_rate": sw + 6.0, "mmc_sig": mmc_sig, "mmc_ev": mmc_ev,
             "mmc_rate": mmc_ev + 10.0 / 2, "mmc_delay": mmc_ev + 10.0 / 2 + 30.0 / 2}
 
@@ -518,7 +537,9 @@ CLASS_TABLE: dict[tuple[str, str], tuple[str, str]] = {
        for v in ("rms_uv", "sigmaFloor_uv", "excess_uv", "validFrac")},
     ("spikes_v2", "metrics.fr_hz"): (_I, "band"),
     ("spikes_v2", "metrics.fr_validFrac"): (_I, "band"),
-    ("spikes_v2", "metrics.cv2_roll"): (_I, "band"),
+    # Andrea, 2026-10-09: cv2_roll is cut at its FULL kept reach (the 30 s bins counted,
+    # (c) 3 (c)), the analysis's binding 15.007782 s - and no other spike output is
+    ("spikes_v2", "metrics.cv2_roll"): (_I, "cv2"),
     ("spikes_v2", "metrics.burst.onsets"): (_I, "wave"),
     ("spikes_v2", "metrics.burst.offsets"): (_I, "wave"),
     # HR_BR_HRVAnalysis_beats: the trace is filtered over the linear fill (:262, :282), (ii);
@@ -578,6 +599,50 @@ def test_every_trimmed_variable_is_cut_at_its_class_reach_to_the_sample() -> Non
     assert rate["start_sample0"] == seconds_to_sample(el + reach["mmc_ev"] + 5.0, FS)
     assert {c["cut"] for c in f["cuts"]} == {rs.cut_id(*c) for c in rs.trim_cuts()}
     assert rs.cut_id("slow_wave", "sw_peaks", _II) in cuts  # peaks: + MinPeakDistance 6 s
+
+
+SPIKE_FILES = ("spikes_v2",)
+
+
+def test_only_cv2_roll_is_cut_at_15_s_every_other_spike_output_at_its_ms_reach() -> None:
+    """Andrea, 2026-10-09: the 15.0 s spike cut applies ONLY to ``metrics.cv2_roll``.
+
+    cv2_roll at electrical + 15.007782 s (one figure with the analysis); spike times and the
+    firing rate from 7.782 ms after the electrical settling; any other spike variable cut at
+    or beyond 1 s fails.
+    """
+    el = 125.0
+    f = rs.file_starts(session="x", fs=FS, stim_off_s=120.8, electrical_settle_s=el,
+                       stim_off_source="a", electrical_source="b")
+    cuts = {c["cut"]: c for c in f["cuts"]}
+    trims = [v for v in rs.OUTPUT_VARS if v.role == "trim" and v.file in SPIKE_FILES]
+    by_path = {v.path: cuts[rs.cut_id("spikes", v.reach, str(v.trim_class))] for v in trims}
+    cv2 = by_path["metrics.cv2_roll"]
+    assert cv2["reach_s"] == pytest.approx(15.007782, abs=1e-12)
+    assert cv2["reach_s"] == rs.analysis_settling("spikes", FS).settling_s  # one figure
+    assert cv2["start_sample0"] == seconds_to_sample(el + 15.007782, FS)
+    for path in ("spikes.times", "spikes.centers", "metrics.fr_hz"):
+        assert by_path[path]["reach_s"] == pytest.approx(0.007782, abs=1e-12), path
+        assert by_path[path]["start_sample0"] == seconds_to_sample(el + 0.007782, FS), path
+    long_ = sorted(p for p, c in by_path.items() if c["reach_s"] >= 1.0)
+    assert long_ == ["metrics.cv2_roll"], long_
+    assert all(c["reach_s"] < 0.013 for p, c in by_path.items() if p != "metrics.cv2_roll")
+
+
+def test_the_hr_band_edge_moves_the_hrv_and_breathing_starts_and_the_trace_cut() -> None:
+    """Andrea's item 2b answers: wherever the HR band enters a reach, it is 0.2374 s measured.
+
+    hrv = FIR 0.0049 + band 0.2374 + beat spacing 0.375 = 0.617315 s; breathing + trough
+    spacing 1.0 s = 1.617315 s; the heart-band trace cut 0.2374 s (was 0.140165 s).
+    """
+    q = rs.beat_decimation_factor(FS)
+    assert rs.analysis_settling("hrv", FS).settling_s == pytest.approx(
+        10 * q / FS + 0.2374 + 0.375, abs=1e-12)
+    assert rs.analysis_settling("breathing", FS).settling_s == pytest.approx(
+        10 * q / FS + 0.2374 + 0.375 + 1.0, abs=1e-12)
+    tr, miss = rs.output_reach_s("hrv", "heart_band_trace", _II, FS)
+    assert miss == () and tr == 0.2374
+    assert tr > impulse_settling_s(CONSUMER_FILTERS["hrv"], FS)  # the one-way impz understates
 
 
 @settings(max_examples=100, deadline=None)

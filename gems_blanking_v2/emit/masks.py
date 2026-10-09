@@ -25,6 +25,10 @@ Rules applied:
 * **The routing table's ``distrusted_spans``** (ruling 2026-10-03) become part of the
   spike consumer's mask for that cuff, and a cuff distrusted outright (route
   ``distrusted``) gets a wholly invalid spike mask - for the spike consumer only.
+* **Minutes where the HR train has no beats** (RULING 2026-10-09 (b) 2) are distrusted
+  for the spike consumer, every cuff, because heartbeat leak continues there but no peri-R
+  span can be placed (:func:`no_beat_minutes`, :func:`no_beat_spike_spans`). Only a
+  recording WITH a train has them; one without keeps its spike mask unchanged ((k) 1).
 * **Line noise never enters a mask.** The spike consumer's per-minute distrust for
   mains-locked spikes (ruling 2026-10-07 (c) item 4, decided by the test of RULING
   2026-10-08 (d) 2) is its own record (``emit.line_distrust``), never a mask span, so the
@@ -65,10 +69,13 @@ if TYPE_CHECKING:
     from gems_blanking_v2.emit.provenance import MaskProvenance
 
 __all__ = [
+    "NO_BEAT_MINUTE_S",
+    "NO_BEAT_RULE",
     "TAPER_S",
     "ConsumerMask",
     "MaskKey",
     "MaskSpan",
+    "NoBeatMinute",
     "apply_mask",
     "build_masks",
     "distrusted_spike_spans",
@@ -78,6 +85,8 @@ __all__ = [
     "mask_sample_spans",
     "masked_spans_s",
     "mmc_not_measured",
+    "no_beat_minutes",
+    "no_beat_spike_spans",
     "spans_from_routing",
     "velocity_mask",
 ]
@@ -177,6 +186,90 @@ def distrusted_spike_spans(entry: Mapping[str, Any], *, region_start_s: float,
             out.append(MaskSpan("spikes", f"{cuff}_T", region_start_s + float(a),
                                 region_start_s + float(b), "per_minute_cuff_distrust"))
     return out
+
+
+NO_BEAT_MINUTE_S: Final = 60.0
+"""The per-minute storage window of a beat train (ruling 2026-10-02 (f)-(g)): 60 s from the
+train's origin (the start of the routing region the beats were detected on)."""
+NO_BEAT_EDGE_TOL_S: Final = 1e-4
+"""How far a stored rejected-span edge may sit from its storage-window edge, s. The trailing
+partial minute's end is the region end in two forms that differ by under one sample (41 us at
+24414 Hz): ``hr.blank_s`` stores ``n / fs`` at 1 us (600.360018) while the train's region is
+the planned 10 ms-rounded duration (600.36) - measured on the production routing, 2026-10-09.
+Far below one 10 ms mask frame."""
+NO_BEAT_RULE: Final = (
+    "RULING 2026-10-09 (b) 2: the spike consumer distrusts every minute in which the "
+    "recording's HR train has no beats - its rejected minutes (routing entry hr.blank_s) and "
+    "any other 60 s window of the train's region holding no beat - because heartbeat leak "
+    "continues there but no peri-R span can be placed. A minute is the per-minute storage "
+    "window [origin + 60 k, origin + 60 (k + 1)), the last one cut at the region's end. A "
+    "recording with no train has none (its spike mask is unchanged, (k) 1)")
+
+
+@dataclass(frozen=True, slots=True)
+class NoBeatMinute:
+    """One minute of a train's region with no beat: recording seconds, half-open."""
+
+    minute: int
+    start_s: float
+    stop_s: float
+    kind: str
+    """``"rejected"`` (listed in ``hr.blank_s``) or ``"empty"`` (not listed, holds no beat)."""
+
+
+def no_beat_minutes(*, beat_times_s: npt.ArrayLike, region_s: tuple[float, float],
+                    rejected_s: Sequence[Sequence[float]]) -> list[NoBeatMinute]:
+    """Return every minute of the train's region in which the train places no beat.
+
+    ``beat_times_s`` are the train's beats on the recording's timeline; ``region_s`` is the
+    routing region they were detected on (its start is the train's origin); ``rejected_s``
+    is the routing entry's ``hr.blank_s``, REGION-relative seconds (the per-minute storage
+    writes them from the region start; adjacent rejected minutes are merged into one span).
+    Raises, naming it, for a rejected span that is not a run of storage windows, or a
+    rejected minute that still holds a beat - either means the
+    train and its routing entry disagree, which is a defect, not a minute to guess about.
+    """
+    lo, hi = float(region_s[0]), float(region_s[1])
+    if not (math.isfinite(lo) and math.isfinite(hi) and hi > lo):
+        msg = f"region {region_s} is not a finite interval"
+        raise ValueError(msg)
+    t = np.sort(np.asarray(beat_times_s, dtype=np.float64).ravel())
+    if t.size and not np.isfinite(t).all():
+        msg = "beat times must be finite"
+        raise ValueError(msg)
+    n_min = int(math.ceil((hi - lo) / NO_BEAT_MINUTE_S - 1e-9))
+    windows = [(lo + k * NO_BEAT_MINUTE_S, min(lo + (k + 1) * NO_BEAT_MINUTE_S, hi))
+               for k in range(n_min)]
+    rejected: set[int] = set()
+    for a, b in rejected_s:  # a run of consecutive storage windows, stored at 1 us
+        k0 = int(round(float(a) / NO_BEAT_MINUTE_S))
+        k1 = int(math.ceil(float(b) / NO_BEAT_MINUTE_S - 1e-6)) - 1
+        if not (0 <= k0 <= k1 < n_min
+                and abs(lo + float(a) - windows[k0][0]) < NO_BEAT_EDGE_TOL_S
+                and abs(lo + float(b) - windows[k1][1]) < NO_BEAT_EDGE_TOL_S):
+            msg = (f"rejected span [{a}, {b}) s (region-relative) is not a run of per-minute "
+                   f"storage windows of the region [{lo}, {hi}) s")
+            raise ValueError(msg)
+        rejected.update(range(k0, k1 + 1))
+    out: list[NoBeatMinute] = []
+    for k, (a, b) in enumerate(windows):
+        n_in = int(np.searchsorted(t, b, side="left") - np.searchsorted(t, a, side="left"))
+        if k in rejected:
+            if n_in:
+                msg = (f"rejected minute {k} [{a}, {b}) s still holds {n_in} beat(s): the train "
+                       "and its routing entry disagree")
+                raise ValueError(msg)
+            out.append(NoBeatMinute(k, a, b, "rejected"))
+        elif n_in == 0:
+            out.append(NoBeatMinute(k, a, b, "empty"))
+    return out
+
+
+def no_beat_spike_spans(minutes: Iterable[NoBeatMinute], spike_signals: Sequence[str]
+                        ) -> list[MaskSpan]:
+    """Return the no-beat minutes as spike-consumer spans, one per minute per spike signal."""
+    return [MaskSpan("spikes", sig, m.start_s, m.stop_s, f"no_beat_minute_{m.kind}")
+            for m in minutes for sig in spike_signals]
 
 
 def build_masks(signals: Mapping[str, Sequence[str]], spans: Iterable[MaskSpan], *,

@@ -1,0 +1,498 @@
+{
+ "filter": "butter(4,[10 150]) bandpass SOS filtfilt, linear fill (HR_BR_HRVAnalysis_beats.m:262, :278-282)",
+ "fs": 24414.0625,
+ "order": 4,
+ "band_hz": [
+  10.0,
+  150.0
+ ],
+ "fs_basis": "full rate: night6_run_recording.m:429 passes fs = plan.fs, the mask file's fs (night6_prepare_epoch.m:78, :93)",
+ "tolerance": "1% of peak error",
+ "seed": 20261009,
+ "gaps_s": [
+  0.025,
+  0.1,
+  1.0,
+  10.0
+ ],
+ "qrs_sigma_s": [
+  0.002,
+  0.004,
+  0.008
+ ],
+ "qrs_offsets_before_gap_start_s": [
+  -0.005,
+  0.0,
+  0.005,
+  0.01,
+  0.02,
+  0.05
+ ],
+ "settling_s": {
+  "step|gap0.025s": [
+   0.1999,
+   0.1999
+  ],
+  "step|gap0.1s": [
+   0.1711,
+   0.1711
+  ],
+  "step|gap1.0s": [
+   0.1956,
+   0.1956
+  ],
+  "step|gap10.0s": [
+   0.1956,
+   0.1956
+  ],
+  "noise_white|gap0.025s": [
+   0.119,
+   0.1369
+  ],
+  "noise_white|gap0.1s": [
+   0.1701,
+   0.0848
+  ],
+  "noise_white|gap1.0s": [
+   0.0627,
+   0.1673
+  ],
+  "noise_white|gap10.0s": [
+   0.1673,
+   0.1613
+  ],
+  "sine_20hz|gap0.025s": [
+   0.1935,
+   0.1936
+  ],
+  "sine_20hz|gap0.1s": [
+   0.1844,
+   0.1844
+  ],
+  "sine_20hz|gap1.0s": [
+   0.186,
+   0.1862
+  ],
+  "sine_20hz|gap10.0s": [
+   0.1861,
+   0.1862
+  ],
+  "sine_100hz|gap0.025s": [
+   0.1862,
+   0.1871
+  ],
+  "sine_100hz|gap0.1s": [
+   0.0843,
+   0.0867
+  ],
+  "sine_100hz|gap1.0s": [
+   0.0848,
+   0.0889
+  ],
+  "sine_100hz|gap10.0s": [
+   0.0849,
+   0.0894
+  ],
+  "qrs_s2ms_off-5ms|gap0.025s": [
+   0.1232,
+   0.113
+  ],
+  "qrs_s2ms_off-5ms|gap0.1s": [
+   0.1209,
+   0.0332
+  ],
+  "qrs_s2ms_off-5ms|gap1.0s": [
+   0.1194,
+   0.0
+  ],
+  "qrs_s2ms_off-5ms|gap10.0s": [
+   0.1192,
+   0.0
+  ],
+  "qrs_s2ms_off0ms|gap0.025s": [
+   0.175,
+   0.167
+  ],
+  "qrs_s2ms_off0ms|gap0.1s": [
+   0.1684,
+   0.0838
+  ],
+  "qrs_s2ms_off0ms|gap1.0s": [
+   0.1664,
+   0.0
+  ],
+  "qrs_s2ms_off0ms|gap10.0s": [
+   0.1662,
+   0.0
+  ],
+  "qrs_s2ms_off5ms|gap0.025s": [
+   0.177,
+   0.1697
+  ],
+  "qrs_s2ms_off5ms|gap0.1s": [
+   0.1695,
+   0.0863
+  ],
+  "qrs_s2ms_off5ms|gap1.0s": [
+   0.1675,
+   0.0002
+  ],
+  "qrs_s2ms_off5ms|gap10.0s": [
+   0.1673,
+   0.0
+  ],
+  "qrs_s2ms_off10ms|gap0.025s": [
+   0.1767,
+   0.1686
+  ],
+  "qrs_s2ms_off10ms|gap0.1s": [
+   0.1695,
+   0.0855
+  ],
+  "qrs_s2ms_off10ms|gap1.0s": [
+   0.1676,
+   0.0
+  ],
+  "qrs_s2ms_off10ms|gap10.0s": [
+   0.1674,
+   0.0
+  ],
+  "qrs_s2ms_off20ms|gap0.025s": [
+   0.2728,
+   0.0
+  ],
+  "qrs_s2ms_off20ms|gap0.1s": [
+   0.2576,
+   0.0
+  ],
+  "qrs_s2ms_off20ms|gap1.0s": [
+   0.217,
+   0.0
+  ],
+  "qrs_s2ms_off20ms|gap10.0s": [
+   0.2442,
+   0.0
+  ],
+  "qrs_s2ms_off50ms|gap0.025s": [
+   0.0,
+   0.0
+  ],
+  "qrs_s2ms_off50ms|gap0.1s": [
+   0.0,
+   0.0
+  ],
+  "qrs_s2ms_off50ms|gap1.0s": [
+   0.0,
+   0.0
+  ],
+  "qrs_s2ms_off50ms|gap10.0s": [
+   0.2953,
+   0.0
+  ],
+  "qrs_s4ms_off-5ms|gap0.025s": [
+   0.1787,
+   0.161
+  ],
+  "qrs_s4ms_off-5ms|gap0.1s": [
+   0.1705,
+   0.0308
+  ],
+  "qrs_s4ms_off-5ms|gap1.0s": [
+   0.1678,
+   0.0
+  ],
+  "qrs_s4ms_off-5ms|gap10.0s": [
+   0.1675,
+   0.0
+  ],
+  "qrs_s4ms_off0ms|gap0.025s": [
+   0.1779,
+   0.1721
+  ],
+  "qrs_s4ms_off0ms|gap0.1s": [
+   0.1698,
+   0.0848
+  ],
+  "qrs_s4ms_off0ms|gap1.0s": [
+   0.1677,
+   0.0
+  ],
+  "qrs_s4ms_off0ms|gap10.0s": [
+   0.1675,
+   0.0
+  ],
+  "qrs_s4ms_off5ms|gap0.025s": [
+   0.1096,
+   0.1219
+  ],
+  "qrs_s4ms_off5ms|gap0.1s": [
+   0.156,
+   0.0889
+  ],
+  "qrs_s4ms_off5ms|gap1.0s": [
+   0.156,
+   0.0
+  ],
+  "qrs_s4ms_off5ms|gap10.0s": [
+   0.156,
+   0.0
+  ],
+  "qrs_s4ms_off10ms|gap0.025s": [
+   0.1779,
+   0.1718
+  ],
+  "qrs_s4ms_off10ms|gap0.1s": [
+   0.1696,
+   0.0879
+  ],
+  "qrs_s4ms_off10ms|gap1.0s": [
+   0.1676,
+   0.0016
+  ],
+  "qrs_s4ms_off10ms|gap10.0s": [
+   0.1674,
+   0.0
+  ],
+  "qrs_s4ms_off20ms|gap0.025s": [
+   0.177,
+   0.1696
+  ],
+  "qrs_s4ms_off20ms|gap0.1s": [
+   0.1695,
+   0.0862
+  ],
+  "qrs_s4ms_off20ms|gap1.0s": [
+   0.1676,
+   0.0
+  ],
+  "qrs_s4ms_off20ms|gap10.0s": [
+   0.1674,
+   0.0
+  ],
+  "qrs_s4ms_off50ms|gap0.025s": [
+   0.0,
+   0.0
+  ],
+  "qrs_s4ms_off50ms|gap0.1s": [
+   0.0,
+   0.0
+  ],
+  "qrs_s4ms_off50ms|gap1.0s": [
+   0.0,
+   0.0
+  ],
+  "qrs_s4ms_off50ms|gap10.0s": [
+   0.2965,
+   0.0
+  ],
+  "qrs_s8ms_off-5ms|gap0.025s": [
+   0.1881,
+   0.1573
+  ],
+  "qrs_s8ms_off-5ms|gap0.1s": [
+   0.1625,
+   0.1316
+  ],
+  "qrs_s8ms_off-5ms|gap1.0s": [
+   0.1618,
+   0.0028
+  ],
+  "qrs_s8ms_off-5ms|gap10.0s": [
+   0.1617,
+   0.0
+  ],
+  "qrs_s8ms_off0ms|gap0.025s": [
+   0.1764,
+   0.1774
+  ],
+  "qrs_s8ms_off0ms|gap0.1s": [
+   0.1695,
+   0.0856
+  ],
+  "qrs_s8ms_off0ms|gap1.0s": [
+   0.1677,
+   0.0008
+  ],
+  "qrs_s8ms_off0ms|gap10.0s": [
+   0.1675,
+   0.0
+  ],
+  "qrs_s8ms_off5ms|gap0.025s": [
+   0.1788,
+   0.1737
+  ],
+  "qrs_s8ms_off5ms|gap0.1s": [
+   0.1723,
+   0.0742
+  ],
+  "qrs_s8ms_off5ms|gap1.0s": [
+   0.1705,
+   0.0
+  ],
+  "qrs_s8ms_off5ms|gap10.0s": [
+   0.1703,
+   0.0
+  ],
+  "qrs_s8ms_off10ms|gap0.025s": [
+   0.1796,
+   0.1606
+  ],
+  "qrs_s8ms_off10ms|gap0.1s": [
+   0.1916,
+   0.1425
+  ],
+  "qrs_s8ms_off10ms|gap1.0s": [
+   0.1921,
+   0.0052
+  ],
+  "qrs_s8ms_off10ms|gap10.0s": [
+   0.1921,
+   0.0
+  ],
+  "qrs_s8ms_off20ms|gap0.025s": [
+   0.1783,
+   0.1744
+  ],
+  "qrs_s8ms_off20ms|gap0.1s": [
+   0.1693,
+   0.0905
+  ],
+  "qrs_s8ms_off20ms|gap1.0s": [
+   0.1672,
+   0.0027
+  ],
+  "qrs_s8ms_off20ms|gap10.0s": [
+   0.167,
+   0.0
+  ],
+  "qrs_s8ms_off50ms|gap0.025s": [
+   0.1775,
+   0.1706
+  ],
+  "qrs_s8ms_off50ms|gap0.1s": [
+   0.1696,
+   0.087
+  ],
+  "qrs_s8ms_off50ms|gap1.0s": [
+   0.1676,
+   0.0011
+  ],
+  "qrs_s8ms_off50ms|gap10.0s": [
+   0.1674,
+   0.0
+  ]
+ },
+ "degenerate_rel_threshold": 1e-06,
+ "degenerate_rows_excluded": [
+  "qrs_s2ms_off20ms|gap0.025s",
+  "qrs_s2ms_off20ms|gap0.1s",
+  "qrs_s2ms_off20ms|gap1.0s",
+  "qrs_s2ms_off20ms|gap10.0s",
+  "qrs_s2ms_off50ms|gap0.025s",
+  "qrs_s2ms_off50ms|gap0.1s",
+  "qrs_s2ms_off50ms|gap1.0s",
+  "qrs_s2ms_off50ms|gap10.0s",
+  "qrs_s4ms_off50ms|gap0.025s",
+  "qrs_s4ms_off50ms|gap0.1s",
+  "qrs_s4ms_off50ms|gap1.0s",
+  "qrs_s4ms_off50ms|gap10.0s",
+  "qrs_s8ms_off50ms|gap0.025s",
+  "qrs_s8ms_off50ms|gap0.1s",
+  "qrs_s8ms_off50ms|gap1.0s",
+  "qrs_s8ms_off50ms|gap10.0s"
+ ],
+ "worst_including_degenerate_s": 0.2965,
+ "error_peak_rel_to_output_peak": {
+  "step|gap0.025s": 0.033,
+  "step|gap0.1s": 0.233,
+  "step|gap1.0s": 0.00954,
+  "step|gap10.0s": 0.000954,
+  "noise_white|gap0.025s": 0.375,
+  "noise_white|gap0.1s": 0.595,
+  "noise_white|gap1.0s": 0.729,
+  "noise_white|gap10.0s": 0.0662,
+  "sine_20hz|gap0.025s": 0.0177,
+  "sine_20hz|gap0.1s": 0.159,
+  "sine_20hz|gap1.0s": 0.164,
+  "sine_20hz|gap10.0s": 0.164,
+  "sine_100hz|gap0.025s": 0.0899,
+  "sine_100hz|gap0.1s": 0.195,
+  "sine_100hz|gap1.0s": 0.198,
+  "sine_100hz|gap10.0s": 0.201,
+  "qrs_s2ms_off-5ms|gap0.025s": 0.35,
+  "qrs_s2ms_off-5ms|gap0.1s": 0.418,
+  "qrs_s2ms_off-5ms|gap1.0s": 0.431,
+  "qrs_s2ms_off-5ms|gap10.0s": 0.432,
+  "qrs_s2ms_off0ms|gap0.025s": 0.457,
+  "qrs_s2ms_off0ms|gap0.1s": 0.747,
+  "qrs_s2ms_off0ms|gap1.0s": 0.803,
+  "qrs_s2ms_off0ms|gap10.0s": 0.809,
+  "qrs_s2ms_off5ms|gap0.025s": 0.0914,
+  "qrs_s2ms_off5ms|gap0.1s": 0.157,
+  "qrs_s2ms_off5ms|gap1.0s": 0.17,
+  "qrs_s2ms_off5ms|gap10.0s": 0.171,
+  "qrs_s2ms_off10ms|gap0.025s": 4.07e-05,
+  "qrs_s2ms_off10ms|gap0.1s": 6.72e-05,
+  "qrs_s2ms_off10ms|gap1.0s": 7.21e-05,
+  "qrs_s2ms_off10ms|gap10.0s": 7.26e-05,
+  "qrs_s2ms_off20ms|gap0.025s": 1.71e-13,
+  "qrs_s2ms_off20ms|gap0.1s": 5.59e-13,
+  "qrs_s2ms_off20ms|gap1.0s": 6.7e-13,
+  "qrs_s2ms_off20ms|gap10.0s": 2.88e-13,
+  "qrs_s2ms_off50ms|gap0.025s": 0.0,
+  "qrs_s2ms_off50ms|gap0.1s": 0.0,
+  "qrs_s2ms_off50ms|gap1.0s": 0.0,
+  "qrs_s2ms_off50ms|gap10.0s": 9.87e-14,
+  "qrs_s4ms_off-5ms|gap0.025s": 0.154,
+  "qrs_s4ms_off-5ms|gap0.1s": 0.208,
+  "qrs_s4ms_off-5ms|gap1.0s": 0.218,
+  "qrs_s4ms_off-5ms|gap10.0s": 0.219,
+  "qrs_s4ms_off0ms|gap0.025s": 0.266,
+  "qrs_s4ms_off0ms|gap0.1s": 0.474,
+  "qrs_s4ms_off0ms|gap1.0s": 0.515,
+  "qrs_s4ms_off0ms|gap10.0s": 0.52,
+  "qrs_s4ms_off5ms|gap0.025s": 0.0882,
+  "qrs_s4ms_off5ms|gap0.1s": 0.14,
+  "qrs_s4ms_off5ms|gap1.0s": 0.151,
+  "qrs_s4ms_off5ms|gap10.0s": 0.152,
+  "qrs_s4ms_off10ms|gap0.025s": 0.0531,
+  "qrs_s4ms_off10ms|gap0.1s": 0.099,
+  "qrs_s4ms_off10ms|gap1.0s": 0.108,
+  "qrs_s4ms_off10ms|gap10.0s": 0.109,
+  "qrs_s4ms_off20ms|gap0.025s": 2.52e-05,
+  "qrs_s4ms_off20ms|gap0.1s": 4.3e-05,
+  "qrs_s4ms_off20ms|gap1.0s": 4.63e-05,
+  "qrs_s4ms_off20ms|gap10.0s": 4.67e-05,
+  "qrs_s4ms_off50ms|gap0.025s": 0.0,
+  "qrs_s4ms_off50ms|gap0.1s": 0.0,
+  "qrs_s4ms_off50ms|gap1.0s": 0.0,
+  "qrs_s4ms_off50ms|gap10.0s": 5.67e-13,
+  "qrs_s8ms_off-5ms|gap0.025s": 0.073,
+  "qrs_s8ms_off-5ms|gap0.1s": 0.182,
+  "qrs_s8ms_off-5ms|gap1.0s": 0.203,
+  "qrs_s8ms_off-5ms|gap10.0s": 0.205,
+  "qrs_s8ms_off0ms|gap0.025s": 0.224,
+  "qrs_s8ms_off0ms|gap0.1s": 0.452,
+  "qrs_s8ms_off0ms|gap1.0s": 0.495,
+  "qrs_s8ms_off0ms|gap10.0s": 0.499,
+  "qrs_s8ms_off5ms|gap0.025s": 0.208,
+  "qrs_s8ms_off5ms|gap0.1s": 0.315,
+  "qrs_s8ms_off5ms|gap1.0s": 0.335,
+  "qrs_s8ms_off5ms|gap10.0s": 0.337,
+  "qrs_s8ms_off10ms|gap0.025s": 0.0413,
+  "qrs_s8ms_off10ms|gap0.1s": 0.0642,
+  "qrs_s8ms_off10ms|gap1.0s": 0.075,
+  "qrs_s8ms_off10ms|gap10.0s": 0.0761,
+  "qrs_s8ms_off20ms|gap0.025s": 0.0407,
+  "qrs_s8ms_off20ms|gap0.1s": 0.088,
+  "qrs_s8ms_off20ms|gap1.0s": 0.0973,
+  "qrs_s8ms_off20ms|gap10.0s": 0.0983,
+  "qrs_s8ms_off50ms|gap0.025s": 3.29e-08,
+  "qrs_s8ms_off50ms|gap0.1s": 5.82e-08,
+  "qrs_s8ms_off50ms|gap1.0s": 6.3e-08,
+  "qrs_s8ms_off50ms|gap10.0s": 6.35e-08
+ },
+ "worst_before_gap_s": 0.1999,
+ "worst_after_gap_s": 0.1999,
+ "worst_s": 0.1999
+}

@@ -204,6 +204,36 @@ def test_q5_spikes_under_the_motion_mask_are_not_read() -> None:
     assert m1.n_spikes is not None and m1.n_spikes < _row(plain, "L_T", 1).n_spikes  # type: ignore[operator]
 
 
+def test_the_test_reads_only_the_samples_spike_detection_uses() -> None:
+    """RULING 2026-10-09 (b) 2: excluded spans (peri-R + pad) are not read, like motion."""
+    sig = make_mains_spike_t(FS, 180.0, locked_spans_s=((62.0, 88.0),), seed=15).signal
+    motion = {"L_T": _motion("L_T", sig.size)}
+    plain = ld.pass1({"L_T": sig}, FS, epoch_start_s=0.0, motion=motion)
+    assert plain.exclusion is None
+    span = [(int(round(61.0 * FS)), int(round(89.0 * FS)))]
+    p = ld.pass1({"L_T": sig}, FS, epoch_start_s=0.0, motion=motion, exclude={"L_T": span},
+                 exclusion="peri-R spans + 10.5 ms pad")
+    assert p.exclusion == "peri-R spans + 10.5 ms pad"
+    m1 = next(t for t in p.tests if t.minute == 1)
+    m1_plain = next(t for t in plain.tests if t.minute == 1)
+    assert m1.valid_s == pytest.approx(32.0, abs=0.02) and m1_plain.valid_s == pytest.approx(
+        60.0, abs=0.02)
+    assert m1.n_spikes is not None and m1_plain.n_spikes is not None
+    assert m1.n_spikes < m1_plain.n_spikes
+    rec = ld.decide_animal("new:A", [("r", p)])[1][("r", 0.0)]
+    assert _distrusted(rec, "L_T") == set()  # the locked train was inside the excluded span
+    # minutes the exclusion does not touch are tested exactly as before
+    assert [t for t in p.tests if t.minute != 1] == [t for t in plain.tests if t.minute != 1]
+    with pytest.raises(ValueError, match="together"):
+        ld.pass1({"L_T": sig}, FS, epoch_start_s=0.0, motion=motion, exclude={"L_T": span})
+    with pytest.raises(ValueError, match="no T here"):
+        ld.minute_tests({"L_T": sig}, FS, epoch_start_s=0.0, motion=motion,
+                        exclude={"R_T": span})
+    with pytest.raises(ValueError, match="not inside the epoch"):
+        ld.minute_tests({"L_T": sig}, FS, epoch_start_s=0.0, motion=motion,
+                        exclude={"L_T": [(0, sig.size + 1)]})
+
+
 def test_the_motion_masks_must_be_the_spike_consumers_own_on_this_epoch() -> None:
     x = make_mains_spike_t(FS, 60.0, seed=16).signal
     good = _motion("L_T", x.size)

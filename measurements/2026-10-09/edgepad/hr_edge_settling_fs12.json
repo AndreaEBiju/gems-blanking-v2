@@ -1,0 +1,88 @@
+{
+ "filter": "butter(4,[10 150]) bandpass SOS filtfilt, linear fill, fs/12 (HR_BR_HRVAnalysis_beats.m:278-281)",
+ "fs": 2034.5052083333333,
+ "tolerance": "1% of peak",
+ "settling_s": {
+  "step|gap0.025s": [
+   0.2,
+   0.2
+  ],
+  "step|gap0.1s": [
+   0.1715,
+   0.171
+  ],
+  "step|gap1.0s": [
+   0.1956,
+   0.1956
+  ],
+  "step|gap10.0s": [
+   0.1956,
+   0.1956
+  ],
+  "noise_white|gap0.025s": [
+   0.143,
+   0.1465
+  ],
+  "noise_white|gap0.1s": [
+   0.1642,
+   0.088
+  ],
+  "noise_white|gap1.0s": [
+   0.1671,
+   0.0634
+  ],
+  "noise_white|gap10.0s": [
+   0.1666,
+   0.1652
+  ],
+  "sine_20hz|gap0.025s": [
+   0.1887,
+   0.1578
+  ],
+  "sine_20hz|gap0.1s": [
+   0.1838,
+   0.1838
+  ],
+  "sine_20hz|gap1.0s": [
+   0.1843,
+   0.1848
+  ],
+  "sine_20hz|gap10.0s": [
+   0.1848,
+   0.1853
+  ],
+  "sine_100hz|gap0.025s": [
+   0.1529,
+   0.1848
+  ],
+  "sine_100hz|gap0.1s": [
+   0.1263,
+   0.117
+  ],
+  "sine_100hz|gap1.0s": [
+   0.1258,
+   0.1008
+  ],
+  "sine_100hz|gap10.0s": [
+   0.1278,
+   0.1248
+  ],
+  "qrs_like_at_edge|gap0.025s": [
+   0.171,
+   0.1597
+  ],
+  "qrs_like_at_edge|gap0.1s": [
+   0.2374,
+   0.2236
+  ],
+  "qrs_like_at_edge|gap1.0s": [
+   0.2114,
+   0.2005
+  ],
+  "qrs_like_at_edge|gap10.0s": [
+   0.2118,
+   0.2
+  ]
+ },
+ "worst_s": 0.2374
+}

@@ -416,3 +416,78 @@ def test_routed_windows_inside_the_declared_one_pass_edges_included() -> None:
                R={"route": "scalar"})
     assert pr.routed_outside_window(e, w) == []
     assert pr.routed_outside_window(_entry(), w) == []
+
+
+# ---------------------------------------------------------------------------
+# RULING 2026-10-09 (b) 1: the window per recording class
+# ---------------------------------------------------------------------------
+
+EXC = "gems_a_t02_2_3_bl_215610_20260925T015614Z"
+OWN = "gems_x_t01_bl_000000_20260901T000000Z"
+
+
+def _table_file(tmp_path: Path, **over: object) -> Path:
+    doc: dict[str, object] = {
+        "schema": pr.WINDOW_SCHEMA_V2,
+        "default_window": {"before_ms": 11.5, "after_ms": 9.5},
+        "recording_windows": {
+            EXC: {"before_ms": 16.0, "after_ms": 9.5, "class": "ruled_exception",
+                  "why": "RULING 2026-10-09 (b) 1, both cuffs"},
+            OWN: {"before_ms": 13.0, "after_ms": 9.5, "class": "own_routed_extent",
+                  "why": "routed L peri_r_ms [-13.0, 0.0] exceeds the default"}}}
+    doc.update(over)
+    f = tmp_path / "perir_window.json"
+    f.write_text(json.dumps(doc, indent=1) + "\n", encoding="utf-8", newline="\n")
+    return f
+
+
+def _entry_ab(a: float, b: float) -> dict[str, object]:
+    return {"spike": {"L": {"route": "scalar", "peri_r_ms": [a, b]}, "R": {"route": "scalar"}}}
+
+
+def test_each_recording_gets_the_window_of_its_class(tmp_path: Path) -> None:
+    f = _table_file(tmp_path)
+    t = pr.load_peri_r_windows(f)
+    assert t.sha256 == hashlib.sha256(f.read_bytes()).hexdigest() and t.source == f.name
+    d = t.for_recording("gems_b_bl_x")
+    assert (d.before_ms, d.after_ms, d.window_class) == (11.5, 9.5, "default")
+    e = t.for_recording(EXC)
+    assert (e.before_ms, e.after_ms, e.window_class) == (16.0, 9.5, "ruled_exception")
+    o = t.for_recording(OWN)
+    assert (o.before_ms, o.after_ms, o.window_class) == (13.0, 9.5, "own_routed_extent")
+    assert e.provenance()["class"] == "ruled_exception" and e.provenance()["recording"] == EXC
+    assert e.provenance()["rule"] == pr.PERI_R_RULE_BY_CLASS
+    assert t.provenance()["listed_by_class"] == {"ruled_exception": 1, "own_routed_extent": 1}
+    assert t.provenance()["sha256"] == t.sha256
+    # the refusal checks a recording against the window that applies to IT
+    wide = _entry_ab(-16.0, -2.0)
+    assert pr.routed_outside_window(wide, t.for_recording("gems_b_bl_x")) == [
+        "L peri_r_ms [-16.0, -2.0]"]
+    assert pr.routed_outside_window(wide, t.for_recording(EXC)) == []
+    assert pr.routed_outside_window(_entry_ab(-13.0, 0.0), t.for_recording(OWN)) == []
+    assert pr.routed_outside_window(_entry_ab(-13.5, 0.0), t.for_recording(OWN)) != []
+    assert pr.routed_outside_window(_entry_ab(-11.5, 9.5), d) == []
+    # a span record built on a class window carries the class rule
+    rec = pr.build_peri_r(recording=EXC, signals=("L_T",), window=e, fs=FS, n_samples=10_000,
+                          epoch_start_s=0.0, epoch_start_sample=0, heartlocs=[5000],
+                          origin_sample=0, train={"sha256": "x"})
+    nb, na = e.samples(FS)
+    assert rec.spans == ((4999 - nb, 4999 + na),)
+    assert rec.provenance()["rule"] == pr.PERI_R_RULE_BY_CLASS
+
+
+def test_a_malformed_window_table_is_refused_by_name(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="schema"):
+        pr.load_peri_r_windows(_table_file(tmp_path, schema=pr.WINDOW_SCHEMA))
+    with pytest.raises(ValueError, match="default_window"):
+        pr.load_peri_r_windows(_table_file(tmp_path, default_window={"before_ms": 11.5}))
+    with pytest.raises(ValueError, match="recording_windows"):
+        pr.load_peri_r_windows(_table_file(tmp_path, recording_windows=None))
+    for bad, what in (({"before_ms": 12.0, "after_ms": 9.5, "class": "default", "why": "x"},
+                       "class"),
+                      ({"before_ms": 12.0, "after_ms": 9.5, "class": "widest", "why": "x"},
+                       "class"),
+                      ({"before_ms": 12.0, "after_ms": 9.5, "class": "own_routed_extent"},
+                       "why")):
+        with pytest.raises(ValueError, match=what):
+            pr.load_peri_r_windows(_table_file(tmp_path, recording_windows={OWN: bad}))

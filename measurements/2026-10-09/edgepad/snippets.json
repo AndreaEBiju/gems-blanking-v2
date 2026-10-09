@@ -1,0 +1,29 @@
+[
+ {
+  "rid": "gems_a_t04_3_1_bl_190347_20260910T230351Z",
+  "cuff": "R",
+  "start_s": 300.0,
+  "dur_s": 10.0,
+  "units": "uV",
+  "n_beats_in_snippet": 65,
+  "beats_file": "gems_a_t04_3_1_bl_190347_20260910T230351Z_beats.mat"
+ },
+ {
+  "rid": "gems_b_t03_2_1_bl_174858_20260923T214905Z",
+  "cuff": "L",
+  "start_s": 300.0,
+  "dur_s": 10.0,
+  "units": "uV",
+  "n_beats_in_snippet": 56,
+  "beats_file": "gems_b_t03_2_1_bl_174858_20260923T214905Z_beats.mat"
+ },
+ {
+  "rid": "gems_h_t01_1_2_bl_214349_20260914T014355Z",
+  "cuff": "R",
+  "start_s": 300.0,
+  "dur_s": 10.0,
+  "units": "uV",
+  "n_beats_in_snippet": 59,
+  "beats_file": "gems_h_t01_1_2_bl_214349_20260914T014355Z_beats.mat"
+ }
+]

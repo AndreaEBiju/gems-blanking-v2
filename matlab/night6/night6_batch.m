@@ -3,6 +3,8 @@ function summary = night6_batch(listFile, nWorkers, varargin)
 %
 %   summary = night6_batch(listFile, nWorkers)
 %   summary = night6_batch(listFile, nWorkers, 'DryRun', true)
+%   summary = night6_batch(listFile, nWorkers, 'KeepInputs', true)   (keep each epoch's
+%             <base>_spikes_in.mat etc., e.g. for the pilot's v1/v2/ECAP validation)
 %
 % listFile is UTF-8 JSON:
 %   { "gems_root": "<store root>",          (local path; never shared)
@@ -39,6 +41,7 @@ function summary = night6_batch(listFile, nWorkers, varargin)
     ip.addParameter('DryRun', false);
     ip.addParameter('Figures', false);
     ip.addParameter('Force', false);
+    ip.addParameter('KeepInputs', false, @(x) islogical(x) || isnumeric(x));
     ip.parse(varargin{:});
     opt = ip.Results;
 
@@ -73,7 +76,8 @@ function summary = night6_batch(listFile, nWorkers, varargin)
     preflight_recovery(folders, starts);   % (k) 2: before any recording is loaded
     args = {'GemsRoot', L.gems_root, 'Units', L.units, 'OutRoot', L.out_root, ...
             'CodeCommit', commit, 'Label', label, 'DryRun', opt.DryRun, ...
-            'Figures', opt.Figures, 'Force', opt.Force, 'RecoveryStarts', starts, ...
+            'Figures', opt.Figures, 'Force', opt.Force, 'KeepInputs', logical(opt.KeepInputs), ...
+            'RecoveryStarts', starts, ...
             'RecoveryTrimMode', mode, 'SlowWaveRate', SW.name};
     status = cell(1, n); wall = zeros(1, n);
     t0 = tic;

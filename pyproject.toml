@@ -66,6 +66,9 @@ include = ["gems_blanking_v2*"]
 line-length = 100
 target-version = "py311"
 src = ["gems_blanking_v2", "tests"]
+# Archived measurement scripts are kept byte for byte: their SHA-256 is recorded in
+# extent.tolerance.EDGE_SETTLING and re-checked by a test, so they are never reformatted.
+extend-exclude = ["measurements"]
 
 [tool.ruff.lint]
 select = [

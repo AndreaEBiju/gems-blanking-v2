@@ -592,3 +592,79 @@ def test_hr_not_computed_is_marked_and_refused_while_read(tmp_path: Path) -> Non
                            line_distrust=_ld(),
                            peri_r=peri_r_like(_ld()), n_samples=N_SAMPLES, epoch_start_s=0.0,
                            not_computed={"hrv": " "}, **GATE)
+
+
+# ---------------------------------------------------------------------------
+# RULING 2026-10-09 (b) 2: no-beat minutes
+# ---------------------------------------------------------------------------
+
+
+def _beats_except(region: tuple[float, float], gaps: tuple[tuple[float, float], ...],
+                  rr: float = 0.15) -> np.ndarray:
+    t = np.arange(region[0] + 0.05, region[1], rr)
+    keep = np.ones(t.size, dtype=bool)
+    for a, b in gaps:
+        keep &= ~((t >= a) & (t < b))
+    return t[keep]
+
+
+def test_a_minute_without_beats_is_distrusted_whether_listed_or_not() -> None:
+    """Rejected minutes (hr.blank_s) and unlisted empty minutes; nothing else.
+
+    Windows run from the train's origin, the last one cut at the region's end.
+    """
+    region = (132.0, 400.0)  # windows from 132: 132-192-252-312-372-400
+    beats = _beats_except(region, ((192.0, 252.0), (312.0, 372.0), (372.0, 400.0)))
+    got = mk.no_beat_minutes(beat_times_s=beats, region_s=region, rejected_s=[[60.0, 120.0]])
+    assert [(m.minute, m.start_s, m.stop_s, m.kind) for m in got] == [
+        (1, 192.0, 252.0, "rejected"), (3, 312.0, 372.0, "empty"), (4, 372.0, 400.0, "empty")]
+    # a minute with a single beat is not a no-beat minute
+    one = np.sort(np.append(beats, 330.0))
+    assert [m.minute for m in mk.no_beat_minutes(beat_times_s=one, region_s=region,
+                                                  rejected_s=[[60.0, 120.0]])] == [1, 4]
+    # a train with beats everywhere: none
+    assert mk.no_beat_minutes(beat_times_s=_beats_except(region, ()), region_s=region,
+                              rejected_s=[]) == []
+
+
+def test_a_rejected_minute_must_be_one_window_and_hold_no_beat() -> None:
+    region = (0.0, 300.0)
+    beats = _beats_except(region, ((60.0, 120.0),))
+    with pytest.raises(ValueError, match="not a run of per-minute storage windows"):
+        mk.no_beat_minutes(beat_times_s=beats, region_s=region, rejected_s=[[90.0, 150.0]])
+    with pytest.raises(ValueError, match="not a run of per-minute storage windows"):
+        mk.no_beat_minutes(beat_times_s=beats, region_s=region, rejected_s=[[300.0, 360.0]])
+    # merged adjacent rejected minutes, as the per-minute storage writes them
+    b3 = _beats_except(region, ((60.0, 180.0),))
+    got = mk.no_beat_minutes(beat_times_s=b3, region_s=region, rejected_s=[[60.0, 180.0]])
+    assert [(m.minute, m.kind) for m in got] == [(1, "rejected"), (2, "rejected")]
+    with pytest.raises(ValueError, match="still holds"):
+        mk.no_beat_minutes(beat_times_s=beats, region_s=region, rejected_s=[[180.0, 240.0]])
+    # the trailing partial window may be rejected as itself, its end stored at 1 us
+    short = (0.0, 150.54)
+    b2 = _beats_except(short, ((120.0, 150.54),))
+    assert [m.kind for m in mk.no_beat_minutes(beat_times_s=b2, region_s=short,
+                                               rejected_s=[[120.0, 150.539996]])] == ["rejected"]
+    # under one sample apart (n / fs at 1 us against the 10 ms-rounded region): the same edge
+    assert [m.kind for m in mk.no_beat_minutes(beat_times_s=b2, region_s=short,
+                                               rejected_s=[[120.0, 150.540018]])] == ["rejected"]
+    with pytest.raises(ValueError, match="not a run"):  # a frame away is not
+        mk.no_beat_minutes(beat_times_s=b2, region_s=short, rejected_s=[[120.0, 150.55]])
+
+
+def test_no_beat_minutes_reach_the_spike_masks_only() -> None:
+    region = (0.0, 180.0)
+    beats = _beats_except(region, ((60.0, 120.0),))
+    mins = mk.no_beat_minutes(beat_times_s=beats, region_s=region, rejected_s=[[60.0, 120.0]])
+    spans = mk.no_beat_spike_spans(mins, ("L_T", "R_T"))
+    assert {(s.consumer, s.signal, s.reason) for s in spans} == {
+        ("spikes", "L_T", "no_beat_minute_rejected"), ("spikes", "R_T", "no_beat_minute_rejected")}
+    sig = {"spikes": ("L_T", "R_T"), "mmc": ("ANT1",), "slow_wave": ("ANT1",),
+           "breathing": ("RVN2",), "hrv": ("RVN2",)}
+    masks = mk.build_masks(sig, spans, n_frames=18000, t0_s=0.0)
+    for key, m in masks.items():
+        if key[0] == "spikes":
+            assert m.invalid[6000:12000].all() and not m.invalid[:6000].any()
+            assert not m.invalid[12000:].any()
+        else:
+            assert not m.invalid.any(), key  # invariant 2: no other consumer

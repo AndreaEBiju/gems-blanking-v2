@@ -24,7 +24,17 @@ Where the chain's settling at a blanked edge has been MEASURED as v2 runs it
 response: her chains fill across the NaN and filter zero phase, which the one-way
 impulse response understates. Spikes: 7.78 ms (``step1_bandpass``) + 2.5 ms
 (``step4_waveforms`` before a gap) = 10.28 ms, against task 13's 5.1 ms. mmc: 1.16 s
-measured, padded 1.5 s, against task 13's 15 s (its moving median and MAD skip NaN).
+measured, padded 1.5 s, against task 13's 15 s (its moving median and MAD skip NaN). The
+10-150 Hz heart band (``EDGE_SETTLING["hr_band"]``): 0.2374 s, against the one-way 0.140 s;
+it is a stage of the recovery-start table (the beat detector's band and the heart-band
+trace), not an extent pad, so it is keyed by the band, not by a consumer.
+
+Decision rule
+-------------
+Which events are confirmed motion is a per-animal declaration (:data:`DECISION_RULES`,
+:func:`decision_rule`, :func:`confirms_motion`): calibrated P >= 0.5 (ruling 2026-10-08
+(f) 2) or, for I, J and K, raw P >= 0.5 (RULING 2026-10-09 (d) 1). A missing or unknown
+rule is refused by name; nothing is defaulted.
 
 The cardiac tolerance is operational
 ------------------------------------
@@ -69,7 +79,10 @@ from gems_blanking_v2.types import Event
 __all__ = [
     "CONSUMER_FILTERS",
     "CONSUMER_SIGNAL_ERRATA",
+    "DECISION_RULES",
+    "EDGE_MEASUREMENTS_DIR",
     "EDGE_SETTLING",
+    "HR_BAND_EDGE_S",
     "MMC_NOT_MEASURED_HALF_S",
     "OUT_OF_BUILD_CONSUMERS",
     "SPIKE_STEP1_EDGE_S",
@@ -79,6 +92,7 @@ __all__ = [
     "CardiacVerdict",
     "ConsumerFilter",
     "ConsumerSettling",
+    "DecisionRule",
     "EdgeSettling",
     "Extent",
     "ExtentNotAssessableError",
@@ -87,8 +101,10 @@ __all__ = [
     "beat_train_changed",
     "cardiac_operational_damage",
     "compute_extent",
+    "confirms_motion",
     "consumer_settling",
     "consumer_signals",
+    "decision_rule",
     "edge_settling_record",
     "expected_consumers",
     "extent_consumers",
@@ -213,9 +229,9 @@ class EdgeSettling:
     ``pad_s`` - the pad Andrea ruled at a blanked edge (``total_s`` rounded up);
     ``extent_pad_s`` - what an extent is padded by (:func:`consumer_settling`): the ruling
     says which of the two;
-    ``files`` - ``(measurement file, sha256)``, relative to the build session's scratchpad
-    (where they were made; they are not in the repo), so the record names exactly the
-    measurement it rests on.
+    ``files`` - ``(measurement file, sha256)``, relative to the repository root: the files are
+    archived under :data:`EDGE_MEASUREMENTS_DIR` (outside the generation hash), so the record
+    names exactly the measurement it rests on and a test re-hashes it in every checkout.
     """
 
     consumer: str
@@ -234,6 +250,15 @@ class EdgeSettling:
         return max(self.before_gap_s, self.after_gap_s)
 
 
+EDGE_MEASUREMENTS_DIR: Final = "measurements/2026-10-09/edgepad"
+"""Where the edge-settling measurements are archived in the repository (POSIX, repo-relative).
+They were made in the build session's scratchpad (``edgepad/``) and copied byte for byte."""
+
+
+def _m(name: str) -> str:
+    return f"{EDGE_MEASUREMENTS_DIR}/{name}"
+
+
 SPIKE_WAVEFORM_BEFORE_PEAK_S: Final = 0.0015
 """``step4_waveforms.m:44-46``: wfPreMs 1 ms + wfAlignSearchMs 0.5 ms read before an aligned
 peak - the part of the waveform window that reaches back into a gap BEHIND the spike
@@ -245,6 +270,12 @@ SPIKE_STEP1_EDGE_S: Final = 0.007782
 """``step1_bandpass`` (300-3000 Hz order 4, ``fillmissing`` + ``filtfilt``) at a NaN edge,
 as v2 calls it: 7.782 ms on either side (``settling.json`` ``worst``, input
 ``bump_*_G21``). Task 13's one-way impulse response gave 5.1 ms."""
+
+HR_BAND_EDGE_S: Final = 0.2374
+"""The 10-150 Hz order-4 heart band at a NaN edge, zero phase over the linear fill: 0.2374 s,
+measured at the beat detector's fs/12 (``hr_edge_settling_fs12.json``), which binds the
+full-rate measurement of HR_BR's trace filter (0.1999 s, ``hr_edge_settling.json``). The
+one-way impz was 0.140 s."""
 
 EDGE_SETTLING: Final[Mapping[str, EdgeSettling]] = {
     "spikes": EdgeSettling(
@@ -260,13 +291,13 @@ EDGE_SETTLING: Final[Mapping[str, EdgeSettling]] = {
                "takes the last distance from the gap at which the error exceeds 1 % of its "
                "peak (task 13's rule), worst over input and side: step1 7.782 ms; step4 reads "
                "2.5 ms further before a gap and 1.5 ms after one: 10.282 ms in total",
-        files=(("edgepad/settling.json",
+        files=((_m("settling.json"),
                 "908feb679d6bd378e2d2849ba9a0e706008f8c70dbcb4c0292b71ffe48e2c4e9"),
-               ("edgepad/pad_savings.json",
+               (_m("pad_savings.json"),
                 "3995aef33b143cac47d3e0f6f9ecd5e39eefe38bcd3c56bb195f5b4147d3b4a3"),
-               ("edgepad/analyse_settling.py",
+               (_m("analyse_settling.py"),
                 "658b7b31f7104224ff30f5e8888e22fc7be905e92c8e447151dc0fca615d7fee"),
-               ("edgepad/edgepad_run.m",
+               (_m("edgepad_run.m"),
                 "e1cb67e1c79a7ad3de25688129d8bfbcd5a0e879e2e2ebe5907731ac06663ef6"))),
     "mmc": EdgeSettling(
         "mmc", 1.1594, before_gap_s=1.1594, after_gap_s=1.1594, pad_s=1.5, extent_pad_s=1.5,
@@ -278,10 +309,37 @@ EDGE_SETTLING: Final[Mapping[str, EdgeSettling]] = {
                "its peak, worst over input (step, white noise, 5 and 20 Hz sines, a burst at "
                "the edge), gap (25 ms - 10 s) and side: 1.1594 s. Her moving median and MAD "
                "(:231-232) are 'omitnan': they skip the blank and add nothing",
-        files=(("edgepad/mmc_edge_settling.json",
+        files=((_m("mmc_edge_settling.json"),
                 "321aae64d6847dc3d5acee10fe90c939dcb7fba38a47e127afb6f462f65b1f2b"),
-               ("edgepad/mmc_edge_settling.py",
+               (_m("mmc_edge_settling.py"),
                 "0adf4782392246fba90d50c575aa991ef68d8956ffb2e25160930399b4e974cf"))),
+    "hr_band": EdgeSettling(
+        "hr_band", HR_BAND_EDGE_S, before_gap_s=HR_BAND_EDGE_S, after_gap_s=0.2236,
+        pad_s=HR_BAND_EDGE_S, extent_pad_s=HR_BAND_EDGE_S,
+        ruling="RULING 2026-10-09 (Andrea's item 2b answers, invariant 19): the HRV and "
+               "breathing starts, and the heart-band trace cut, use the measured HR-band edge "
+               "settling (0.2374 s), not the one-way impz (0.140 s); no pad is ruled, and no "
+               "extent is padded by it (an extent pad is a consumer's, consumer_settling)",
+        method="the 10-150 Hz order-4 band, linear fill + zero-phase filtfilt, by "
+               "mmc_edge_settling.py's method (error = filtered with the gap filled - filtered "
+               "without it; last distance above 1 % of its peak; worst over input, gap 25 ms - "
+               "10 s and side). Two rates, because two filters use the band: (1) the beat "
+               "detector (physio.rpeaks:327-336) filters at fs/12 = 2034.5 Hz: "
+               "hr_edge_settling_fs12.json (coordinator, 2026-10-09; its generating script is "
+               "not on disk; archived with LF line ends - the scratch original was CRLF, sha256 "
+               "b733b0b6...) 0.2374 s before / 0.2236 s after a gap, from a QRS-like burst at "
+               "the edge (a step: 0.200 s); (2) HR_BR_HRVAnalysis_beats.m:278-282 filters the "
+               "heart-band trace at the fs Night 6 passes - the full rate (night6_run_recording.m"
+               ":429 fs = plan.fs; H.order = 4 at :471): hr_edge_settling.py at 24414.0625 Hz, "
+               "order 4, QRS placements searched, rows whose error is rounding noise (< 1e-6 of "
+               "the output peak) excluded: 0.1999 s (a step). The maximum over both, 0.2374 s, "
+               "is used for both stages (invariant 19)",
+        files=((_m("hr_edge_settling_fs12.json"),
+                "bd30e12b0369dfe34696651b42f40da88d78b7cf919d09ace34c070a0b1c7f83"),
+               (_m("hr_edge_settling.json"),
+                "2fa97c963448780214ef7d727fd23fcbc4732176c65c54d9d09d289aa39f8e07"),
+               (_m("hr_edge_settling.py"),
+                "7e9a0d7b41eb392a20d67b3c02e5eb31b7cea309052fa00fc4040f248b28c86e"))),
 }
 """THE measured edge settlings (invariant 33): :func:`consumer_settling`, the recovery-start
 table (``extent.recovery_start``) and the Night 6 declaration
@@ -296,7 +354,8 @@ def edge_settling_record() -> dict[str, Any]:
     ``night6_v2_params`` sets, so MATLAB never converts. Files are ``[{file, sha256}]`` rows
     (MATLAB's ``jsondecode`` would mangle a file name used as a key, invariant 22).
     """
-    out: dict[str, Any] = {"schema": 1, "ruling": "RULING 2026-10-09 (c) 1-2"}
+    out: dict[str, Any] = {"schema": 1, "ruling": "RULING 2026-10-09 (c) 1-2; hr_band: "
+                                                  "Andrea's item 2b answers (invariant 19)"}
     for name, e in sorted(EDGE_SETTLING.items()):
         out[name] = {"filter_s": e.filter_s, "before_gap_s": e.before_gap_s,
                      "after_gap_s": e.after_gap_s, "total_s": e.total_s, "pad_s": e.pad_s,
@@ -437,6 +496,9 @@ def settling_provenance(fs: float) -> dict[str, Any]:
         if s.edge is not None:
             row["edge"] = rec[name]
         out[name] = row
+    for name in sorted(set(EDGE_SETTLING) - set(CONSUMER_FILTERS)):  # stages, not consumers
+        out[f"{name}_edge"] = {"total_s": EDGE_SETTLING[name].total_s, "edge": rec[name],
+                               "pads_no_extent": True}
     return out
 
 
@@ -515,6 +577,68 @@ def is_confirmed_motion(event: Event, *, p_threshold: float | None = None,
             raise ValueError(msg)
         return bool(np.isfinite(event.p_motion) and event.p_motion >= p_threshold)
     return False
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionRule:
+    """How a model-scored event becomes confirmed motion: which score, which threshold.
+
+    ``score`` is ``"calibrated"`` (the model's calibrated P(motion)) or ``"raw"`` (the
+    booster's uncalibrated probability, ``model.train.predict_raw``). ``caveat`` is recorded
+    in every mask's provenance with the rule.
+    """
+
+    name: str
+    score: Literal["calibrated", "raw"]
+    threshold: float
+    ruling: str
+    caveat: str = ""
+
+    def provenance(self) -> dict[str, Any]:
+        """Return the rule as it travels into a mask's provenance (no empty caveat)."""
+        out: dict[str, Any] = {"name": self.name, "score": self.score,
+                               "threshold": self.threshold, "ruling": self.ruling}
+        if self.caveat:
+            out["caveat"] = self.caveat
+        return out
+
+
+DECISION_RULES: Final[Mapping[str, DecisionRule]] = {
+    "calibrated_p_ge_0.5": DecisionRule(
+        "calibrated_p_ge_0.5", "calibrated", 0.5,
+        "RULING 2026-10-08 (f) 2: 0.5 on the calibrated probability, fixed; kept for A, B and H "
+        "by RULING 2026-10-09 (d) 1 (their calibrators were fitted on held-out LOAO_ADAPT "
+        "predictions, and pass)"),
+    "raw_p_ge_0.5": DecisionRule(
+        "raw_p_ge_0.5", "raw", 0.5,
+        "RULING 2026-10-09 (d) 1 (amends 2026-10-08 (f) 2 for I, J and K only): raw "
+        "P(motion) >= 0.5, because the adapted calibrators were fitted on uncertainty-sampled "
+        "cores, a biased sample known from the design; calibrated decisions at 0.3, 0.5 and 0.7 "
+        "are reported as sensitivity",
+        caveat="the rule was settled after the I/J/K scores were seen, so those scores are "
+               "optimistic as an estimate of production performance (RULING 2026-10-09 (d) 1)"),
+}
+"""The declared decision rules (invariant 33: one construction site). A model-choice file
+names one per animal; :func:`decision_rule` refuses anything else by name."""
+
+
+def decision_rule(name: object, *, animal: str) -> DecisionRule:
+    """Return the declared rule ``name`` for ``animal``; refuse a missing or unknown one by name."""
+    if name is None or name == "":
+        msg = (f"{animal}: the model choice declares no decision_rule; nothing is defaulted "
+               f"(declared rules: {sorted(DECISION_RULES)})")
+        raise ValueError(msg)
+    if not isinstance(name, str) or name not in DECISION_RULES:
+        msg = (f"{animal}: unknown decision_rule {name!r}; declared rules: "
+               f"{sorted(DECISION_RULES)}")
+        raise ValueError(msg)
+    return DECISION_RULES[name]
+
+
+def confirms_motion(rule: DecisionRule, *, p_calibrated: float, p_raw: float) -> bool:
+    """Whether a model-scored core is confirmed motion under ``rule`` (non-finite: never)."""
+    score = p_calibrated if rule.score == "calibrated" else p_raw
+    return bool(math.isfinite(score) and score >= rule.threshold)
 
 
 @dataclass(frozen=True, slots=True)

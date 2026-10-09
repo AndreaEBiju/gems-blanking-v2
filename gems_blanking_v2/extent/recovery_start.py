@@ -419,11 +419,14 @@ _BEAT_FIR = Stage(
     "gems_blanking_v2/physio/rpeaks.py:329-330 (scipy decimate ftype='fir', zero_phase)",
     'decimate(y, factor, ftype="fir", zero_phase=True)', "code")
 _BEAT_BAND = Stage(
-    "beat fiducials: the beat detector's 10-150 Hz order-4 band, at the decimated rate",
-    "filter impulse response", "impz_beat_rate",
-    "gems_blanking_v2/physio/rpeaks.py:335-336 (butter 4, DETECT_BAND_HZ = HR_BAND)",
+    "beat fiducials: the beat detector's 10-150 Hz order-4 band, at the decimated rate, "
+    "zero phase over the linear fill: measured at a NaN edge",
+    "filter at a NaN edge, measured", "edge",
+    "gems_blanking_v2/physio/rpeaks.py:335-336 (butter 4, DETECT_BAND_HZ = HR_BAND; fill :319-325)",
     'sos = butter(4, [lo / nyq, min(hi, nyq * 0.9) / nyq], btype="bandpass"', "measured",
-    filter=CONSUMER_FILTERS["hrv"], note="not measured at a NaN edge: task 13's impz stands")
+    edge=EDGE_SETTLING["hr_band"],
+    note="0.2374 s at fs/12 (edgepad/hr_edge_settling_fs12.json); the one-way impz was 0.141 s "
+         "(Andrea's item 2b answers: wherever the HR band enters a reach)")
 _BEAT_SPACING = Stage(
     "beat peak spacing: the plausibility gate keeps one of two beats closer than 0.75 x the "
     "global RR (<= 0.75 x 0.5 s; the 60 ms pass-1 distance lies inside it)",
@@ -496,8 +499,10 @@ _SPIKES = Analysis(
                   "rolling_cv2(st, isims, isClean, Tend, P.cv2WinSec)", "code",
                   window_s=30.0,
                   note="KEPT (RULING 2026-10-09 (c) 3 (c)) although it reads gap-clean ISIs "
-                       "only"),
-        ), "step6_spike_report.m:94", key="cv2", own_window=True),
+                       "only. Andrea, 2026-10-09: cv2_roll is cut at this FULL kept reach "
+                       "(electrical + input + half the 30 s bin), the analysis's binding "
+                       "figure - so the bin is not an own window left out of the cut"),
+        ), "step6_spike_report.m:94", key="cv2", own_window=False),
         Output("noise sigma windows (sigmaWindowSec 5 s, step 2.5 s, at the window centre)", (
             _SPIKE_BAND,
             _skip("sigma window, sigmaWindowSec = 5 s, value at its centre", "centred window",
@@ -557,12 +562,14 @@ _HRV = Analysis(
         Output("heart-band trace (heartBeatSeries): her 10-150 Hz order-4 filtfilt over the "
                "linear fill, detrended over the epoch", (
                    Stage("her 10-150 Hz order-4 bandpass (night6 order 4), filtfilt over the "
-                         "linear fill", "filter impulse response", "impz",
-                         f"{_HR_BR}:282 (fill :262; butter :280)",
+                         "linear fill: measured at a NaN edge", "filter at a NaN edge, measured",
+                         "edge", f"{_HR_BR}:282 (fill :262; butter :280)",
                          "yFilt    = filtfilt(sos, g, xFill);", "measured",
-                         filter=CONSUMER_FILTERS["hrv"],
-                         note="not measured at a NaN edge: task 13's one-way impz stands (the "
-                              "two measured chains settle 1.5-2.4 x their impz there)"),
+                         edge=EDGE_SETTLING["hr_band"],
+                         note="0.2374 s, the maximum of the full-rate measurement of this filter "
+                              "(0.1999 s; Night 6 passes the full fs, night6_run_recording.m:429) "
+                              "and the beat detector's fs/12 one (0.2374 s), invariant 19; the "
+                              "one-way impz was 0.140 s"),
                ), f"{_HR_BR}:286, :302-303", key="heart_band_trace"),
     ),
     (

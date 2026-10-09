@@ -869,6 +869,12 @@ def test_run_epoch_always_hands_the_starts_to_the_planner() -> None:
     batch = (NIGHT6 / "night6_batch.m").read_text(encoding="utf-8")
     assert "'RecoveryStarts', starts" in batch
     assert "'RecoveryTrimMode', mode, 'SlowWaveRate', SW.name}" in batch
+    # the pilot keeps each epoch's inputs for the v1/v2/ECAP validation: passed through, off
+    # by default
+    assert "ip.addParameter('KeepInputs', false," in batch
+    assert "'KeepInputs', logical(opt.KeepInputs)," in batch
+    run = (NIGHT6 / "night6_run_recording.m").read_text(encoding="utf-8")
+    assert "ip.addParameter('KeepInputs', false," in run
 
 
 def test_the_trim_modes_are_one_list_on_both_sides() -> None:

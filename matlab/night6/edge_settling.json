@@ -1,15 +1,39 @@
 {
+ "hr_band": {
+  "after_gap_s": 0.2236,
+  "before_gap_s": 0.2374,
+  "extent_pad_s": 0.2374,
+  "files": [
+   {
+    "file": "measurements/2026-10-09/edgepad/hr_edge_settling_fs12.json",
+    "sha256": "bd30e12b0369dfe34696651b42f40da88d78b7cf919d09ace34c070a0b1c7f83"
+   },
+   {
+    "file": "measurements/2026-10-09/edgepad/hr_edge_settling.json",
+    "sha256": "2fa97c963448780214ef7d727fd23fcbc4732176c65c54d9d09d289aa39f8e07"
+   },
+   {
+    "file": "measurements/2026-10-09/edgepad/hr_edge_settling.py",
+    "sha256": "7e9a0d7b41eb392a20d67b3c02e5eb31b7cea309052fa00fc4040f248b28c86e"
+   }
+  ],
+  "filter_s": 0.2374,
+  "method": "the 10-150 Hz order-4 band, linear fill + zero-phase filtfilt, by mmc_edge_settling.py's method (error = filtered with the gap filled - filtered without it; last distance above 1 % of its peak; worst over input, gap 25 ms - 10 s and side). Two rates, because two filters use the band: (1) the beat detector (physio.rpeaks:327-336) filters at fs/12 = 2034.5 Hz: hr_edge_settling_fs12.json (coordinator, 2026-10-09; its generating script is not on disk; archived with LF line ends - the scratch original was CRLF, sha256 b733b0b6...) 0.2374 s before / 0.2236 s after a gap, from a QRS-like burst at the edge (a step: 0.200 s); (2) HR_BR_HRVAnalysis_beats.m:278-282 filters the heart-band trace at the fs Night 6 passes - the full rate (night6_run_recording.m:429 fs = plan.fs; H.order = 4 at :471): hr_edge_settling.py at 24414.0625 Hz, order 4, QRS placements searched, rows whose error is rounding noise (< 1e-6 of the output peak) excluded: 0.1999 s (a step). The maximum over both, 0.2374 s, is used for both stages (invariant 19)",
+  "pad_s": 0.2374,
+  "ruling": "RULING 2026-10-09 (Andrea's item 2b answers, invariant 19): the HRV and breathing starts, and the heart-band trace cut, use the measured HR-band edge settling (0.2374 s), not the one-way impz (0.140 s); no pad is ruled, and no extent is padded by it (an extent pad is a consumer's, consumer_settling)",
+  "total_s": 0.2374
+ },
  "mmc": {
   "after_gap_s": 1.1594,
   "before_gap_s": 1.1594,
   "extent_pad_s": 1.5,
   "files": [
    {
-    "file": "edgepad/mmc_edge_settling.json",
+    "file": "measurements/2026-10-09/edgepad/mmc_edge_settling.json",
     "sha256": "321aae64d6847dc3d5acee10fe90c939dcb7fba38a47e127afb6f462f65b1f2b"
    },
    {
-    "file": "edgepad/mmc_edge_settling.py",
+    "file": "measurements/2026-10-09/edgepad/mmc_edge_settling.py",
     "sha256": "0adf4782392246fba90d50c575aa991ef68d8956ffb2e25160930399b4e974cf"
    }
   ],
@@ -19,7 +43,7 @@
   "ruling": "RULING 2026-10-09 (c) 2: mmc padding at a blanked edge 1.5 s, replacing task 13's 15 s extra_edge_s",
   "total_s": 1.1594
  },
- "ruling": "RULING 2026-10-09 (c) 1-2",
+ "ruling": "RULING 2026-10-09 (c) 1-2; hr_band: Andrea's item 2b answers (invariant 19)",
  "schema": 1,
  "spikes": {
   "after_gap_s": 0.009282,
@@ -28,19 +52,19 @@
   "extent_pad_s": 0.010282,
   "files": [
    {
-    "file": "edgepad/settling.json",
+    "file": "measurements/2026-10-09/edgepad/settling.json",
     "sha256": "908feb679d6bd378e2d2849ba9a0e706008f8c70dbcb4c0292b71ffe48e2c4e9"
    },
    {
-    "file": "edgepad/pad_savings.json",
+    "file": "measurements/2026-10-09/edgepad/pad_savings.json",
     "sha256": "3995aef33b143cac47d3e0f6f9ecd5e39eefe38bcd3c56bb195f5b4147d3b4a3"
    },
    {
-    "file": "edgepad/analyse_settling.py",
+    "file": "measurements/2026-10-09/edgepad/analyse_settling.py",
     "sha256": "658b7b31f7104224ff30f5e8888e22fc7be905e92c8e447151dc0fca615d7fee"
    },
    {
-    "file": "edgepad/edgepad_run.m",
+    "file": "measurements/2026-10-09/edgepad/edgepad_run.m",
     "sha256": "e1cb67e1c79a7ad3de25688129d8bfbcd5a0e879e2e2ebe5907731ac06663ef6"
    }
   ],

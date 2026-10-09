@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 import re
 from pathlib import Path
 from typing import Any
@@ -129,18 +128,48 @@ def test_the_edge_settlings_are_the_measured_ones_and_the_pads_round_them_up() -
     assert mmc.filter_s == mmc.total_s == 1.1594
     assert mmc.pad_s == mmc.extent_pad_s == 1.5 == math.ceil(mmc.total_s * 2) / 2
     for e in tl.EDGE_SETTLING.values():
-        assert e.ruling.startswith("RULING 2026-10-09 (c)") and e.files
+        assert e.ruling.startswith("RULING 2026-10-09") and e.files
         assert all(re.fullmatch(r"[0-9a-f]{64}", h) for _, h in e.files)
 
 
-def test_the_measurement_files_are_the_ones_hashed() -> None:
-    """Where the build session's scratchpad still holds them, the recorded SHA-256 matches."""
-    root = os.environ.get("GEMS_BUILD_SCRATCHPAD")
-    if not root:
-        pytest.skip("GEMS_BUILD_SCRATCHPAD (the build session's scratchpad) is not set")
+REPO = Path(__file__).resolve().parents[1]
+
+
+def test_the_measurement_files_are_archived_in_the_repo_and_hash_as_recorded() -> None:
+    """Every file an edge settling rests on is in the repo, byte for byte (LF), at its hash."""
+    seen = set()
     for e in tl.EDGE_SETTLING.values():
         for f, h in e.files:
-            assert hashlib.sha256((Path(root) / f).read_bytes()).hexdigest() == h, f
+            assert f.startswith(tl.EDGE_MEASUREMENTS_DIR + "/"), f
+            raw = (REPO / f).read_bytes().replace(b"\r\n", b"\n")  # eol=lf; never CRLF
+            assert hashlib.sha256(raw).hexdigest() == h, f
+            seen.add(f)
+    assert len(seen) >= 9  # spikes 4, mmc 2, hr_band 3
+
+
+def test_the_hr_band_edge_is_the_maximum_of_its_two_measurements() -> None:
+    """0.2374 s: the beat detector's fs/12 measurement binds the full-rate trace one (0.1999 s).
+
+    The full-rate file is measured with what Night 6 passes HR_BR_HRVAnalysis_beats: the
+    file's fs (night6_run_recording.m:429, ``fs = plan.fs``) and ``H.order`` = 4.
+    """
+    hb = tl.EDGE_SETTLING["hr_band"]
+    d = REPO / tl.EDGE_MEASUREMENTS_DIR
+    full = json.loads((d / "hr_edge_settling.json").read_text(encoding="utf-8"))
+    f12 = json.loads((d / "hr_edge_settling_fs12.json").read_text(encoding="utf-8"))
+    assert full["fs"] == FS and full["order"] == 4 and full["band_hz"] == [10.0, 150.0]
+    assert f12["fs"] == pytest.approx(FS / 12, abs=1e-9)
+    assert (full["worst_s"], f12["worst_s"]) == (0.1999, 0.2374)
+    assert hb.filter_s == tl.HR_BAND_EDGE_S == max(full["worst_s"], f12["worst_s"]) == 0.2374
+    assert hb.before_gap_s == max(v[0] for v in f12["settling_s"].values()) == 0.2374
+    assert hb.after_gap_s == max(v[1] for v in f12["settling_s"].values()) == 0.2236
+    assert hb.total_s == 0.2374 > tl.impulse_settling_s(tl.CONSUMER_FILTERS["hrv"], FS)
+    run = (REPO / "matlab" / "night6" / "night6_run_recording.m").read_text(encoding="utf-8")
+    assert "HR_BR_HRVAnalysis_beats(o.beatsEpochFile, X, fs, H.cutoff, H.order," in run
+    assert "fs = plan.fs;" in run and "P.hr = struct('cutoff', 8, 'order', 4," in run
+    # the band is a stage, not a consumer: no extent is padded by it
+    assert "hr_band" not in tl.CONSUMER_FILTERS
+    assert _settle("hrv").edge is None and _settle("breathing").edge is None
 
 
 def test_night6_declares_exactly_the_python_edge_settlings() -> None:
@@ -179,6 +208,9 @@ def test_settling_provenance_carries_each_measurement() -> None:
     assert p["mmc"]["total_s"] == 1.5
     assert p["mmc"]["edge"] == tl.edge_settling_record()["mmc"]
     assert "edge" not in p["slow_wave"] and "edge" not in p["hrv"]
+    assert p["hr_band_edge"]["total_s"] == 0.2374
+    assert p["hr_band_edge"]["edge"] == tl.edge_settling_record()["hr_band"]
+    assert p["hr_band_edge"]["pads_no_extent"] is True
     json.dumps(p, allow_nan=False)
 
 
@@ -236,6 +268,33 @@ def test_an_unjudged_or_uncalibrated_event_is_not_confirmed() -> None:
         tl.is_confirmed_motion(model, p_threshold=0.5)
     assert tl.is_confirmed_motion(model, p_threshold=0.5, calibrator="cal/iso.json")
     assert not tl.is_confirmed_motion(model, p_threshold=0.95, calibrator="cal/iso.json")
+
+
+def test_the_decision_rules_are_declared_and_anything_else_is_refused_by_name() -> None:
+    """RULING 2026-10-09 (d) 1: raw P >= 0.5 for I/J/K, calibrated P >= 0.5 for A/B/H."""
+    assert set(tl.DECISION_RULES) == {"calibrated_p_ge_0.5", "raw_p_ge_0.5"}
+    raw = tl.decision_rule("raw_p_ge_0.5", animal="new:I")
+    cal = tl.decision_rule("calibrated_p_ge_0.5", animal="new:A")
+    assert (raw.score, raw.threshold, cal.score, cal.threshold) == ("raw", 0.5, "calibrated", 0.5)
+    for bad in (None, "", "raw_p_ge_0.3", "calibrated", 0.5):
+        with pytest.raises(ValueError, match="new:J"):
+            tl.decision_rule(bad, animal="new:J")
+    with pytest.raises(ValueError, match="no decision_rule"):
+        tl.decision_rule(None, animal="new:K")
+    with pytest.raises(ValueError, match=re.escape("unknown decision_rule 'raw_p_ge_0.3'")):
+        tl.decision_rule("raw_p_ge_0.3", animal="new:K")
+    # the rule decides from ITS score only, at its threshold, inclusive; NaN never confirms
+    assert tl.confirms_motion(raw, p_calibrated=0.01, p_raw=0.5)
+    assert not tl.confirms_motion(raw, p_calibrated=0.99, p_raw=0.4999)
+    assert tl.confirms_motion(cal, p_calibrated=0.5, p_raw=0.01)
+    assert not tl.confirms_motion(cal, p_calibrated=0.4999, p_raw=0.99)
+    assert not tl.confirms_motion(raw, p_calibrated=0.9, p_raw=float("nan"))
+    assert not tl.confirms_motion(cal, p_calibrated=float("nan"), p_raw=0.9)
+    # the caveat travels with the raw rule only (RULING 2026-10-09 (d) 1)
+    assert "after the I/J/K scores were seen" in raw.provenance()["caveat"]
+    assert "caveat" not in cal.provenance()
+    assert raw.provenance()["ruling"].startswith("RULING 2026-10-09 (d) 1")
+    json.dumps(raw.provenance(), allow_nan=False)
 
 
 def test_tolerances_have_no_defaults_and_name_their_source(tmp_path: Path) -> None:

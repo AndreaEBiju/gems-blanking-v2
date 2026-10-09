@@ -375,20 +375,41 @@ def _motion_samples(name: str, mask: ConsumerMask, fs: float, n: int,
     return frames_to_samples(mask.invalid, fs, n, mask.grid_s)
 
 
+def _excluded_samples(name: str, spans: Sequence[tuple[int, int]], n: int) -> Bool:
+    out = np.zeros(n, dtype=bool)
+    for a, b in spans:
+        if not (0 <= int(a) < int(b) <= n):
+            msg = f"{name}: excluded span [{a}, {b}) is not inside the epoch's {n} samples"
+            raise ValueError(msg)
+        out[int(a):int(b)] = True
+    return out
+
+
 def minute_tests(raw_t: Mapping[str, npt.ArrayLike], fs: float, *, epoch_start_s: float,
                  motion: Mapping[str, ConsumerMask],
-                 cleaner: MainsCleaner | None = None) -> tuple[MinuteTest, ...]:
+                 cleaner: MainsCleaner | None = None,
+                 exclude: Mapping[str, Sequence[tuple[int, int]]] | None = None,
+                 ) -> tuple[MinuteTest, ...]:
     """Pass 1: test every cuff-minute overlapping the epoch, on RAW T less motion blanks.
 
     ``raw_t`` maps ``<cuff>_T`` to the raw, unmasked tripole over the emitted epoch
     (microvolts; sample 0 at ``epoch_start_s``). ``motion`` maps the same names to the
     spike consumer's motion masks (required; an all-valid mask where nothing blanked).
-    Inputs are never modified (invariant 17); a ``cleaner`` receives a copy.
+    ``exclude`` maps a name to further 0-based half-open epoch-sample spans the spike
+    consumer never reads - RULING 2026-10-09 (b) 2: the test runs on the samples spike
+    detection actually uses, so the peri-R spans (and their edge pad, as the caller
+    declares) are left out. A name absent from ``exclude`` excludes nothing; a name not in
+    ``raw_t`` is refused. Inputs are never modified (invariant 17); a ``cleaner`` receives
+    a copy.
     """
     _check_signal_names(raw_t)
     _check_fs(fs)
     if set(motion) != set(raw_t):
         msg = f"motion masks for {sorted(motion)}, T for {sorted(raw_t)}: they must match"
+        raise ValueError(msg)
+    extra = dict(exclude or {})
+    if set(extra) - set(raw_t):
+        msg = f"exclusions for {sorted(set(extra) - set(raw_t))}, which have no T here"
         raise ValueError(msg)
     out: list[MinuteTest] = []
     for name in sorted(raw_t):
@@ -398,6 +419,8 @@ def minute_tests(raw_t: Mapping[str, npt.ArrayLike], fs: float, *, epoch_start_s
             x = np.asarray(cleaner(np.array(x, copy=True), fs), dtype=np.float64)
         n = int(x.size)
         read = np.isfinite(x) & ~_motion_samples(name, motion[name], fs, n, epoch_start_s)
+        if name in extra:
+            read &= ~_excluded_samples(name, extra[name], n)
         e0, e1 = float(epoch_start_s), float(epoch_start_s) + n / fs
         for m in range(int(math.floor(e0 / MINUTE_S)), int(math.ceil(e1 / MINUTE_S))):
             ia, ib = max(m * MINUTE_S, e0), min((m + 1) * MINUTE_S, e1)
@@ -436,19 +459,30 @@ class Pass1:
     epoch_start_s: float
     n_samples: int
     cleaner: str | None = None
+    exclusion: str | None = None
+    """What ``exclude`` left out of the tested samples (None: nothing beyond motion)."""
 
 
 def pass1(raw_t: Mapping[str, npt.ArrayLike], fs: float, *, epoch_start_s: float,
-          motion: Mapping[str, ConsumerMask], cleaner: MainsCleaner | None = None) -> Pass1:
-    """Run :func:`minute_tests` on one recording; keep only what pass 2 needs."""
+          motion: Mapping[str, ConsumerMask], cleaner: MainsCleaner | None = None,
+          exclude: Mapping[str, Sequence[tuple[int, int]]] | None = None,
+          exclusion: str | None = None) -> Pass1:
+    """Run :func:`minute_tests` on one recording; keep only what pass 2 needs.
+
+    ``exclude`` (see :func:`minute_tests`) needs ``exclusion``, the words that say what it
+    is, and the other way round, so the record never carries one without the other.
+    """
+    if (exclude is None) != (exclusion is None):
+        msg = "exclude and exclusion are given together or not at all"
+        raise ValueError(msg)
     lengths = {int(np.asarray(x).size) for x in raw_t.values()}
     if len(lengths) != 1:
         msg = f"every cuff's T must cover the same epoch; got lengths {sorted(lengths)}"
         raise ValueError(msg)
     tests = minute_tests(raw_t, fs, epoch_start_s=epoch_start_s, motion=motion,
-                         cleaner=cleaner)
+                         cleaner=cleaner, exclude=exclude)
     return Pass1(tests, float(fs), float(epoch_start_s), lengths.pop(),
-                 None if cleaner is None else cleaner.name)
+                 None if cleaner is None else cleaner.name, exclusion)
 
 
 # ---------------------------------------------------------------------------
