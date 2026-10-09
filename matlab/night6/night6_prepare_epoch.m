@@ -1,7 +1,8 @@
-function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile, units, beats, condition)
+function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile, units, beats, condition, varargin)
 % NIGHT6_PREPARE_EPOCH  Plan one epoch of a Night 6 run from its mask file. No arrays.
 %
 %   plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile, units, beats, condition)
+%   plan = night6_prepare_epoch(..., condition, 'Recovery', struct('starts', RS, 'session', s))
 %
 %   M             load() of one e<start>_masks.mat (gems_blanking_v2.emit.handoff)
 %   fileLabels    the recording file's own chanlabels, in column order (authoritative
@@ -50,6 +51,19 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
 % train = "none: ..." with no spans when it gives none. So "no spans because no train" is
 % recorded, and a file with no perir_json was written before (k) 1 - never read as "no
 % train". plan.periR states which (train_state 'train' | 'none'); [] when no spike signal.
+%
+% RECOVERY START (RULING 2026-10-08 (k) 2), name-value 'Recovery', struct(starts, session):
+% starts is night6_recovery_start(file) or []. For a stim_recovery epoch every consumer that
+% runs must have its start there, or the epoch is refused by name; each consumer whose own
+% start is later than the epoch start gets its leading rows masked (NaN, like any motion
+% span) BEFORE the runs are planned, so calls that share a mask still share it exactly
+% (night6_recovery_lead_in). plan.recoveryStart is the record; [] when 'Recovery' is not
+% given (test harnesses that plan an epoch only - night6_run_recording always gives it).
+    ip = inputParser;
+    ip.addParameter('Recovery', [], @(x) isempty(x) || (isstruct(x) && isscalar(x) ...
+                    && all(isfield(x, {'starts', 'session'}))));
+    ip.parse(varargin{:});
+    recovery = ip.Results.Recovery;
     known = {'spikes', 'slow_wave', 'mmc', 'hrv', 'breathing', 'velocity'};
     if ~ismember(units, {'V', 'mV', 'uV'})
         error('night6:units', 'units must be declared as V, mV or uV; got ''%s''', char(units));
@@ -201,6 +215,15 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
             'and this epoch has no stored beats (no beats file, or none in the epoch)'];
     end
 
+    plan.recoveryStart = [];
+    if ~isempty(recovery)
+        toRun = known(cellfun(@(c) strcmp(plan.consumers.(c).status, 'to_run'), known));
+        [lead, plan.recoveryStart] = night6_recovery_lead_in(recovery.starts, ...
+            char(recovery.session), plan.condition, plan.i0, plan.n, plan.fs, toRun);
+        masks = apply_lead_in(masks, lead);
+        plan.masks = masks;
+    end
+
     plan.runs = struct('call', {}, 'consumers', {}, 'signals', {}, 'maskSignal', {}, 'keep', {});
     for C = night6_calls()
         want = C.consumers(cellfun(@(c) strcmp(plan.consumers.(c).status, 'to_run'), C.consumers));
@@ -221,6 +244,31 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
             want = want(~same);
         end
     end
+end
+
+% ==========================================================================
+function masks = apply_lead_in(masks, lead)
+% Add the span [1, lead.<consumer>] to every mask of that consumer and merge the spans
+% (sorted, overlapping or adjacent runs joined), so two masks with the same NaN rows
+% compare equal and still share one call.
+    for k = 1:numel(masks)
+        c = masks(k).consumer;
+        if ~isfield(lead, c) || lead.(c) < 1, continue, end
+        masks(k).spans = merge_spans([1, lead.(c); masks(k).spans]);
+    end
+end
+
+function s = merge_spans(s)
+    s = sortrows(s, 1);
+    out = s(1, :);
+    for k = 2:size(s, 1)
+        if s(k, 1) <= out(end, 2) + 1
+            out(end, 2) = max(out(end, 2), s(k, 2));
+        else
+            out(end + 1, :) = s(k, :); %#ok<AGROW>
+        end
+    end
+    s = out;
 end
 
 % ==========================================================================

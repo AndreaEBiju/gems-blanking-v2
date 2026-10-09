@@ -46,6 +46,13 @@ function records = night6_run_recording(maskFolder, varargin)
 %               step1a (RULING 2026-10-08 (j) 1; night6_step1a_fallback). Default:
 %               step1a_fallback.json beside this file, which is empty. Its path, hash and
 %               keys go into every record; an unreadable list stops the run.
+%   RecoveryStarts  the declared recovery-starts file (RULING 2026-10-08 (k) 2; written by
+%               gems_blanking_v2.extent.recovery_start.write_recovery_starts). Every
+%               stim_recovery epoch REQUIRES it: each analysis whose own start is later
+%               than the epoch start has its input masked before that start
+%               (night6_recovery_lead_in), and an analysis with no start is refused by
+%               name. Its path and SHA-256 go into the record; a changed file reruns the
+%               stim_recovery epochs on resume. Default '' (no file: stim_recovery refused).
     ip = inputParser;
     ip.addRequired('maskFolder', @(x) ischar(x) || isstring(x));
     ip.addParameter('GemsRoot', '', @(x) ischar(x) || isstring(x));
@@ -60,6 +67,7 @@ function records = night6_run_recording(maskFolder, varargin)
     ip.addParameter('Force', false, @(x) islogical(x) || isnumeric(x));
     ip.addParameter('Step1aFallback', fullfile(fileparts(mfilename('fullpath')), ...
                     'step1a_fallback.json'), @(x) ischar(x) || isstring(x));
+    ip.addParameter('RecoveryStarts', '', @(x) ischar(x) || isstring(x));
     ip.parse(maskFolder, varargin{:});
     o = ip.Results;
     for req = {'GemsRoot', 'Units', 'OutRoot'}
@@ -70,6 +78,7 @@ function records = night6_run_recording(maskFolder, varargin)
     o = structfun_char(o);
     if isempty(o.CodeCommit), [o.CodeCommit, o.CodeDirty] = code_commit(); else, o.CodeDirty = []; end
     o.fallback = night6_step1a_fallback(o.Step1aFallback);   % read before any work
+    o.RS = night6_recovery_start(o.RecoveryStarts);          % (k) 2; [] when not declared
 
     maskFolder = char(o.maskFolder);
     [~, modelId] = fileparts(strip_sep(maskFolder));
@@ -95,7 +104,8 @@ function records = night6_run_recording(maskFolder, varargin)
             % Resume only what was made from THIS mask file: a rewritten mask file
             % (same name, new content) must rerun, not be reported as done.
             same = isfield(R, 'mask_file_sha256') && strcmp(R.mask_file_sha256, ...
-                night6_sha256_file(fullfile(files(k).folder, files(k).name)));
+                night6_sha256_file(fullfile(files(k).folder, files(k).name))) ...
+                && same_recovery_start(R, o.RS);
             if isfield(R, 'status') && strcmp(R.status, 'complete') && same
                 records{k} = R;
                 todo(k) = false;
@@ -192,7 +202,9 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
     condition = '';
     if isfield(R, 'condition'), condition = R.condition; end
     plan = night6_prepare_epoch(M, S.chanlabels, meta.channels, size(S.signal, 1), S.fs, ...
-                                o.Units, beats, condition);
+                                o.Units, beats, condition, ...
+                                'Recovery', struct('starts', o.RS, 'session', src.session));
+    R.recovery_start = plan.recoveryStart;   % (k) 2: each analysis's start, basis, source
     R.epoch = struct('start_s', plan.epochStart_s, 'start_sample_0based', plan.i0, ...
                      'n_samples', plan.n, 'fs', plan.fs, ...
                      'rule', ['file samples i0+1..i0+n, i0 = the mask file''s ' ...
@@ -434,7 +446,8 @@ function F = function_provenance()
     F = struct();
     C = night6_calls();
     ours = {'process_dataset_v2', 'night6_v2_steps', 'night6_v2_params', ...
-            'night6_step1a_fallback', 'night6_sha256_file'};
+            'night6_step1a_fallback', 'night6_sha256_file', 'night6_recovery_start', ...
+            'night6_recovery_lead_in'};
     hers = [setdiff({C.name}, ours, 'stable'), night6_v2_steps(), ...
             {'step1a_blank_cardiac', 'pipeline_params', 'bulk_load_one'}];   % step1a: (j) 1 fallback
     here = fileparts(mfilename('fullpath'));
@@ -662,6 +675,20 @@ function assert_finite(v, where, f)
         for i = 1:numel(v)
             assert_finite(v{i}, sprintf('%s{%d}', where, i), f);
         end
+    end
+end
+
+function tf = same_recovery_start(R, RS)
+% Resume only a stim_recovery epoch made with THIS recovery-starts file: a changed file
+% (or none recorded) reruns it, never reports it done with another set of starts.
+    tf = true;
+    applies = isfield(R, 'recovery_start') && isstruct(R.recovery_start) ...
+        && isfield(R.recovery_start, 'applies') && R.recovery_start.applies;
+    if applies
+        tf = ~isempty(RS) && isfield(R.recovery_start, 'sha256') ...
+            && strcmp(R.recovery_start.sha256, RS.sha256);
+    elseif isfield(R, 'condition') && strcmp(R.condition, 'stim_recovery')
+        tf = false;
     end
 end
 

@@ -10,6 +10,8 @@ function summary = night6_batch(listFile, nWorkers, varargin)
 %     "out_root": "<output folder>",
 %     "processing_new": "<path>",           (optional; default ../../../processing_new)
 %     "label": "free text",                 (optional; copied into every record)
+%     "recovery_starts": "<path>",          (RULING 2026-10-08 (k) 2; required for any
+%                                            stim_recovery recording - see RecoveryStarts)
 %     "recordings": [ {"mask_folder": "data/A/<session>/masks/<model-id>",
 %                      "meta_file": "..."} ] }   (meta_file optional)
 % A relative path is POSIX and resolves against gems_root (cross-platform rule 2).
@@ -47,9 +49,11 @@ function summary = night6_batch(listFile, nWorkers, varargin)
         metas{i} = '';
         if isfield(recs{i}, 'meta_file'), metas{i} = resolve(L.gems_root, recs{i}.meta_file); end
     end
+    starts = '';
+    if isfield(L, 'recovery_starts'), starts = resolve(L.gems_root, L.recovery_starts); end
     args = {'GemsRoot', L.gems_root, 'Units', L.units, 'OutRoot', L.out_root, ...
             'CodeCommit', commit, 'Label', label, 'DryRun', opt.DryRun, ...
-            'Figures', opt.Figures, 'Force', opt.Force};
+            'Figures', opt.Figures, 'Force', opt.Force, 'RecoveryStarts', starts};
     status = cell(1, n); wall = zeros(1, n);
     t0 = tic;
     fprintf('[night6] %d recording(s), %d worker(s), commit %s\n', n, nWorkers, commit);
