@@ -57,6 +57,7 @@ __all__ = [
     "build_peri_r",
     "load_peri_r_window",
     "peri_r_sample_spans",
+    "routed_outside_window",
 ]
 
 F64 = npt.NDArray[np.float64]
@@ -126,6 +127,27 @@ def load_peri_r_window(path: Path) -> PeriRWindow:
             raise ValueError(msg)
     return PeriRWindow(before_ms=cw["before_ms"], after_ms=cw["after_ms"],
                        source=Path(path).name, sha256=hashlib.sha256(raw).hexdigest())
+
+
+def routed_outside_window(entry: Mapping[str, Any], window: PeriRWindow) -> list[str]:
+    """Return every routed peri-R window of one routing entry that ``window`` does not contain.
+
+    The routed windows are each cuff's ``spike[cuff].peri_r_ms = [a, b]`` and every
+    ``peri_r_narrow_ms`` window, milliseconds relative to R (negative = before R). One is
+    contained when ``-before_ms <= a`` and ``b <= after_ms``. The constant window is the
+    hull of every routed window ((k) 1: "no file is under-blanked"), so a routed window it
+    does not contain is a file the constant window would under-blank: the caller refuses
+    that recording by name. Each item reads ``"<cuff> peri_r_ms [a, b]"`` (or
+    ``peri_r_narrow_ms``); the list is empty when every routed window is contained.
+    """
+    out: list[str] = []
+    for cuff, s in sorted(dict(entry.get("spike") or {}).items()):
+        wins = [("peri_r_ms", s["peri_r_ms"])] if "peri_r_ms" in s else []
+        wins += [("peri_r_narrow_ms", w) for w in s.get("peri_r_narrow_ms", [])]
+        for name, (a, b) in wins:
+            if not (float(a) >= -float(window.before_ms) and float(b) <= float(window.after_ms)):
+                out.append(f"{cuff} {name} [{float(a)}, {float(b)}]")
+    return out
 
 
 def beat_epoch_samples(heartlocs: npt.ArrayLike, *, origin_sample: int,

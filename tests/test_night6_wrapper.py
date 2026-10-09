@@ -47,6 +47,12 @@ masking and skip logic; the consumers' calls are not made). Checks:
   keeps two channels from one shared call keeps both, each equal to a direct call;
 * the step1a fallback list is hashed as raw bytes (LF, CRLF, UTF-8 and Latin-1 files hash as
   hashlib does, and the CRLF copy differs from the LF file);
+* review fix 2 (2026-10-09, invariant 28): a spike mask is planned only with its peri-R
+  record - a no-train file says ``train: "none: ..."`` (state ``none``), a train file names
+  the train's sha256 (state ``train``), and a file without ``perir_json`` (written before
+  RULING 2026-10-08 (k) 1), with a train state that is neither, or missing a
+  ``perir_spikes_*`` variable is refused by name (``night6:periR``); a file whose spike
+  consumer reads nothing needs none;
 * a recording whose hrv/breathing are "not computed" skips them with the reason; mmc is
   "not computed" on a "pre" recording with no beat train, and skipped for want of R-peaks
   on any other recording without beats.
@@ -78,6 +84,7 @@ from gems_blanking_v2.emit.handoff import (
     write_mask_file,
 )
 from gems_blanking_v2.emit.hr_beats import beats_file_record, write_hr_beats
+from gems_blanking_v2.emit.peri_r import build_peri_r
 from gems_blanking_v2.emit.provenance import MaskProvenance
 from gems_blanking_v2.extent.grid import n_grid_frames, seconds_to_sample
 from gems_blanking_v2.extent.tolerance import extent_consumers
@@ -86,6 +93,7 @@ from hypothesis import strategies as st
 from scipy.io import loadmat, savemat
 
 from tests.conftest import (
+    TEST_PERI_R_WINDOW,
     make_line_distrust,
     make_mains_spike_t,
     make_routed_train,
@@ -481,6 +489,98 @@ def test_slice_beats_places_a_routed_train_by_its_origin(tmp_path: Path) -> None
     assert got["sha"]["error"] == "night6:beatsSha"
     assert got["count"]["error"] == "night6:beatsCount"
     assert got["declared"]["error"] == "night6:beatsStart"
+
+
+# ------------------------------------------- review fix 2: no spike mask without peri-R
+
+PERI_N = int(round(4.0 * FS))
+PERI_BEATS = np.array([1_000, 30_000, 30_400, 60_000], dtype=np.int64)  # 1-based, origin 0
+
+
+def _peri_case(tmp: Path, name: str, *, spikes: bool = True, train: bool = False,
+               strip: bool = False, edit: dict[str, Any] | None = None,
+               drop_var: bool = False) -> dict[str, Any]:
+    """One mask file, written by the real handoff, then possibly reduced (pre-(k) 1 etc.)."""
+    sigs = ("L_T", "R_T") if spikes else ()
+    reads = {"spikes": sigs, "slow_wave": GASTRIC, "mmc": (), "hrv": (), "breathing": (),
+             "velocity": ()}
+    spans = [mk.MaskSpan("slow_wave", "ANT1", 1.0, 1.5, "in_band")]
+    if spikes:
+        spans.append(mk.MaskSpan("spikes", "L_T", 2.0, 2.2, "in_band"))
+    masks = mk.build_masks(reads, spans, n_frames=n_grid_frames(PERI_N, FS), t0_s=0.0)
+    line = peri = None
+    if spikes:
+        rng = np.random.default_rng(5)
+        line = make_line_distrust({s: rng.normal(0.0, 5.0, PERI_N) for s in sigs}, FS,
+                                  recording=SESSION_A, epoch_start_s=0.0,
+                                  motion={s: masks[("spikes", s, "300-3000")] for s in sigs})
+        peri = build_peri_r(recording=SESSION_A, signals=sigs, window=TEST_PERI_R_WINDOW, fs=FS,
+                            n_samples=PERI_N, epoch_start_s=0.0, epoch_start_sample=0,
+                            heartlocs=PERI_BEATS if train else None,
+                            origin_sample=0 if train else None,
+                            train={"grade": "hrv", "sha256": "c" * 64, "file": "synthetic"}
+                            if train else None)
+    f = tmp / f"{name}_masks.mat"
+    write_mask_file(f, masks, _provenance(SESSION_A, {"condition": "baseline"}), signals=reads,
+                    fs=FS, n_samples=PERI_N, epoch_start_s=0.0, epoch_start_sample=0,
+                    min_retention=0.5, animal_median={f"{c}|{s}|{b}": 0.3 for c, s, b in masks},
+                    line_distrust=line, peri_r=peri,
+                    release="synthetic night6 test: spans are large on purpose")
+    if strip or edit or drop_var:
+        m = {k: v for k, v in loadmat(f).items() if not k.startswith("__")}
+        if strip:  # a mask file as written before RULING 2026-10-08 (k) 1
+            m = {k: v for k, v in m.items() if not k.startswith("perir")}
+            prov = json.loads(str(np.asarray(m["provenance_json"]).ravel()[0]))
+            del prov["spike_peri_r"]
+            m["provenance_json"] = json.dumps(prov)
+        if edit:
+            doc = json.loads(str(np.asarray(m["perir_json"]).ravel()[0]))
+            doc.update(edit)
+            m["perir_json"] = json.dumps(doc)
+        if drop_var:
+            del m["perir_spikes_R_T"]
+        savemat(f, m, do_compression=True)
+    return {"name": name, "mask_file": f.as_posix(), "labels": list(LABELS), "fs": FS,
+            "n_file": PERI_N, "meta_json": json.dumps({"channels": _channels()})}
+
+
+def test_a_spike_mask_without_its_peri_r_record_is_refused(tmp_path: Path) -> None:
+    """Review fix 2: "no spans because no train" is recorded; a pre-(k) 1 file is refused."""
+    matlab, pnew = _matlab(), _processing_new()
+    if matlab is None:
+        pytest.skip("MATLAB is not on this machine (set GEMS_MATLAB)")
+    if pnew is None:
+        pytest.skip("processing_new is not on this machine (set GEMS_PROCESSING_NEW)")
+    cases = [_peri_case(tmp_path, "no_train"),
+             _peri_case(tmp_path, "train", train=True),
+             _peri_case(tmp_path, "no_spikes", spikes=False),
+             _peri_case(tmp_path, "pre_k1", strip=True),
+             _peri_case(tmp_path, "unknown_state", edit={"train": {"file": "x"}}),
+             _peri_case(tmp_path, "none_with_spans", edit={"n_spans": 2}),
+             _peri_case(tmp_path, "missing_var", drop_var=True)]
+    nt = json.loads(str(np.asarray(loadmat(cases[0]["mask_file"])["perir_json"]).ravel()[0]))
+    assert nt["train"].startswith("none:") and nt["n_spans"] == 0  # f15bf43's explicit no-train
+    case_file, res_file = tmp_path / "perir_case.json", tmp_path / "perir_result.json"
+    case_file.write_text(json.dumps({"cases": cases}, ensure_ascii=True), encoding="utf-8",
+                         newline="\n")
+    cmd = (f"addpath('{pnew.as_posix()}'); addpath('{NIGHT6.as_posix()}'); "
+           f"addpath('{HARNESS.as_posix()}'); "
+           f"check_peri_r_required('{case_file.as_posix()}', '{res_file.as_posix()}');")
+    done = subprocess.run([str(matlab), "-batch", cmd], capture_output=True, text=True,
+                          timeout=900, check=False)
+    assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
+    got = {c["name"]: c for c in json.loads(res_file.read_text(encoding="utf-8"))["cases"]}
+    for ok, state in (("no_train", "none"), ("train", "train"), ("no_spikes", "not_read")):
+        assert got[ok]["error"] == "", (ok, got[ok]["message"])
+        assert got[ok]["train_state"] == state, ok
+    assert got["no_train"]["n_spans"] == 0
+    assert got["train"]["n_spans"] == 3  # beats 30,000 and 30,400 share one merged span
+    for bad, words in (("pre_k1", "before RULING 2026-10-08 (k) 1"),
+                       ("unknown_state", "train state is unknown"),
+                       ("none_with_spans", "says no train but carries 2 spans"),
+                       ("missing_var", "no perir_spikes_R_T")):
+        assert got[bad]["error"] == "night6:periR", (bad, got[bad])
+        assert words in got[bad]["message"], (bad, got[bad]["message"])
 
 
 # ---------------------------------------------------------------- item 3: her step list
@@ -921,6 +1021,8 @@ def _check_epoch(key: str, e: dict[str, Any], root: Path,  # noqa: PLR0915 - one
     assert rec["status"] == ("complete" if key == f"{SESSION_A}/e0" else "dry_run")
     assert rec["epoch"]["start_sample_0based"] == i0
     assert rec["epoch"]["n_samples"] == e["n"]
+    # review fix 2: each fixture spike mask carries a no-train peri-R record, recorded as such
+    assert rec["peri_r"]["train_state"] == "none" and rec["peri_r"]["n_spans"] == 0
     if session == SESSION_D:
         assert rec["epoch"]["start_s"] == pytest.approx(e["start"] + SHIFT_SAMPLES / FS,
                                                         rel=0, abs=1e-12)

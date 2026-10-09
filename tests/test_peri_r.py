@@ -8,6 +8,8 @@
 * a recording with no train: the spike spans are exactly the motion and distrust spans;
 * the provenance carries the declared window file's sha256;
 * the 1-based beat index is converted once: a one-sample shift is caught.
+* a routed ``peri_r_ms`` / ``peri_r_narrow_ms`` outside the declared window is named
+  (review fix 1: "no file is under-blanked"); a -18 ms entry against 16 ms is refused.
 
 (k) 3, MATLAB side (Andrea's step functions, read only, through ``process_dataset_v2``):
 around each R, the samples step3b leaves out of the activity RMS are exactly the peri-R NaN
@@ -34,7 +36,12 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from scipy.io import loadmat, savemat
 
-from tests.conftest import make_line_distrust, make_mains_spike_t, peri_r_like
+from tests.conftest import (
+    TEST_PERI_R_WINDOW,
+    make_line_distrust,
+    make_mains_spike_t,
+    peri_r_like,
+)
 from tests.test_matlab_acceptance import _matlab, _processing_new
 
 FS = 24414.0625
@@ -376,3 +383,35 @@ def test_step3b_excludes_exactly_the_peri_r_span_plus_the_edge_pad(tmp_path: Pat
     # the exclusions first, so a reverted guard fails on what it does, not on its value
     assert not bad, f"step3b excluded other samples than span + pad: {bad}"
     assert {name: res[name]["guard_ms"] for name in cases} == dict.fromkeys(cases, 0)
+
+
+# ------------------------------------------- review fix 1: routed window inside the declared
+
+
+def _entry(**cuffs: dict[str, Any]) -> dict[str, Any]:
+    return {"spike": cuffs, "hr": {"channel": "LVN2-RVN2", "detector": "x", "n_beats": 1},
+            "stomach_ref": {}}
+
+
+def test_a_routed_window_wider_than_the_declared_one_is_named() -> None:
+    """A -18 ms routed peri_r_ms against the declared 16 ms is outside; so is each side."""
+    w = TEST_PERI_R_WINDOW  # [-16.0, 9.5] ms
+    assert pr.routed_outside_window(_entry(L={"route": "multi", "peri_r_ms": [-18.0, 5.0],
+                                               "peri_r_beats": "hrv"}), w) == [
+        "L peri_r_ms [-18.0, 5.0]"]
+    assert pr.routed_outside_window(_entry(R={"route": "multi", "peri_r_ms": [-4.0, 9.75],
+                                               "peri_r_beats": "hrv"}), w) == [
+        "R peri_r_ms [-4.0, 9.75]"]
+    narrow = {"route": "multi", "peri_r_narrow_ms": [[-3.0, 2.0], [-16.5, -12.0]],
+              "peri_r_beats": "mask"}
+    assert pr.routed_outside_window(_entry(L=narrow), w) == ["L peri_r_narrow_ms [-16.5, -12.0]"]
+
+
+def test_routed_windows_inside_the_declared_one_pass_edges_included() -> None:
+    """The hull's own setters (-16.0 and 9.5 exactly) are inside; a cuff without one is too."""
+    w = TEST_PERI_R_WINDOW
+    e = _entry(L={"route": "multi", "peri_r_ms": [-16.0, 9.5], "peri_r_beats": "hrv",
+                  "peri_r_narrow_ms": [[-16.0, -10.0], [2.0, 9.5]]},
+               R={"route": "scalar"})
+    assert pr.routed_outside_window(e, w) == []
+    assert pr.routed_outside_window(_entry(), w) == []

@@ -256,7 +256,18 @@ def read_gap_after(path: Path) -> npt.NDArray[np.bool_] | None:
 
 
 def read_blank_spans(path: Path) -> F64 | None:
-    """Return the file's blank spans as half-open ``[a, b)`` s on the epoch's timeline, or None."""
+    """Return the file's blank spans as half-open ``[a, b)`` s on the epoch's timeline, or None.
+
+    **Region frame, not file time.** The times are ``(h - 1) / fs + epochStart_s`` with the
+    file's OWN ``epochStart_s`` - the frame the beats were detected in. Every routing-stored
+    train declares ``epochStart_s = 0``, and for a stim_rec train that frame is the routing
+    region, which starts at 132 s of the file (sample ``round(132 fs)`` = 3,222,656), so
+    these times are 132 s early against the whole file. For FILE time use
+    :func:`train_origin` (the origin from the train's build record) - or, for a routed
+    train, the one resolver (``perir_train.resolve_train``) and its ``origin_sample0``:
+    heartloc ``h`` is 0-based file sample ``origin_sample0 + h - 1``. Behaviour is
+    unchanged on purpose: the frozen routing scripts read these region-frame times.
+    """
     m = loadmat(path)
     if "blankSpans" not in m:
         return None
@@ -267,7 +278,18 @@ def read_blank_spans(path: Path) -> F64 | None:
 
 
 def read_hr_beats(path: Path) -> tuple[F64, float]:
-    """Return ``(beat times in seconds on the epoch's timeline, fs)`` from a beats file."""
+    """Return ``(beat times in seconds on the epoch's timeline, fs)`` from a beats file.
+
+    **Region frame, not file time.** The times are ``(h - 1) / fs + epochStart_s`` with the
+    file's OWN ``epochStart_s`` - the frame the beats were detected in. Every routing-stored
+    train declares ``epochStart_s = 0``, and for a stim_rec train that frame is the routing
+    region, which starts at 132 s of the file (sample ``round(132 fs)`` = 3,222,656), so
+    these times are 132 s early against the whole file. For FILE time use
+    :func:`train_origin` (the origin from the train's build record) - or, for a routed
+    train, the one resolver (``perir_train.resolve_train``) and its ``origin_sample0``:
+    heartloc ``h`` is 0-based file sample ``origin_sample0 + h - 1``. Behaviour is
+    unchanged on purpose: the frozen routing scripts read these region-frame times.
+    """
     m = loadmat(path)
     fs = float(np.asarray(m["fs"]).squeeze())
     heartlocs = np.asarray(m["heartlocs"], dtype=np.float64).ravel()
@@ -295,7 +317,18 @@ def write_mask_beats(
 
 
 def read_mask_beats(path: Path) -> tuple[F64, float]:
-    """Return ``(beat times s, fs)`` from a mask-grade file; raises on an HRV file."""
+    """Return ``(beat times s, fs)`` from a mask-grade file; raises on an HRV file.
+
+    **Region frame, not file time.** The times are ``(h - 1) / fs + epochStart_s`` with the
+    file's OWN ``epochStart_s`` - the frame the beats were detected in. Every routing-stored
+    train declares ``epochStart_s = 0``, and for a stim_rec train that frame is the routing
+    region, which starts at 132 s of the file (sample ``round(132 fs)`` = 3,222,656), so
+    these times are 132 s early against the whole file. For FILE time use
+    :func:`train_origin` (the origin from the train's build record) - or, for a routed
+    train, the one resolver (``perir_train.resolve_train``) and its ``origin_sample0``:
+    heartloc ``h`` is 0-based file sample ``origin_sample0 + h - 1``. Behaviour is
+    unchanged on purpose: the frozen routing scripts read these region-frame times.
+    """
     m = loadmat(path)
     if "maskBeatlocs" not in m:
         msg = f"{Path(path).name} holds no maskBeatlocs: not a mask-grade beats file"

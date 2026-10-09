@@ -41,6 +41,15 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
 % outputs are kept (run.keep). Channels whose masks are identical get bit-identical
 % inputs, so they share one call and each keeps its own column - the outputs are those
 % of separate calls exactly, at a third of the cost.
+%
+% PERI-R (RULING 2026-10-08 (k) 1; review fix 2, 2026-10-09, invariant 28): when the spike
+% consumer reads any signal, the file must carry its peri-R record - perir_json, a
+% perir_spikes_<token> per spike signal, and the provenance's spike_peri_r - or the epoch is
+% refused (night6:periR). emit.handoff writes that record for EVERY such file since
+% f15bf43: with the train's provenance (sha256, origin) when the routing gives a train, and
+% train = "none: ..." with no spans when it gives none. So "no spans because no train" is
+% recorded, and a file with no perir_json was written before (k) 1 - never read as "no
+% train". plan.periR states which (train_state 'train' | 'none'); [] when no spike signal.
     known = {'spikes', 'slow_wave', 'mmc', 'hrv', 'breathing', 'velocity'};
     if ~ismember(units, {'V', 'mV', 'uV'})
         error('night6:units', 'units must be declared as V, mV or uV; got ''%s''', char(units));
@@ -96,6 +105,7 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
                                 'token', token, 'spans', sp); %#ok<AGROW>
     end
     plan.masks = masks;
+    plan.periR = check_peri_r(M, masks, plan.n);
     plan.notMeasuredMmc = struct();
     for i = 1:numel(names)
         if startsWith(names{i}, 'notmeasured_mmc_')
@@ -297,6 +307,59 @@ function i = find_one(labels, lab, sig)
     if numel(i) ~= 1
         error('night6:label', 'signal %s needs channel %s, found %d in the file', sig, lab, numel(i));
     end
+end
+
+function P = check_peri_r(M, masks, n)
+% Review fix 2: a spike consumer that reads signals needs the file's peri-R record.
+    P = [];
+    sel = strcmp({masks.consumer}, 'spikes');
+    if ~any(sel), return, end
+    sigs = sort({masks(sel).signal});
+    if ~isfield(M, 'perir_json')
+        error('night6:periR', ['the spike consumer reads [%s] but the mask file has no ' ...
+              'perir_json: it was written before RULING 2026-10-08 (k) 1 and carries no ' ...
+              'peri-R spans. A spike mask without its peri-R record is refused; re-emit ' ...
+              'the masks'], strjoin(sigs, ' '));
+    end
+    J = jsondecode(char(M.perir_json));
+    if ~isfield(J, 'train') || ~isfield(J, 'signals') || ~isfield(J, 'n_spans') ...
+            || ~isfield(J, 'window') || ~isfield(J.window, 'sha256')
+        error('night6:periR', 'perir_json lacks train, signals, n_spans or window.sha256');
+    end
+    if ischar(J.train) && startsWith(J.train, 'none:')
+        state = 'none';
+        if J.n_spans ~= 0
+            error('night6:periR', 'perir_json says no train but carries %d spans', J.n_spans);
+        end
+    elseif isstruct(J.train) && isfield(J.train, 'sha256') && ischar(J.train.sha256) ...
+            && numel(J.train.sha256) == 64
+        state = 'train';
+    else
+        error('night6:periR', ['perir_json train is neither a train record (with its ' ...
+              'sha256) nor "none: ..." - the train state is unknown']);
+    end
+    got = cellstr(J.signals);
+    got = sort(got(:))';
+    if ~isequal(got, sigs(:)')
+        error('night6:periR', 'perir_json covers [%s]; the spike consumer reads [%s]', ...
+              strjoin(got, ' '), strjoin(sigs, ' '));
+    end
+    for t = {masks(sel).token}
+        nm = ['perir_spikes_' t{1}];
+        if ~isfield(M, nm)
+            error('night6:periR', 'the mask file has perir_json but no %s', nm);
+        end
+        sp = check_spans(M.(nm), n, nm);
+        if size(sp, 1) ~= J.n_spans
+            error('night6:periR', '%s has %d spans, perir_json %d', nm, size(sp, 1), J.n_spans);
+        end
+    end
+    if ~isfield(M, 'provenance_json') ...
+            || ~isfield(jsondecode(char(M.provenance_json)), 'spike_peri_r')
+        error('night6:periR', 'the mask provenance names no spike_peri_r record');
+    end
+    P = struct('train_state', state, 'n_spans', J.n_spans, ...
+               'window_sha256', J.window.sha256, 'signals', {got});
 end
 
 function tf = same_mask(masks, a, b)

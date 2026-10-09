@@ -198,6 +198,9 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
                      'rule', ['file samples i0+1..i0+n, i0 = the mask file''s ' ...
                               'epochStartSample0 (never derived from seconds)']);
     R.not_computed = plan.notComputed;
+    if ~isempty(plan.periR)   % review fix 2: the spike mask's peri-R state, train or none
+        R.peri_r = plan.periR;
+    end
     R.not_measured_mmc = plan.notMeasuredMmc;   % R6: reported, never blanked
     if ~isempty(plan.beats)
         R.beats = struct('n_in_epoch', numel(plan.beats.heartlocs), ...
