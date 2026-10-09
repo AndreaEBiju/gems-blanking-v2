@@ -2348,6 +2348,29 @@ The rulings headed **2026-10-08**, **(b)** and **(c)** were written on **2026-10
    - **The production beat trains are published** through the corrected publisher, as byte-identical copies.
    - **The routing writers' fix is deferred** until after task 19.
 
+### RULING 2026-10-09 (b) — peri-R window per recording class; adapted I/J/K scoring; open item 4 parts
+
+**Measured (build, 2026-10-09):**
+- **gems_a_t02_2_3_bl_215610:** its −16 ms edge is reproducible on the left cuff. Odd beats, even beats, the first half and the second half all give −15.5 to −15.0 ms, at 3.8–4.4× chance; the right cuff gives −15 ms.
+- **The 11.5 ms runner-up (gems_a_t06_2_1_bl_191057 L)** rests on a handful of spikes: its first half gives −6 ms.
+- **Across the other 121 cuffs,** after these two recordings the widest extent is 10.5 ms.
+
+**Andrea, 2026-10-09:**
+
+1. **The peri-R window is 11.5 ms before R and 9.5 ms after R for every recording, with one exception:** gems_a_t02_2_3_bl_215610 (both cuffs) uses 16.0 ms before R and 9.5 ms after.
+   - **A recording that needs more than 11.5 ms** (in the rest of routing or the final re-measurement) uses its own routed extent instead. It is listed in the window file and reported, never silently under-blanked.
+   - The (k) 1 refusal stays: a recording whose routed extent exceeds the window that applies to it is refused.
+   - The window file lists both classes, and its hash goes into provenance.
+   - (k) 1's "maximum over all files" is replaced by this rule.
+2. **Item 4's two other parts, as recommended:**
+   - **Minutes where the HR train has no beats:** the spike consumer distrusts the minute, because heartbeat leak continues there but no spans can be placed. Report the spike time lost, by animal.
+   - **The line-noise test** (ruling 2026-10-08 (d)) runs on the samples spike detection actually uses, so the peri-R spans are excluded.
+3. **Adapted I/J/K, from the builder's points:**
+   - **Offline comparison scores** of adapted against pooled on the I/J evaluation spans and the K exam span are accepted, as RULING 2026-10-09 item 5 asks. The registry keeps its "never scores evaluation spans" flag, so production masks inside evaluation spans come from the pooled model.
+   - **Pooled is not accepted** as the main I/J/K model in Night 5.
+   - **The labelling session's user name "User"** is accepted for setADAPT_IJK only, and recorded.
+   - **The adapted calibrators' weak validation** is stated on the model-options page and in provenance. Andrea confirms the I/J/K ids from the scores.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
