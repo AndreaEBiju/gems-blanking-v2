@@ -5865,6 +5865,28 @@ The rulings headed **2026-10-08**, **(b)** and **(c)** were written on **2026-10
    - Report only: the routing rules are frozen.
 8. **HRV and breathing as two calls:** waiting for Andrea, after the explanation.
 
+### RULING 2026-10-08 (i) — spike consumer: Andrea's `process_dataset`, as a v2 driver (replaces ruling 2026-10-08 (h) item 5)
+
+*Dated by Andrea's local date (US Eastern). Prompts sent on 2026-10-08 call this "RULING 2026-10-09"; that was the UTC date, and it is the same ruling (invariant 31).*
+
+**Andrea, 2026-10-08:** her spike results come from `process_dataset` (the step pipeline), not `detectSortNerveSpikesECAP`. She asks for a v2 that keeps the 4.5σ local threshold, uses the band ruled for the spike consumer, and drops the built-in heartbeat remover. The full two-method comparison of (h) item 5 is withdrawn.
+
+1. **`process_dataset_v2.m` is a new driver,** in `matlab/night6/` beside the wrapper. None of Andrea's files are copied or edited: processing_new stays unedited and uncommitted.
+   - It builds `P = pipeline_params()`, then sets `P.bandpassLow = 300` and `P.bandpassHigh = 3000` (R8). `P.threshSigma` stays 4.5, and every other parameter keeps Andrea's default.
+   - It calls her step functions in her order, **leaving out `step1b_remove_cardiac`:** `step1_bandpass`, `step2_noise_sigma`, `step3_detect`, `step3b_envelope`, `step4_waveforms`, `step5c_modality_test`, `step6_spike_report`.
+   - It still passes `D.rpeakSamples` from the routed beat train, so `step3b_envelope` keeps its ±20 ms cardiac guard on the activity RMS. It does not pass them through `step1b`.
+   - Heartbeats reach the spike consumer only as the pipeline's peri-R NaN spans. `step1_bandpass` and `step2_noise_sigma` already honour NaN through `isnan` and `validMask`.
+   - Use the build machine's current processing_new. The Drive copies in `Survivals/nerve firing` date from May and may be older. Report any difference from the steps listed here.
+2. **The Night 6 wrapper calls `process_dataset_v2`** for the spike consumer instead of `detectSortNerveSpikesECAP`. All the wrapper's other rules stand.
+3. **Validation, report only, with criteria fixed before results.** Use 3 clean baseline recordings (A, B, H) with their production masks.
+   - **(a) v1 against v2:** spike counts and rates per channel, the fraction matched within ±0.5 ms, cluster counts, and the modality verdict.
+   - **(b) No heartbeat leakage:** the spike times of v2 relative to R-peaks (±100 ms histogram) show no excess in the peri-R bins over the flanks, by Poisson test at α = 0.01 per channel. Report it for v1 too.
+   - **(c) Masks honoured:** no v2 spike falls inside a NaN span or its 5 ms edge pad.
+4. **The spike tolerance was measured with `detectSortNerveSpikesECAP`, so it is re-measured with `process_dataset_v2`.**
+   - This is a spike-only tolerance pass (same kinds, seeds and grid as the original spike points). It runs after tonight's re-run, and its value replaces the ECAP-based one for spike masks.
+   - Cost it and place it within the slack. If it cannot run before the inference night, say what slips.
+   - Until it exists, the spike tolerance's provenance names the method it was measured with.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
