@@ -66,6 +66,20 @@ function night6_check(caseFile, outFile)
             out.mmc_error = sprintf('%s: %s', ME.identifier, ME.message);
         end
     end
+    % Ruling (j) 1: the declared step1a fallback list - refusals, and a run that uses it.
+    if isfield(C, 'fallback')
+        Fb = C.fallback;
+        out.fallback_bad = cellfun(@(f) attempt_id(@() night6_step1a_fallback(f)), ...
+                                   cellstr(Fb.bad_files), 'UniformOutput', false);
+        try
+            night6_run_recording(Fb.mask_folder, 'GemsRoot', C.gems_root, 'Units', C.units, ...
+                'OutRoot', Fb.out_root, 'DryRun', true, 'CodeCommit', 'test', ...
+                'Step1aFallback', Fb.file_ok);
+            out.fallback_error = '';
+        catch ME
+            out.fallback_error = sprintf('%s: %s', ME.identifier, ME.message);
+        end
+    end
     if isfield(C, 'slow_wave'), out.slow_wave = slow_wave_case(C.slow_wave); end
     if isfield(C, 'v2'), out.v2 = v2_case(C.v2); end
     fid = fopen(outFile, 'w', 'n', 'UTF-8');
@@ -134,6 +148,19 @@ function r = v2_case(V)
     end
     % A pad wider than her own 10 ms + 0.5 ms re-alignment must fire: the check is live.
     r.wide_pad = attempt_id(@() process_dataset_v2(D, 'NanPadMs', V.wide_pad_ms));
+    % Ruling (j) 1 fallback: her step1a on channel 1 only.
+    try
+        [Df, fi] = process_dataset_v2(D, 'Step1aChannels', [true false]);
+        r.fb_channels = fi.step1a_channels;
+        r.fb_nan_added = [nnz(isnan(Df.y(:, 1))) - nnz(isnan(D.y(:, 1))), ...
+                          nnz(isnan(Df.y(:, 2))) - nnz(isnan(D.y(:, 2)))];
+        r.fb_spike_check = fi.spike_check;
+        r.fb_error = '';
+    catch ME
+        r.fb_error = sprintf('%s: %s', ME.identifier, ME.message);
+    end
+    E = D; E.rpeakSamples = zeros(0, 1); E.rpeakTimes = zeros(0, 1);
+    r.fb_no_rpeaks = attempt_id(@() process_dataset_v2(E, 'Step1aChannels', [true false]));
     E = D; E.y(:, 2) = NaN;
     r.all_nan = attempt_id(@() process_dataset_v2(E));
     E = D; E.y(isfinite(E.y(:, 2)), 2) = 3e-6;

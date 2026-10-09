@@ -42,6 +42,10 @@ function records = night6_run_recording(maskFolder, varargin)
 %   CodeCommit  this repo's commit; default: git rev-parse HEAD beside this file
 %   Label       free text copied into each record (e.g. 'STAND-IN smoke run')
 %   Force       rerun epochs whose record is complete (false)
+%   Step1aFallback  the declared animal x cuff list whose spike consumer falls back to
+%               step1a (RULING 2026-10-08 (j) 1; night6_step1a_fallback). Default:
+%               step1a_fallback.json beside this file, which is empty. Its path, hash and
+%               keys go into every record; an unreadable list stops the run.
     ip = inputParser;
     ip.addRequired('maskFolder', @(x) ischar(x) || isstring(x));
     ip.addParameter('GemsRoot', '', @(x) ischar(x) || isstring(x));
@@ -54,6 +58,8 @@ function records = night6_run_recording(maskFolder, varargin)
     ip.addParameter('CodeCommit', '', @(x) ischar(x) || isstring(x));
     ip.addParameter('Label', '', @(x) ischar(x) || isstring(x));
     ip.addParameter('Force', false, @(x) islogical(x) || isnumeric(x));
+    ip.addParameter('Step1aFallback', fullfile(fileparts(mfilename('fullpath')), ...
+                    'step1a_fallback.json'), @(x) ischar(x) || isstring(x));
     ip.parse(maskFolder, varargin{:});
     o = ip.Results;
     for req = {'GemsRoot', 'Units', 'OutRoot'}
@@ -63,6 +69,7 @@ function records = night6_run_recording(maskFolder, varargin)
     end
     o = structfun_char(o);
     if isempty(o.CodeCommit), [o.CodeCommit, o.CodeDirty] = code_commit(); else, o.CodeDirty = []; end
+    o.fallback = night6_step1a_fallback(o.Step1aFallback);   % read before any work
 
     maskFolder = char(o.maskFolder);
     [~, modelId] = fileparts(strip_sep(maskFolder));
@@ -197,6 +204,9 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
                     st.status, st.reason);
         end
     end
+    R.step1a_fallback = struct('file', o.fallback.file, 'sha256', o.fallback.sha256, ...
+                               'keys', {o.fallback.keys});
+    o.animal = src.animal;
     R.functions = function_provenance();
     R.params = params();
     % Labels are the epoch tag alone: the folder already names animal, session and
@@ -248,6 +258,9 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
                 r.signals = r.signals(~empty);
             end
             [empty, why] = dead_columns(X, r.signals, isSpk);
+            if isSpk
+                run.step1a_fallback = r.signals(step1a_channels(r.signals, o));
+            end
             if any(empty)
                 run.status = 'skipped_no_valid_samples';
                 run.reason = why;
@@ -308,7 +321,8 @@ function [label, extra] = call_one(r, X, plan, base, outDir, o)
             D = bulk_load_one(f, o.beatsEpochFile, struct('neuralCols', 1:numel(r.signals), ...
                                                          'labels', {r.signals}));
             D.condition = plan.condition;
-            [D, info] = process_dataset_v2(D, 'PlotMode', figs, 'NanPadMs', P.spikes.nanPadMs);
+            [D, info] = process_dataset_v2(D, 'PlotMode', figs, 'NanPadMs', P.spikes.nanPadMs, ...
+                                           'Step1aChannels', step1a_channels(r.signals, o));
             save_spikes_v2(fullfile(outDir, [label '_spikes_v2.mat']), D, info, r.signals);
             extra.n_rpeaks = info.n_rpeaks;
             extra.spike_check = info.spike_check;
@@ -369,9 +383,9 @@ function F = function_provenance()
 % and the wrapper's own (process_dataset_v2 and its step list) to this folder.
     F = struct();
     C = night6_calls();
-    ours = {'process_dataset_v2', 'night6_v2_steps'};
+    ours = {'process_dataset_v2', 'night6_v2_steps', 'night6_step1a_fallback'};
     hers = [setdiff({C.name}, ours, 'stable'), night6_v2_steps(), ...
-            {'pipeline_params', 'bulk_load_one'}];
+            {'step1a_blank_cardiac', 'pipeline_params', 'bulk_load_one'}];   % step1a: (j) 1 fallback
     here = fileparts(mfilename('fullpath'));
     for name = [hers, ours]
         p = which(name{1});
@@ -390,6 +404,19 @@ function F = function_provenance()
     % which version of the driver the parameters were taken from.
     p = which('batch_process');
     F.batch_process = struct('path', p, 'sha256', sha256_file(p), 'role', 'parameter source');
+end
+
+function tf = step1a_channels(signals, o)
+% Which spike signals (<cuff>_T) belong to an animal x cuff on the declared fallback
+% list (ruling (j) 1). Any other spike signal name is refused rather than guessed.
+    tf = false(1, numel(signals));
+    for j = 1:numel(signals)
+        tok = regexp(signals{j}, '^([A-Za-z]+)_T$', 'tokens', 'once');
+        if isempty(tok)
+            error('night6:fallbackSignal', 'spike signal %s is not <cuff>_T', signals{j});
+        end
+        tf(j) = any(strcmp(o.fallback.keys, sprintf('%s|%s', o.animal, tok{1})));
+    end
 end
 
 function [dead, why] = dead_columns(X, signals, checkConstant)

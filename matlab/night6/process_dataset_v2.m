@@ -24,6 +24,12 @@ function [D, info] = process_dataset_v2(D, varargin)
 % reader (step3b_envelope.m:56-61, the cardiac guard on the activity RMS);
 % step3_detect reads D.rpeakTimes only to draw its figure (step3_detect.m:155).
 %
+% Fallback, RULING 2026-10-08 (j) 1: 'Step1aChannels' (logical, one per neural channel,
+% default none) names the channels of an animal x cuff on the declared fallback list
+% (night6_step1a_fallback): a peri-R excess classified as leak. On those channels only,
+% her step1a_blank_cardiac, unchanged, sets +/-15 ms around each R-peak to NaN before
+% step1_bandpass; it is refused when there are no R-peaks. info.step1a_channels records it.
+%
 % Refused by name before any step (invariant 41): a neural channel with no finite
 % sample ('process_dataset_v2:noValidSamples') or whose finite samples are all equal
 % ('process_dataset_v2:constantInput'), and R-peaks that are not integer samples in D.y.
@@ -47,6 +53,7 @@ function [D, info] = process_dataset_v2(D, varargin)
     ip.addRequired('D', @isstruct);
     ip.addParameter('PlotMode', false, @(x) islogical(x) || isnumeric(x));
     ip.addParameter('NanPadMs', 5, @(x) isnumeric(x) && isscalar(x) && x >= 0);
+    ip.addParameter('Step1aChannels', [], @(x) isempty(x) || islogical(x));
     ip.parse(D, varargin{:});
     plotMode = logical(ip.Results.PlotMode);
     padMs = ip.Results.NanPadMs;
@@ -85,6 +92,29 @@ function [D, info] = process_dataset_v2(D, varargin)
     steps = night6_v2_steps();
     info = struct();
     info.steps = cellfun(@(s) struct('name', s, 'path', which(s)), steps, 'UniformOutput', false);
+
+    % Ruling (j) 1 fallback: on the declared channels only (a leak-classified animal x
+    % cuff, night6_step1a_fallback), her step1a_blank_cardiac - unchanged - is applied
+    % first; its NaN windows are taken for those channels and no other.
+    fb = ip.Results.Step1aChannels;
+    if isempty(fb), fb = false(1, numel(ch)); end
+    if numel(fb) ~= numel(ch)
+        error('process_dataset_v2:step1aChannels', ...
+              'Step1aChannels has %d entries for %d neural channels', numel(fb), numel(ch));
+    end
+    info.step1a_channels = labels(fb(:)');
+    if any(fb)
+        if isempty(r)
+            error('process_dataset_v2:step1aNoRpeaks', ['step1a fallback requested for ' ...
+                  '[%s] but D.rpeakSamples is empty: refused, not run unblanked'], ...
+                  strjoin(labels(fb(:)'), ' '));
+        end
+        B = step1a_blank_cardiac(D, P, plotMode);
+        D.y(:, ch(fb)) = B.y(:, ch(fb));
+        info.step1a = struct('path', which('step1a_blank_cardiac'), ...
+                             'win_ms', B.cardiacBlankWinMs, 'n_rpeaks', numel(r));
+        clear B
+    end
     for s = steps
         D = feval(s{1}, D, P, plotMode);
     end

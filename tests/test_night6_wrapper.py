@@ -368,7 +368,8 @@ def test_night6_wrapper_slices_masks_and_skips(tmp_path: Path) -> None:
                        .as_posix(),
                        "out_dir": (out_root / "T" / SESSION_A / MODEL).as_posix(),
                        "keep_tag": "e0", "stale_tag": "e5"},
-            "mmc_units": mmc_units, "slow_wave": sw["case"], "v2": v2["case"]}
+            "mmc_units": mmc_units, "slow_wave": sw["case"], "v2": v2["case"],
+            "fallback": _fallback_case(tmp_path, root)}
     case_file, res_file = tmp_path / "case.json", tmp_path / "result.json"
     case_file.write_text(json.dumps(case, ensure_ascii=True), encoding="utf-8", newline="\n")
     cmd = (f"addpath('{pnew.as_posix()}'); addpath('{NIGHT6.as_posix()}'); "
@@ -391,6 +392,55 @@ def test_night6_wrapper_slices_masks_and_skips(tmp_path: Path) -> None:
     _check_mmc_units(mmc_units, res)
     _check_slow_wave_keep(sw, res["slow_wave"])
     _check_v2(v2, res["v2"], pnew)
+    _check_fallback(res, out_root, tmp_path / "out_fb")
+
+
+FALLBACK_OK = {"schema": 1, "ruling": "test", "entries": [
+    {"animal": "T", "cuff": "L", "reason": "synthetic: peri-R excess classified as leak"}]}
+FALLBACK_BAD = {
+    "top_key": {**FALLBACK_OK, "extra": 1},
+    "entry_key": {"schema": 1, "entries": [{"animal": "T", "cuff": "L", "reason": "x",
+                                             "channel": "L_T"}]},
+    "cuff": {"schema": 1, "entries": [{"animal": "T", "cuff": "X", "reason": "x"}]},
+    "no_reason": {"schema": 1, "entries": [{"animal": "T", "cuff": "L"}]},
+    "duplicate": {"schema": 1, "entries": [{"animal": "T", "cuff": "L", "reason": "x"},
+                                           {"animal": "T", "cuff": "L", "reason": "y"}]},
+    "schema": {"schema": 2, "entries": []},
+}
+FALLBACK_BAD_IDS = {"top_key": "night6:fallbackKey", "entry_key": "night6:fallbackKey",
+                    "cuff": "night6:fallbackEntry", "no_reason": "night6:fallbackEntry",
+                    "duplicate": "night6:fallbackDuplicate", "schema": "night6:fallbackSchema"}
+
+
+def _fallback_case(tmp: Path, root: Path) -> dict[str, Any]:
+    """A fallback list naming T x L, and one malformed list per refusal."""
+    d = tmp / "fb"
+    d.mkdir()
+    (d / "ok.json").write_text(json.dumps(FALLBACK_OK), encoding="utf-8", newline="\n")
+    bad = []
+    for name, doc in FALLBACK_BAD.items():
+        (d / f"{name}.json").write_text(json.dumps(doc), encoding="utf-8", newline="\n")
+        bad.append((d / f"{name}.json").as_posix())
+    return {"file_ok": (d / "ok.json").as_posix(), "bad_files": bad,
+            "mask_folder": (root / "data" / "T" / SESSION_A / "masks" / MODEL).as_posix(),
+            "out_root": (tmp / "out_fb").as_posix()}
+
+
+def _check_fallback(res: dict[str, Any], out_root: Path, out_fb: Path) -> None:
+    """Default list empty and recorded; T x L listed -> L_T falls back; malformed refused."""
+    assert np.atleast_1d(res["fallback_bad"]).tolist() == list(FALLBACK_BAD_IDS.values())
+    assert res["fallback_error"] == "", res["fallback_error"]
+    default = json.loads((out_root / "T" / SESSION_A / MODEL / "e5" / "night6_record.json")
+                         .read_text(encoding="utf-8"))
+    assert default["step1a_fallback"]["keys"] == []
+    assert Path(default["step1a_fallback"]["file"]).name == "step1a_fallback.json"
+    assert default["runs"][0]["step1a_fallback"] == []
+    listed = json.loads((out_fb / "T" / SESSION_A / MODEL / "e5" / "night6_record.json")
+                        .read_text(encoding="utf-8"))
+    assert np.atleast_1d(listed["step1a_fallback"]["keys"]).tolist() == ["T|L"]
+    assert len(listed["step1a_fallback"]["sha256"]) == 64
+    assert listed["runs"][0]["call"] == "process_dataset_v2"
+    assert np.atleast_1d(listed["runs"][0]["step1a_fallback"]).tolist() == ["L_T"]
 
 
 MMC_FS = 2000.0
@@ -476,7 +526,7 @@ def _v2_case(tmp: Path) -> dict[str, Any]:
     savemat(tmp / "v2_in.mat", {"y": y, "fs": FS, "rpeakSamples": rpeaks})
     case = {"input_file": (tmp / "v2_in.mat").as_posix(), "labels": ["L_T", "R_T"],
             "wide_pad_ms": 200.0}
-    return {"case": case, "y": y, "n_rpeaks": rpeaks.size}
+    return {"case": case, "y": y, "n_rpeaks": rpeaks.size, "rpeaks": rpeaks}
 
 
 def _check_v2(v2: dict[str, Any], r: dict[str, Any], pnew: Path) -> None:
@@ -503,6 +553,20 @@ def _check_v2(v2: dict[str, Any], r: dict[str, Any], pnew: Path) -> None:
         near = np.convolve(nan.astype(np.int64), np.ones(2 * pad + 1, dtype=np.int64),
                            mode="same") > 0
         assert not near[c - 1].any(), k  # independently of the MATLAB check
+    # ruling (j) 1 fallback on channel 1 only: her step1a's +/-15 ms windows, exactly
+    assert r["fb_error"] == "", r["fb_error"]
+    assert np.atleast_1d(r["fb_channels"]).tolist() == ["L_T"]
+    n = v2["y"].shape[0]
+    w = round(15e-3 * FS)
+    blank = np.zeros(n, dtype=bool)
+    for rs in v2["rpeaks"].astype(np.int64):
+        blank[max(1, rs - w) - 1:min(n, rs + w)] = True
+    want0 = int((blank & ~np.isnan(v2["y"][:, 0])).sum())
+    assert np.atleast_1d(r["fb_nan_added"]).tolist() == [want0, 0]
+    fb_checks = r["fb_spike_check"] if isinstance(r["fb_spike_check"], list) \
+        else [r["fb_spike_check"]]
+    assert all(c["n_in_pad"] == 0 for c in fb_checks)
+    assert r["fb_no_rpeaks"] == "process_dataset_v2:step1aNoRpeaks"
     assert r["wide_pad"] == "process_dataset_v2:spikeInMask"
     assert r["all_nan"] == "process_dataset_v2:noValidSamples"
     assert r["constant"] == "process_dataset_v2:constantInput"
