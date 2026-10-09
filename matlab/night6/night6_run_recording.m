@@ -48,17 +48,18 @@ function records = night6_run_recording(maskFolder, varargin)
 %               keys go into every record; an unreadable list stops the run.
 %   RecoveryStarts  the declared recovery-starts file (RULING 2026-10-08 (k) 2; written by
 %               gems_blanking_v2.extent.recovery_start.write_recovery_starts). Every
-%               stim_recovery epoch REQUIRES it: each analysis whose own start is later
-%               than the epoch start has its input masked before that start
-%               (night6_recovery_lead_in), and an analysis with no start is refused by
-%               name. Its path and SHA-256 go into the record; a changed file reruns the
+%               stim_recovery epoch REQUIRES it: every analysis's input is masked
+%               before the file's electrical settling (night6_recovery_lead_in), each
+%               output variable is cut at its own cut, and an analysis with no start is
+%               refused by name. Its path and SHA-256 go into the record; a changed file reruns the
 %               stim_recovery epochs on resume. Default '' (no file: stim_recovery refused).
-%   RecoveryTrimMode  REQUIRED, no default (night6_trim_modes): 'mask_to_own_start' masks
-%               each analysis's input up to its own start; 'mask_to_electrical_drop_outputs'
-%               masks every input up to the electrical settling and then drops or flags
-%               every output stamped before the analysis's own start
-%               (night6_recovery_trim_outputs, by the starts file's output time map). A
-%               missing or unknown mode is refused by name before any work; the mode is
+%   RecoveryTrimMode  REQUIRED, no default (night6_trim_modes): mode (B),
+%               'mask_to_electrical_drop_outputs' (RULING 2026-10-09 item 6), masks every
+%               input up to the electrical settling and then cuts every output VARIABLE
+%               at its own cut by its class, adds each windowed value's valid fraction
+%               and recomputes the whole-epoch averages (night6_recovery_trim_outputs, by
+%               the starts file's output time map). A missing, unknown or withdrawn mode
+%               ((A) 'mask_to_own_start') is refused by name before any work; the mode is
 %               in every record, and a stim_recovery epoch made under another mode reruns.
     ip = inputParser;
     ip.addRequired('maskFolder', @(x) ischar(x) || isstring(x));
@@ -343,7 +344,7 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
                     d1 = dir(outDir);
                     run.outputs = setdiff({d1.name}, {d0.name});
                     for fn = fieldnames(extra)', run.(fn{1}) = extra.(fn{1}); end
-                    if drop_outputs(plan, o)   % (k) 2 drop mode: cut at each own start
+                    if drop_outputs(plan, o)   % mode (B): each variable at its own cut
                         run.recovery_trim = night6_recovery_trim_outputs(outDir, ...
                             run.outputs, r.consumers, plan.recoveryStart, ...
                             o.RS.outputTimes, plan.fs);
@@ -696,8 +697,8 @@ function assert_finite(v, where, f)
 end
 
 function tf = drop_outputs(plan, o)
-% True when this epoch's outputs are cut at each analysis's own start (the drop mode,
-% on a stim_recovery epoch the starts file applies to).
+% True when this epoch's outputs are cut per variable (mode (B), RULING 2026-10-09 item
+% 6, on a stim_recovery epoch the starts file applies to).
     tf = strcmp(o.RecoveryTrimMode, 'mask_to_electrical_drop_outputs') ...
         && ~isempty(plan.recoveryStart) && plan.recoveryStart.applies;
 end

@@ -59,18 +59,38 @@ What is NOT counted, and why (each listed per analysis, never silently dropped):
   keeps them free of unsettled data; under ``mask_to_electrical_drop_outputs`` they are
   computed over [electrical settling, epoch end], and the record says so.
 
-Trim modes (:data:`TRIM_MODES`, a REQUIRED declaration of every Night 6 batch)
--------------------------------------------------------------------------------
-* ``mask_to_own_start`` - each analysis's input is masked (NaN) up to its OWN start.
-  Costs, per analysis, the window settling after the electrical settling (spikes 15 s,
-  hrv and breathing 30 s, slow wave 41 s, mmc 51 s at the cohort rate), and its outputs
-  in the first window after the start are partial windows over the fill of the mask.
-* ``mask_to_electrical_drop_outputs`` - every analysis's input is masked up to the
-  electrical settling, one point for all; every output stamped before the analysis's
-  own start is then dropped or flagged as not computed, by :data:`OUTPUT_VARS` (the
-  per-output time map, read from her code with ``file:line``). Epoch-wide scalars stay,
-  recorded as computed over [electrical settling, epoch end]; an output whose time
-  convention is not known is left untrimmed and listed by name, never dropped silently.
+Trim mode (:data:`TRIM_MODES`, a REQUIRED declaration of every Night 6 batch)
+------------------------------------------------------------------------------
+RULING 2026-10-09 item 6: Night 6 runs mode (B), ``mask_to_electrical_drop_outputs``,
+defined PER OUTPUT VARIABLE:
+
+* every analysis's input is masked (NaN) only through the electrical settling, one point
+  for all;
+* every time-stamped output variable is then cut at ITS OWN cut point, by its class
+  (:data:`TRIM_CLASSES`, declared per variable in :data:`OUTPUT_VARS` with ``file:line``):
+
+  - ``valid_only`` (i): computed over valid input samples or events only, so her own
+    rule decides the edge windows (the rule is cited per variable, :class:`EdgeRule`):
+    cut at the electrical settling + the settling of its own INPUT (its cascade without
+    its own window), never half its window;
+  - ``filled_or_filtered`` (ii): computed on filled-in or filtered data: cut at the
+    electrical settling + its FULL reach (the whole cascade);
+  - a trimmed variable with no class, or an unknown one, is refused by name;
+
+* every windowed output value carries its valid fraction (:class:`ValidFraction`): her
+  own variable where she already saves one, otherwise a sibling ``<name>_validFraction``
+  computed from the masked input her function saw, over her own window;
+* whole-epoch averages and counts of trimmed series are recomputed from the kept values
+  (:class:`Recompute`); her original values are kept in the marker (:data:`TRIM_MARKER`);
+* not-computed mmc events are NaN, never "no event" (action ``nan_events``: the logical
+  series becomes double);
+* windows stay centred: nothing is re-stamped.
+
+Mode (A), ``mask_to_own_start`` (each analysis's input masked to its own start), is
+withdrawn by the same ruling and refused by name (:data:`WITHDRAWN_TRIM_MODES`), so a
+stale batch list cannot run it. Epoch-wide scalars that are not recomputed stay, recorded
+as computed over [electrical settling, epoch end]; an output whose time convention is
+not known is left untrimmed and listed by name, never dropped silently.
 
 An unknown stage makes the analysis's settling ``None`` with the missing stage named -
 never the part that is known (invariant 19). That analysis then keeps 132 s for the
@@ -79,9 +99,10 @@ file, labelled ``fixed_132s_settling_unknown`` (the user's rule, 2026-10-08).
 The file Night 6 reads
 ----------------------
 :func:`write_recovery_starts` writes one JSON document - per file: the electrical
-settling as an exact 0-based FILE sample, and per analysis the start in seconds (for the
+settling as an exact 0-based FILE sample, per analysis the start in seconds (for the
 record) and as an exact 0-based FILE sample (MATLAB never converts seconds to samples,
-invariants 15 and 22), its basis and its source - plus the table it was computed with,
+invariants 15 and 22), its basis and its source, and per CUT (one per owner, output and
+class the map uses) the cut point the same way - plus the table it was computed with,
 the output time map, the cited files' hashes and the held files. Night 6 records the
 file's path and SHA-256 in every stim_rec epoch's record.
 
@@ -113,6 +134,7 @@ from gems_blanking_v2.physio.rpeaks import DECIMATE_TARGET_HZ
 __all__ = [
     "ACTIONS",
     "ANALYSES",
+    "BASIS_CUT",
     "BASIS_FIXED",
     "BASIS_MEASURED",
     "CONVENTIONS",
@@ -122,36 +144,51 @@ __all__ = [
     "HELD_UNDETECTED",
     "OUTPUT_FILES",
     "OUTPUT_VARS",
+    "RECOMPUTE_KINDS",
     "RULING",
+    "RULING_TRIM",
     "SCHEMA",
     "SOURCE_FILES",
     "SOURCE_LABEL",
+    "TRIM_CLASSES",
     "TRIM_MARKER",
     "TRIM_MODES",
+    "VALID_FRACTION_KINDS",
+    "VALID_FRACTION_SUFFIX",
+    "WITHDRAWN_TRIM_MODES",
     "Analysis",
     "AnalysisSettling",
+    "EdgeRule",
     "Excluded",
     "Output",
     "OutputFile",
     "OutputVar",
+    "Recompute",
     "Stage",
+    "ValidFraction",
     "analysis_settling",
     "beat_decimation_factor",
+    "cut_id",
     "file_starts",
+    "output_reach_s",
     "output_times_record",
     "read_recovery_starts",
     "recovery_starts_document",
     "source_files_record",
     "stage_settling_s",
     "table_record",
+    "trim_cuts",
     "write_recovery_starts",
 ]
 
 RULING: Final = "RULING 2026-10-08 (k) 2"
-SCHEMA: Final = "gems-blanking-v2 recovery starts v2"
-"""v2: the electrical settling sample, the output time map and the cited files' hashes
-(``source_files``: ``[{file, sha256}]`` rows, checked by Night 6 against the files it
-resolves; no v2 file had been written for a run when the rows replaced an object)."""
+RULING_TRIM: Final = "RULING 2026-10-09 item 6"
+SCHEMA: Final = "gems-blanking-v2 recovery starts v3"
+"""v3: per-file ``cuts`` (one cut point per owner, output and trim class, RULING
+2026-10-09 item 6) and the per-variable classes, valid fractions and recomputed averages
+in the output time map. v2 (no cuts) is refused: its owner-start cut is not mode (B).
+v2 added the electrical settling sample, the output time map and the cited files'
+hashes (``source_files``: ``[{file, sha256}]`` rows)."""
 SOURCE_FILES: Final[Mapping[str, str]] = {
     "HR_BR_HRVAnalysis_beats.m":
         "14f85d66de4097f5385965f5f6df31e3ce00b51bb86d9295adf19d715a9b9670",
@@ -183,9 +220,36 @@ def source_files_record() -> list[dict[str, str]]:
     """
     return [{"file": k, "sha256": v} for k, v in sorted(SOURCE_FILES.items())]
 
-TRIM_MODES: Final = ("mask_to_own_start", "mask_to_electrical_drop_outputs")
-"""The two Night 6 trim semantics; the batch list must name one (no default). The same
-two names are ``matlab/night6/night6_trim_modes.m`` (a test holds them equal)."""
+TRIM_MODES: Final = ("mask_to_electrical_drop_outputs",)
+"""The Night 6 trim mode: (B), per output variable (RULING 2026-10-09 item 6). The batch
+list must still name it (no default). The same name is ``matlab/night6/night6_trim_modes.m``
+(a test holds them equal)."""
+
+WITHDRAWN_TRIM_MODES: Final[Mapping[str, str]] = {
+    "mask_to_own_start": (
+        "trim mode (A), withdrawn by RULING 2026-10-09 item 6: Night 6 runs mode (B), "
+        "mask_to_electrical_drop_outputs (input masked through the electrical settling only, "
+        "outputs trimmed per variable)"),
+}
+"""Modes refused BY NAME, with the ruling, so a stale batch list cannot run one. (A) is
+removed rather than kept unselectable: code no batch can reach is untested surface, and
+the commit history keeps it (``night6_trim_modes.m`` lists the same names)."""
+
+TrimClass = Literal["valid_only", "filled_or_filtered"]
+TRIM_CLASSES: Final[Mapping[str, str]] = {
+    "valid_only": (
+        "(i) computed over valid input samples or events only, so her own rule decides the "
+        "edge windows: cut at the electrical settling + the settling of its own INPUT (its "
+        "cascade without its own window), never half its window"),
+    "filled_or_filtered": (
+        "(ii) computed on filled-in or filtered data: cut at the electrical settling + its "
+        "full reach (the whole cascade)"),
+}
+"""RULING 2026-10-09 item 6. Every trimmed variable declares one; none is guessed."""
+
+VALID_FRACTION_SUFFIX: Final = "_validFraction"
+"""A computed valid fraction is saved as the sibling ``<name>_validFraction`` (her names,
+types and shapes are kept; the sibling is listed in the marker)."""
 
 FIXED_START_S: Final = 132.0
 FIXED_START_SOURCE: Final = (
@@ -196,6 +260,7 @@ FIXED_START_SOURCE: Final = (
 """Where the current recovery epoch starts. Not a settling measurement (RULING (k))."""
 
 BASIS_MEASURED: Final = "stim_off_plus_electrical_plus_own_settling"
+BASIS_CUT: Final = "stim_off_plus_electrical_plus_class_reach"
 BASIS_FIXED: Final = "fixed_132s_settling_unknown"
 HELD_UNDETECTED: Final = "held_stim_edges_undetected"
 HELD_NO_SETTLING: Final = "held_no_electrical_settling"
@@ -241,11 +306,18 @@ class Stage:
 
 @dataclass(frozen=True, slots=True)
 class Output:
-    """One output of an analysis's call, and the cascade of stages it is made through."""
+    """One output of an analysis's call, and the cascade of stages it is made through.
+
+    ``key`` names it for the per-variable cuts (an identifier, unique in its analysis);
+    ``own_window`` says the LAST stage is the output's own window - the one a class (i)
+    variable's cut leaves out (RULING 2026-10-09 item 6: "not by half its window").
+    """
 
     name: str
     stages: tuple[Stage, ...]
     source: str
+    key: str = ""
+    own_window: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,20 +387,21 @@ _SPIKE_BAND = Stage(
 _SPIKES = Analysis(
     "spikes", "process_dataset_v2 (her process_dataset steps, matlab/night6)",
     (
-        Output("spike times", (_SPIKE_BAND,), "step3_detect.m (on D.filtered)"),
+        Output("spike times", (_SPIKE_BAND,), "step3_detect.m (on D.filtered)",
+               key="spike_times"),
         Output("spike waveforms", (
             _SPIKE_BAND,
             Stage("waveform window before the aligned peak: wfPreMs 1 ms + wfAlignSearchMs "
                   "0.5 ms", "window, part before t", "before_t", "step4_waveforms.m:44-46",
                   "npre   = round(P.wfPreMs  * 1e-3 * fs);", "code", window_s=0.0015),
-        ), "step4_waveforms.m"),
+        ), "step4_waveforms.m", key="spike_waveforms"),
         Output("firing rate (frBinSec 1 s bins)", (
             _SPIKE_BAND,
             Stage("firing-rate bins, frBinSec = 1 s, value at the bin centre",
                   "fixed bin, reported at its centre", "half",
                   "step6_spike_report.m:62 (firing_rate, :140-152, t = bin centre)",
                   "firing_rate(cen, valid, N, fs, P.frBinSec)", "code", window_s=1.0),
-        ), "step6_spike_report.m:62"),
+        ), "step6_spike_report.m:62", key="firing_rate", own_window=True),
         Output("activity envelope (envBinSec 1 s RMS bins)", (
             _SPIKE_BAND,
             Stage("artifact-excursion pad, +/- 5 ms", "centred window", "half",
@@ -337,7 +410,7 @@ _SPIKES = Analysis(
             Stage("RMS bins, envBinSec = 1 s, value at the bin centre",
                   "fixed bin, reported at its centre", "half", "step3b_envelope.m:107",
                   "t_c(b) = ((i0 + i1) / 2 - 1) / fs;", "code", window_s=1.0),
-        ), "step3b_envelope.m"),
+        ), "step3b_envelope.m", key="envelope", own_window=True),
         Output("rolling CV2 (cv2WinSec 30 s bins)", (
             _SPIKE_BAND,
             Stage("CV2 bins, cv2WinSec = 30 s, value at the bin centre",
@@ -345,7 +418,13 @@ _SPIKES = Analysis(
                   "step6_spike_report.m:94 (rolling_cv2, :262-271, t = edges + winSec/2)",
                   "rolling_cv2(st, isims, isClean, Tend, P.cv2WinSec)", "code",
                   window_s=30.0),
-        ), "step6_spike_report.m:94"),
+        ), "step6_spike_report.m:94", key="cv2", own_window=True),
+        Output("noise sigma windows (sigmaWindowSec 5 s, step 2.5 s, at the window centre)", (
+            _SPIKE_BAND,
+            Stage("sigma window, sigmaWindowSec = 5 s, value at its centre", "centred window",
+                  "half", "step2_noise_sigma.m:98 (window :90-91; win :42)",
+                  "cWin(w) = (i0 + i1) / 2;", "code", window_s=5.0),
+        ), "step2_noise_sigma.m:89-99", key="sigma_windows", own_window=True),
     ),
     (
         Excluded("step2 edge pad, edgeBufferMs 10 ms around every invalid sample", "edge guard",
@@ -377,24 +456,31 @@ _HRV = Analysis(
             Stage("heart-rate window, hrBrWinSec = 60 s (night6 params), centred",
                   "centred window", "half", f"{_HR_BR}:835 (t0 = tc - halfHrBr; :816)",
                   "t0   = tc - halfHrBr;", "code", window_s=60.0),
-        ), f"{_HR_BR}:833-849"),
+        ), f"{_HR_BR}:833-849", key="heart_rate", own_window=True),
         Output("beat count and HRV metrics (winSec 20 s, centred)", (
             *_BEATS,
             Stage("count/HRV window, winSec = 20 s (night6 params), centred",
                   "centred window", "half", f"{_HR_BR}:873 (t0w = tc - halfWin; :817)",
                   "t0w   = tc - halfWin;", "code", window_s=20.0),
-        ), f"{_HR_BR}:871-917"),
+        ), f"{_HR_BR}:871-917", key="count_hrv", own_window=True),
         Output("sample entropy (fixed 60 s, centred)", (
             *_BEATS,
             Stage("sample-entropy window, fixed 60 s, centred", "centred window", "half",
                   f"{_HR_BR}:924 (t0se = tc - halfSampEn; :818-819)",
                   "t0se  = tc - halfSampEn;", "code", window_s=60.0),
-        ), f"{_HR_BR}:920-934"),
+        ), f"{_HR_BR}:920-934", key="sampen", own_window=True),
+        Output("beat fiducials as read (heartlocs, RR intervals)", _BEATS,
+               f"{_HR_BR}:289-299, :310", key="beats"),
+        Output("heart-band trace (heartBeatSeries): her 10-150 Hz order-4 filtfilt over the "
+               "linear fill, detrended over the epoch", (
+                   Stage("her 10-150 Hz order-4 bandpass (night6 order 4), filtfilt over the "
+                         "linear fill", "filter impulse response", "impz",
+                         f"{_HR_BR}:282 (fill :262; butter :280)",
+                         "yFilt    = filtfilt(sos, g, xFill);", "measured",
+                         filter=CONSUMER_FILTERS["hrv"]),
+               ), f"{_HR_BR}:286, :302-303", key="heart_band_trace"),
     ),
     (
-        Excluded("the call's own 10-150 Hz filter (heartBeatSeriesClean)", "display only",
-                 f"{_HR_BR}:278-286", "with stored beats it feeds only the detrended trace; "
-                 "the beats are READ (:289-299), not found on it"),
         Excluded("edgeBufferSec 0.75 s (night6 params) at blank and signal edges", "edge guard",
                  f"{_HR_BR}:249-256", "acts after an edge; does not reach back. Built from "
                  "blankIdx and the array ends only, and night6 passes blankIdx = []: no buffer at "
@@ -415,7 +501,9 @@ _BREATHING = Analysis(
             Stage("breath-rate window, hrBrWinSec = 60 s (night6 params), centred",
                   "centred window", "half", f"{_HR_BR}:835 (t0 = tc - halfHrBr; :816)",
                   "t0   = tc - halfHrBr;", "code", window_s=60.0),
-        ), f"{_HR_BR}:851-868"),
+        ), f"{_HR_BR}:851-868", key="breath_rate", own_window=True),
+        Output("breath troughs (br_locs_true): stored beats, read on the raw signal", _BEATS,
+               f"{_HR_BR}:378-391", key="breath_troughs"),
     ),
     (
         Excluded("breath troughs: findpeaks MinPeakDistance (in beats)", "selection rule",
@@ -442,7 +530,7 @@ _SLOW_WAVE = Analysis(
                   "centred window", "half", f"{_SW}:156",
                   "smoothdata(filteredSignal, 1, 'gaussian', windowlen)", "code",
                   window_s=5.0),
-        ), f"{_SW}:156, :200"),
+        ), f"{_SW}:156, :200", key="sw_trace"),
         Output("slow-wave rate (rateWinSec 60 s, centred)", (
             Stage("low-pass 0.15 Hz order 2", "filter impulse response", "impz",
                   f"{_SW}:133", "filtSignal = filtfilt(sos, g, xFill);", "measured",
@@ -453,7 +541,7 @@ _SLOW_WAVE = Analysis(
             Stage("rate window, rateWinSec = 60 s, centred", "centred window", "half",
                   f"{_SW}:246 (winStartSamp = ctrSamp - halfWinSamp; :169, :229)",
                   "winStartSamp = max(1, ctrSamp - halfWinSamp);", "code", window_s=60.0),
-        ), f"{_SW}:225-280"),
+        ), f"{_SW}:225-280", key="sw_rate", own_window=True),
     ),
     (
         Excluded("findpeaks MinPeakDistance 6 s", "selection rule", f"{_SW}:200 (:165)",
@@ -488,13 +576,13 @@ _MMC_A = Analysis(
     "mmc", "extract_mmc (ANT1-3 raw, stored beats)",
     (
         Output("firing and burst (mmc_burst) event times", _MMC_EVENTS,
-               f"{_MMC}:109-111 (detect_crossings :220-235)"),
+               f"{_MMC}:109-111 (detect_crossings :220-235)", key="mmc_events"),
         Output("firing and burst (mmc_burst) rate and peak amplitude (W 10 s, centred)", (
             *_MMC_EVENTS,
             Stage("rate window W = 10 s (default), centred", "centred window", "half",
                   f"{_MMC}:287 (centers :115)",
                   "lo = max(1, floor((centers(w)-W/2)*fs)+1);", "code", window_s=10.0),
-        ), f"{_MMC}:115-117 (event_rate :282-296)"),
+        ), f"{_MMC}:115-117 (event_rate :282-296)", key="mmc_rate", own_window=True),
         Output("cross-channel delay (delayW 30 s on the firing rate, centred)", (
             *_MMC_EVENTS,
             Stage("rate window W = 10 s, centred", "centred window", "half", f"{_MMC}:287",
@@ -502,7 +590,9 @@ _MMC_A = Analysis(
             Stage("delay window delayW = 30 s (default), labelled at its centre",
                   "centred window", "half", f"{_MMC}:265 (wlen :259)",
                   "delay_t(s) = (lo+hi)/2 * S;", "code", window_s=30.0),
-        ), f"{_MMC}:119 (xchan_delay :255-272)"),
+        ), f"{_MMC}:119 (xchan_delay :255-272)", key="mmc_delay", own_window=True),
+        Output("conditioned signal (mmc.signal): 2-50 Hz band over the cardiac-blanked fill",
+               (*_BEATS, _MMC_BLANK, _MMC_BAND), f"{_MMC}:103-108, :153", key="mmc_signal"),
     ),
     (
         Excluded("event grouping by valid-time gap: 0.05 s (firings), 0.5 s (bursts)",
@@ -527,10 +617,10 @@ ANALYSES: Final[Mapping[str, Analysis]] = {
 # the output time map (mask_to_electrical_drop_outputs)
 # ---------------------------------------------------------------------------
 
-Role = Literal["trim", "time_axis", "epoch_scalar", "input", "parameter", "container",
-               "unknown"]
+Role = Literal["trim", "time_axis", "epoch_scalar", "recomputed", "input", "parameter",
+               "container", "unknown"]
 Convention = Literal["row1", "sec0", "sec_row1", "sec_xchan_delay"]
-Action = Literal["nan", "drop", "false"]
+Action = Literal["nan", "drop", "nan_events"]
 
 CONVENTIONS: Final[Mapping[str, str]] = {
     "row1": "a 1-based epoch row (a window centre may be fractional): position p = v - 1",
@@ -551,21 +641,104 @@ ACTIONS: Final[Mapping[str, str]] = {
            "(the time axis) is kept, so kept values keep their index",
     "drop": "the entry is removed from its event list (spike, beat, peak, RR interval, "
             "burst), together with every list co-indexed with the same stamps",
-    "false": "a full-rate logical event series: the rows are set false so her variable "
-             "keeps its type and her readers still load it (a logical has no NaN); a false "
-             "row before the start means NOT COMPUTED, never 'no event', and that is "
-             "recorded in the file itself (TRIM_MARKER). How events are represented in the "
-             "not-computed region is still Andrea's ruling to make",
+    "nan_events": "a full-rate logical event series becomes DOUBLE (1 event, 0 no event) and "
+                  "its rows before the cut are NaN: not computed, never 'no event' (RULING "
+                  "2026-10-09 item 6). Readers that call logical() on it fail loudly; find() "
+                  "would count a NaN row as an event, so a reader must test == 1",
 }
 """Every action is recorded in the trimmed file itself (:data:`TRIM_MARKER`)."""
 
 TRIM_MARKER: Final = "night6_recovery_trim"
-"""The top-level variable Night 6 adds to every output file it trims (drop mode): per
-trimmed variable path, the owner, the action, the stamp and its convention, the owner's
-start (seconds and 0-based file sample), the first computed epoch row and sample, the
-mode, and per leaf how many entries are not computed and where. It travels with the
-file, so any reader can tell 'not computed' from a value without the run record. Her
-variables keep their names and types."""
+"""The top-level variable Night 6 adds to every output file it trims: per trimmed variable
+path, the owner, its trim class and cut, the governing edge rule, the action, the stamp
+and its convention, the cut point (seconds and 0-based file sample), the first computed
+epoch row and sample, the mode, per leaf how many entries are not computed and where,
+and its valid-fraction variable; the sibling variables Night 6 added; and every
+recomputed average with her original value. It travels with the file, so any reader can
+tell 'not computed' from a value without the run record. Her variables keep their names
+(and, but for ``nan_events``, their types and shapes)."""
+
+
+@dataclass(frozen=True, slots=True)
+class EdgeRule:
+    """The rule in her code that decides a class (i) variable's edge windows.
+
+    ``half_valid`` is True only for her >= 50 %-valid window rule; the other rules are
+    cited as they are (RULING 2026-10-09 item 6 asks for every output it governs).
+    ``anchor`` is checked on the cited line by a test.
+    """
+
+    rule: str
+    source: str
+    anchor: str
+    half_valid: bool = False
+
+
+VFKind = Literal["her", "hr_window", "sw_window", "mmc_rate_window", "mmc_delay_window",
+                 "step2_window", "cv2_bins"]
+VALID_FRACTION_KINDS: Final[Mapping[str, str]] = {
+    "her": "her own variable already holds it (no sibling added)",
+    "hr_window": "HR_BR_HRVAnalysis_beats: rows idx0 = max(1, round((tc - W/2) fs) + 1) .. "
+                 "idx1 = min(N, round((tc + W/2) fs) + 1) (:835-838, :873-876); valid = "
+                 "~invalidMask (:226, saved)",
+    "sw_window": "slowWaveAnalysis_new: rows max(1, c - round(W fs / 2)) .. min(N, c + "
+                 "round(W fs / 2)), c = the centre row (:229, :246-247); valid = ~invalidMask "
+                 "(:97, saved)",
+    "mmc_rate_window": "extract_mmc event_rate: rows max(1, floor((c - W/2) fs) + 1) .. min(N, "
+                       "floor((c + W/2) fs)) (:287-288); valid = ~isnan(mmc.signal(:, ch)) "
+                       "(:284, as the call saved it), per channel",
+    "mmc_delay_window": "extract_mmc xchan_delay: firing-rate rows lo .. min(M, lo + wlen - 1), "
+                        "lo = 1 : step : max(1, M - wlen + 1) (:259-264); valid = both rates "
+                        "of the pair finite (:268), per pair",
+    "step2_window": "step2_noise_sigma: rows (w - 1) step + 1 .. min(N, i0 + win - 1) "
+                    "(:42-43, :90-91); valid = the channel's validMask (saved as invalidRuns)",
+    "cv2_bins": "step6 rolling_cv2: rows whose time (row - 1) / fs is in [edges(b), "
+                "edges(b + 1)) (:263, :267); valid = the channel's validMask (invalidRuns)",
+}
+"""How each valid fraction is computed: the fraction of the window's rows whose input
+sample was valid, over the window exactly as her code defines it, from the masked input
+her function saw (as saved in the output file). Every row of the stamp gets one, computed
+or not."""
+
+
+@dataclass(frozen=True, slots=True)
+class ValidFraction:
+    """Where a windowed variable's valid fraction comes from (:data:`VALID_FRACTION_KINDS`).
+
+    ``variable`` is her own variable (kind ``her``); ``width`` the variable holding the
+    window length in seconds (or ``width_s``, a constant of her code); ``validity`` the
+    variable the input validity is read from. Paths are dotted, in the same file.
+    """
+
+    kind: VFKind
+    source: str
+    variable: str = ""
+    width: str = ""
+    width_s: float | None = None
+    validity: str = ""
+
+
+RecomputeKind = Literal["mean_omitnan", "mean_well_sampled", "count", "events_per_valid_s"]
+RECOMPUTE_KINDS: Final[Mapping[str, str]] = {
+    "mean_omitnan": "mean(of, 1, 'omitnan') over the trimmed series (not-computed rows are "
+                    "NaN): her own expression, on the kept values",
+    "mean_well_sampled": "mean(of(where >= 0.5 & isfinite(finite)), 'omitnan') over the "
+                         "trimmed bins: her step3b_envelope.m:110-112 rule, on the kept bins",
+    "count": "numel of the trimmed list (the same struct element)",
+    "events_per_valid_s": "kept events (== 1) / (kept rows whose validity sample is not NaN "
+                          "/ fs), per column: her extract_mmc.m:295 definition, on the kept span",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class Recompute:
+    """How a whole-epoch average or count is recomputed from the kept values."""
+
+    kind: RecomputeKind
+    of: str
+    where: str = ""
+    finite: str = ""
+    validity: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -583,13 +756,16 @@ class OutputFile:
 class OutputVar:
     """One variable of an output file (a dotted path into the loaded ``.mat``), classified.
 
-    ``role``: ``trim`` (time-stamped: dropped or flagged before the owner's start, by
-    ``stamp`` / ``convention`` / ``action``), ``time_axis`` (a stamp vector, kept),
-    ``epoch_scalar`` (no time: computed over [electrical settling, epoch end] and kept),
-    ``input`` (a description of what the call was given), ``parameter``, ``container``
-    (a struct whose fields are classified one by one), or ``unknown`` (time convention
-    not determinable: left UNTRIMMED and listed by name). A struct-array container is
-    walked element by element; a sibling ``stamp`` is read from the same element.
+    ``role``: ``trim`` (time-stamped: dropped or flagged before its cut, by ``stamp`` /
+    ``convention`` / ``action``; its cut is ``trim_class`` of the owner's output keyed
+    ``reach``, with the ``edge`` rule of her code for class (i) and the ``valid`` fraction
+    of a windowed one), ``time_axis`` (a stamp vector, kept), ``epoch_scalar`` (no time:
+    computed over [electrical settling, epoch end] and kept), ``recomputed`` (a whole-epoch
+    average or count, recomputed from the kept values by ``recompute``), ``input`` (a
+    description of what the call was given), ``parameter``, ``container`` (a struct whose
+    fields are classified one by one), or ``unknown`` (time convention not determinable:
+    left UNTRIMMED and listed by name). A struct-array container is walked element by
+    element; a sibling ``stamp`` is read from the same element.
     """
 
     file: str
@@ -602,6 +778,11 @@ class OutputVar:
     convention: Convention | None = None
     action: Action | None = None
     why: str = ""
+    trim_class: TrimClass | None = None
+    reach: str = ""
+    edge: EdgeRule | None = None
+    valid: ValidFraction | None = None
+    recompute: Recompute | None = None
 
 
 _STEP2, _STEP3, _STEP3B = "step2_noise_sigma.m", "step3_detect.m", "step3b_envelope.m"
@@ -622,8 +803,10 @@ listed as untrimmed by name (figures included); none is dropped silently."""
 
 
 def _trim(file: str, path: str, source: str, anchor: str, stamp: str, convention: Convention,
-          action: Action, owner: str = "") -> OutputVar:
-    return OutputVar(file, path, "trim", source, owner, anchor, stamp, convention, action)
+          action: Action, owner: str = "", *, cls: TrimClass, reach: str,
+          edge: EdgeRule | None = None, valid: ValidFraction | None = None) -> OutputVar:
+    return OutputVar(file, path, "trim", source, owner, anchor, stamp, convention, action,
+                     trim_class=cls, reach=reach, edge=edge, valid=valid)
 
 
 def _axis(file: str, path: str, source: str, anchor: str, owner: str = "") -> OutputVar:
@@ -635,7 +818,92 @@ def _many(file: str, role: Role, paths: str, source: str, why: str = "",
     return tuple(OutputVar(file, p, role, source, owner, why=why) for p in paths.split())
 
 
-_EPOCH_WHY = "no time: computed over [electrical settling, epoch end] in the drop mode"
+_EPOCH_WHY = "no time: computed over [electrical settling, epoch end] (mode (B))"
+_RECOMPUTED_WHY = ("a whole-epoch average or count of a trimmed series: recomputed from the "
+                   "kept values (RULING 2026-10-09 item 6); her value is kept in the marker")
+
+
+def _recomputed(file: str, path: str, source: str, rc: Recompute,
+                owner: str = "") -> OutputVar:
+    return OutputVar(file, path, "recomputed", source, owner, why=_RECOMPUTED_WHY, recompute=rc)
+
+
+_VI: Final = "valid_only"
+_FF: Final = "filled_or_filtered"
+
+# --- the rules in her code that decide each class (i) variable's edge windows ----------
+_E_SIGMA = EdgeRule("at least max(100, sigmaMinValidFrac 0.2 x window) valid samples "
+                    "(pipeline_params.m:74)", f"{_STEP2}:95 (minValid :88)",
+                    "if numel(s) >= minValid")
+_E_ENV = EdgeRule("none per bin: an RMS whenever any sample of the bin is valid; her >= 0.5 "
+                  "rule (step3b_envelope.m:110) governs only meanRMS_uv and meanExcess_uv",
+                  f"{_STEP3B}:99 (vfrac :98)", "if any(sel)")
+_E_FR = EdgeRule("none: a rate whenever any sample of the bin is valid (vsec > 0), on the "
+                 "valid-seconds denominator", f"{_STEP6}:149 (validFrac :148)",
+                 "if vsec > 0; fr(b) = cnt(b)/vsec; end")
+_E_CV2 = EdgeRule("at least 3 gap-clean ISIs in the bin (an ISI is clean when no invalid "
+                  "sample lies between its spikes, :49)", f"{_STEP6}:269", "if numel(dd) >= 3;")
+_E_BURST = EdgeRule("bursts are built from gap-clean ISIs only", f"{_STEP6}:49 (detect_bursts "
+                    ":240-252)", "isClean = vbet == span;")
+_E_BEATS = EdgeRule("a stored beat in an invalid or edge-buffered sample is rejected",
+                    f"{_HR_BR}:298", "validHeartPeakMask = ~invalidMask(heartlocsRaw)")
+_E_RR = EdgeRule("an RR interval is kept only when no invalid sample lies between its beats",
+                 f"{_HR_BR}:998 (computeValidRRIntervals)",
+                 "if csumInvalid(s2) - csumInvalid(s1+1) == 0")
+_E_HR = EdgeRule("the beat rate over the LONGEST clean stretch of the window, at least "
+                 "hrMinStretchSec 1 s (:425) and hrMinPeaksInStretch 3 beats; NaN when the "
+                 "centre sample is invalid (:829)", f"{_HR_BR}:844, :848",
+                 "if stretchLen >= hrMinStretchSamp")
+_E_BR = EdgeRule("the trough rate over the longest clean stretch of the window, at least "
+                 "brMinStretchSec 5 s (:419) and 3 troughs; NaN when the centre sample is "
+                 "invalid (:829)", f"{_HR_BR}:860, :865", "stretchLen >= brMinStretchSamp")
+_E_BRLOCS = EdgeRule("a trough in an invalid or edge-buffered sample is rejected",
+                     f"{_HR_BR}:391", "br_locs_true = br_locs_true(~invalidMask(br_locs_true)")
+_E_COUNT = EdgeRule("none: the raw beat count over the window's valid samples (heartPeakTrain "
+                    "is 0 at an invalid sample, :307), biased low in a partly invalid window; "
+                    "heartCountRateSeries is her corrected form", f"{_HR_BR}:893",
+                    "heartCountSeries(i) = sum(heartPeakTrain")
+_E_COUNT_SEC = EdgeRule("none: the window's valid seconds", f"{_HR_BR}:894",
+                        "heartCountValidSec(i) = winValidSec;")
+_E_COUNT_RATE = EdgeRule("at least minValidFracForCount = 0.5 of the window valid (:802)",
+                         f"{_HR_BR}:895", "if winValidSec >= minValidFracForCount",
+                         half_valid=True)
+_E_HRV = EdgeRule("at least minRR valid RR intervals in the window (max(3, round(0.1 x 400 x "
+                  "winSec / 60)) = 13 at winSec 20, :217)", f"{_HR_BR}:902",
+                  "if nRR_used(i) >= minRR")
+_E_NRR = EdgeRule("none: the count of valid RR intervals in the window", f"{_HR_BR}:901",
+                  "nRR_used(i) = sum(keep);")
+_E_SAMPEN = EdgeRule("at least minRR_sampEn = 40 valid RR intervals in the window (:822)",
+                     f"{_HR_BR}:928", "if nSE >= minRR_sampEn")
+_E_MMC_RATE = EdgeRule("at least minValidFrac = 0.5 of the window valid, of W seconds (:49)",
+                       f"{_MMC}:290", "if vd < minVF*W; continue; end", half_valid=True)
+_E_SW_RATE = EdgeRule("pooled clean stretches of at least minStretchSec 30 s of the 60 s window "
+                      "(:170) - a 50 % rule, but counted over peaks of filled, low-passed and "
+                      "smoothed data (:126-156), so class (ii)", f"{_SW}:273",
+                      "if pooledLen < minStretchSamp", half_valid=True)
+_E_DELAY = EdgeRule("at least 4 rows with both rates finite; the other rows are set to the "
+                    "mean (0 once it is removed) before the cross-correlation - a fill, so "
+                    "class (ii)", f"{_MMC}:269-270", "a(~ok)=0")
+
+# --- where each windowed variable's valid fraction comes from ------------------------
+_VF_SIGMA = ValidFraction("step2_window", f"{_STEP2}:42-43, :90-91", width="sigmaWin.windowSec",
+                          validity="invalidRuns")
+_VF_ENV = ValidFraction("her", f"{_STEP3B}:98, :118", variable="envelope.validFrac")
+_VF_FR = ValidFraction("her", f"{_STEP6}:148 (:62)", variable="metrics.fr_validFrac")
+_VF_CV2 = ValidFraction("cv2_bins", f"{_STEP6}:263, :267", width="info.P.cv2WinSec",
+                        validity="invalidRuns")
+_VF_HRBR = ValidFraction("hr_window", f"{_HR_BR}:835-838", width="hrBrWinSec",
+                         validity="invalidMask")
+_VF_WIN = ValidFraction("hr_window", f"{_HR_BR}:873-876", width="winSec",
+                        validity="invalidMask")
+_VF_SE = ValidFraction("hr_window", f"{_HR_BR}:923-925 (seconds on RR_times; rows as :875-876)",
+                       width="sampEnWinSec", validity="invalidMask")
+_VF_SW = ValidFraction("sw_window", f"{_SW}:229, :246-247", width="rateWinSec",
+                       validity="invalidMask")
+_VF_MMC_RATE = ValidFraction("mmc_rate_window", f"{_MMC}:284-290", width="mmc.params.W",
+                             validity="mmc.signal")
+_VF_DELAY = ValidFraction("mmc_delay_window", f"{_MMC}:259-268", width="mmc.params.delayW",
+                          validity="mmc.firing.rate")
 
 _SPIKE_VARS = (
     *_many("spikes_v2", "container", "spikes envelope metrics metrics.burst sigmaWin",
@@ -648,9 +916,9 @@ _SPIKE_VARS = (
     *_many("spikes_v2", "input", "rpeakSamples rpeakTimes invalidRuns",
            f"{_RUN} save_spikes_v2 (the beats and masked runs it was given)"),
     *_many("spikes_v2", "epoch_scalar",
-           "noiseInfo modality spikes.nSpikes spikes.rate_hz spikes.validSec "
+           "noiseInfo modality spikes.rate_hz spikes.validSec "
            "spikes.meanWaveform spikes.stdWaveform spikes.nDetected spikes.screen "
-           "envelope.meanRMS_uv envelope.meanExcess_uv metrics.nSpikes metrics.validDur_s "
+           "metrics.validDur_s "
            "metrics.meanRate_hz metrics.medianVpp_uv metrics.medianFWHM_ms metrics.CV "
            "metrics.CV2 metrics.LV metrics.refracViolFrac metrics.nISItotal metrics.nISIclean "
            "metrics.fracISIclean metrics.fanoCanon metrics.fanoSlope metrics.fano_T "
@@ -661,18 +929,30 @@ _SPIKE_VARS = (
            "metrics.burst.intraRate_hz metrics.burst.fracInBurst",
            f"{_STEP2}:147; {_STEP3}:91-93; {_STEP4}:119-124; {_STEP3B}:119-120; "
            f"{_STEP6}:52-91; step5c_modality_test.m:60", _EPOCH_WHY),
+    _recomputed("spikes_v2", "spikes.nSpikes", f"{_STEP4}:122",
+                Recompute("count", "spikes.alignedCenters")),
+    _recomputed("spikes_v2", "metrics.nSpikes", f"{_STEP6}:55",
+                Recompute("count", "spikes.alignedTimes")),
+    _recomputed("spikes_v2", "envelope.meanRMS_uv", f"{_STEP3B}:110-111",
+                Recompute("mean_well_sampled", "envelope.rms_uv", where="envelope.validFrac",
+                          finite="envelope.rms_uv")),
+    _recomputed("spikes_v2", "envelope.meanExcess_uv", f"{_STEP3B}:110, :112",
+                Recompute("mean_well_sampled", "envelope.excess_uv",
+                          where="envelope.validFrac", finite="envelope.rms_uv")),
     _axis("spikes_v2", "sigmaWin.centers", f"{_STEP2}:98 (cell per channel)",
           "cWin(w) = (i0 + i1) / 2;"),
     _trim("spikes_v2", "sigmaWin.sigma", f"{_STEP2}:96", "sigWin(w) = median(abs(s)) / 0.6745;",
-          "sigmaWin.centers", "row1", "nan"),
-    *(_trim("spikes_v2", f"spikes.{v}", f"{_STEP3}:{ln}", a, "spikes.centers", "row1", "drop")
+          "sigmaWin.centers", "row1", "nan", cls=_VI, reach="sigma_windows", edge=_E_SIGMA,
+          valid=_VF_SIGMA),
+    *(_trim("spikes_v2", f"spikes.{v}", f"{_STEP3}:{ln}", a, "spikes.centers", "row1", "drop",
+            cls=_FF, reach="spike_times")
       for v, ln, a in (("centers", 86, "spikes(k).centers          = locs;"),
                        ("times", 87, "spikes(k).times            = (locs - 1) / fs;"),
                        ("peakAmp_uv", 88, "spikes(k).peakAmp_uv       = peakAmp_uv;"),
                        ("threshAtSpike_uv", 89, "spikes(k).threshAtSpike_uv = threshAtSpike_uv;"),
                        ("artifactMask", 90, "spikes(k).artifactMask     = artifactMask;"))),
     *(_trim("spikes_v2", f"spikes.{v}", f"{_STEP4}:{ln}", a, "spikes.alignedCenters", "row1",
-            "drop")
+            "drop", cls=_FF, reach="spike_waveforms")
       for v, ln, a in (("waveforms", 114, "D.spikes(k).waveforms      = W;"),
                        ("alignedCenters", 115, "D.spikes(k).alignedCenters = aligned;"),
                        ("alignedTimes", 116, "D.spikes(k).alignedTimes   = (aligned - 1) / fs;"),
@@ -680,7 +960,8 @@ _SPIKE_VARS = (
                        ("width_ms", 118, "D.spikes(k).width_ms       = wid;"))),
     _axis("spikes_v2", "envelope.t", f"{_STEP3B}:107 (bin centre)",
           "t_c(b) = ((i0 + i1) / 2 - 1) / fs;"),
-    *(_trim("spikes_v2", f"envelope.{v}", f"{_STEP3B}:{ln}", a, "envelope.t", "sec0", "nan")
+    *(_trim("spikes_v2", f"envelope.{v}", f"{_STEP3B}:{ln}", a, "envelope.t", "sec0", "nan",
+            cls=_VI, reach="envelope", edge=_E_ENV, valid=_VF_ENV)
       for v, ln, a in (("rms_uv", 115, "D.envelope(k).rms_uv       = rms;"),
                        ("sigmaFloor_uv", 116, "D.envelope(k).sigmaFloor_uv = sigFloor;"),
                        ("excess_uv", 117, "D.envelope(k).excess_uv    = excess;"),
@@ -688,37 +969,43 @@ _SPIKE_VARS = (
     _axis("spikes_v2", "metrics.fr_t", f"{_STEP6}:150 (bin centre)",
           "t(b) = ((i0+i1)/2-1)/fs;"),
     *(_trim("spikes_v2", f"metrics.{v}", f"{_STEP6}:62", "[M.fr_t, M.fr_hz, M.fr_validFrac]",
-            "metrics.fr_t", "sec0", "nan") for v in ("fr_hz", "fr_validFrac")),
+            "metrics.fr_t", "sec0", "nan", cls=_VI, reach="firing_rate", edge=_E_FR,
+            valid=_VF_FR) for v in ("fr_hz", "fr_validFrac")),
     _axis("spikes_v2", "metrics.cv2_t", f"{_STEP6}:264 (bin start + winSec/2)",
           "t = edges(1:end-1)+winSec/2;"),
     _trim("spikes_v2", "metrics.cv2_roll", f"{_STEP6}:94", "[M.cv2_t, M.cv2_roll]",
-          "metrics.cv2_t", "sec0", "nan"),
+          "metrics.cv2_t", "sec0", "nan", cls=_VI, reach="cv2", edge=_E_CV2, valid=_VF_CV2),
     *(_trim("spikes_v2", f"metrics.burst.{v}", f"{_STEP6}:249 (st = alignedTimes, sec0)",
             "onsets(end+1)=st(i0); offsets(end+1)=st(i1);", "metrics.burst.onsets", "sec0",
-            "drop") for v in ("onsets", "offsets")),
+            "drop", cls=_VI, reach="spike_waveforms", edge=_E_BURST)
+      for v in ("onsets", "offsets")),
 )
 
-_HR_SERIES = (("heartRateSeries", 849, "heartRateSeries(i) = hrPeaksInStretch", "hrv"),
-              ("heartCountSeries", 893, "heartCountSeries(i) = sum(heartPeakTrain", "hrv"),
-              ("heartCountValidSec", 894, "heartCountValidSec(i) = winValidSec;", "hrv"),
+_HR_SERIES = (("heartRateSeries", 849, "heartRateSeries(i) = hrPeaksInStretch", "hrv",
+               "heart_rate", _E_HR, _VF_HRBR),
+              ("heartCountSeries", 893, "heartCountSeries(i) = sum(heartPeakTrain", "hrv",
+               "count_hrv", _E_COUNT, _VF_WIN),
+              ("heartCountValidSec", 894, "heartCountValidSec(i) = winValidSec;", "hrv",
+               "count_hrv", _E_COUNT_SEC, _VF_WIN),
               ("heartCountRateSeries", 896, "heartCountRateSeries(i) = heartCountSeries(i)",
-               "hrv"),
+               "hrv", "count_hrv", _E_COUNT_RATE, _VF_WIN),
               ("breathRateSeries", 866, "breathRateSeries(i) = numel(peaksInStretch)",
-               "breathing"))
-_HRV_SERIES = (("hrv_series", 910, "hrv_series(i)   = hrv_val;"),
-               ("rmssd_series", 911, "rmssd_series(i) = hv.rmssd;"),
-               ("pnn5_series", 912, "pnn5_series(i)  = hv.pnn5;"),
-               ("sd1_series", 915, "sd1_series(i)  = sd1_val;"),
-               ("sd2_series", 916, "sd2_series(i)  = hv.sd2;"),
-               ("sampEn_series", 929, "sampEn_series(i) = sampleEntropyFast("),
-               ("nRR_used", 901, "nRR_used(i) = sum(keep);"))
+               "breathing", "breath_rate", _E_BR, _VF_HRBR))
+_HRV_SERIES = (("hrv_series", 910, "hrv_series(i)   = hrv_val;", "count_hrv", _E_HRV, _VF_WIN),
+               ("rmssd_series", 911, "rmssd_series(i) = hv.rmssd;", "count_hrv", _E_HRV,
+                _VF_WIN),
+               ("pnn5_series", 912, "pnn5_series(i)  = hv.pnn5;", "count_hrv", _E_HRV, _VF_WIN),
+               ("sd1_series", 915, "sd1_series(i)  = sd1_val;", "count_hrv", _E_HRV, _VF_WIN),
+               ("sd2_series", 916, "sd2_series(i)  = hv.sd2;", "count_hrv", _E_HRV, _VF_WIN),
+               ("sampEn_series", 929, "sampEn_series(i) = sampleEntropyFast(", "sampen",
+                _E_SAMPEN, _VF_SE),
+               ("nRR_used", 901, "nRR_used(i) = sum(keep);", "count_hrv", _E_NRR, _VF_WIN))
 
 
 def _heartlocs(file: str) -> OutputVar:
     return _trim(file, "heartlocs", f"{_HR_BR}:299",
                  "heartlocs          = heartlocsRaw(validHeartPeakMask);", "heartlocs", "row1",
-                 "drop")
-
+                 "drop", cls=_VI, reach="beats", edge=_E_BEATS)
 
 
 _HR_VARS = (
@@ -732,21 +1019,26 @@ _HR_VARS = (
     _axis("HRBR", "t", f"{_HR_BR}:213", "t = (0:N-1)' / fs;"),
     _axis("HRBR", "metrics_t", f"{_HR_BR}:792 (window centres, :834-836)",
           "metrics_t = (0 : stepSec : sigDurSec)';"),
-    *_many("HRBR", "epoch_scalar", "avgHeartRate avgHeartCount avgHeartCountRate",
-           f"{_HR_BR}:436-442", _EPOCH_WHY),
-    *_many("HRBR", "epoch_scalar", "avgBreathRate br_implausibleFraction",
-           f"{_HR_BR}:437, :402", _EPOCH_WHY, owner="breathing"),
+    *(_recomputed("HRBR", v, f"{_HR_BR}:{ln}", Recompute("mean_omitnan", of), owner=o)
+      for v, ln, of, o in (("avgHeartRate", 436, "heartRateSeries", "hrv"),
+                           ("avgBreathRate", 437, "breathRateSeries", "breathing"),
+                           ("avgHeartCount", 438, "heartCountSeries", "hrv"),
+                           ("avgHeartCountRate", 442, "heartCountRateSeries", "hrv"))),
+    *_many("HRBR", "epoch_scalar", "br_implausibleFraction", f"{_HR_BR}:402", _EPOCH_WHY,
+           owner="breathing"),
     OutputVar("HRBR", "RR_implausibleMask", "unknown", f"{_HR_BR}:318", why=(
         "one flag per RR interval BEFORE the implausible ones are removed; the times of "
         "that list are not saved, so it has no stamp to trim by: untrimmed, listed")),
     _trim("HRBR", "heartBeatSeries", f"{_HR_BR}:303 (t :213)",
-          "heartBeatSeries(invalidMask) = NaN;", "t", "sec0", "nan"),
+          "heartBeatSeries(invalidMask) = NaN;", "t", "sec0", "nan", cls=_FF,
+          reach="heart_band_trace"),
     _heartlocs("HRBR"),
-    *(_trim("HRBR", v, f"{_HR_BR}:{ln}", a, "metrics_t", "sec0", "nan", owner=o)
-      for v, ln, a, o in _HR_SERIES),
+    *(_trim("HRBR", v, f"{_HR_BR}:{ln}", a, "metrics_t", "sec0", "nan", owner=o, cls=_VI,
+            reach=r, edge=e, valid=vf)
+      for v, ln, a, o, r, e, vf in _HR_SERIES),
     _trim("HRBR", "br_locs_true", f"{_HR_BR}:388 (filtered :391)",
           "br_locs_true = heartlocs(br_locs);", "br_locs_true", "row1", "drop",
-          owner="breathing"),
+          owner="breathing", cls=_VI, reach="breath_troughs", edge=_E_BRLOCS),
     *_many("HRVMeasures", "epoch_scalar",
            "hrv rmssd pnn5 sd1 sd2 sampEn appxEn RR_implausibleFraction dfa_alpha1 dfa_alpha2 "
            "dfa_alphaFull dfa_R2_1 dfa_R2_2 dfa_nCross dfa_nWindows dfa_excludedScales",
@@ -759,10 +1051,12 @@ _HR_VARS = (
     _axis("HRVMeasures", "metrics_t", f"{_HR_BR}:792", "metrics_t = (0 : stepSec : sigDurSec)';"),
     _heartlocs("HRVMeasures"),
     *(_trim("HRVMeasures", v, f"{_HR_BR}:995, :1000 (RR_times = s1 / fs, s1 the start beat's "
-            "1-based row)", "RR_times(end+1,1)     = s1 / fs;", "RR_times", "sec_row1", "drop")
+            "1-based row)", "RR_times(end+1,1)     = s1 / fs;", "RR_times", "sec_row1", "drop",
+            cls=_VI, reach="beats", edge=_E_RR)
       for v in ("RR_intervals", "RR_times")),
-    *(_trim("HRVMeasures", v, f"{_HR_BR}:{ln}", a, "metrics_t", "sec0", "nan")
-      for v, ln, a in _HRV_SERIES),
+    *(_trim("HRVMeasures", v, f"{_HR_BR}:{ln}", a, "metrics_t", "sec0", "nan", cls=_VI,
+            reach=r, edge=e, valid=vf)
+      for v, ln, a, r, e, vf in _HRV_SERIES),
 )
 
 _SW_VARS = (
@@ -771,17 +1065,20 @@ _SW_VARS = (
            "windowlen channel channelColumn maskSignal keptFrom",
            f"{_SW}:340-345; matlab/night6/night6_keep_slow_wave.m"),
     *_many("slowWaves", "input", "invalidMask edgeMask", f"{_SW}:97, :111-118"),
-    *_many("slowWaves", "epoch_scalar", "avgSlowWave sw_implausibleFraction",
-           f"{_SW}:283, :212", _EPOCH_WHY),
+    _recomputed("slowWaves", "avgSlowWave", f"{_SW}:283",
+                Recompute("mean_omitnan", "slowWaveRateSeries")),
+    *_many("slowWaves", "epoch_scalar", "sw_implausibleFraction", f"{_SW}:212", _EPOCH_WHY),
     _axis("slowWaves", "t", f"{_SW}:89", "t          = (0:N-1)' / fs;"),
     _axis("slowWaves", "slowWaveRateTime", f"{_SW}:178 (the window's centre sample, :246)",
           "slowWaveRateTime = t(rateT_idx);"),
     _trim("slowWaves", "slowWaveTimeSeries", f"{_SW}:160",
-          "slowWaveTimeSeries(invalidMask, :) = NaN;", "t", "sec0", "nan"),
+          "slowWaveTimeSeries(invalidMask, :) = NaN;", "t", "sec0", "nan", cls=_FF,
+          reach="sw_trace"),
     _trim("slowWaves", "slowWaveRateSeries", f"{_SW}:279",
-          "slowWaveRateSeries(ti, ci) = pooledPeaks", "slowWaveRateTime", "sec0", "nan"),
+          "slowWaveRateSeries(ti, ci) = pooledPeaks", "slowWaveRateTime", "sec0", "nan",
+          cls=_FF, reach="sw_rate", edge=_E_SW_RATE, valid=_VF_SW),
     _trim("slowWaves", "slowWavePeakLocs", f"{_SW}:205", "slowWavePeakLocs{ci} = locs;",
-          "slowWavePeakLocs", "row1", "drop"),
+          "slowWavePeakLocs", "row1", "drop", cls=_FF, reach="sw_trace"),
 )
 
 _MMC_VARS = (
@@ -790,32 +1087,40 @@ _MMC_VARS = (
            "mmc.fs mmc.pairs mmc.params mmc.firing.refractory mmc.burst.refractory "
            "mmc.qc.srcFile mmc.qc.dataVar mmc.qc.gastricCols mmc.qc.periR_t", f"{_MMC}:124-166"),
     OutputVar("mmc", "mmc.qc.rpeakT", "input", f"{_MMC}:125", why="the beats it was given"),
+    *(_recomputed("mmc", f"mmc.{lvl}.avgRate", f"{_MMC}:295",
+                  Recompute("events_per_valid_s", f"mmc.{lvl}.events", validity="mmc.signal"))
+      for lvl in ("firing", "burst")),
     *_many("mmc", "epoch_scalar",
-           "mmc.firing.avgRate mmc.burst.avgRate mmc.qc.meanHR mmc.qc.pctBlanked "
+           "mmc.qc.meanHR mmc.qc.pctBlanked "
            "mmc.qc.rateNanFrac mmc.qc.nFirings mmc.qc.nBursts mmc.qc.periR_raw "
            "mmc.qc.periR_cond mmc.qc.psd_f mmc.qc.psd_raw mmc.qc.psd_cond",
-           f"{_MMC}:126-146, :295", _EPOCH_WHY),
+           f"{_MMC}:126-146", _EPOCH_WHY),
     _axis("mmc", "mmc.t", f"{_MMC}:152 (t :65)", "mmc.fs = fs; mmc.t = t;"),
     _axis("mmc", "mmc.rate_t", f"{_MMC}:154 (centers :115, windows :287-288)",
           "mmc.rate_t = centers;"),
     _axis("mmc", "mmc.delay_t", f"{_MMC}:159 (delay_t :265: RATE ROWS, not rate_t)",
           "mmc.delay_t = delay_t; mmc.delay = delay;"),
     _trim("mmc", "mmc.signal", f"{_MMC}:153", "mmc.signal = single(cond);", "mmc.t", "sec0",
-          "nan"),
+          "nan", cls=_FF, reach="mmc_signal"),
     *(_trim("mmc", f"mmc.{lvl}.events", f"{_MMC}:302 (ev_bool, :155-157)",
-            "for ch = 1:3; ev(evIdx{ch},ch) = true; end", "mmc.t", "sec0", "false")
+            "for ch = 1:3; ev(evIdx{ch},ch) = true; end", "mmc.t", "sec0", "nan_events",
+            cls=_FF, reach="mmc_events")
       for lvl in ("firing", "burst")),
-    *(_trim("mmc", f"mmc.{lvl}.{v}", f"{_MMC}:{ln}", a, "mmc.rate_t", "sec0", "nan")
+    *(_trim("mmc", f"mmc.{lvl}.{v}", f"{_MMC}:{ln}", a, "mmc.rate_t", "sec0", "nan", cls=_VI,
+            reach="mmc_rate", edge=_E_MMC_RATE, valid=_VF_MMC_RATE)
       for lvl in ("firing", "burst")
       for v, ln, a in (("rate", 292, "rate(w,ch) = sum(inw)/vd;"),
                        ("peakAmp", 293, "peakAmp(w,ch) = mean(pka(inw));"))),
     _trim("mmc", "mmc.delay", f"{_MMC}:272 (window :264-265)",
-          "delay(s,p) = lags(mi)*S;", "mmc.delay_t", "sec_xchan_delay", "nan"),
+          "delay(s,p) = lags(mi)*S;", "mmc.delay_t", "sec_xchan_delay", "nan", cls=_FF,
+          reach="mmc_delay", edge=_E_DELAY, valid=_VF_DELAY),
 )
 
 OUTPUT_VARS: Final[tuple[OutputVar, ...]] = (*_SPIKE_VARS, *_HR_VARS, *_SW_VARS, *_MMC_VARS)
 """THE per-output time map (invariant 33): every variable of every kept output file,
-classified. An ``owner`` left empty is the file's owner (:data:`OUTPUT_FILES`)."""
+classified, and every trimmed one with its class, its cut and (if windowed) its valid
+fraction. An ``owner`` left empty is the file's owner (:data:`OUTPUT_FILES`)."""
+
 
 XCHAN_DELAY_PARAMS: Final = ("mmc.params.W", "mmc.params.S")
 """Where ``sec_xchan_delay`` reads W and S (``extract_mmc.m:161``)."""
@@ -825,13 +1130,131 @@ def _owner(v: OutputVar) -> str:
     return v.owner or OUTPUT_FILES[v.file].owner
 
 
+def cut_id(owner: str, key: str, trim_class: str) -> str:
+    """Return the one name of a cut, ``<owner>.<output key>.<class>`` (never a JSON key)."""
+    return f"{owner}.{key}.{trim_class}"
+
+
+def _root_declared(decl: Mapping[str, OutputVar], path: str) -> bool:
+    return path.partition(".")[0] in decl or path in decl
+
+
+def _check_trim_var(kind: str, path: str, v: OutputVar, decl: Mapping[str, OutputVar],
+                    owner: str) -> dict[str, Any]:
+    """Validate a trimmed variable's class, cut, edge rule and valid fraction; its row."""
+    where = f"{kind}/{path}"
+    if v.trim_class is None:
+        msg = f"{where} has no trim class: declare one of {sorted(TRIM_CLASSES)} (never guessed)"
+        raise ValueError(msg)
+    if v.trim_class not in TRIM_CLASSES:
+        msg = f"{where}: unknown trim class {v.trim_class!r}"
+        raise ValueError(msg)
+    keys = [o.key for o in ANALYSES[owner].outputs]
+    if not v.reach or v.reach not in keys:
+        msg = f"{where}: reach {v.reach!r} is not an output key of {owner} ({keys})"
+        raise ValueError(msg)
+    if v.trim_class == "valid_only" and v.edge is None:
+        msg = f"{where}: a valid_only variable must cite the rule that decides its edge windows"
+        raise ValueError(msg)
+    row: dict[str, Any] = {"trim_class": v.trim_class, "output_key": v.reach,
+                           "cut": cut_id(owner, v.reach, v.trim_class)}
+    if v.edge is not None:
+        row["edge"] = {"rule": v.edge.rule, "source": v.edge.source,
+                       "half_valid": v.edge.half_valid}
+    if v.valid is not None:
+        row["valid_fraction"] = _check_valid_fraction(kind, path, v.valid, decl)
+    return row
+
+
+def _check_valid_fraction(kind: str, path: str, vf: ValidFraction,
+                          decl: Mapping[str, OutputVar]) -> dict[str, Any]:
+    """Validate where a windowed variable's valid fraction comes from; its record."""
+    where = f"{kind}/{path}"
+    if vf.kind not in VALID_FRACTION_KINDS:
+        msg = f"{where}: unknown valid-fraction kind {vf.kind!r}"
+        raise ValueError(msg)
+    d: dict[str, Any] = {"kind": vf.kind, "source": vf.source}
+    if vf.kind == "her":
+        if vf.variable not in decl:
+            msg = f"{where}: its valid fraction {vf.variable!r} is not declared in {kind}"
+            raise ValueError(msg)
+        return d | {"variable": vf.variable}
+    sib = path + VALID_FRACTION_SUFFIX
+    if sib in decl:
+        msg = f"{where}: the sibling {sib!r} would overwrite a declared variable"
+        raise ValueError(msg)
+    for ref in (vf.width, vf.validity):
+        if ref and not _root_declared(decl, ref):
+            msg = f"{where}: valid fraction reads {ref!r}, not declared in {kind}"
+            raise ValueError(msg)
+    if not vf.validity or not (vf.width or vf.width_s is not None):
+        msg = f"{where}: a computed valid fraction needs its window and its validity"
+        raise ValueError(msg)
+    d |= {"sibling": sib, "validity": vf.validity}
+    if vf.width:
+        d["width"] = vf.width
+    if vf.width_s is not None:
+        d["width_s"] = vf.width_s
+    return d
+
+
+def _check_recomputed(kind: str, path: str, v: OutputVar,
+                      decl: Mapping[str, OutputVar]) -> dict[str, Any]:
+    rc = v.recompute
+    if rc is None or rc.kind not in RECOMPUTE_KINDS:
+        msg = f"{kind}/{path}: a recomputed variable needs a known recompute kind"
+        raise ValueError(msg)
+    of = decl.get(rc.of)
+    if of is None or of.role != "trim":
+        msg = f"{kind}/{path}: it is recomputed from {rc.of!r}, not a trimmed variable of {kind}"
+        raise ValueError(msg)
+    d: dict[str, Any] = {"kind": rc.kind, "of": rc.of}
+    for name, ref in (("where", rc.where), ("finite", rc.finite), ("validity", rc.validity)):
+        if ref:
+            if ref not in decl:
+                msg = f"{kind}/{path}: {name} {ref!r} is not declared in {kind}"
+                raise ValueError(msg)
+            d[name] = ref
+    if rc.kind == "mean_well_sampled" and not (rc.where and rc.finite):
+        msg = f"{kind}/{path}: mean_well_sampled needs where and finite"
+        raise ValueError(msg)
+    if rc.kind == "events_per_valid_s" and not rc.validity:
+        msg = f"{kind}/{path}: events_per_valid_s needs its validity"
+        raise ValueError(msg)
+    return {"recompute": d}
+
+
+def _role_fields(kind: str, path: str, v: OutputVar,
+                 decl: Mapping[str, OutputVar]) -> dict[str, Any]:
+    """Validate a variable's role-specific declaration; the fields its row adds."""
+    if v.role == "trim":
+        st = decl.get(v.stamp)
+        if st is None or st.role not in ("time_axis", "trim"):
+            msg = f"{kind}/{path}: stamp {v.stamp!r} is not a declared time axis"
+            raise ValueError(msg)
+        if v.convention not in CONVENTIONS or v.action not in ACTIONS:
+            msg = f"{kind}/{path}: convention or action missing"
+            raise ValueError(msg)
+        return ({"stamp": v.stamp, "convention": v.convention, "action": v.action}
+                | _check_trim_var(kind, path, v, decl, _owner(v)))
+    if v.role == "recomputed":
+        return _check_recomputed(kind, path, v, decl)
+    if v.trim_class is not None or v.valid is not None or v.recompute is not None:
+        msg = f"{kind}/{path}: a {v.role} variable carries a trim class or a fraction"
+        raise ValueError(msg)
+    return {}
+
+
 def output_times_record() -> dict[str, Any]:
     """Return the output time map as data, for the starts document (Night 6 applies it).
 
     Checked here (a malformed map is refused, never half applied): every file and owner
     is known, every path is unique within its file and its parent is a declared
     container, and every ``trim`` names a stamp that is itself a declared time axis or a
-    trimmed list, a known convention and a known action.
+    trimmed list, a known convention and a known action, a trim class (RULING 2026-10-09
+    item 6: refused by name when absent or unknown), an output of its owner to be cut by,
+    the edge rule of a class (i) variable, and a valid fraction whose inputs are declared;
+    every ``recomputed`` names a trimmed variable of its file.
     """
     analyses = set(ANALYSES)
     by_file: dict[str, dict[str, OutputVar]] = {k: {} for k in OUTPUT_FILES}
@@ -857,20 +1280,16 @@ def output_times_record() -> dict[str, Any]:
                                    "owner": _owner(v), "source": v.source}
             if v.why:
                 row["why"] = v.why
-            if v.role == "trim":
-                st = decl.get(v.stamp)
-                if st is None or st.role not in ("time_axis", "trim"):
-                    msg = f"{kind}/{path}: stamp {v.stamp!r} is not a declared time axis"
-                    raise ValueError(msg)
-                if v.convention not in CONVENTIONS or v.action not in ACTIONS:
-                    msg = f"{kind}/{path}: convention or action missing"
-                    raise ValueError(msg)
-                row |= {"stamp": v.stamp, "convention": v.convention, "action": v.action}
+            row |= _role_fields(kind, path, v, decl)
             rows.append(row)
             if path.split(".")[0] == TRIM_MARKER:
                 msg = f"{kind}/{path}: {TRIM_MARKER!r} is the trim marker, not her variable"
                 raise ValueError(msg)
     return {"conventions": dict(CONVENTIONS), "actions": dict(ACTIONS),
+            "trim_classes": dict(TRIM_CLASSES), "ruling": RULING_TRIM,
+            "valid_fraction_kinds": dict(VALID_FRACTION_KINDS),
+            "valid_fraction_suffix": VALID_FRACTION_SUFFIX,
+            "recompute_kinds": dict(RECOMPUTE_KINDS),
             "marker_variable": TRIM_MARKER,
             "xchan_delay_params": list(XCHAN_DELAY_PARAMS),
             "files": [{"kind": f.kind, "pattern": f.pattern, "call": f.call, "owner": f.owner,
@@ -927,6 +1346,43 @@ def analysis_settling(name: str, fs: float,
         return AnalysisSettling(name, float(fs), None, None, per, tuple(missing))
     bind = max(per, key=lambda k: float(per[k] or 0.0))
     return AnalysisSettling(name, float(fs), per[bind], bind, per, ())
+
+
+def output_reach_s(owner: str, key: str, trim_class: str, fs: float,
+                   table: Mapping[str, Analysis] | None = None
+                   ) -> tuple[float | None, tuple[str, ...]]:
+    """How far back a variable of class ``trim_class`` on output ``key`` reaches, s.
+
+    RULING 2026-10-09 item 6: class (i) ``valid_only`` counts the settling of its own
+    INPUT - the output's cascade without its own window (``Output.own_window``), so never
+    half that window; class (ii) ``filled_or_filtered`` counts the full cascade. Returns
+    ``(None, missing)`` when a counted stage is unknown, or the owner or the output is not
+    in the table (invariant 19: never the known part, never 0).
+    """
+    if trim_class not in TRIM_CLASSES:
+        msg = f"{owner}/{key}: unknown trim class {trim_class!r}"
+        raise ValueError(msg)
+    tab = ANALYSES if table is None else table
+    a = tab.get(owner)
+    if a is None:
+        return None, (f"{owner}: not in the table",)
+    hit = [o for o in a.outputs if o.key == key]
+    if len(hit) != 1:
+        return None, (f"{owner}: {len(hit)} outputs keyed {key!r}",)
+    out = hit[0]
+    stages = out.stages[:-1] if trim_class == "valid_only" and out.own_window else out.stages
+    vals = [stage_settling_s(s, fs) for s in stages]
+    gaps = tuple(f"{owner}/{out.name}: {s.what}" for s, v in zip(stages, vals, strict=True)
+                 if v is None)
+    if gaps:
+        return None, gaps
+    return float(sum(v for v in vals if v is not None)), ()
+
+
+def trim_cuts() -> list[tuple[str, str, str]]:
+    """Every ``(owner, output key, class)`` the map cuts by, sorted (one cut point each)."""
+    out = {(_owner(v), v.reach, str(v.trim_class)) for v in OUTPUT_VARS if v.role == "trim"}
+    return sorted(out)
 
 
 def file_starts(*, session: str, fs: float | None, stim_off_s: float | None,
@@ -993,11 +1449,38 @@ def file_starts(*, session: str, fs: float | None, stim_off_s: float | None,
         else:
             row["relation"] = "later_than_fixed: trimmed at Night 6"
         rows.append(row)
+    cuts = _file_cuts(float(fs), float(electrical_settle_s), float(fixed_start_s),
+                      f"stim-off ({stim_off_source}) + electrical settling "
+                      f"({electrical_source})", table)
     return {"session": session, "fs": float(fs), "stim_off_s": float(stim_off_s),
             "electrical_settle_s": float(electrical_settle_s),
             "electrical_settle_sample0": seconds_to_sample(float(electrical_settle_s), fs),
             "electrical_s": float(electrical_settle_s) - float(stim_off_s),
-            "analyses": rows}
+            "analyses": rows, "cuts": cuts}
+
+
+def _file_cuts(fs: float, electrical_settle_s: float, fixed_start_s: float, basis_text: str,
+               table: Mapping[str, Analysis] | None) -> list[dict[str, Any]]:
+    """One row per cut the map uses: electrical settling + the class reach, or 132 s."""
+    fixed0 = seconds_to_sample(fixed_start_s, fs)
+    cuts: list[dict[str, Any]] = []
+    for owner, key, cls in trim_cuts():
+        reach, missing = output_reach_s(owner, key, cls, fs, table)
+        c: dict[str, Any] = {"cut": cut_id(owner, key, cls), "owner": owner,
+                             "output_key": key, "trim_class": cls}
+        if reach is None:
+            c |= {"start_s": fixed_start_s, "start_sample0": fixed0,
+                  "basis": BASIS_FIXED, "missing_settling": list(missing),
+                  "source": f"{RULING_TRIM}: reach unknown, keeps {fixed_start_s:g} s "
+                            "(user rule 2026-10-08; never a partial reach)"}
+        else:
+            start = electrical_settle_s + reach
+            c |= {"start_s": start, "start_sample0": seconds_to_sample(start, fs),
+                  "basis": BASIS_CUT, "reach_s": reach,
+                  "source": (f"{RULING_TRIM}: {basis_text} + the {cls} reach of "
+                             f"{owner}/{key} (extent.recovery_start, {SOURCE_LABEL})")}
+        cuts.append(c)
+    return cuts
 
 
 # ---------------------------------------------------------------------------
@@ -1037,6 +1520,27 @@ def table_record(fs: float, table: Mapping[str, Analysis] | None = None) -> list
     return out
 
 
+def _check_cuts(sess: str, cuts: object) -> None:
+    """Every cut the map uses, once, as an exact sample (invariant 27: asserted at write)."""
+    if not isinstance(cuts, list):
+        msg = f"{sess}: cuts (one per owner, output and class) are absent"
+        raise TypeError(msg)
+    ids = [str(c.get("cut")) for c in cuts]
+    if len(set(ids)) != len(ids):
+        msg = f"{sess}: a cut appears twice ({sorted(ids)})"
+        raise ValueError(msg)
+    want = {cut_id(*c) for c in trim_cuts()}
+    if set(ids) != want:
+        msg = (f"{sess}: cuts {sorted(set(ids) ^ want)} differ from the map's "
+               f"(missing {sorted(want - set(ids))})")
+        raise ValueError(msg)
+    for c in cuts:
+        k = c.get("start_sample0")
+        if not isinstance(k, int) or isinstance(k, bool) or k < 0:
+            msg = f"{sess}/{c.get('cut')}: start_sample0 must be an int >= 0"
+            raise TypeError(msg)
+
+
 def recovery_starts_document(files: Sequence[Mapping[str, Any]], *, fs: float,
                              fixed_start_s: float = FIXED_START_S,
                              table: Mapping[str, Analysis] | None = None,
@@ -1063,8 +1567,9 @@ def recovery_starts_document(files: Sequence[Mapping[str, Any]], *, fs: float,
                     raise TypeError(msg)
             ke = f.get("electrical_settle_sample0")
             if not isinstance(ke, int) or isinstance(ke, bool) or ke < 0:
-                msg = f"{sess}: electrical_settle_sample0 must be an int >= 0 (both trim modes)"
+                msg = f"{sess}: electrical_settle_sample0 must be an int >= 0 (mode (B))"
                 raise TypeError(msg)
+            _check_cuts(sess, f.get("cuts"))
             measured.append(dict(f))
         else:
             held.append(dict(f))
@@ -1072,6 +1577,7 @@ def recovery_starts_document(files: Sequence[Mapping[str, Any]], *, fs: float,
         "schema": SCHEMA, "ruling": RULING, "fs": float(fs),
         "fixed_start_s": float(fixed_start_s), "fixed_start_source": FIXED_START_SOURCE,
         "source_files": source_files_record(), "trim_modes": list(TRIM_MODES),
+        "withdrawn_trim_modes": dict(WITHDRAWN_TRIM_MODES),
         "output_times": output_times_record(), "table": table_record(fs, table),
         "files": sorted(measured, key=lambda d: str(d["session"])),
         "held": sorted(held, key=lambda d: str(d["session"])),

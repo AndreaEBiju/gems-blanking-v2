@@ -12,8 +12,9 @@ function summary = night6_batch(listFile, nWorkers, varargin)
 %     "label": "free text",                 (optional; copied into every record)
 %     "recovery_starts": "<path>",          (RULING 2026-10-08 (k) 2; required for any
 %                                            stim_recovery recording - see RecoveryStarts)
-%     "recovery_trim_mode": "<mode>",       (REQUIRED, no default: one of
-%                                            night6_trim_modes - see RecoveryTrimMode)
+%     "recovery_trim_mode": "<mode>",       (REQUIRED, no default: mode (B),
+%                                            mask_to_electrical_drop_outputs - see
+%                                            RecoveryTrimMode; (A) is refused by name)
 %     "recordings": [ {"mask_folder": "data/A/<session>/masks/<model-id>",
 %                      "meta_file": "..."} ] }   (meta_file optional)
 % A relative path is POSIX and resolves against gems_root (cross-platform rule 2).
@@ -26,8 +27,8 @@ function summary = night6_batch(listFile, nWorkers, varargin)
 % recording does not stop the batch. Writes <out_root>/night6_batch_<time>.json.
 %
 % Refused AT BATCH START, by name, before any recording is loaded (RULING 2026-10-08
-% (k) 2; review of be402a1): a missing or unknown recovery_trim_mode
-% ('night6:recoveryTrimMode'); any listed mask folder holding a stim_recovery epoch
+% (k) 2; review of be402a1): a missing, unknown or withdrawn recovery_trim_mode
+% ('night6:recoveryTrimMode'; (A) names RULING 2026-10-09 item 6); any listed mask folder holding a stim_recovery epoch
 % when no recovery_starts is declared ('night6:recoveryStarts' - the conditions are read
 % from the mask files' provenance only, never from the signals); and an unreadable or
 % malformed recovery_starts file (night6_recovery_start, read once here).

@@ -18,6 +18,21 @@
   fallback lands on the epoch's own first sample; earlier / equal / later are labelled;
 * the file: keys proven unique at write time (invariant 27), canonical ASCII JSON with no
   NaN and LF endings, and an exact round trip.
+
+RULING 2026-10-09 item 6 (mode (B), per output variable):
+
+* (B) is the one mode and (A) is refused by name, with the ruling;
+* every trimmed variable declares its class, and an absent or unknown class, a cut by an
+  output its owner does not have, or a class (i) variable with no edge rule is refused;
+* an INDEPENDENT table (``CLASS_TABLE``, transcribed from her code, not read from the map)
+  gives every trimmed variable's class and reach, from the measured filter settlings and
+  her window constants: class (i) keeps from electrical + its own input's settling (never
+  half its window), class (ii) from electrical + its full reach, to the sample;
+* the rules that decide the edge windows are cited and still on their lines; exactly the
+  variables her >= 50 % rule governs are flagged as such;
+* every windowed variable carries a valid fraction, the per-sample and event ones do not;
+  the recomputed averages are exactly the ruled ones;
+* every file's cuts are the map's, once each, as exact samples.
 """
 
 from __future__ import annotations
@@ -25,6 +40,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -61,6 +77,8 @@ def _anchored() -> list[tuple[str, str, str]]:
     out = [(f"{a.name}/{s.what}", s.source, s.anchor) for a in rs.ANALYSES.values()
            for o in a.outputs for s in o.stages]
     out += [(f"{v.file}/{v.path}", v.source, v.anchor) for v in rs.OUTPUT_VARS if v.anchor]
+    out += [(f"{v.file}/{v.path} edge", v.edge.source, v.edge.anchor) for v in rs.OUTPUT_VARS
+            if v.edge is not None]
     return out
 
 
@@ -82,7 +100,7 @@ def test_every_cited_line_still_says_it() -> None:
             path = pnew / rel
         assert anchor in _lines(path, lo, hi), (what, source)
         checked += 1
-    assert checked >= (4 if pnew is None else 80)
+    assert checked >= (4 if pnew is None else 120)
 
 
 def test_every_cited_file_is_the_one_the_table_was_read_from() -> None:
@@ -159,6 +177,7 @@ VALUES = [
     ("pipeline_params.m", r"P\.wfPreMs\s*=\s*1\.0;"),
     ("pipeline_params.m", r"P\.wfAlignSearchMs\s*=\s*0\.5;"),
     ("pipeline_params.m", r"P\.edgeBufferMs\s*=\s*10;"),
+    ("pipeline_params.m", r"P\.sigmaWindowSec\s*=\s*5;"),
     ("slowWaveAnalysis_new.m", r"rateWinSec\s*=\s*60;"),
     ("HR_BR_HRVAnalysis_beats.m", r"sampEnWinSec = 60;\s+% fixed by design"),
     ("HR_BR_HRVAnalysis_beats.m", r"halfHrBr\s*=\s*hrBrWinSec / 2;"),
@@ -390,3 +409,254 @@ def test_the_table_record_carries_every_stage_and_exclusion() -> None:
             len(o.stages) for o in a.outputs)
     cats = {e["category"] for r in rec.values() for e in r["excluded"]}
     assert {"selection rule", "edge guard", "epoch-wide statistic"} <= cats
+
+
+# ---------------------------------------------------------------------------
+# RULING 2026-10-09 item 6: mode (B), per output variable
+# ---------------------------------------------------------------------------
+
+
+def test_b_is_the_one_mode_and_a_is_refused_by_name() -> None:
+    assert rs.TRIM_MODES == ("mask_to_electrical_drop_outputs",)
+    assert set(rs.WITHDRAWN_TRIM_MODES) == {"mask_to_own_start"}
+    assert "RULING 2026-10-09 item 6" in rs.WITHDRAWN_TRIM_MODES["mask_to_own_start"]
+    assert not set(rs.TRIM_MODES) & set(rs.WITHDRAWN_TRIM_MODES)
+    assert set(rs.TRIM_CLASSES) == {"valid_only", "filled_or_filtered"}
+
+
+def _independent_reaches() -> dict[str, float]:
+    """Each reach from the MEASURED filter settlings and her window constants (not the map)."""
+    q = 12
+    beats = 10 * q / FS + impulse_settling_s(CONSUMER_FILTERS["hrv"], FS / q)
+    band = impulse_settling_s(CONSUMER_FILTERS["spikes"], FS)
+    mmc_sig = beats + 0.050 / 2 + impulse_settling_s(CONSUMER_FILTERS["mmc"], FS)
+    mmc_ev = mmc_sig + 30.0 / 2 + 30.0 / 2       # the nested moving median and MAD
+    sw = impulse_settling_s(CONSUMER_FILTERS["slow_wave"], FS) + 5.0 / 2
+    return {"band": band, "wave": band + 0.0015, "env": band + 0.010 / 2, "beats": beats,
+            "trace": impulse_settling_s(CONSUMER_FILTERS["hrv"], FS), "sw": sw,
+            "sw_rate": sw + 60.0 / 2, "mmc_sig": mmc_sig, "mmc_ev": mmc_ev,
+            "mmc_delay": mmc_ev + 10.0 / 2 + 30.0 / 2}
+
+
+_I, _II = "valid_only", "filled_or_filtered"
+CLASS_TABLE: dict[tuple[str, str], tuple[str, str]] = {
+    # spikes_v2: detection on D.filtered (step1_bandpass.m:53-57 fills, filtfilt) is (ii);
+    # the windows over validMask only (step2 :95, step3b :99, step6 :49, :149) are (i)
+    ("spikes_v2", "sigmaWin.sigma"): (_I, "band"),
+    **{("spikes_v2", f"spikes.{v}"): (_II, "band")
+       for v in ("centers", "times", "peakAmp_uv", "threshAtSpike_uv", "artifactMask")},
+    **{("spikes_v2", f"spikes.{v}"): (_II, "wave")
+       for v in ("waveforms", "alignedCenters", "alignedTimes", "Vpp_uv", "width_ms")},
+    **{("spikes_v2", f"envelope.{v}"): (_I, "env")
+       for v in ("rms_uv", "sigmaFloor_uv", "excess_uv", "validFrac")},
+    ("spikes_v2", "metrics.fr_hz"): (_I, "band"),
+    ("spikes_v2", "metrics.fr_validFrac"): (_I, "band"),
+    ("spikes_v2", "metrics.cv2_roll"): (_I, "band"),
+    ("spikes_v2", "metrics.burst.onsets"): (_I, "wave"),
+    ("spikes_v2", "metrics.burst.offsets"): (_I, "wave"),
+    # HR_BR_HRVAnalysis_beats: the trace is filtered over the linear fill (:262, :282), (ii);
+    # beats, intervals and every window over valid beats (:298, :829-928, :998) are (i)
+    ("HRBR", "heartBeatSeries"): (_II, "trace"),
+    **{("HRBR", v): (_I, "beats")
+       for v in ("heartlocs", "heartRateSeries", "heartCountSeries", "heartCountValidSec",
+                 "heartCountRateSeries", "breathRateSeries", "br_locs_true")},
+    **{("HRVMeasures", v): (_I, "beats")
+       for v in ("heartlocs", "RR_intervals", "RR_times", "hrv_series", "rmssd_series",
+                 "pnn5_series", "sd1_series", "sd2_series", "sampEn_series", "nRR_used")},
+    # slowWaveAnalysis_new: fillmissing before the low-pass (:126-133): all (ii)
+    ("slowWaves", "slowWaveTimeSeries"): (_II, "sw"),
+    ("slowWaves", "slowWavePeakLocs"): (_II, "sw"),
+    ("slowWaves", "slowWaveRateSeries"): (_II, "sw_rate"),
+    # extract_mmc: the band over the cardiac-blanked fill (:104-106), the events on it, and
+    # the delay over mean-filled rate rows (:270) are (ii); the rate and peak amplitude over
+    # valid samples with her 50 % rule (:284-293) are (i)
+    ("mmc", "mmc.signal"): (_II, "mmc_sig"),
+    **{("mmc", f"mmc.{lvl}.events"): (_II, "mmc_ev") for lvl in ("firing", "burst")},
+    **{("mmc", f"mmc.{lvl}.{v}"): (_I, "mmc_ev")
+       for lvl in ("firing", "burst") for v in ("rate", "peakAmp")},
+    ("mmc", "mmc.delay"): (_II, "mmc_delay"),
+}
+"""Every trimmed variable: its class and its reach, transcribed from her code."""
+
+
+def test_every_trimmed_variable_is_cut_at_its_class_reach_to_the_sample() -> None:
+    """Class (i) from electrical + own input settling, class (ii) + full reach (independent)."""
+    reach = _independent_reaches()
+    trims = {(v.file, v.path): v for v in rs.OUTPUT_VARS if v.role == "trim"}
+    assert set(trims) == set(CLASS_TABLE), sorted(set(trims) ^ set(CLASS_TABLE))
+    el = 125.0
+    f = rs.file_starts(session="x", fs=FS, stim_off_s=120.8, electrical_settle_s=el,
+                       stim_off_source="a", electrical_source="b")
+    cuts = {c["cut"]: c for c in f["cuts"]}
+    for key, (cls, r) in CLASS_TABLE.items():
+        v = trims[key]
+        assert v.trim_class == cls, key
+        owner = v.owner or rs.OUTPUT_FILES[v.file].owner
+        c = cuts[rs.cut_id(owner, v.reach, cls)]
+        assert c["trim_class"] == cls and c["basis"] == rs.BASIS_CUT, key
+        assert c["reach_s"] == pytest.approx(reach[r], abs=1e-12), key
+        assert c["start_sample0"] == seconds_to_sample(el + c["reach_s"], FS), key
+        assert c["start_sample0"] == seconds_to_sample(el + reach[r], FS), key
+    # (i) is NOT cut by half its window: heart rate keeps 30 s earlier than its analysis
+    hr = cuts[rs.cut_id("hrv", "heart_rate", _I)]
+    hrv = rs.analysis_settling("hrv", FS).settling_s
+    assert hrv is not None and hr["reach_s"] == pytest.approx(hrv - 30.0, abs=1e-12)
+    assert {c["cut"] for c in f["cuts"]} == {rs.cut_id(*c) for c in rs.trim_cuts()}
+
+
+@settings(max_examples=100, deadline=None)
+@given(el=st.floats(120.0, 200.0), fs=st.sampled_from([FS, 24414.0, 1000.0]))
+def test_every_cut_is_one_rounding_of_electrical_plus_reach(el: float, fs: float) -> None:
+    f = rs.file_starts(session="x", fs=fs, stim_off_s=119.0, electrical_settle_s=el,
+                       stim_off_source="a", electrical_source="b")
+    for c in f["cuts"]:
+        r, missing = rs.output_reach_s(c["owner"], c["output_key"], c["trim_class"], fs)
+        assert r is not None and missing == ()
+        assert c["start_s"] == el + r
+        assert c["start_sample0"] == seconds_to_sample(el + r, fs)
+
+
+def test_an_unknown_reach_keeps_132_labelled_never_the_known_part() -> None:
+    t = {**rs.ANALYSES, "slow_wave": rs.Analysis("slow_wave", "c", (
+        rs.Output("trace", (_stage(5.0),), "x", key="sw_trace"),
+        rs.Output("rate", (_stage(5.0), _stage(None, "unknown"), _stage(60.0)), "x",
+                  key="sw_rate", own_window=True)))}
+    f = rs.file_starts(session="x", fs=FS, stim_off_s=120.8, electrical_settle_s=121.4,
+                       stim_off_source="a", electrical_source="b", table=t)
+    cuts = {c["cut"]: c for c in f["cuts"]}
+    rate = cuts[rs.cut_id("slow_wave", "sw_rate", _II)]
+    assert rate["basis"] == rs.BASIS_FIXED and rate["start_s"] == 132.0
+    assert rate["missing_settling"] == ["slow_wave/rate: w"] and "reach_s" not in rate
+    trace = cuts[rs.cut_id("slow_wave", "sw_trace", _II)]
+    assert trace["basis"] == rs.BASIS_CUT and trace["reach_s"] == 2.5
+    gone = rs.output_reach_s("slow_wave", "no_such", _II, FS, t)
+    assert gone == (None, ("slow_wave: 0 outputs keyed 'no_such'",))
+    with pytest.raises(ValueError, match="unknown trim class"):
+        rs.output_reach_s("hrv", "heart_rate", "probably_valid", FS)
+
+
+def test_a_trimmed_variable_without_a_known_class_is_refused_by_name(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    orig = rs.OUTPUT_VARS
+    i = next(k for k, v in enumerate(orig) if (v.file, v.path) == ("HRBR", "heartRateSeries"))
+    good = orig[i]
+    for bad, words in (
+            (replace(good, trim_class=None), "HRBR/heartRateSeries has no trim class"),
+            (replace(good, trim_class="partly"), "unknown trim class 'partly'"),
+            (replace(good, reach="heart_rates"), "reach 'heart_rates' is not an output key"),
+            (replace(good, reach="sw_rate"), "is not an output key of hrv"),
+            (replace(good, edge=None), "must cite the rule"),
+            (replace(good, valid=rs.ValidFraction("hr_window", "x", width="nope",
+                                                  validity="invalidMask")), "'nope'"),
+            (replace(good, valid=rs.ValidFraction("hr_window", "x", width="winSec")),
+             "needs its window and its validity"),
+            (replace(good, valid=rs.ValidFraction("guess", "x")),  # type: ignore[arg-type]
+             "unknown valid-fraction"),
+            (replace(good, valid=rs.ValidFraction("her", "x", variable="nothing")),
+             "is not declared in HRBR")):
+        monkeypatch.setattr(rs, "OUTPUT_VARS", (*orig[:i], bad, *orig[i + 1:]))
+        with pytest.raises(ValueError, match=re.escape(words)):
+            rs.output_times_record()
+    j = next(k for k, v in enumerate(orig) if (v.file, v.path) == ("HRBR", "avgHeartRate"))
+    for rc, words in ((rs.Recompute("mean_omitnan", "metrics_t"), "not a trimmed variable"),
+                      (rs.Recompute("mean_well_sampled", "heartRateSeries"), "needs where"),
+                      (rs.Recompute("events_per_valid_s", "heartRateSeries"), "its validity")):
+        monkeypatch.setattr(rs, "OUTPUT_VARS",
+                            (*orig[:j], replace(orig[j], recompute=rc), *orig[j + 1:]))
+        with pytest.raises(ValueError, match=re.escape(words)):
+            rs.output_times_record()
+    monkeypatch.setattr(rs, "OUTPUT_VARS", (
+        *orig, rs.OutputVar("HRBR", "heartRateSeries_validFraction", "parameter", "x")))
+    with pytest.raises(ValueError, match="would overwrite a declared variable"):
+        rs.output_times_record()
+
+
+HALF_VALID = {("HRBR", "heartCountRateSeries"),
+              *{("mmc", f"mmc.{lvl}.{v}") for lvl in ("firing", "burst")
+                for v in ("rate", "peakAmp")}}
+"""The class (i) variables her >= 50 %-valid window rule governs (HR_BR :802/:895,
+extract_mmc :49/:290). HR (:844), HRV (:902), sample entropy (:928) and the spike rate
+(step6 :149) are governed by other rules - cited as they are, a contradiction of the
+ruling's examples."""
+
+
+def test_exactly_her_half_valid_rule_is_flagged_as_it() -> None:
+    got = {(v.file, v.path) for v in rs.OUTPUT_VARS
+           if v.role == "trim" and v.trim_class == _I and v.edge and v.edge.half_valid}
+    assert got == HALF_VALID
+    for v in rs.OUTPUT_VARS:
+        if v.role == "trim" and v.trim_class == _I:
+            assert v.edge is not None and re.match(r"^\S+\.m:\d+", v.edge.source), v.path
+    sw = next(v for v in rs.OUTPUT_VARS if v.path == "slowWaveRateSeries")
+    assert sw.trim_class == _II and sw.edge is not None and sw.edge.half_valid  # filled data
+
+
+WINDOWED = {("spikes_v2", "sigmaWin.sigma"),
+            *{("spikes_v2", f"envelope.{v}") for v in ("rms_uv", "sigmaFloor_uv", "excess_uv",
+                                                       "validFrac")},
+            ("spikes_v2", "metrics.fr_hz"), ("spikes_v2", "metrics.fr_validFrac"),
+            ("spikes_v2", "metrics.cv2_roll"),
+            *{("HRBR", v) for v in ("heartRateSeries", "heartCountSeries", "heartCountValidSec",
+                                    "heartCountRateSeries", "breathRateSeries")},
+            *{("HRVMeasures", v) for v in ("hrv_series", "rmssd_series", "pnn5_series",
+                                           "sd1_series", "sd2_series", "sampEn_series",
+                                           "nRR_used")},
+            ("slowWaves", "slowWaveRateSeries"),
+            *{("mmc", f"mmc.{lvl}.{v}") for lvl in ("firing", "burst")
+              for v in ("rate", "peakAmp")},
+            ("mmc", "mmc.delay")}
+"""Every windowed output: each value carries its valid fraction. The rest are samples or
+events, whose validity is their own NaN or their presence."""
+
+
+def test_every_windowed_value_carries_its_valid_fraction() -> None:
+    rec = rs.output_times_record()
+    got = {(v["file"], v["path"]) for v in rec["vars"] if "valid_fraction" in v}
+    assert got == WINDOWED
+    her = {(v["file"], v["path"]): v["valid_fraction"]["variable"] for v in rec["vars"]
+           if v.get("valid_fraction", {}).get("kind") == "her"}
+    assert her == {**{("spikes_v2", f"envelope.{v}"): "envelope.validFrac"
+                      for v in ("rms_uv", "sigmaFloor_uv", "excess_uv", "validFrac")},
+                   ("spikes_v2", "metrics.fr_hz"): "metrics.fr_validFrac",
+                   ("spikes_v2", "metrics.fr_validFrac"): "metrics.fr_validFrac"}
+    for v in rec["vars"]:
+        vf = v.get("valid_fraction")
+        if vf and vf["kind"] != "her":
+            assert vf["sibling"] == v["path"] + rs.VALID_FRACTION_SUFFIX
+
+
+RECOMPUTED = {("HRBR", "avgHeartRate"): "heartRateSeries",
+              ("HRBR", "avgBreathRate"): "breathRateSeries",
+              ("HRBR", "avgHeartCount"): "heartCountSeries",
+              ("HRBR", "avgHeartCountRate"): "heartCountRateSeries",
+              ("slowWaves", "avgSlowWave"): "slowWaveRateSeries",
+              ("mmc", "mmc.firing.avgRate"): "mmc.firing.events",
+              ("mmc", "mmc.burst.avgRate"): "mmc.burst.events",
+              ("spikes_v2", "spikes.nSpikes"): "spikes.alignedCenters",
+              ("spikes_v2", "metrics.nSpikes"): "spikes.alignedTimes",
+              ("spikes_v2", "envelope.meanRMS_uv"): "envelope.rms_uv",
+              ("spikes_v2", "envelope.meanExcess_uv"): "envelope.excess_uv"}
+
+
+def test_the_recomputed_averages_are_the_ruled_ones() -> None:
+    rec = rs.output_times_record()
+    got = {(v["file"], v["path"]): v["recompute"]["of"] for v in rec["vars"]
+           if v["role"] == "recomputed"}
+    assert got == RECOMPUTED
+    by = {(v["file"], v["path"]): v for v in rec["vars"]}
+    assert by[("HRBR", "avgBreathRate")]["owner"] == "breathing"
+    assert by[("mmc", "mmc.firing.avgRate")]["recompute"]["validity"] == "mmc.signal"
+
+
+def test_every_file_carries_the_maps_cuts_once_as_samples() -> None:
+    a = rs.file_starts(session="Sess_A", fs=FS, stim_off_s=120.8, electrical_settle_s=125.0,
+                       stim_off_source="a", electrical_source="b")
+    for edit, err, words in (
+            (lambda f: f.pop("cuts"), TypeError, "cuts"),
+            (lambda f: f["cuts"].append(dict(f["cuts"][0])), ValueError, "a cut appears twice"),
+            (lambda f: f["cuts"].pop(), ValueError, "differ from the map"),
+            (lambda f: f["cuts"][0].update(start_sample0=1.5), TypeError, "start_sample0")):
+        bad = json.loads(json.dumps(a))
+        edit(bad)
+        with pytest.raises(err, match=words):
+            _doc(bad)

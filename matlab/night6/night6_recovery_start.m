@@ -4,22 +4,24 @@ function RS = night6_recovery_start(file)
 %   RS = night6_recovery_start(file)
 %
 % The file is written by gems_blanking_v2.extent.recovery_start.write_recovery_starts
-% (schema 'gems-blanking-v2 recovery starts v2'): per stim_rec file the electrical
-% settling as an exact 0-based FILE sample (electrical_settle_sample0) and per analysis
-% (= consumer) the analysis's start as one (start_sample0) with its basis and source; the
-% output time map (RS.outputTimes, the drop mode's per-output stamps - Python's
-% extent.recovery_start.OUTPUT_VARS); and the files held for want of stim edges or
-% settling. A v1 file (no electrical sample, no output map) is refused by name. It is a
+% (schema 'gems-blanking-v2 recovery starts v3'): per stim_rec file the electrical
+% settling as an exact 0-based FILE sample (electrical_settle_sample0), per analysis
+% (= consumer) the analysis's start as one (start_sample0) with its basis and source, and
+% per CUT (owner.output.class, RULING 2026-10-09 item 6) the cut point as one; the output
+% time map (RS.outputTimes: per-variable stamps, classes, cuts, valid fractions and
+% recomputed averages - Python's extent.recovery_start.OUTPUT_VARS); and the files held
+% for want of stim edges or settling. A v1 or v2 file (no cuts: the owner-start cut is
+% not mode (B)) is refused by name. It is a
 % DECLARED input: its path and SHA-256 go into every record (RS.file, RS.sha256).
 % An empty path returns [] - Night 6 then refuses every stim_recovery epoch by name
 % (night6_recovery_lead_in), never runs one untrimmed.
 %
 % Refused here by name ('night6:recoveryStartFile'): an unreadable file, another schema,
 % a session listed twice (case-insensitively, as the store matches names), a file both
-% measured and held, an analysis listed twice for one file, a start_sample0 or an
-% electrical_settle_sample0 that is not one integer >= 0, and a missing output map or
-% source list. Refused as 'night6:recoveryStartSource', naming the file: a cited
-% processing_new file (source_files, Python SOURCE_FILES) that is not on the path, or
+% measured and held, an analysis or a cut listed twice for one file, a file with no
+% cuts, a start_sample0 or an electrical_settle_sample0 that is not one integer >= 0, and
+% a missing output map or source list. Refused as 'night6:recoveryStartSource', naming
+% the file: a cited processing_new file (source_files, Python SOURCE_FILES) that is not on the path, or
 % whose SHA-256 is not the one the starts file was computed from. Rows are matched by
 % strcmp on the session and analysis STRINGS, never by jsondecode field names (which
 % mangle keys - invariant 22).
@@ -32,7 +34,7 @@ function RS = night6_recovery_start(file)
         error('night6:recoveryStartFile', 'the recovery-starts file %s does not exist', file);
     end
     D = jsondecode(fileread(file));
-    want = 'gems-blanking-v2 recovery starts v2';
+    want = 'gems-blanking-v2 recovery starts v3';
     if ~isstruct(D) || ~isfield(D, 'schema') || ~strcmp(D.schema, want)
         error('night6:recoveryStartFile', '%s is not a ''%s'' file', file, want);
     end
@@ -68,6 +70,22 @@ function RS = night6_recovery_start(file)
             end
         end
         RS.files{k}.analyses = rows;
+        if ~isfield(F, 'cuts') || isempty(F.cuts)
+            error('night6:recoveryStartFile', ['%s: %s has no cuts (RULING 2026-10-09 ' ...
+                  'item 6: one per owner, output and class)'], file, F.session);
+        end
+        cuts = as_cells(F.cuts);
+        ids = cellfun(@(c) char(c.cut), cuts, 'UniformOutput', false);
+        if numel(unique(ids)) ~= numel(ids)
+            error('night6:recoveryStartFile', '%s: %s lists a cut twice', file, F.session);
+        end
+        for j = 1:numel(cuts)
+            if ~is_sample(cuts{j}.start_sample0)
+                error('night6:recoveryStartFile', ['%s: %s/%s start_sample0 must be one ' ...
+                      'integer >= 0'], file, F.session, ids{j});
+            end
+        end
+        RS.files{k}.cuts = cuts;
     end
     for k = 1:numel(RS.held)
         seen = add_session(seen, RS.held{k}, file);
@@ -118,10 +136,16 @@ function T = output_times(D, file)
     end
     T = struct('files', {as_cells(D.files)}, 'vars', {as_cells(D.vars)}, ...
                'xchanDelayParams', {cellstr(D.xchan_delay_params(:)')}, ...
-               'markerVariable', D.marker_variable, 'conventions', struct());
+               'markerVariable', D.marker_variable, 'conventions', struct(), ...
+               'trimClasses', struct(), 'ruling', '', 'suffix', '_validFraction');
     if isfield(D, 'conventions') && isstruct(D.conventions)
         T.conventions = D.conventions;   % name -> meaning (identifiers: jsondecode keeps them)
     end
+    if isfield(D, 'trim_classes') && isstruct(D.trim_classes)
+        T.trimClasses = D.trim_classes;  % valid_only / filled_or_filtered -> meaning
+    end
+    if isfield(D, 'ruling'), T.ruling = D.ruling; end
+    if isfield(D, 'valid_fraction_suffix'), T.suffix = D.valid_fraction_suffix; end
     for k = 1:numel(T.vars)
         v = T.vars{k};
         if ~all(isfield(v, {'file', 'path', 'role', 'owner'}))

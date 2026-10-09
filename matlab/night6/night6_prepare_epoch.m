@@ -54,11 +54,12 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
 % train". plan.periR states which (train_state 'train' | 'none'); [] when no spike signal.
 %
 % RECOVERY START (RULING 2026-10-08 (k) 2), name-value 'Recovery', struct(starts, session,
-% mode) - mode is the declared trim mode (night6_trim_modes), refused by name if unknown:
+% mode) - mode is the declared trim mode (night6_trim_modes), refused by name if unknown
+% or withdrawn:
 % starts is night6_recovery_start(file) or []. For a stim_recovery epoch every consumer that
-% runs must have its start there, or the epoch is refused by name; each consumer whose
-% input-mask end (its own start, or the electrical settling in the drop mode) is later
-% than the epoch start gets its leading rows masked (NaN, like any motion
+% runs must have its start there, or the epoch is refused by name; when the file's
+% electrical settling (mode (B), RULING 2026-10-09 item 6) is later than the epoch start,
+% every consumer gets its leading rows masked (NaN, like any motion
 % span) BEFORE the runs are planned, so calls that share a mask still share it exactly
 % (night6_recovery_lead_in). plan.recoveryStart is the record; [] when 'Recovery' is not
 % given (test harnesses that plan an epoch only - night6_run_recording always gives it).

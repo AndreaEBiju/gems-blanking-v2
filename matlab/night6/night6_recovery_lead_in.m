@@ -11,40 +11,37 @@ function [lead, rec] = night6_recovery_lead_in(RS, session, condition, i0, n, fs
 %   consumers  the consumers this epoch will run (status 'to_run')
 %   mode       the declared trim mode (night6_trim_modes; refused by name otherwise)
 %
-% RULING 2026-10-08 (k) 2: Night 6 runs every stim_rec recovery epoch from its own start
-% (132 s). Each analysis's own start k0 (stim-off + electrical settling + its own
-% settling) and the file's electrical settling ke are exact 0-based FILE samples. Rows
-% are 1-based into the epoch, so row r is file sample i0 + r - 1 (0-based) and the rows
-% before file sample k are 1 .. k - i0.
+% RULING 2026-10-08 (k) 2 and RULING 2026-10-09 item 6 (mode (B)): Night 6 runs every
+% stim_rec recovery epoch from its own start (132 s). The file's electrical settling ke,
+% each analysis's own start k0 and each CUT's point kc (owner.output.class) are exact
+% 0-based FILE samples. Rows are 1-based into the epoch, so row r is file sample
+% i0 + r - 1 (0-based) and the rows before file sample k are 1 .. k - i0.
 %
-%   mask_to_own_start                 the consumer's input rows 1 .. k0 - i0 are NaN.
-%   mask_to_electrical_drop_outputs   EVERY consumer's input rows 1 .. ke - i0 are NaN (one
-%                                     point for all, so her epoch-wide statistics see no
-%                                     unsettled data); the outputs stamped before row
-%                                     k0 - i0 + 1 are dropped after the call
-%                                     (night6_recovery_trim_outputs, by the output time map).
+%   EVERY consumer's input rows 1 .. ke - i0 are NaN (one point for all, so her
+%   epoch-wide statistics see no unsettled data); each output variable stamped before
+%   row kc - i0 + 1 of its cut is dropped or flagged after the call
+%   (night6_recovery_trim_outputs, by the output time map's class and cut).
 %
 % The added span is NaN like any motion span (invariant 1) and honoured by her functions
 % exactly as one. Her edge guards do NOT act at it: Night 6 passes blankIdx = [] and her
 % HR and slow-wave edge masks sit only at blankIdx and the array ends.
 %
 % lead.<consumer> = number of leading INPUT rows to mask (0 .. n);
-% rec.consumers.<consumer>.output_rows_before_start = rows whose outputs are dropped in
-% the drop mode (0 in mask_to_own_start: the input is already masked there);
-% rec.analyses.<analysis> = start_s, start_sample0 and output_rows_before_start of EVERY
-% analysis in the file's row, run or not (the trimmer cuts each output at its owner's). A start
-% before the epoch start is not an error: the analysis runs from the epoch start and its
-% record says "early part deferred to the add-on".
+% rec.cuts{} = cut, owner, output_key, trim_class, basis, start_s, start_sample0 and
+% output_rows_before_start (0 .. n) of EVERY cut in the file's row (the trimmer cuts
+% each variable at its own); rec.analyses.<analysis> = each analysis's own start (the
+% latest of its cuts' full reach, for the record and the add-on). A cut or a start before
+% the epoch start is not an error: nothing is cut there and the record says "early part
+% deferred to the add-on".
 %
 % Refused by name - never a silent fallback:
-%   night6:recoveryTrimMode        no mode, or an unknown one
+%   night6:recoveryTrimMode        no mode, an unknown one, or a withdrawn one ((A))
 %   night6:recoveryStarts          a stim_recovery epoch and no declared file
 %   night6:recoveryStartHeld       the file is held (stim edges undetected, or never settles)
 %   night6:recoveryStartMissing    no row for the file, or none for a consumer that runs
 %   night6:recoveryStartFs         the row's fs is not the epoch's
 %   night6:recoveryStartCondition  a row for a recording that is not stim_recovery
     mode = night6_check_trim_mode(mode);
-    drop = strcmp(mode, 'mask_to_electrical_drop_outputs');
     lead = struct();
     rec = struct('applies', false, 'condition', char(condition), 'mode', mode);
     if ~isempty(RS)
@@ -83,19 +80,22 @@ function [lead, rec] = night6_recovery_lead_in(RS, session, condition, i0, n, fs
         if isfield(F, f{1}), rec.(f{1}) = F.(f{1}); end
     end
     ke = double(F.electrical_settle_sample0);
-    if drop
-        rec.rule = sprintf(['input of every analysis masked on epoch rows 1..%d (before the ' ...
-                            'electrical settling, file sample %d 0-based); outputs stamped ' ...
-                            'before each analysis''s own start dropped or flagged'], ...
-                           min(n, max(0, ke - i0)), ke);
-        rec.epoch_scalars = ['computed over [electrical settling, epoch end]: they have no ' ...
-                             'time to trim by'];
-    end
+    rows = min(n, max(0, ke - i0));
+    rec.rule = sprintf(['input of every analysis masked on epoch rows 1..%d (before the ' ...
+                        'electrical settling, file sample %d 0-based); each output variable ' ...
+                        'stamped before its own cut dropped or flagged (RULING 2026-10-09 ' ...
+                        'item 6)'], rows, ke);
+    rec.epoch_scalars = ['computed over [electrical settling, epoch end]: they have no ' ...
+                         'time to trim by (whole-epoch averages of trimmed series are ' ...
+                         'recomputed from the kept values)'];
+    rec.cuts = cellfun(@(c) struct('cut', char(c.cut), 'owner', char(c.owner), ...
+        'output_key', char(c.output_key), 'trim_class', char(c.trim_class), ...
+        'basis', char(c.basis), 'start_s', double(c.start_s), ...
+        'start_sample0', double(c.start_sample0), ...
+        'output_rows_before_start', min(n, max(0, double(c.start_sample0) - i0))), ...
+        F.cuts, 'UniformOutput', false);
     rec.consumers = struct();
     names = cellfun(@(r) char(r.analysis), F.analyses, 'UniformOutput', false);
-    % EVERY analysis's start, run or not: an output is cut at its OWNER's start, and a
-    % byproduct's owner (hrv's heart rate in a breathing-only run) need not be a consumer
-    % of this run (review of 4d008b6, fix 4).
     rec.analyses = struct();
     for j = 1:numel(F.analyses)
         r = F.analyses{j};
@@ -105,7 +105,7 @@ function [lead, rec] = night6_recovery_lead_in(RS, session, condition, i0, n, fs
         end
         k0 = double(r.start_sample0);
         rec.analyses.(names{j}) = struct('start_s', r.start_s, 'start_sample0', k0, ...
-            'output_rows_before_start', ternary(drop, min(n, max(0, k0 - i0)), 0));
+            'output_rows_before_start', min(n, max(0, k0 - i0)));
     end
     for c = consumers(:)'
         j = find(strcmp(names, c{1}));
@@ -116,35 +116,29 @@ function [lead, rec] = night6_recovery_lead_in(RS, session, condition, i0, n, fs
         end
         r = F.analyses{j};
         k0 = double(r.start_sample0);
-        own = min(n, max(0, k0 - i0));
-        kin = ternary(drop, ke, k0);           % where this consumer's INPUT mask ends
-        rows = min(n, max(0, kin - i0));
         e = struct('start_s', r.start_s, 'start_sample0', k0, 'basis', char(r.basis), ...
                    'source', char(r.source), 'trimmed_rows', rows, ...
-                   'output_rows_before_start', ternary(drop, own, 0));
+                   'output_rows_before_start', min(n, max(0, k0 - i0)));
         for g = {'own_settling_s', 'binding_output', 'missing_settling'}
             if isfield(r, g{1}), e.(g{1}) = r.(g{1}); end
         end
-        if kin > i0
+        if ke > i0
             e.status = 'trimmed';
             e.rule = sprintf('input masked on epoch rows 1..%d (file samples %d..%d, 0-based)', ...
                              rows, i0, i0 + rows - 1);
-        elseif kin == i0
+        elseif ke == i0
             e.status = 'at_epoch_start';
         else
             e.status = 'early part deferred to add-on';
             e.rule = sprintf(['input mask end %d samples before the epoch start: runs from ' ...
                               'the epoch start; the early recovery is appended by the add-on'], ...
-                             i0 - kin);
+                             i0 - ke);
         end
-        if drop
-            if k0 > i0
-                e.output_status = 'outputs before own start dropped';
-                e.output_rule = sprintf(['outputs stamped before epoch row %d (file sample %d, ' ...
-                                         '0-based) dropped or flagged as not computed'], own + 1, k0);
-            else
-                e.output_status = 'own start at or before the epoch start: no output dropped';
-            end
+        mine = cellfun(@(x) strcmp(x.owner, c{1}), rec.cuts);
+        if any(cellfun(@(x) x.start_sample0 > i0, rec.cuts(mine)))
+            e.output_status = 'outputs before their own cuts dropped or flagged, per variable';
+        else
+            e.output_status = 'every cut at or before the epoch start: no output dropped';
         end
         rec.consumers.(c{1}) = e;
         lead.(c{1}) = rows;
@@ -159,8 +153,4 @@ function F = find_session(list, session)
             return
         end
     end
-end
-
-function o = ternary(c, a, b)
-    if c, o = a; else, o = b; end
 end

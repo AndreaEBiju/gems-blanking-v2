@@ -1,5 +1,6 @@
 function check_recovery_start(caseFile, outFile)
-% CHECK_RECOVERY_START  Harness for tests/test_night6_recovery_start.py (RULING 2026-10-08 (k) 2).
+% CHECK_RECOVERY_START  Harness for tests/test_night6_recovery_start.py (RULING 2026-10-08 (k) 2,
+% RULING 2026-10-09 item 6).
 %
 %   plans    each case plans ONE epoch from a mask file written by the real
 %            emit.handoff.write_mask_file, twice: without 'Recovery' (the untrimmed
@@ -8,13 +9,16 @@ function check_recovery_start(caseFile, outFile)
 %            runs), plus plan.recoveryStart - or the error identifier and message.
 %   readers  night6_recovery_start on each file: 'ok' or the error identifier.
 %   run      night6_run_recording (DryRun) on a store mask folder: without RecoveryStarts,
-%            with one, without / with an unknown RecoveryTrimMode, and the resume rule (a
-%            complete record made with another starts file, or another trim mode, reruns;
-%            one made with this file and mode is skipped).
-%   trim     the drop mode end to end with her real functions, against an untrimmed
-%            reference run on the same masked input, through an oracle with its own
-%            convention table (trim_case, oracle_table), and the marker in every file.
-%   unit     night6_recovery_trim_outputs on hand-built files, every convention at L-1/L/L+1.
+%            with one, without / with an unknown / with the withdrawn (A) RecoveryTrimMode,
+%            and the resume rule (a complete record made with another starts file, or
+%            under (A), reruns; one made with this file and mode is skipped).
+%   trim     mode (B) end to end with her real functions, against a reference run cut at
+%            the electrical settling on the same masked input, through an oracle with its
+%            own tables of conventions, CLASSES and CUTS, windowed variables and
+%            recomputed averages (trim_case, oracle_table, oracle_fractions,
+%            oracle_recomputed), and the marker in every file (RULING 2026-10-09 item 6).
+%   unit     night6_recovery_trim_outputs on hand-built files: every class and convention at
+%            L-1/L/L+1 of its own cut, exact valid fractions, averages, NaN events, refusals.
 %   sources  the reader against a changed copy of a cited function on the path.
 %   batch    night6_batch's refusals at batch start.
     C = jsondecode(fileread(caseFile));
@@ -86,13 +90,15 @@ end
 
 function r = run_case(K)
     args0 = {'GemsRoot', K.gems_root, 'Units', 'uV', 'DryRun', true, 'CodeCommit', 'test'};
-    args = [args0, {'RecoveryTrimMode', 'mask_to_own_start'}];
+    args = [args0, {'RecoveryTrimMode', 'mask_to_electrical_drop_outputs'}];
     r = struct();
     r.without = attempt(@() night6_run_recording(K.mask_folder, 'OutRoot', K.out_a, args{:}));
     r.no_mode = attempt(@() night6_run_recording(K.mask_folder, 'OutRoot', K.out_a, ...
         'RecoveryStarts', K.starts_file, args0{:}));
     r.bad_mode = attempt(@() night6_run_recording(K.mask_folder, 'OutRoot', K.out_a, ...
         'RecoveryStarts', K.starts_file, 'RecoveryTrimMode', 'mask_everything', args0{:}));
+    r.mode_a = attempt(@() night6_run_recording(K.mask_folder, 'OutRoot', K.out_a, ...
+        'RecoveryStarts', K.starts_file, 'RecoveryTrimMode', 'mask_to_own_start', args0{:}));
     R = night6_run_recording(K.mask_folder, 'OutRoot', K.out_b, 'RecoveryStarts', ...
                              K.starts_file, args{:});
     r.with = cellfun(@(x) jsonencode(x), R, 'UniformOutput', false);
@@ -107,14 +113,14 @@ function r = run_case(K)
     R3 = night6_run_recording(K.mask_folder, 'OutRoot', K.out_b, 'RecoveryStarts', ...
                               K.other_starts_file, args{:});
     r.resume_other = R3{1}.status;
-    % the same starts file under ANOTHER trim mode: rerun
+    % a complete record made under the withdrawn mode (A), same starts file: rerun under (B)
     Rc = jsondecode(fileread(recFile));
     Rc.status = 'complete';
+    Rc.recovery_trim_mode = 'mask_to_own_start';
     write(recFile, Rc);
     R4 = night6_run_recording(K.mask_folder, 'OutRoot', K.out_b, 'RecoveryStarts', ...
-                              K.other_starts_file, args0{:}, 'RecoveryTrimMode', ...
-                              'mask_to_electrical_drop_outputs');
-    r.resume_other_mode = R4{1}.status;
+                              K.other_starts_file, args{:});
+    r.resume_old_mode = R4{1}.status;
     r.mode_recorded = R4{1}.recovery_trim_mode;
 end
 
@@ -139,33 +145,39 @@ function c = as_cells(v)
 end
 
 % ==========================================================================
-% (k) 2 trim modes (review of be402a1)
+% mode (B), per output variable (RULING 2026-10-09 item 6)
 
 function r = trim_case(K)
-% The drop mode end to end, with her real functions: the same epoch run twice on the
-% same masked input (every input masked to the electrical settling) - once with the
-% drop mode (outputs cut at each own start), once as the untrimmed reference
-% (mask_to_own_start with every own start AT the electrical settling: no output cut).
+% Mode (B) end to end, with her real functions: the same epoch run twice on the same
+% masked input (every input masked to the electrical settling) - once with the case's
+% per-variable cuts, once as the reference with EVERY cut at the electrical settling.
 % Every output file is compared through an ORACLE that does not read the map: its own
 % table (oracle_table, transcribed from her code with file:line) says which variables
-% are time-stamped, by what, in which convention, with which action and owner. Each
-% entry is cut at its OWNER's start (K.L, every analysis), whether or not the owner ran.
-% The marker each trimmed file carries is checked against the same oracle, exactly.
+% are time-stamped, by what, in which convention, with which action, owner, CLASS and
+% CUT; each entry is cut at its own cut (K.cuts). Its own tables of the windowed
+% variables (oracle_fractions) and of the recomputed averages (oracle_recomputed) check
+% the valid fractions and the averages. The marker each trimmed file carries is checked
+% against the same oracle, exactly.
     args = {'GemsRoot', K.gems_root, 'Units', 'uV', 'CodeCommit', 'test'};
+    mode = 'mask_to_electrical_drop_outputs';
     rng(0, 'twister');
     Rd = night6_run_recording(K.mask_folder, 'OutRoot', K.out_drop, 'RecoveryStarts', ...
-                              K.starts_drop, 'RecoveryTrimMode', ...
-                              'mask_to_electrical_drop_outputs', args{:});
+                              K.starts_drop, 'RecoveryTrimMode', mode, args{:});
     rng(0, 'twister');
     Rr = night6_run_recording(K.mask_folder, 'OutRoot', K.out_ref, 'RecoveryStarts', ...
-                              K.starts_ref, 'RecoveryTrimMode', 'mask_to_own_start', args{:});
+                              K.starts_ref, 'RecoveryTrimMode', mode, args{:});
     r = struct('record_drop', jsonencode(Rd{1}), 'record_ref', jsonencode(Rr{1}), ...
-               'files', {{}}, 'vars', {{}});
+               'files', {{}}, 'vars', {{}}, 'fractions', {{}}, 'recomputed', {{}});
     RS = night6_recovery_start(K.starts_drop);
     OT = RS.outputTimes;
     TB = oracle_table();
+    FR = oracle_fractions();
+    RC = oracle_recomputed();
     r.table_vs_map = table_vs_map(TB, OT);
+    r.recomputed_vs_map = recomputed_vs_map(RC, OT);
     r.marker_variable = OT.markerVariable;
+    cut = containers.Map();
+    for c = as_cells(K.cuts), cut(c{1}.cut) = c{1}; end
     dD = fullfile(K.out_drop, K.epoch_rel);
     dR = fullfile(K.out_ref, K.epoch_rel);
     files = dir(fullfile(dD, '*.mat'));
@@ -175,7 +187,7 @@ function r = trim_case(K)
         U = load(fullfile(dR, name));
         hit = cellfun(@(f) ~isempty(regexp(name, f.pattern, 'once')), OT.files);
         fr = struct('file', name, 'kind', '', 'rest_equal', false, 'has_marker', false, ...
-                    'marker_extra', {{}});
+                    'marker_extra', {{}}, 'added_ok', false);
         if ~any(hit)
             fr.rest_equal = isequaln(T, U);
             r.files{end + 1} = fr;
@@ -183,25 +195,45 @@ function r = trim_case(K)
         end
         kind = OT.files{hit}.kind;
         fr.kind = kind;
-        fr.has_marker = isfield(T, OT.markerVariable);
-        M = struct('vars', {{}});
-        if fr.has_marker, M = T.(OT.markerVariable); end
+        fr.has_marker = isfield(T, OT.markerVariable) && isfield(U, OT.markerVariable);
+        M = struct('vars', {{}}, 'added_variables', {{}}, 'recomputed', {{}});
+        MU = M;
+        if fr.has_marker, M = T.(OT.markerVariable); MU = U.(OT.markerVariable); end
         mine = TB(strcmp({TB.kind}, kind));
         Tr = T; Ur = U;
         seen = {};
         for j = 1:numel(mine)
-            [res, Tr, Ur] = oracle(T, U, Tr, Ur, mine(j), K, M);
+            [res, Tr, Ur] = oracle(T, U, Tr, Ur, mine(j), K, M, cut);
             res.file = name;
             r.vars{end + 1} = res;
             if ~strcmp(res.why, 'absent'), seen{end + 1} = mine(j).path; end %#ok<AGROW>
         end
         mpaths = cellfun(@(v) v.path, M.vars, 'UniformOutput', false);
         fr.marker_extra = setdiff(mpaths, seen);   % the marker names nothing it did not cut
+        added = {};
+        for f = FR(strcmp({FR.kind}, kind))
+            res = check_fraction(T, U, M, f, K);
+            res.file = name;
+            r.fractions{end + 1} = res;
+            if strcmp(f.how, 'sibling') && ~strcmp(res.why, 'absent')
+                added{end + 1} = [f.path '_validFraction']; %#ok<AGROW>
+            end
+        end
+        fr.added_ok = isequal(sort(as_cells(M.added_variables)), sort(added)) ...
+                      && isequal(sort(as_cells(MU.added_variables)), sort(added));
+        for c = RC(strcmp({RC.kind}, kind))
+            [res, Tr, Ur] = check_recomputed(T, U, Tr, Ur, M, MU, c, K);
+            res.file = name;
+            r.recomputed{end + 1} = res;
+        end
         if strcmp(kind, 'mmc')   % her qc.srcFile names the input file: the out folder
             Tr.mmc.qc.srcFile = ''; Ur.mmc.qc.srcFile = '';
         end
-        if fr.has_marker, Tr = rmfield(Tr, OT.markerVariable); end
-        fr.rest_equal = isequaln(Tr, Ur);   % everything but the trimmed leaves: untouched
+        if fr.has_marker
+            Tr = rmfield(Tr, OT.markerVariable);
+            Ur = rmfield(Ur, OT.markerVariable);
+        end
+        fr.rest_equal = isequaln(Tr, Ur);   % everything else - the siblings too - untouched
         r.files{end + 1} = fr;
     end
 end
@@ -216,112 +248,203 @@ function TB = oracle_table()
 %   delay extract_mmc delay_t, (lo + hi) / 2 * S in RATE ROWS: the window's true centre
 %         is (rate_t(lo) + rate_t(hi)) / 2 = W/2 + ((lo + hi) / 2 - 1) * S
 %                                                             p = (v - S + W/2) * fs
-% Owner = the analysis whose start cuts the entry (an HR call writes both hrv's and
+% Owner = the analysis the variable belongs to (an HR call writes both hrv's and
 % breathing's outputs). Action: nan (value NaN, stamp kept), drop (removed with its
-% co-indexed lists), false (logical event series).
-    TB = struct('kind', {}, 'path', {}, 'stamp', {}, 'conv', {}, 'action', {}, 'owner', {});
+% co-indexed lists), nan_events (logical event series made double, NaN = not computed).
+% CLASS (RULING 2026-10-09 item 6): I = valid_only - computed over valid samples or
+% events only; II = filled_or_filtered - computed on filled-in or filtered data. CUT =
+% owner.output.class: the cut point each variable is kept from.
+    I = 'valid_only'; II = 'filled_or_filtered';
+    TB = struct('kind', {}, 'path', {}, 'stamp', {}, 'conv', {}, 'action', {}, 'owner', {}, ...
+                'cls', {}, 'cut', {});
     % --- spikes: process_dataset_v2 (night6_run_recording save_spikes_v2: her D fields)
     % step2_noise_sigma.m:89-98 window i0 = (w-1)*step+1 (1-based), cWin(w) = (i0+i1)/2;
-    % :144 D.sigmaWin.centers / .sigma, a cell per channel
-    TB = add(TB, 'spikes_v2', 'sigmaWin.sigma', 'sigmaWin.centers', 'row1', 'nan', 'spikes');
-    % step3_detect.m:86-90 centers = locs (findpeaks rows of the epoch), times = (locs-1)/fs
+    % :95 the window's VALID samples only (>= 20 %): class I
+    TB = add(TB, 'spikes_v2', 'sigmaWin.sigma', 'sigmaWin.centers', 'row1', 'nan', 'spikes', ...
+             I, 'spikes.sigma_windows.valid_only');
+    % step3_detect.m:86-90 centers = locs (findpeaks on D.filtered: step1_bandpass.m:53-57
+    % fills and filtfilts): class II
     for v = {'centers', 'times', 'peakAmp_uv', 'threshAtSpike_uv', 'artifactMask'}
-        TB = add(TB, 'spikes_v2', ['spikes.' v{1}], 'spikes.centers', 'row1', 'drop', 'spikes');
+        TB = add(TB, 'spikes_v2', ['spikes.' v{1}], 'spikes.centers', 'row1', 'drop', 'spikes', ...
+                 II, 'spikes.spike_times.filled_or_filtered');
     end
-    % step4_waveforms.m:114-118 alignedCenters (rows), alignedTimes = (aligned-1)/fs
+    % step4_waveforms.m:114-118 alignedCenters (rows), alignedTimes = (aligned-1)/fs: II
     for v = {'waveforms', 'alignedCenters', 'alignedTimes', 'Vpp_uv', 'width_ms'}
         TB = add(TB, 'spikes_v2', ['spikes.' v{1}], 'spikes.alignedCenters', 'row1', 'drop', ...
-                 'spikes');
+                 'spikes', II, 'spikes.spike_waveforms.filled_or_filtered');
     end
-    % step3b_envelope.m:95-107 bins i0 = (b-1)*binN+1, t_c(b) = ((i0+i1)/2 - 1)/fs; :114-118
+    % step3b_envelope.m:95-107 bins, t_c(b) = ((i0+i1)/2 - 1)/fs; :99 RMS over valid samples: I
     for v = {'rms_uv', 'sigmaFloor_uv', 'excess_uv', 'validFrac'}
-        TB = add(TB, 'spikes_v2', ['envelope.' v{1}], 'envelope.t', 'sec0', 'nan', 'spikes');
+        TB = add(TB, 'spikes_v2', ['envelope.' v{1}], 'envelope.t', 'sec0', 'nan', 'spikes', ...
+                 I, 'spikes.envelope.valid_only');
     end
-    % step6_spike_report.m:62, firing_rate :142-151 t(b) = ((i0+i1)/2-1)/fs
+    % step6_spike_report.m:62, firing_rate :142-151 t(b) = ((i0+i1)/2-1)/fs; :149 valid s: I
     for v = {'fr_hz', 'fr_validFrac'}
-        TB = add(TB, 'spikes_v2', ['metrics.' v{1}], 'metrics.fr_t', 'sec0', 'nan', 'spikes');
+        TB = add(TB, 'spikes_v2', ['metrics.' v{1}], 'metrics.fr_t', 'sec0', 'nan', 'spikes', ...
+                 I, 'spikes.firing_rate.valid_only');
     end
-    % step6_spike_report.m:94, rolling_cv2 :262-264 edges = 0:winSec:Tend on st, the sorted
-    % alignedTimes (:34, step4:116, seconds from row 1): t = edges(1:end-1) + winSec/2
-    TB = add(TB, 'spikes_v2', 'metrics.cv2_roll', 'metrics.cv2_t', 'sec0', 'nan', 'spikes');
-    % step6_spike_report.m:249-252 onsets/offsets = st(i0)/st(i1); a burst is cut by its onset
+    % step6_spike_report.m:94, rolling_cv2 :262-269 on gap-clean ISIs (:49): I
+    TB = add(TB, 'spikes_v2', 'metrics.cv2_roll', 'metrics.cv2_t', 'sec0', 'nan', 'spikes', ...
+             I, 'spikes.cv2.valid_only');
+    % step6_spike_report.m:249-252 onsets/offsets = st(i0)/st(i1) of gap-clean ISIs, st the
+    % aligned times: I, reaching back as the aligned spikes do
     for v = {'onsets', 'offsets'}
         TB = add(TB, 'spikes_v2', ['metrics.burst.' v{1}], 'metrics.burst.onsets', 'sec0', ...
-                 'drop', 'spikes');
+                 'drop', 'spikes', I, 'spikes.spike_waveforms.valid_only');
     end
     % --- HR_BR_HRVAnalysis_beats: _HRBR.mat (save :663-674), _HRVMeasures.mat (:685-694)
-    % :213 t = (0:N-1)'/fs; :303 heartBeatSeries(invalidMask) = NaN, one row per sample
-    TB = add(TB, 'HRBR', 'heartBeatSeries', 't', 'sec0', 'nan', 'hrv');
-    % :292-299 heartlocs: 1-based sample indices 1..N, filtered
+    % :282 yFilt = filtfilt over the linear fill (:262); :303 heartBeatSeries: II
+    TB = add(TB, 'HRBR', 'heartBeatSeries', 't', 'sec0', 'nan', 'hrv', II, ...
+             'hrv.heart_band_trace.filled_or_filtered');
+    % :292-299 heartlocs: stored beats, those at invalid samples rejected: I
     for f = {'HRBR', 'HRVMeasures'}
-        TB = add(TB, f{1}, 'heartlocs', 'heartlocs', 'row1', 'drop', 'hrv');
+        TB = add(TB, f{1}, 'heartlocs', 'heartlocs', 'row1', 'drop', 'hrv', I, ...
+                 'hrv.beats.valid_only');
     end
-    % :792 metrics_t = (0:stepSec:sigDurSec)', :823-824 idxCtr = round(tc*fs)+1;
-    % :849, :893-896 heart rate and counts (hrv); :866 breath rate (breathing)
-    for v = {'heartRateSeries', 'heartCountSeries', 'heartCountValidSec', 'heartCountRateSeries'}
-        TB = add(TB, 'HRBR', v{1}, 'metrics_t', 'sec0', 'nan', 'hrv');
+    % :792 metrics_t; :844-849 HR over the longest clean stretch (I, heart_rate); :893-896
+    % counts over valid samples (I, count/HRV window); :866 breath rate (breathing)
+    TB = add(TB, 'HRBR', 'heartRateSeries', 'metrics_t', 'sec0', 'nan', 'hrv', I, ...
+             'hrv.heart_rate.valid_only');
+    for v = {'heartCountSeries', 'heartCountValidSec', 'heartCountRateSeries'}
+        TB = add(TB, 'HRBR', v{1}, 'metrics_t', 'sec0', 'nan', 'hrv', I, ...
+                 'hrv.count_hrv.valid_only');
     end
-    TB = add(TB, 'HRBR', 'breathRateSeries', 'metrics_t', 'sec0', 'nan', 'breathing');
-    % :388 br_locs_true = heartlocs(br_locs), :391 filtered: sample indices (breathing)
-    TB = add(TB, 'HRBR', 'br_locs_true', 'br_locs_true', 'row1', 'drop', 'breathing');
-    % :310, computeValidRRIntervals :983-1000: RR_times = s1/fs, s1 = heartlocs(i) 1-based
+    TB = add(TB, 'HRBR', 'breathRateSeries', 'metrics_t', 'sec0', 'nan', 'breathing', I, ...
+             'breathing.breath_rate.valid_only');
+    % :388 br_locs_true = heartlocs(br_locs), :391 those at invalid samples rejected: I
+    TB = add(TB, 'HRBR', 'br_locs_true', 'br_locs_true', 'row1', 'drop', 'breathing', I, ...
+             'breathing.breath_troughs.valid_only');
+    % :310, computeValidRRIntervals :983-1000: RR_times = s1/fs; no invalid sample between: I
     for v = {'RR_intervals', 'RR_times'}
-        TB = add(TB, 'HRVMeasures', v{1}, 'RR_times', 'sec1', 'drop', 'hrv');
+        TB = add(TB, 'HRVMeasures', v{1}, 'RR_times', 'sec1', 'drop', 'hrv', I, ...
+                 'hrv.beats.valid_only');
     end
-    % :901-929 windowed HRV series on metrics_t (:792)
+    % :901-917 windowed HRV over valid RR intervals (:902 >= minRR): I
     for v = {'hrv_series', 'rmssd_series', 'pnn5_series', 'sd1_series', 'sd2_series', ...
-             'sampEn_series', 'nRR_used'}
-        TB = add(TB, 'HRVMeasures', v{1}, 'metrics_t', 'sec0', 'nan', 'hrv');
+             'nRR_used'}
+        TB = add(TB, 'HRVMeasures', v{1}, 'metrics_t', 'sec0', 'nan', 'hrv', I, ...
+                 'hrv.count_hrv.valid_only');
     end
-    % --- slowWaveAnalysis_new (save :340-345; one file per kept channel)
-    % :89 t = (0:N-1)'/fs; :160 slowWaveTimeSeries(invalidMask,:) = NaN
-    TB = add(TB, 'slowWaves', 'slowWaveTimeSeries', 't', 'sec0', 'nan', 'slow_wave');
-    % :176-178 rateT_idx = 1:rateStepSamp:N, slowWaveRateTime = t(rateT_idx); :279
+    % :920-929 sample entropy over valid RR intervals (fixed 60 s): I
+    TB = add(TB, 'HRVMeasures', 'sampEn_series', 'metrics_t', 'sec0', 'nan', 'hrv', I, ...
+             'hrv.sampen.valid_only');
+    % --- slowWaveAnalysis_new (save :340-345; one file per kept channel): fillmissing
+    % (:126) before the low-pass (:133): every output II
+    TB = add(TB, 'slowWaves', 'slowWaveTimeSeries', 't', 'sec0', 'nan', 'slow_wave', II, ...
+             'slow_wave.sw_trace.filled_or_filtered');
     TB = add(TB, 'slowWaves', 'slowWaveRateSeries', 'slowWaveRateTime', 'sec0', 'nan', ...
-             'slow_wave');
-    % :203-205 slowWavePeakLocs{ci} = locs (sample indices, a cell per channel)
+             'slow_wave', II, 'slow_wave.sw_rate.filled_or_filtered');
     TB = add(TB, 'slowWaves', 'slowWavePeakLocs', 'slowWavePeakLocs', 'row1', 'drop', ...
-             'slow_wave');
+             'slow_wave', II, 'slow_wave.sw_trace.filled_or_filtered');
     % --- extract_mmc (save :170; struct :151-166)
-    % :65 t = (0:N-1).'/fs; :153 signal = single(cond), one row per sample
-    TB = add(TB, 'mmc', 'mmc.signal', 'mmc.t', 'sec0', 'nan', 'mmc');
-    % :155-157 events = ev_bool (:299-303), N x 3 logical, row = sample
+    % :104-106 filtfilt over the fill; :153 signal = single(cond): II
+    TB = add(TB, 'mmc', 'mmc.signal', 'mmc.t', 'sec0', 'nan', 'mmc', II, ...
+             'mmc.mmc_signal.filled_or_filtered');
     for lvl = {'firing', 'burst'}
-        TB = add(TB, 'mmc', ['mmc.' lvl{1} '.events'], 'mmc.t', 'sec0', 'false', 'mmc');
-        % :115 centers = (W/2 : S : t(end)-W/2) in seconds of t; :154; :292-293
+        % :155-157 events = ev_bool, detected on the filtered signal: II, NaN when not computed
+        TB = add(TB, 'mmc', ['mmc.' lvl{1} '.events'], 'mmc.t', 'sec0', 'nan_events', 'mmc', ...
+                 II, 'mmc.mmc_events.filled_or_filtered');
+        % :284-293 rate / peak amplitude over valid samples, >= 0.5 valid (:290): I
         for v = {'rate', 'peakAmp'}
-            TB = add(TB, 'mmc', ['mmc.' lvl{1} '.' v{1}], 'mmc.rate_t', 'sec0', 'nan', 'mmc');
+            TB = add(TB, 'mmc', ['mmc.' lvl{1} '.' v{1}], 'mmc.rate_t', 'sec0', 'nan', 'mmc', ...
+                     I, 'mmc.mmc_rate.valid_only');
         end
     end
-    % :118 xchan_delay on the firing rate; :259-265 delay_t = (lo+hi)/2*S in rate rows; :272
-    TB = add(TB, 'mmc', 'mmc.delay', 'mmc.delay_t', 'delay', 'nan', 'mmc');
+    % :118 xchan_delay on the firing rate; :270 invalid rows mean-filled: II
+    TB = add(TB, 'mmc', 'mmc.delay', 'mmc.delay_t', 'delay', 'nan', 'mmc', II, ...
+             'mmc.mmc_delay.filled_or_filtered');
 end
 
-function TB = add(TB, kind, path, stamp, conv, action, owner)
+function TB = add(TB, kind, path, stamp, conv, action, owner, cls, cut)
     TB(end + 1) = struct('kind', kind, 'path', path, 'stamp', stamp, 'conv', conv, ...
-                         'action', action, 'owner', owner);
+                         'action', action, 'owner', owner, 'cls', cls, 'cut', cut);
+end
+
+function FR = oracle_fractions()
+% Every windowed output (each value carries its valid fraction) and where it lives:
+% 'sibling' = <path>_validFraction added by Night 6, else her own variable.
+    FR = struct('kind', {}, 'path', {}, 'how', {});
+    FR(end + 1) = struct('kind', 'spikes_v2', 'path', 'sigmaWin.sigma', 'how', 'sibling');
+    for v = {'rms_uv', 'sigmaFloor_uv', 'excess_uv', 'validFrac'}
+        FR(end + 1) = struct('kind', 'spikes_v2', 'path', ['envelope.' v{1}], ...
+                             'how', 'envelope.validFrac'); %#ok<AGROW>
+    end
+    for v = {'fr_hz', 'fr_validFrac'}
+        FR(end + 1) = struct('kind', 'spikes_v2', 'path', ['metrics.' v{1}], ...
+                             'how', 'metrics.fr_validFrac'); %#ok<AGROW>
+    end
+    FR(end + 1) = struct('kind', 'spikes_v2', 'path', 'metrics.cv2_roll', 'how', 'sibling');
+    for v = {'heartRateSeries', 'heartCountSeries', 'heartCountValidSec', ...
+             'heartCountRateSeries', 'breathRateSeries'}
+        FR(end + 1) = struct('kind', 'HRBR', 'path', v{1}, 'how', 'sibling'); %#ok<AGROW>
+    end
+    for v = {'hrv_series', 'rmssd_series', 'pnn5_series', 'sd1_series', 'sd2_series', ...
+             'sampEn_series', 'nRR_used'}
+        FR(end + 1) = struct('kind', 'HRVMeasures', 'path', v{1}, 'how', 'sibling'); %#ok<AGROW>
+    end
+    FR(end + 1) = struct('kind', 'slowWaves', 'path', 'slowWaveRateSeries', 'how', 'sibling');
+    for lvl = {'firing', 'burst'}
+        for v = {'rate', 'peakAmp'}
+            FR(end + 1) = struct('kind', 'mmc', 'path', ['mmc.' lvl{1} '.' v{1}], ...
+                                 'how', 'sibling'); %#ok<AGROW>
+        end
+    end
+    FR(end + 1) = struct('kind', 'mmc', 'path', 'mmc.delay', 'how', 'sibling');
+end
+
+function RC = oracle_recomputed()
+% Every whole-epoch average or count of a trimmed series, and her expression for it.
+    RC = struct('kind', {}, 'path', {}, 'of', {}, 'how', {});
+    for p = {{'avgHeartRate', 'heartRateSeries'}, {'avgBreathRate', 'breathRateSeries'}, ...
+             {'avgHeartCount', 'heartCountSeries'}, ...
+             {'avgHeartCountRate', 'heartCountRateSeries'}}     % HR_BR :436-442
+        RC(end + 1) = struct('kind', 'HRBR', 'path', p{1}{1}, 'of', p{1}{2}, 'how', 'mean'); %#ok<AGROW>
+    end
+    RC(end + 1) = struct('kind', 'slowWaves', 'path', 'avgSlowWave', ...
+                         'of', 'slowWaveRateSeries', 'how', 'mean');           % SW :283
+    for lvl = {'firing', 'burst'}                                              % mmc :295
+        RC(end + 1) = struct('kind', 'mmc', 'path', ['mmc.' lvl{1} '.avgRate'], ...
+                             'of', ['mmc.' lvl{1} '.events'], 'how', 'events'); %#ok<AGROW>
+    end
+    RC(end + 1) = struct('kind', 'spikes_v2', 'path', 'spikes.nSpikes', ...
+                         'of', 'spikes.alignedCenters', 'how', 'count');       % step4 :122
+    RC(end + 1) = struct('kind', 'spikes_v2', 'path', 'metrics.nSpikes', ...
+                         'of', 'spikes.alignedTimes', 'how', 'count');         % step6 :55
+    RC(end + 1) = struct('kind', 'spikes_v2', 'path', 'envelope.meanRMS_uv', ...
+                         'of', 'envelope.rms_uv', 'how', 'well');              % 3b :110-111
+    RC(end + 1) = struct('kind', 'spikes_v2', 'path', 'envelope.meanExcess_uv', ...
+                         'of', 'envelope.excess_uv', 'how', 'well');           % 3b :112
 end
 
 function d = table_vs_map(TB, OT)
 % Which trimmed variables one side names and the other does not (membership only: the
-% conventions, actions and owners are checked on the data, by the oracle).
+% conventions, actions, owners, classes and cuts are checked on the data, by the oracle).
     m = OT.vars(cellfun(@(v) strcmp(v.role, 'trim'), OT.vars));
     mk = cellfun(@(v) [v.file '/' v.path], m, 'UniformOutput', false);
     tk = arrayfun(@(t) [t.kind '/' t.path], TB, 'UniformOutput', false);
     d = struct('map_only', {setdiff(mk, tk)}, 'oracle_only', {setdiff(tk, mk)});
 end
 
-function [res, Tr, Ur] = oracle(T, U, Tr, Ur, d, K, M)
-    res = struct('path', d.path, 'owner', d.owner, 'action', d.action, 'n_leaves', 0, ...
-                 'n_before', 0, 'n_after', 0, 'n_before_value', 0, 'n_after_value', 0, ...
-                 'ok', true, 'why', '', 'marker_ok', true, 'marker_why', '');
+function d = recomputed_vs_map(RC, OT)
+    m = OT.vars(cellfun(@(v) strcmp(v.role, 'recomputed'), OT.vars));
+    mk = cellfun(@(v) [v.file '/' v.path], m, 'UniformOutput', false);
+    tk = arrayfun(@(t) [t.kind '/' t.path], RC, 'UniformOutput', false);
+    d = struct('map_only', {setdiff(mk, tk)}, 'oracle_only', {setdiff(tk, mk)});
+end
+
+function [res, Tr, Ur] = oracle(T, U, Tr, Ur, d, K, M, cut)
+    res = struct('path', d.path, 'owner', d.owner, 'action', d.action, 'cls', d.cls, ...
+                 'cut', d.cut, 'n_leaves', 0, 'n_before', 0, 'n_after', 0, ...
+                 'n_before_value', 0, 'n_after_value', 0, 'ok', true, 'why', '', ...
+                 'marker_ok', true, 'marker_why', '');
     vparts = strsplit(d.path, '.');
     sparts = strsplit(d.stamp, '.');
     if ~has_field_path(U, vparts)
         res.why = 'absent';
         return
     end
-    L = K.L.(d.owner);   % the OWNER's start, whether or not it ran (fix 4)
+    C = cut(d.cut);   % ITS OWN cut, whichever analysis ran
+    L = double(C.L);
     leaves = expand(U, vparts);
     sib = numel(vparts) == numel(sparts) && isequal(vparts(1:end - 1), sparts(1:end - 1));
     ex = {};
@@ -347,10 +470,10 @@ function [res, Tr, Ur] = oracle(T, U, Tr, Ur, d, K, M)
         Tr = subsasgn(Tr, s, []);
         Ur = subsasgn(Ur, s, []);
     end
-    [res.marker_ok, res.marker_why] = check_marker(M, d, L, K, ex);
+    [res.marker_ok, res.marker_why] = check_marker(M, d, L, C, K, ex);
 end
 
-function [ok, why] = check_marker(M, d, L, K, ex)
+function [ok, why] = check_marker(M, d, L, C, K, ex)
 % The file's own record of what is not computed, against the oracle - exactly.
     ok = false;
     hit = cellfun(@(v) strcmp(v.path, d.path), M.vars);
@@ -361,10 +484,13 @@ function [ok, why] = check_marker(M, d, L, K, ex)
     v = M.vars{hit};
     conv = struct('row1', 'row1', 'sec0', 'sec0', 'sec1', 'sec_row1', 'delay', ...
                   'sec_xchan_delay');
-    k0 = K.start_sample0.(d.owner);
+    k0 = double(C.sample0);
     checks = {strcmp(M.mode, 'mask_to_electrical_drop_outputs'), 'file mode'; ...
+              contains(M.ruling, 'RULING 2026-10-09 item 6'), 'ruling'; ...
               strcmp(v.mode, 'mask_to_electrical_drop_outputs'), 'mode'; ...
               strcmp(v.owner, d.owner), 'owner'; strcmp(v.action, d.action), 'action'; ...
+              strcmp(v.trim_class, d.cls), 'trim class'; strcmp(v.cut, d.cut), 'cut'; ...
+              ~isempty(v.trim_class_meaning), 'class meaning'; ...
               strcmp(v.convention, conv.(d.conv)), 'convention'; ...
               strcmp(v.stamp, d.stamp), 'stamp'; ...
               ~isempty(v.convention_meaning), 'convention meaning'; ...
@@ -373,6 +499,7 @@ function [ok, why] = check_marker(M, d, L, K, ex)
               v.first_computed_epoch_row == L + 1, 'first_computed_epoch_row'; ...
               v.first_computed_epoch_sample0 == L, 'first_computed_epoch_sample0'; ...
               M.epoch_start_sample0 == K.i0, 'epoch_start_sample0'; ...
+              strcmp(d.cls, 'filled_or_filtered') || ~isempty(v.edge_rule.source), 'edge rule'; ...
               numel(v.leaves) == numel(ex), 'leaf count'};
     for c = 1:size(checks, 1)
         if ~checks{c, 1}
@@ -450,7 +577,11 @@ function [res, e] = check_leaf(res, t, u, st, d, L, K, U)
     end
     switch d.action
         case 'nan', ok = ok && all(isnan(bb(:)));
-        case 'false', ok = ok && ~any(bb(:));
+        case 'nan_events'
+            % NOT COMPUTED is NaN, never "no event": the series is double, and the rows
+            % after the cut hold exactly her events (1) and non-events (0)
+            ok = ok && strcmp(class(t), 'double') && all(isnan(bb(:))) ...
+                 && all(ismember(ub(:), [0 1]));
     end
     if ~ok
         res.ok = false;
@@ -459,15 +590,178 @@ function [res, e] = check_leaf(res, t, u, st, d, L, K, U)
 end
 
 function h = value_rows(u, action)
-% One flag per row: the row holds a value (not NaN; for a logical series, an event).
+% One flag per row: the row holds a value (not NaN; for an event series, an event).
     if strcmp(action, 'drop')
         h = true(size(u, 1), 1);
+    elseif strcmp(action, 'nan_events')
+        h = any(u == 1, 2);
     elseif islogical(u)
         h = any(u, 2);
     elseif isfloat(u)
         h = any(~isnan(u), 2);
     else
         h = true(size(u, 1), 1);
+    end
+end
+
+function res = check_fraction(T, U, M, f, K)
+% Each windowed value's valid fraction: Night 6's sibling (the same in both runs - it is
+% computed from the masked input, never from the cut) or her own variable, as the marker
+% says; in [0, 1]; and consistent with her own rules where she has one.
+    res = struct('path', f.path, 'how', f.how, 'ok', false, 'why', '', 'n_values', 0, ...
+                 'n_partial', 0, 'n_rule', 0);
+    vparts = strsplit(f.path, '.');
+    if ~has_field_path(U, vparts)
+        res.why = 'absent';
+        return
+    end
+    hit = cellfun(@(v) strcmp(v.path, f.path), M.vars);
+    if nnz(hit) ~= 1 || ~isstruct(M.vars{hit}.valid_fraction)
+        res.why = 'no valid_fraction in the marker';
+        return
+    end
+    mv = M.vars{hit}.valid_fraction;
+    if strcmp(f.how, 'sibling')
+        want = [f.path '_validFraction'];
+        if ~strcmp(mv.variable, want) || ~mv.added
+            res.why = sprintf('marker names %s', mv.variable);
+            return
+        end
+        sparts = [vparts(1:end - 1), {[vparts{end} '_validFraction']}];
+    else
+        if ~strcmp(mv.variable, f.how) || mv.added || ~strcmp(mv.kind, 'her')
+            res.why = sprintf('marker names %s for her %s', mv.variable, f.how);
+            return
+        end
+        sparts = strsplit(f.how, '.');
+        if has_field_path(T, [vparts(1:end - 1), {[vparts{end} '_validFraction']}])
+            res.why = 'a sibling was added beside her own fraction';
+            return
+        end
+    end
+    leaves = expand(U, vparts);
+    for i = 1:numel(leaves)
+        s = leaves{i};
+        fs_ = [s(1:end - 1), substruct('.', sparts{end})];
+        if numel(sparts) ~= numel(vparts)
+            fs_ = substruct_path(sparts);
+        end
+        u = subsref(U, s);
+        fT = subsref(T, fs_);
+        fU = subsref(U, fs_);
+        if ~iscell(u), u = {u}; fT = {fT}; fU = {fU}; end
+        for c = 1:numel(u)
+            a = fT{c}; b = fU{c};
+            if strcmp(f.how, 'sibling') && ~(isequal(size(a), size(u{c})) && bits_equal(a, b))
+                res.why = sprintf('%s leaf %d: sibling differs from the reference', f.path, i);
+                return
+            end
+            if any(a(:) < 0 | a(:) > 1)
+                res.why = sprintf('%s leaf %d: a fraction outside [0, 1]', f.path, i);
+                return
+            end
+            res.n_values = res.n_values + numel(a);
+            res.n_partial = res.n_partial + nnz(a > 0 & a < 1);
+            [ok, n] = her_rule(f.path, u{c}, b, U, K);
+            res.n_rule = res.n_rule + n;
+            if ~ok
+                res.why = sprintf('%s leaf %d: disagrees with her rule', f.path, i);
+                return
+            end
+        end
+    end
+    res.ok = true;
+end
+
+function [ok, n] = her_rule(path, u, f, U, K)
+% Where her own code gates on validity, the fraction must agree with what she computed.
+    ok = true; n = 0;
+    switch path
+        case 'heartCountRateSeries'   % HR_BR :895: rate iff >= 0.5 of the window valid
+            evald = isfinite(U.heartCountSeries(:));     % windows she evaluated
+            n = nnz(evald);
+            ok = isequal(isfinite(u(evald)), f(evald) >= 0.5);
+        case 'heartCountValidSec'     % :894: valid seconds / valid fraction = the window
+            ev = isfinite(u(:)) & f(:) > 0;
+            n = nnz(ev);
+            ok = all(abs(u(ev) ./ f(ev) - double(U.winSec)) <= 2 / K.fs);
+        case {'mmc.firing.rate', 'mmc.burst.rate'}   % extract_mmc :290: >= 0.5 of W valid
+            W = double(U.mmc.params.W);
+            tol = 2 / (W * K.fs);
+            n = numel(u);
+            ok = all(f(isfinite(u)) >= 0.5 - tol) && all(~isfinite(u(f < 0.5 - tol)));
+    end
+end
+
+function [res, Tr, Ur] = check_recomputed(T, U, Tr, Ur, M, MU, c, K)
+% A recomputed average equals her expression over the KEPT values; the marker keeps her
+% original (the same in both runs: one call), labelled.
+    res = struct('path', c.path, 'ok', false, 'why', '', 'n_leaves', 0, 'n_changed', 0);
+    if ~has_field_path(U, strsplit(c.path, '.'))
+        res.why = 'absent';
+        return
+    end
+    hit = cellfun(@(e) strcmp(e.path, c.path), as_cells(M.recomputed));
+    hitU = cellfun(@(e) strcmp(e.path, c.path), as_cells(MU.recomputed));
+    if nnz(hit) ~= 1 || nnz(hitU) ~= 1
+        res.why = 'not in the marker exactly once';
+        return
+    end
+    e = M.recomputed{hit};
+    eU = MU.recomputed{hitU};
+    if ~contains(e.label, 'RECOMPUTED')
+        res.why = 'not labelled as recomputed';
+        return
+    end
+    tparts = strsplit(c.path, '.');
+    leaves = expand(U, tparts);
+    if numel(e.leaves) ~= numel(leaves)
+        res.why = 'marker leaf count';
+        return
+    end
+    for i = 1:numel(leaves)
+        s = leaves{i};
+        k = 1;
+        if numel(s) >= 2 && strcmp(s(2).type, '()'), k = s(2).subs{1}; end
+        got = subsref(T, s);
+        x = elem(T, c.of, k);
+        switch c.how
+            case 'mean', want = mean(x, 1, 'omitnan');
+            case 'count', want = numel(x);
+            case 'well'
+                rms = elem(T, 'envelope.rms_uv', k);
+                vf = elem(T, 'envelope.validFrac', k);
+                want = mean(x(vf >= 0.5 & isfinite(rms)), 'omitnan');
+            case 'events'
+                sig = T.mmc.signal;   % trimmed at its own, earlier, cut: NaN only there
+                kept = ~isnan(x);
+                want = zeros(1, size(x, 2));
+                for ch = 1:size(x, 2)
+                    want(ch) = nnz(x(kept(:, ch), ch) == 1) / ...
+                               max(nnz(kept(:, ch) & ~isnan(sig(:, ch))) / K.fs, eps);
+                end
+        end
+        g = e.leaves{i};
+        if ~(isequaln(double(got), double(want)) && isequaln(g.recomputed, got) ...
+                && isequaln(g.original, eU.leaves{i}.original))
+            res.why = sprintf('%s leaf %d: recomputed %s, oracle %s', c.path, i, ...
+                              mat2str(double(got)), mat2str(double(want)));
+            return
+        end
+        res.n_changed = res.n_changed + ~isequaln(g.original, got);
+        res.n_leaves = res.n_leaves + 1;
+        Tr = subsasgn(Tr, s, []);
+        Ur = subsasgn(Ur, s, []);
+    end
+    res.ok = true;
+end
+
+function v = elem(S, path, k)
+% A path read at struct-array element k (scalar structs as they are).
+    v = S;
+    for p = strsplit(path, '.')
+        if numel(v) > 1, v = v(k); end
+        v = v.(p{1});
     end
 end
 
@@ -515,93 +809,145 @@ function s = substruct_path(parts)
 end
 
 function r = unit_case(K)
-% night6_recovery_trim_outputs on hand-built files of four kinds, every stamp convention
-% at L - 1, L and L + 1, with owners whose starts differ (hrv vs breathing), a byproduct,
-% an unmapped variable, an 'unknown' one and a figure.
+% night6_recovery_trim_outputs on hand-built files of every kind, each variable at
+% L - 1, L and L + 1 of ITS OWN cut (every cut different): every class and convention,
+% byproducts in a breathing-only run, struct arrays, cells and co-indexed lists, v7.3
+% kept, an unmapped and an 'unknown' variable and a figure listed untrimmed; the valid
+% fractions of every computed kind on known masks (the Python test computes them
+% independently); the recomputed averages and counts; the mmc events NaN; and the
+% refusals (trimmed twice, no cut, no class, an unknown class, a stamp that does not fit,
+% a sibling that already exists).
     RS = night6_recovery_start(K.starts);
-    d = K.dir;
-    fs = K.fs;
-    Lh = K.L_hrv; Lb = K.L_breathing; Lm = K.L_mmc; Ls = K.L_spikes;
-    p3 = @(L) [L - 1; L; L + 1];
-    % HRVMeasures (hrv run): sec_row1, sec0, row1
-    RR_times = (p3(Lh) + 1) / fs; RR_intervals = [0.11; 0.12; 0.13];
-    metrics_t = p3(Lh) / fs; hrv_series = [1; 2; 3]; nRR_used = [4; 5; 6];
-    heartlocs = p3(Lh) + 1; hrv = 0.5; mystery = [1 2 3]; t = (0:2)' / fs; %#ok<NASGU>
-    save(fullfile(d, 'e2_hrv_HRVMeasures.mat'), 'RR_times', 'RR_intervals', 'metrics_t', ...
-         'hrv_series', 'nRR_used', 'heartlocs', 'hrv', 'mystery', 't');
-    % HRBR (an hrv-only run: breathRateSeries is a byproduct; and an hrv+breathing run)
-    metrics_t = sort([p3(Lh); p3(Lb)]) / fs; heartRateSeries = (1:6)'; %#ok<NASGU>
-    breathRateSeries = (11:16)'; br_locs_true = sort([p3(Lh); p3(Lb)]) + 1; %#ok<NASGU>
-    RR_implausibleMask = false(3, 1); %#ok<NASGU>
-    save(fullfile(d, 'e2_hrv_HRBR.mat'), 'metrics_t', 'heartRateSeries', 'breathRateSeries', ...
-         'br_locs_true', 'RR_implausibleMask');
-    save(fullfile(d, 'e2_hrv_breathing_HRBR.mat'), 'metrics_t', 'heartRateSeries', ...
-         'breathRateSeries', 'br_locs_true', 'RR_implausibleMask');
-    % a breathing-only run: heart rate and heartlocs are hrv's byproducts, cut at HRV's start
-    heartlocs = sort([p3(Lh); p3(Lb)]) + 1; %#ok<NASGU>
-    save(fullfile(d, 'e2_breathing_HRBR.mat'), 'metrics_t', 'heartRateSeries', ...
-         'breathRateSeries', 'br_locs_true', 'heartlocs');
-    save(fullfile(d, 'e2_breathing_owner_HRBR.mat'), 'metrics_t', 'breathRateSeries');
-    % mmc: sec_xchan_delay (true centre = delay_t + W/2 - S) and sec0 on rate_t / t
+    OT = RS.outputTimes;
+    d = K.dir; fs = K.fs; i0 = K.i0; N = K.n;
+    L = containers.Map();
+    for c = as_cells(K.cut_L), L(c{1}.cut) = double(c{1}.L); end
+    p3 = @(x) [x - 1; x; x + 1];
+    invalid = false(N, 1);
+    for j = 1:size(K.invalid, 1), invalid(K.invalid(j, 1):K.invalid(j, 2)) = true; end
+    Lb = L('hrv.beats.valid_only'); Lc = L('hrv.count_hrv.valid_only');
+    Lh = L('hrv.heart_rate.valid_only'); Lt = L('hrv.heart_band_trace.filled_or_filtered');
+    Lbr = L('breathing.breath_rate.valid_only'); Ltr = L('breathing.breath_troughs.valid_only');
+    % HRVMeasures (an hrv run): class (i) RR (sec_row1), heartlocs (row1), hrv_series (sec0)
+    RR_times = (p3(Lb) + 1) / fs; RR_intervals = [0.11; 0.12; 0.13]; %#ok<NASGU>
+    heartlocs = p3(Lb) + 1;
+    metrics_t = p3(Lc) / fs; hrv_series = [1; 2; 3]; nRR_used = [4; 5; 6]; %#ok<NASGU>
+    hrv = 0.5; mystery = [1 2 3]; invalidMask = invalid; winSec = K.win_w / fs; %#ok<NASGU>
+    save(fullfile(d, 'e2_hrv_HRVMeasures.mat'), 'RR_times', 'RR_intervals', 'heartlocs', ...
+         'metrics_t', 'hrv_series', 'nRR_used', 'hrv', 'mystery', 'invalidMask', 'winSec');
+    % HRBR: heart rate, counts and breath rate on one axis, each at its own cut; the class
+    % (ii) trace at its own; the breath troughs; the averages
+    metrics_t = sort([p3(Lh); p3(Lbr); p3(Lc)]) / fs;
+    heartRateSeries = (1:9)'; breathRateSeries = (11:19)'; heartCountSeries = (21:29)'; %#ok<NASGU>
+    heartCountRateSeries = (31:39)'; heartCountValidSec = (41:49)' / 100; %#ok<NASGU>
+    t = p3(Lt) / fs; heartBeatSeries = [1; 2; 3]; br_locs_true = p3(Ltr) + 1; %#ok<NASGU>
+    avgHeartRate = 99; avgBreathRate = 98; avgHeartCount = 97; avgHeartCountRate = 96; %#ok<NASGU>
+    hrBrWinSec = K.hrbr_w / fs; RR_implausibleMask = false(3, 1); %#ok<NASGU>
+    v = {'metrics_t', 'heartRateSeries', 'breathRateSeries', 'heartCountSeries', ...
+         'heartCountRateSeries', 'heartCountValidSec', 't', 'heartBeatSeries', ...
+         'br_locs_true', 'heartlocs', 'avgHeartRate', 'avgBreathRate', 'avgHeartCount', ...
+         'avgHeartCountRate', 'hrBrWinSec', 'winSec', 'invalidMask', 'RR_implausibleMask'};
+    save(fullfile(d, 'e2_hrv_HRBR.mat'), v{:});
+    save(fullfile(d, 'e2_breathing_HRBR.mat'), v{:});   % a breathing-only run
+    save(fullfile(d, 'e2_nocut_HRBR.mat'), v{:});
+    save(fullfile(d, 'e2_noclass_HRBR.mat'), v{:});
+    heartRateSeries_validFraction = ones(9, 1); %#ok<NASGU>
+    save(fullfile(d, 'e2_collide_HRBR.mat'), v{:}, 'heartRateSeries_validFraction');
+    % mmc, full rate: signal and events at their own cuts, rate (6 rows) and delay
+    Lr = L('mmc.mmc_rate.valid_only'); Ld = L('mmc.mmc_delay.filled_or_filtered');
     mmc = struct();
-    mmc.params = struct('W', 10, 'S', 1);
-    mmc.delay_t = p3(Lm) / fs - (10 / 2 - 1);
+    mmc.params = struct('W', K.mmc_w / fs, 'S', 1 / fs, 'delayW', 4 / fs, 'delayStep', 1 / fs);
+    mmc.t = (0:N - 1)' / fs;
+    sig = ones(N, 3);
+    for j = 1:size(K.mmc_nan, 1), sig(K.mmc_nan(j, 2):K.mmc_nan(j, 3), K.mmc_nan(j, 1)) = NaN; end
+    mmc.signal = single(sig);
+    ev = false(N, 3);
+    for j = 1:size(K.ev_rows, 1), ev(K.ev_rows(j, 2), K.ev_rows(j, 1)) = true; end
+    mmc.rate_t = (Lr + (-2:3)') / fs;
+    rate = (1:6)' * [1 1 1];
+    rate(2, 1) = NaN;
+    rate(5, 3) = NaN;
+    mmc.firing = struct('events', ev, 'rate', rate, 'peakAmp', rate * 10, 'avgRate', [1 2 3], ...
+                        'refractory', 0.05);
+    mmc.delay_t = p3(Ld) / fs - (mmc.params.W / 2 - mmc.params.S);
     mmc.delay = [1 1 1; 2 2 2; 3 3 3];
-    mmc.t = p3(Lm) / fs;
-    mmc.signal = single([1 1 1; 2 2 2; 3 3 3]);
-    mmc.rate_t = p3(Lm) / fs;
-    mmc.firing = struct('events', true(3, 3), 'rate', ones(3, 3), 'peakAmp', ones(3, 3), ...
-                        'avgRate', [1 2 3], 'refractory', 0.05);
     save(fullfile(d, 'e2_mmc_in_mmc.mat'), 'mmc');
-    % spikes_v2 (v7.3): a struct array (per channel), co-indexed drop, cells
-    spikes = struct('centers', {p3(Ls) + 1, [Ls + 1; Ls + 2]}, ...
-                    'times', {p3(Ls) / fs, [Ls; Ls + 1] / fs}, ...
+    % one kept slow-wave channel
+    Lsw = L('slow_wave.sw_rate.filled_or_filtered');
+    slowWaveRateTime = p3(Lsw) / fs; slowWaveRateSeries = [1; 2; 3]; avgSlowWave = 7; %#ok<NASGU>
+    rateWinSec = K.sw_w / fs; %#ok<NASGU>
+    save(fullfile(d, 'e2_swm_ANT1_slowWaves_ANT1.mat'), 'slowWaveRateTime', ...
+         'slowWaveRateSeries', 'avgSlowWave', 'rateWinSec', 'invalidMask');
+    % spikes_v2 (v7.3): a struct array (per channel), co-indexed drop, cells, sigma windows
+    % and CV2 bins over the channel's own invalid runs
+    Lst = L('spikes.spike_times.filled_or_filtered');
+    Lw = L('spikes.spike_waveforms.filled_or_filtered');
+    Lsg = L('spikes.sigma_windows.valid_only'); Lcv = L('spikes.cv2.valid_only');
+    spikes = struct('centers', {p3(Lst) + 1, [Lst + 1; Lst + 2]}, ...
+                    'times', {p3(Lst) / fs, [Lst; Lst + 1] / fs}, ...
                     'waveforms', {[1 1; 2 2; 3 3], [4 4; 5 5]}, ...
-                    'alignedCenters', {p3(Ls) + 1, [Ls + 1; Ls + 2]}, 'nSpikes', {3, 2});
-    sigmaWin = struct('centers', {{p3(Ls) + 1, p3(Ls) + 1.5}}, ...
-                      'sigma', {{[1; 2; 3], [4; 5; 6]}}, 'windowSec', 5, 'stepFrac', 0.5); %#ok<NASGU>
-    save(fullfile(d, 'e2_spikes_v2.mat'), 'spikes', 'sigmaWin', '-v7.3');
+                    'alignedCenters', {p3(Lw) + 1, [Lw + 1; Lw + 2]}, ...
+                    'alignedTimes', {p3(Lw) / fs, [Lw; Lw + 1] / fs}, 'nSpikes', {3, 2}); %#ok<NASGU>
+    sigmaWin = struct('centers', {{p3(Lsg) + 1, p3(Lsg) + 1.5}}, ...
+                      'sigma', {{[1; 2; 3], [4; 5; 6]}}, 'windowSec', K.sigma_w / fs, ...
+                      'stepFrac', 0.5); %#ok<NASGU>
+    metrics = struct('cv2_t', {p3(Lcv)' / fs, p3(Lcv)' / fs}, 'cv2_roll', {[1 2 3], [4 5 6]}, ...
+                     'nSpikes', {3, 2}); %#ok<NASGU>
+    nSamples = K.spk_n; info = struct('P', struct('cv2WinSec', K.cv2_w / fs)); %#ok<NASGU>
+    invalidRuns = cell(1, 2);
+    for k = 1:2
+        invalidRuns{k} = K.spk_invalid(K.spk_invalid(:, 1) == k, 2:3);
+    end
+    save(fullfile(d, 'e2_spikes_v2.mat'), 'spikes', 'sigmaWin', 'metrics', 'nSamples', ...
+         'info', 'invalidRuns', '-v7.3');
     fid = fopen(fullfile(d, 'e2_figure.png'), 'w'); fwrite(fid, 'x'); fclose(fid);
-    i0 = K.i0;
-    A = @(L) struct('output_rows_before_start', L, 'start_sample0', i0 + L, ...
-                    'start_s', (i0 + L) / fs);
+    A = struct('output_rows_before_start', 0, 'start_sample0', i0, 'start_s', i0 / fs);
+    cuts = cellfun(@(c) struct('cut', c.cut, 'basis', 'synthetic', ...
+        'start_s', (i0 + c.L) / fs, 'start_sample0', i0 + c.L, ...
+        'output_rows_before_start', c.L), as_cells(K.cut_L), 'UniformOutput', false);
     rec = struct('epoch_start_sample0', i0, 'electrical_settle_sample0', i0 + 7, ...
-                 'analyses', struct('hrv', A(Lh), 'breathing', A(Lb), 'mmc', A(Lm), ...
-                                    'spikes', A(Ls)));
+                 'analyses', struct('hrv', A, 'breathing', A, 'mmc', A, 'spikes', A, ...
+                                    'slow_wave', A), 'cuts', {cuts});
+    tr = @(files, cons) night6_recovery_trim_outputs(d, files, cons, rec, OT, fs);
     r = struct();
-    r.hrv = night6_recovery_trim_outputs(d, {'e2_hrv_HRVMeasures.mat', 'e2_hrv_HRBR.mat', ...
-        'e2_figure.png', '.', '..'}, {'hrv'}, rec, RS.outputTimes, fs);
-    r.both = night6_recovery_trim_outputs(d, {'e2_hrv_breathing_HRBR.mat'}, ...
-        {'hrv', 'breathing'}, rec, RS.outputTimes, fs);
-    r.breathing = night6_recovery_trim_outputs(d, {'e2_breathing_HRBR.mat'}, ...
-        {'breathing'}, rec, RS.outputTimes, fs);
-    r.out_breathing = load(fullfile(d, 'e2_breathing_HRBR.mat'));
-    % trimmed twice: refused; an owner with no start: refused, never cut at another's
-    r.twice = attempt(@() night6_recovery_trim_outputs(d, {'e2_breathing_HRBR.mat'}, ...
-        {'breathing'}, rec, RS.outputTimes, fs));
-    noBr = rec;
-    noBr.analyses = rmfield(noBr.analyses, 'breathing');
-    r.no_owner = attempt(@() night6_recovery_trim_outputs(d, ...
-        {'e2_breathing_owner_HRBR.mat'}, {'hrv'}, noBr, RS.outputTimes, fs));
-    r.marker_variable = RS.outputTimes.markerVariable;
-    r.mmc = night6_recovery_trim_outputs(d, {'e2_mmc_in_mmc.mat'}, {'mmc'}, rec, ...
-        RS.outputTimes, fs);
-    r.spikes = night6_recovery_trim_outputs(d, {'e2_spikes_v2.mat'}, {'spikes'}, rec, ...
-        RS.outputTimes, fs);
-    r.out = struct('hrvm', load(fullfile(d, 'e2_hrv_HRVMeasures.mat')), ...
-                   'hrbr', load(fullfile(d, 'e2_hrv_HRBR.mat')), ...
-                   'hrbr2', load(fullfile(d, 'e2_hrv_breathing_HRBR.mat')), ...
-                   'mmc', load(fullfile(d, 'e2_mmc_in_mmc.mat')), ...
-                   'spk', load(fullfile(d, 'e2_spikes_v2.mat')));
-    r.out.mmc.mmc.firing.events = double(r.out.mmc.mmc.firing.events);
-    r.out.mmc.mmc.signal = double(r.out.mmc.mmc.signal);
-    fid = fopen(fullfile(d, 'e2_spikes_v2.mat'), 'r'); h = fread(fid, [1 128], '*char'); fclose(fid);
-    r.spikes_still_v73 = contains(h, 'MATLAB 7.3');
-    % a mismatched stamp is refused by name, never cut by guess
+    r.hrv = tr({'e2_hrv_HRVMeasures.mat', 'e2_hrv_HRBR.mat', 'e2_figure.png', '.', '..'}, {'hrv'});
+    r.breathing = tr({'e2_breathing_HRBR.mat'}, {'breathing'});
+    r.mmc = tr({'e2_mmc_in_mmc.mat'}, {'mmc'});
+    r.spikes = tr({'e2_spikes_v2.mat'}, {'spikes'});
+    r.sw = tr({'e2_swm_ANT1_slowWaves_ANT1.mat'}, {'slow_wave'});
+    % refusals, by name: trimmed twice; a cut the row lacks; no class; an unknown class; a
+    % sibling that already exists; a stamp that does not fit its value
+    r.twice = attempt(@() tr({'e2_breathing_HRBR.mat'}, {'breathing'}));
+    noCut = rec;
+    noCut.cuts = rec.cuts(~cellfun(@(c) strcmp(c.cut, 'hrv.heart_rate.valid_only'), rec.cuts));
+    r.no_cut = attempt(@() night6_recovery_trim_outputs(d, {'e2_nocut_HRBR.mat'}, {'hrv'}, ...
+                                                        noCut, OT, fs));
+    j = find(cellfun(@(x) strcmp(x.file, 'HRBR') && strcmp(x.path, 'heartRateSeries'), OT.vars));
+    OT2 = OT;
+    OT2.vars{j} = rmfield(OT2.vars{j}, 'trim_class');
+    r.no_class = attempt(@() night6_recovery_trim_outputs(d, {'e2_noclass_HRBR.mat'}, ...
+                                                          {'hrv'}, rec, OT2, fs));
+    OT3 = OT;
+    OT3.vars{j}.trim_class = 'probably_valid';
+    r.bad_class = attempt(@() night6_recovery_trim_outputs(d, {'e2_noclass_HRBR.mat'}, ...
+                                                           {'hrv'}, rec, OT3, fs));
+    r.collide = attempt(@() tr({'e2_collide_HRBR.mat'}, {'hrv'}));
     metrics_t = (0:3)' / fs; hrv_series = [1; 2; 3]; %#ok<NASGU>
     save(fullfile(d, 'e2_bad_HRVMeasures.mat'), 'metrics_t', 'hrv_series');
-    r.shape = attempt(@() night6_recovery_trim_outputs(d, {'e2_bad_HRVMeasures.mat'}, ...
-        {'hrv'}, rec, RS.outputTimes, fs));
+    r.shape = attempt(@() tr({'e2_bad_HRVMeasures.mat'}, {'hrv'}));
+    r.marker_variable = OT.markerVariable;
+    r.out = struct('hrvm', load(fullfile(d, 'e2_hrv_HRVMeasures.mat')), ...
+                   'hrbr', load(fullfile(d, 'e2_hrv_HRBR.mat')), ...
+                   'hrbr_b', load(fullfile(d, 'e2_breathing_HRBR.mat')), ...
+                   'mmc', load(fullfile(d, 'e2_mmc_in_mmc.mat')), ...
+                   'spk', load(fullfile(d, 'e2_spikes_v2.mat')), ...
+                   'sw', load(fullfile(d, 'e2_swm_ANT1_slowWaves_ANT1.mat')));
+    r.events_class = class(r.out.mmc.mmc.firing.events);
+    r.out.mmc.mmc.signal = double(r.out.mmc.mmc.signal);
+    r.untouched = struct('nocut', isequal(load(fullfile(d, 'e2_nocut_HRBR.mat')), ...
+                                          load(fullfile(d, 'e2_noclass_HRBR.mat'))));
+    fid = fopen(fullfile(d, 'e2_spikes_v2.mat'), 'r'); h = fread(fid, [1 128], '*char'); fclose(fid);
+    r.spikes_still_v73 = contains(h, 'MATLAB 7.3');
 end
 
 function r = sources_case(K)
