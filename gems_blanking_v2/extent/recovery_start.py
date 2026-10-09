@@ -35,8 +35,10 @@ whose edge the start must cover). A stage's reach, by its kind:
 * ``window, part before t`` - an asymmetric window: the part before ``t``.
 
 Whether each window is centred or trailing is read from Andrea's code and cited with
-``file:line``; :data:`SOURCE_COMMIT` names the processing_new commit, and a test checks
-every cited line still says what the table says it does.
+``file:line``. Her working tree is not a commit (``slowWaveAnalysis_new.m`` is modified
+and ``HR_BR_HRVAnalysis_beats.m`` untracked at f93e250), so :data:`SOURCE_FILES` records
+the SHA-256 of every cited processing_new file as read, and a test checks both the hashes
+and that every cited line still says what the table says it does.
 
 What is NOT counted, and why (each listed per analysis, never silently dropped):
 
@@ -45,10 +47,30 @@ What is NOT counted, and why (each listed per analysis, never silently dropped):
   their reach is a chain (a peak removed by a taller one removed by a taller one), so
   it has no fixed bound. Flagged for a ruling, not counted.
 * **edge guards** (step2's 10 ms pad, HR's 0.75 s and slow wave's 15 s edge buffers).
-  They act AFTER an edge - after the masked start too - so they do not reach back.
+  They act AFTER an edge, so they do not reach back. They do NOT act at a masked start
+  in Night 6: step2's pad dilates every invalid sample, but HR's and slow wave's edge
+  masks are built from ``blankIdx`` and the array ends only
+  (``HR_BR_HRVAnalysis_beats.m:249-256``, ``slowWaveAnalysis_new.m:111-118``) and Night 6
+  passes ``blankIdx = []`` (``night6_run_recording.m`` call_one), so a NaN lead-in gets
+  no edge buffer from either. Their windows that straddle a masked start are computed
+  over her ``'nearest'`` fill of the masked span (review of be402a1, finding 1 (b), (c)).
 * **epoch-wide statistics** (session sigma, detrend, averages). They have no time to
-  trim by; Night 6 therefore masks the input before the start (see
-  ``matlab/night6/night6_recovery_lead_in.m``), which keeps them free of unsettled data.
+  trim by. Both trim modes mask the input before at least the electrical settling, which
+  keeps them free of unsettled data; under ``mask_to_electrical_drop_outputs`` they are
+  computed over [electrical settling, epoch end], and the record says so.
+
+Trim modes (:data:`TRIM_MODES`, a REQUIRED declaration of every Night 6 batch)
+-------------------------------------------------------------------------------
+* ``mask_to_own_start`` - each analysis's input is masked (NaN) up to its OWN start.
+  Costs, per analysis, the window settling after the electrical settling (spikes 15 s,
+  hrv and breathing 30 s, slow wave 41 s, mmc 51 s at the cohort rate), and its outputs
+  in the first window after the start are partial windows over the fill of the mask.
+* ``mask_to_electrical_drop_outputs`` - every analysis's input is masked up to the
+  electrical settling, one point for all; every output stamped before the analysis's
+  own start is then dropped or flagged as not computed, by :data:`OUTPUT_VARS` (the
+  per-output time map, read from her code with ``file:line``). Epoch-wide scalars stay,
+  recorded as computed over [electrical settling, epoch end]; an output whose time
+  convention is not known is left untrimmed and listed by name, never dropped silently.
 
 An unknown stage makes the analysis's settling ``None`` with the missing stage named -
 never the part that is known (invariant 19). That analysis then keeps 132 s for the
@@ -56,11 +78,12 @@ file, labelled ``fixed_132s_settling_unknown`` (the user's rule, 2026-10-08).
 
 The file Night 6 reads
 ----------------------
-:func:`write_recovery_starts` writes one JSON document - per file, per analysis: the
-start in seconds (for the record) and as an exact 0-based FILE sample (MATLAB never
-converts seconds to samples, invariants 15 and 22), its basis and its source - plus the
-table it was computed with and the held files. Night 6 records the file's path and
-SHA-256 in every stim_rec epoch's record.
+:func:`write_recovery_starts` writes one JSON document - per file: the electrical
+settling as an exact 0-based FILE sample, and per analysis the start in seconds (for the
+record) and as an exact 0-based FILE sample (MATLAB never converts seconds to samples,
+invariants 15 and 22), its basis and its source - plus the table it was computed with,
+the output time map, the cited files' hashes and the held files. Night 6 records the
+file's path and SHA-256 in every stim_rec epoch's record.
 
 Electrical settling only: no term here, and nothing that feeds one, uses heart rate,
 firing rate or slow-wave rate (RULING (j) 6).
@@ -88,24 +111,33 @@ from gems_blanking_v2.io.store import atomic_write_text
 from gems_blanking_v2.physio.rpeaks import DECIMATE_TARGET_HZ
 
 __all__ = [
+    "ACTIONS",
     "ANALYSES",
     "BASIS_FIXED",
     "BASIS_MEASURED",
+    "CONVENTIONS",
     "FIXED_START_S",
     "FIXED_START_SOURCE",
     "HELD_NO_SETTLING",
     "HELD_UNDETECTED",
+    "OUTPUT_FILES",
+    "OUTPUT_VARS",
     "RULING",
     "SCHEMA",
-    "SOURCE_COMMIT",
+    "SOURCE_FILES",
+    "SOURCE_LABEL",
+    "TRIM_MODES",
     "Analysis",
     "AnalysisSettling",
     "Excluded",
     "Output",
+    "OutputFile",
+    "OutputVar",
     "Stage",
     "analysis_settling",
     "beat_decimation_factor",
     "file_starts",
+    "output_times_record",
     "read_recovery_starts",
     "recovery_starts_document",
     "stage_settling_s",
@@ -114,9 +146,32 @@ __all__ = [
 ]
 
 RULING: Final = "RULING 2026-10-08 (k) 2"
-SCHEMA: Final = "gems-blanking-v2 recovery starts v1"
-SOURCE_COMMIT: Final = "processing_new f93e250"
-"""The commit of Andrea's code every ``file:line`` below was read at."""
+SCHEMA: Final = "gems-blanking-v2 recovery starts v2"
+"""v2: the electrical settling sample, the output time map and the cited files' hashes."""
+SOURCE_FILES: Final[Mapping[str, str]] = {
+    "HR_BR_HRVAnalysis_beats.m":
+        "14f85d66de4097f5385965f5f6df31e3ce00b51bb86d9295adf19d715a9b9670",
+    "extract_mmc.m": "cdc46f5aa68deb60897b7a7bdb2bac8344adf625b0d16fbdcb607825cfc9546d",
+    "pipeline_params.m": "3e9b8e0a63fdaf1a0405f89f51a3cc54078c58098d268e6dab2220e1ab9c30a9",
+    "slowWaveAnalysis_new.m":
+        "7512caf0cf7212c368101b805a40f97dfb300ea8e33c0e34e6b05adeb472f320",
+    "step1_bandpass.m": "6df4633b29c39bdf3d8831a7213af058bd83f3ed5017da4005c00373f2299159",
+    "step2_noise_sigma.m": "484b14982a04ac10bf1f3b5460d90085b2bc5e9da19720ac42acae506596776d",
+    "step3_detect.m": "9a097bee5c5e0fcf0ad6eb1c40150f1fa0b7a814f1ee76a59f3d8255eb3fe750",
+    "step3b_envelope.m": "8e5bf31708056ea37d6abfdbb80f69a8de9b4c1b78d90e040fc949b19c9528aa",
+    "step4_waveforms.m": "742220b61bd22109c782d9f8763cb3306f455b17bf5d16985409f7fcc4d79dfb",
+    "step5c_modality_test.m":
+        "c6333309d160fb6a3753447bd75a062ea945d4a3f1b1485382bb6fbea35b8a94",
+    "step6_spike_report.m": "e0c6a1641d26195a87a36674231656da62f40e9c7e2be220cc2f720b93e368fd",
+}
+"""SHA-256 of the raw bytes of every processing_new file a ``file:line`` below cites, as
+read on 2026-10-09 (her working tree: not a commit). The same hash Night 6 records for
+each function it calls (``night6_sha256_file``)."""
+SOURCE_LABEL: Final = "processing_new files by SHA-256 (extent.recovery_start.SOURCE_FILES)"
+
+TRIM_MODES: Final = ("mask_to_own_start", "mask_to_electrical_drop_outputs")
+"""The two Night 6 trim semantics; the batch list must name one (no default). The same
+two names are ``matlab/night6/night6_trim_modes.m`` (a test holds them equal)."""
 
 FIXED_START_S: Final = 132.0
 FIXED_START_SOURCE: Final = (
@@ -281,7 +336,8 @@ _SPIKES = Analysis(
     (
         Excluded("step2 edge pad, edgeBufferMs 10 ms around every invalid sample", "edge guard",
                  "step2_noise_sigma.m:41 and :75-77; pipeline_params.m:69",
-                 "acts after an edge (the masked start too) and covers the 5.1 ms ringing "
+                 "acts after an edge (it dilates every invalid sample, so the masked start "
+                 "too) and covers the 5.1 ms ringing "
                  "the bandpass row counts; it does not reach back"),
         Excluded("wrapper check: no spike within 5 ms (NanPadMs) of a NaN", "edge guard",
                  "matlab/night6/process_dataset_v2.m:143-151", "a refusal check, not a stage"),
@@ -326,7 +382,9 @@ _HRV = Analysis(
                  f"{_HR_BR}:278-286", "with stored beats it feeds only the detrended trace; "
                  "the beats are READ (:289-299), not found on it"),
         Excluded("edgeBufferSec 0.75 s (night6 params) at blank and signal edges", "edge guard",
-                 f"{_HR_BR}:249-256", "acts after an edge; does not reach back"),
+                 f"{_HR_BR}:249-256", "acts after an edge; does not reach back. Built from "
+                 "blankIdx and the array ends only, and night6 passes blankIdx = []: no buffer at "
+                 "a masked start"),
         Excluded("global HRV, average heart rate", "epoch-wide statistic",
                  f"{_HR_BR}:436, :453-466", "untimed: masking the input keeps them settled"),
         Excluded("beat detector: global sigma, global RR, QRS template, pass-1 distance",
@@ -350,7 +408,9 @@ _BREATHING = Analysis(
                  f"{_HR_BR}:387", "a selection chain, not a filter or window; the troughs "
                  "are read from the raw signal at the beats (:378), no filter"),
         Excluded("edgeBufferSec 0.75 s (night6 params)", "edge guard", f"{_HR_BR}:249-256",
-                 "acts after an edge; does not reach back"),
+                 "acts after an edge; does not reach back. Built from blankIdx and the "
+                 "array ends only, and night6 passes blankIdx = []: no buffer at a masked "
+                 "start"),
         Excluded("average breath rate", "epoch-wide statistic", f"{_HR_BR}:437",
                  "untimed: masking the input keeps it settled"),
     ))
@@ -386,7 +446,8 @@ _SLOW_WAVE = Analysis(
                  "a selection chain, not a filter or window"),
         Excluded("edgeBufferSec 15 s at the signal edges (and blankIdx, which night6 leaves "
                  "empty: NaN spans get no edge buffer)", "edge guard", f"{_SW}:108-118",
-                 "acts after an edge; does not reach back"),
+                 "acts after an edge; does not reach back. Not at a masked start: "
+                 "blankIdx is empty in night6"),
         Excluded("detrend over the whole epoch; avgSlowWave = mean of the rate series",
                  "epoch-wide statistic", f"{_SW}:139, :283",
                  "untimed: masking the input keeps them settled"),
@@ -449,6 +510,345 @@ ANALYSES: Final[Mapping[str, Analysis]] = {
 
 
 # ---------------------------------------------------------------------------
+# the output time map (mask_to_electrical_drop_outputs)
+# ---------------------------------------------------------------------------
+
+Role = Literal["trim", "time_axis", "epoch_scalar", "input", "parameter", "container",
+               "unknown"]
+Convention = Literal["row1", "sec0", "sec_row1", "sec_xchan_delay"]
+Action = Literal["nan", "drop", "false"]
+
+CONVENTIONS: Final[Mapping[str, str]] = {
+    "row1": "a 1-based epoch row (a window centre may be fractional): position p = v - 1",
+    "sec0": "seconds from epoch row 1, t = (row - 1) / fs: position p = v * fs",
+    "sec_row1": "seconds = 1-based row / fs, one sample later than sec0 "
+                "(computeValidRRIntervals RR_times = s1 / fs): position p = v * fs - 1",
+    "sec_xchan_delay": "extract_mmc delay_t = (lo + hi) / 2 * S counts RATE ROWS from 1, not "
+                       "rate_t: the delay window's true centre is delay_t + W/2 - S (W, S "
+                       "from mmc.params; 4 s later than the stamp at W 10, S 1): position "
+                       "p = (v + W/2 - S) * fs",
+}
+"""How a stamp ``v`` becomes a 0-based epoch position ``p`` (in samples). An entry is
+BEFORE its analysis's start iff ``p < L``, ``L = start_sample0 - epoch_start_sample0``
+(the number of epoch rows before the start). Comparisons are in samples (invariant 15)."""
+
+ACTIONS: Final[Mapping[str, str]] = {
+    "nan": "the value at that stamp is set NaN, her own 'not computed' marker; the stamp "
+           "(the time axis) is kept, so kept values keep their index",
+    "drop": "the entry is removed from its event list (spike, beat, peak, RR interval, "
+            "burst), together with every list co-indexed with the same stamps",
+    "false": "a full-rate logical event series: the rows are set false, and the record "
+             "names them as not computed (a logical has no NaN)",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class OutputFile:
+    """One output file kind of a Night 6 call, matched by a regular expression on its name."""
+
+    kind: str
+    pattern: str
+    call: str
+    owner: str
+    source: str
+
+
+@dataclass(frozen=True, slots=True)
+class OutputVar:
+    """One variable of an output file (a dotted path into the loaded ``.mat``), classified.
+
+    ``role``: ``trim`` (time-stamped: dropped or flagged before the owner's start, by
+    ``stamp`` / ``convention`` / ``action``), ``time_axis`` (a stamp vector, kept),
+    ``epoch_scalar`` (no time: computed over [electrical settling, epoch end] and kept),
+    ``input`` (a description of what the call was given), ``parameter``, ``container``
+    (a struct whose fields are classified one by one), or ``unknown`` (time convention
+    not determinable: left UNTRIMMED and listed by name). A struct-array container is
+    walked element by element; a sibling ``stamp`` is read from the same element.
+    """
+
+    file: str
+    path: str
+    role: Role
+    source: str
+    owner: str = ""
+    anchor: str = ""
+    stamp: str = ""
+    convention: Convention | None = None
+    action: Action | None = None
+    why: str = ""
+
+
+_STEP2, _STEP3, _STEP3B = "step2_noise_sigma.m", "step3_detect.m", "step3b_envelope.m"
+_STEP4, _STEP6 = "step4_waveforms.m", "step6_spike_report.m"
+
+OUTPUT_FILES: Final[Mapping[str, OutputFile]] = {f.kind: f for f in (
+    OutputFile("spikes_v2", r"_spikes_v2\.mat$", "process_dataset_v2", "spikes",
+               f"{_RUN} save_spikes_v2 (her D fields, -v7.3)"),
+    OutputFile("HRBR", r"_HRBR\.mat$", "HR_BR_HRVAnalysis_beats", "hrv", f"{_HR_BR}:660, :663"),
+    OutputFile("HRVMeasures", r"_HRVMeasures\.mat$", "HR_BR_HRVAnalysis_beats", "hrv",
+               f"{_HR_BR}:661, :685"),
+    OutputFile("slowWaves", r"_slowWaves_.+\.mat$", "slowWaveAnalysis_new", "slow_wave",
+               f"{_SW}:340, one file per kept channel (matlab/night6/night6_keep_slow_wave.m)"),
+    OutputFile("mmc", r"_mmc\.mat$", "extract_mmc", "mmc", f"{_MMC}:170"),
+)}
+"""Every output file Night 6 keeps from a call. A new file matching none of these is
+listed as untrimmed by name (figures included); none is dropped silently."""
+
+
+def _trim(file: str, path: str, source: str, anchor: str, stamp: str, convention: Convention,
+          action: Action, owner: str = "") -> OutputVar:
+    return OutputVar(file, path, "trim", source, owner, anchor, stamp, convention, action)
+
+
+def _axis(file: str, path: str, source: str, anchor: str, owner: str = "") -> OutputVar:
+    return OutputVar(file, path, "time_axis", source, owner, anchor)
+
+
+def _many(file: str, role: Role, paths: str, source: str, why: str = "",
+          owner: str = "") -> tuple[OutputVar, ...]:
+    return tuple(OutputVar(file, p, role, source, owner, why=why) for p in paths.split())
+
+
+_EPOCH_WHY = "no time: computed over [electrical settling, epoch end] in the drop mode"
+
+_SPIKE_VARS = (
+    *_many("spikes_v2", "container", "spikes envelope metrics metrics.burst sigmaWin",
+           f"{_RUN} save_spikes_v2"),
+    *_many("spikes_v2", "parameter",
+           "fs neuralChannels channelLabels condition cardiacBlankWinMs bandInfo detectInfo "
+           "signals info nSamples spikes.channel spikes.label spikes.wf_t_ms envelope.guardMs "
+           "metrics.label metrics.condition metrics.wf_t_ms sigmaWin.windowSec "
+           "sigmaWin.stepFrac", f"{_RUN} save_spikes_v2; her steps"),
+    *_many("spikes_v2", "input", "rpeakSamples rpeakTimes invalidRuns",
+           f"{_RUN} save_spikes_v2 (the beats and masked runs it was given)"),
+    *_many("spikes_v2", "epoch_scalar",
+           "noiseInfo modality spikes.nSpikes spikes.rate_hz spikes.validSec "
+           "spikes.meanWaveform spikes.stdWaveform spikes.nDetected spikes.screen "
+           "envelope.meanRMS_uv envelope.meanExcess_uv metrics.nSpikes metrics.validDur_s "
+           "metrics.meanRate_hz metrics.medianVpp_uv metrics.medianFWHM_ms metrics.CV "
+           "metrics.CV2 metrics.LV metrics.refracViolFrac metrics.nISItotal metrics.nISIclean "
+           "metrics.fracISIclean metrics.fanoCanon metrics.fanoSlope metrics.fano_T "
+           "metrics.fano_F metrics.acg_lag metrics.acg metrics.psd_f metrics.psd_p "
+           "metrics.meanWaveform metrics.bandLo metrics.bandHi metrics.burst.hasBursts "
+           "metrics.burst.thrMs metrics.burst.void metrics.burst.nBursts "
+           "metrics.burst.rate_per_min metrics.burst.meanDur_s metrics.burst.meanSpikes "
+           "metrics.burst.intraRate_hz metrics.burst.fracInBurst",
+           f"{_STEP2}:147; {_STEP3}:91-93; {_STEP4}:119-124; {_STEP3B}:119-120; "
+           f"{_STEP6}:52-91; step5c_modality_test.m:60", _EPOCH_WHY),
+    _axis("spikes_v2", "sigmaWin.centers", f"{_STEP2}:98 (cell per channel)",
+          "cWin(w) = (i0 + i1) / 2;"),
+    _trim("spikes_v2", "sigmaWin.sigma", f"{_STEP2}:96", "sigWin(w) = median(abs(s)) / 0.6745;",
+          "sigmaWin.centers", "row1", "nan"),
+    *(_trim("spikes_v2", f"spikes.{v}", f"{_STEP3}:{ln}", a, "spikes.centers", "row1", "drop")
+      for v, ln, a in (("centers", 86, "spikes(k).centers          = locs;"),
+                       ("times", 87, "spikes(k).times            = (locs - 1) / fs;"),
+                       ("peakAmp_uv", 88, "spikes(k).peakAmp_uv       = peakAmp_uv;"),
+                       ("threshAtSpike_uv", 89, "spikes(k).threshAtSpike_uv = threshAtSpike_uv;"),
+                       ("artifactMask", 90, "spikes(k).artifactMask     = artifactMask;"))),
+    *(_trim("spikes_v2", f"spikes.{v}", f"{_STEP4}:{ln}", a, "spikes.alignedCenters", "row1",
+            "drop")
+      for v, ln, a in (("waveforms", 114, "D.spikes(k).waveforms      = W;"),
+                       ("alignedCenters", 115, "D.spikes(k).alignedCenters = aligned;"),
+                       ("alignedTimes", 116, "D.spikes(k).alignedTimes   = (aligned - 1) / fs;"),
+                       ("Vpp_uv", 117, "D.spikes(k).Vpp_uv         = Vpp;"),
+                       ("width_ms", 118, "D.spikes(k).width_ms       = wid;"))),
+    _axis("spikes_v2", "envelope.t", f"{_STEP3B}:107 (bin centre)",
+          "t_c(b) = ((i0 + i1) / 2 - 1) / fs;"),
+    *(_trim("spikes_v2", f"envelope.{v}", f"{_STEP3B}:{ln}", a, "envelope.t", "sec0", "nan")
+      for v, ln, a in (("rms_uv", 115, "D.envelope(k).rms_uv       = rms;"),
+                       ("sigmaFloor_uv", 116, "D.envelope(k).sigmaFloor_uv = sigFloor;"),
+                       ("excess_uv", 117, "D.envelope(k).excess_uv    = excess;"),
+                       ("validFrac", 118, "D.envelope(k).validFrac    = vfrac;"))),
+    _axis("spikes_v2", "metrics.fr_t", f"{_STEP6}:150 (bin centre)",
+          "t(b) = ((i0+i1)/2-1)/fs;"),
+    *(_trim("spikes_v2", f"metrics.{v}", f"{_STEP6}:62", "[M.fr_t, M.fr_hz, M.fr_validFrac]",
+            "metrics.fr_t", "sec0", "nan") for v in ("fr_hz", "fr_validFrac")),
+    _axis("spikes_v2", "metrics.cv2_t", f"{_STEP6}:264 (bin start + winSec/2)",
+          "t = edges(1:end-1)+winSec/2;"),
+    _trim("spikes_v2", "metrics.cv2_roll", f"{_STEP6}:94", "[M.cv2_t, M.cv2_roll]",
+          "metrics.cv2_t", "sec0", "nan"),
+    *(_trim("spikes_v2", f"metrics.burst.{v}", f"{_STEP6}:249 (st = alignedTimes, sec0)",
+            "onsets(end+1)=st(i0); offsets(end+1)=st(i1);", "metrics.burst.onsets", "sec0",
+            "drop") for v in ("onsets", "offsets")),
+)
+
+_HR_SERIES = (("heartRateSeries", 849, "heartRateSeries(i) = hrPeaksInStretch", "hrv"),
+              ("heartCountSeries", 893, "heartCountSeries(i) = sum(heartPeakTrain", "hrv"),
+              ("heartCountValidSec", 894, "heartCountValidSec(i) = winValidSec;", "hrv"),
+              ("heartCountRateSeries", 896, "heartCountRateSeries(i) = heartCountSeries(i)",
+               "hrv"),
+              ("breathRateSeries", 866, "breathRateSeries(i) = numel(peaksInStretch)",
+               "breathing"))
+_HRV_SERIES = (("hrv_series", 910, "hrv_series(i)   = hrv_val;"),
+               ("rmssd_series", 911, "rmssd_series(i) = hv.rmssd;"),
+               ("pnn5_series", 912, "pnn5_series(i)  = hv.pnn5;"),
+               ("sd1_series", 915, "sd1_series(i)  = sd1_val;"),
+               ("sd2_series", 916, "sd2_series(i)  = hv.sd2;"),
+               ("sampEn_series", 929, "sampEn_series(i) = sampleEntropyFast("),
+               ("nRR_used", 901, "nRR_used(i) = sum(keep);"))
+
+
+def _heartlocs(file: str) -> OutputVar:
+    return _trim(file, "heartlocs", f"{_HR_BR}:299",
+                 "heartlocs          = heartlocsRaw(validHeartPeakMask);", "heartlocs", "row1",
+                 "drop")
+
+
+
+_HR_VARS = (
+    *_many("HRBR", "parameter",
+           "chanidx blankIdx edgeBufferSec winSec hrBrWinSec stepSec hrMinStretchSec "
+           "hrMinPeaksInStretch", f"{_HR_BR}:663-674"),
+    *_many("HRBR", "parameter",
+           "brMinStretchSec brMinPeaksInStretch minBreathRate_bpm maxBreathRate_bpm",
+           f"{_HR_BR}:663-674", owner="breathing"),
+    *_many("HRBR", "input", "invalidMask edgeMask", f"{_HR_BR}:226, :249-256"),
+    _axis("HRBR", "t", f"{_HR_BR}:213", "t = (0:N-1)' / fs;"),
+    _axis("HRBR", "metrics_t", f"{_HR_BR}:792 (window centres, :834-836)",
+          "metrics_t = (0 : stepSec : sigDurSec)';"),
+    *_many("HRBR", "epoch_scalar", "avgHeartRate avgHeartCount avgHeartCountRate",
+           f"{_HR_BR}:436-442", _EPOCH_WHY),
+    *_many("HRBR", "epoch_scalar", "avgBreathRate br_implausibleFraction",
+           f"{_HR_BR}:437, :402", _EPOCH_WHY, owner="breathing"),
+    OutputVar("HRBR", "RR_implausibleMask", "unknown", f"{_HR_BR}:318", why=(
+        "one flag per RR interval BEFORE the implausible ones are removed; the times of "
+        "that list are not saved, so it has no stamp to trim by: untrimmed, listed")),
+    _trim("HRBR", "heartBeatSeries", f"{_HR_BR}:303 (t :213)",
+          "heartBeatSeries(invalidMask) = NaN;", "t", "sec0", "nan"),
+    _heartlocs("HRBR"),
+    *(_trim("HRBR", v, f"{_HR_BR}:{ln}", a, "metrics_t", "sec0", "nan", owner=o)
+      for v, ln, a, o in _HR_SERIES),
+    _trim("HRBR", "br_locs_true", f"{_HR_BR}:388 (filtered :391)",
+          "br_locs_true = heartlocs(br_locs);", "br_locs_true", "row1", "drop",
+          owner="breathing"),
+    *_many("HRVMeasures", "epoch_scalar",
+           "hrv rmssd pnn5 sd1 sd2 sampEn appxEn RR_implausibleFraction dfa_alpha1 dfa_alpha2 "
+           "dfa_alphaFull dfa_R2_1 dfa_R2_2 dfa_nCross dfa_nWindows dfa_excludedScales",
+           f"{_HR_BR}:464-486, :317", _EPOCH_WHY),
+    *_many("HRVMeasures", "input", "invalidMask edgeMask", f"{_HR_BR}:226, :249-256"),
+    *_many("HRVMeasures", "parameter",
+           "blankIdx edgeBufferSec sampEnWinSec winSec hrBrWinSec stepSec minRR",
+           f"{_HR_BR}:685-694"),
+    _axis("HRVMeasures", "t", f"{_HR_BR}:213", "t = (0:N-1)' / fs;"),
+    _axis("HRVMeasures", "metrics_t", f"{_HR_BR}:792", "metrics_t = (0 : stepSec : sigDurSec)';"),
+    _heartlocs("HRVMeasures"),
+    *(_trim("HRVMeasures", v, f"{_HR_BR}:995, :1000 (RR_times = s1 / fs, s1 the start beat's "
+            "1-based row)", "RR_times(end+1,1)     = s1 / fs;", "RR_times", "sec_row1", "drop")
+      for v in ("RR_intervals", "RR_times")),
+    *(_trim("HRVMeasures", v, f"{_HR_BR}:{ln}", a, "metrics_t", "sec0", "nan")
+      for v, ln, a in _HRV_SERIES),
+)
+
+_SW_VARS = (
+    *_many("slowWaves", "parameter",
+           "blankIdx edgeBufferSec rateWinSec minStretchSec minPeaksInStretch fs window "
+           "windowlen channel channelColumn maskSignal keptFrom",
+           f"{_SW}:340-345; matlab/night6/night6_keep_slow_wave.m"),
+    *_many("slowWaves", "input", "invalidMask edgeMask", f"{_SW}:97, :111-118"),
+    *_many("slowWaves", "epoch_scalar", "avgSlowWave sw_implausibleFraction",
+           f"{_SW}:283, :212", _EPOCH_WHY),
+    _axis("slowWaves", "t", f"{_SW}:89", "t          = (0:N-1)' / fs;"),
+    _axis("slowWaves", "slowWaveRateTime", f"{_SW}:178 (the window's centre sample, :246)",
+          "slowWaveRateTime = t(rateT_idx);"),
+    _trim("slowWaves", "slowWaveTimeSeries", f"{_SW}:160",
+          "slowWaveTimeSeries(invalidMask, :) = NaN;", "t", "sec0", "nan"),
+    _trim("slowWaves", "slowWaveRateSeries", f"{_SW}:279",
+          "slowWaveRateSeries(ti, ci) = pooledPeaks", "slowWaveRateTime", "sec0", "nan"),
+    _trim("slowWaves", "slowWavePeakLocs", f"{_SW}:205", "slowWavePeakLocs{ci} = locs;",
+          "slowWavePeakLocs", "row1", "drop"),
+)
+
+_MMC_VARS = (
+    *_many("mmc", "container", "mmc mmc.firing mmc.burst mmc.qc", f"{_MMC}:151-166"),
+    *_many("mmc", "parameter",
+           "mmc.fs mmc.pairs mmc.params mmc.firing.refractory mmc.burst.refractory "
+           "mmc.qc.srcFile mmc.qc.dataVar mmc.qc.gastricCols mmc.qc.periR_t", f"{_MMC}:124-166"),
+    OutputVar("mmc", "mmc.qc.rpeakT", "input", f"{_MMC}:125", why="the beats it was given"),
+    *_many("mmc", "epoch_scalar",
+           "mmc.firing.avgRate mmc.burst.avgRate mmc.qc.meanHR mmc.qc.pctBlanked "
+           "mmc.qc.rateNanFrac mmc.qc.nFirings mmc.qc.nBursts mmc.qc.periR_raw "
+           "mmc.qc.periR_cond mmc.qc.psd_f mmc.qc.psd_raw mmc.qc.psd_cond",
+           f"{_MMC}:126-146, :295", _EPOCH_WHY),
+    _axis("mmc", "mmc.t", f"{_MMC}:152 (t :65)", "mmc.fs = fs; mmc.t = t;"),
+    _axis("mmc", "mmc.rate_t", f"{_MMC}:154 (centers :115, windows :287-288)",
+          "mmc.rate_t = centers;"),
+    _axis("mmc", "mmc.delay_t", f"{_MMC}:159 (delay_t :265: RATE ROWS, not rate_t)",
+          "mmc.delay_t = delay_t; mmc.delay = delay;"),
+    _trim("mmc", "mmc.signal", f"{_MMC}:153", "mmc.signal = single(cond);", "mmc.t", "sec0",
+          "nan"),
+    *(_trim("mmc", f"mmc.{lvl}.events", f"{_MMC}:302 (ev_bool, :155-157)",
+            "for ch = 1:3; ev(evIdx{ch},ch) = true; end", "mmc.t", "sec0", "false")
+      for lvl in ("firing", "burst")),
+    *(_trim("mmc", f"mmc.{lvl}.{v}", f"{_MMC}:{ln}", a, "mmc.rate_t", "sec0", "nan")
+      for lvl in ("firing", "burst")
+      for v, ln, a in (("rate", 292, "rate(w,ch) = sum(inw)/vd;"),
+                       ("peakAmp", 293, "peakAmp(w,ch) = mean(pka(inw));"))),
+    _trim("mmc", "mmc.delay", f"{_MMC}:272 (window :264-265)",
+          "delay(s,p) = lags(mi)*S;", "mmc.delay_t", "sec_xchan_delay", "nan"),
+)
+
+OUTPUT_VARS: Final[tuple[OutputVar, ...]] = (*_SPIKE_VARS, *_HR_VARS, *_SW_VARS, *_MMC_VARS)
+"""THE per-output time map (invariant 33): every variable of every kept output file,
+classified. An ``owner`` left empty is the file's owner (:data:`OUTPUT_FILES`)."""
+
+XCHAN_DELAY_PARAMS: Final = ("mmc.params.W", "mmc.params.S")
+"""Where ``sec_xchan_delay`` reads W and S (``extract_mmc.m:161``)."""
+
+
+def _owner(v: OutputVar) -> str:
+    return v.owner or OUTPUT_FILES[v.file].owner
+
+
+def output_times_record() -> dict[str, Any]:
+    """Return the output time map as data, for the starts document (Night 6 applies it).
+
+    Checked here (a malformed map is refused, never half applied): every file and owner
+    is known, every path is unique within its file and its parent is a declared
+    container, and every ``trim`` names a stamp that is itself a declared time axis or a
+    trimmed list, a known convention and a known action.
+    """
+    analyses = set(ANALYSES)
+    by_file: dict[str, dict[str, OutputVar]] = {k: {} for k in OUTPUT_FILES}
+    for v in OUTPUT_VARS:
+        if v.file not in OUTPUT_FILES:
+            msg = f"{v.path}: unknown output file {v.file!r}"
+            raise ValueError(msg)
+        if _owner(v) not in analyses:
+            msg = f"{v.file}/{v.path}: owner {_owner(v)!r} is not an analysis"
+            raise ValueError(msg)
+        if v.path in by_file[v.file]:
+            msg = f"{v.file}/{v.path} is declared twice"
+            raise ValueError(msg)
+        by_file[v.file][v.path] = v
+    rows: list[dict[str, Any]] = []
+    for kind, decl in by_file.items():
+        for path, v in decl.items():
+            parent = path.rpartition(".")[0]
+            if parent and (parent not in decl or decl[parent].role != "container"):
+                msg = f"{kind}/{path}: its parent {parent!r} is not a declared container"
+                raise ValueError(msg)
+            row: dict[str, Any] = {"file": kind, "path": path, "role": v.role,
+                                   "owner": _owner(v), "source": v.source}
+            if v.why:
+                row["why"] = v.why
+            if v.role == "trim":
+                st = decl.get(v.stamp)
+                if st is None or st.role not in ("time_axis", "trim"):
+                    msg = f"{kind}/{path}: stamp {v.stamp!r} is not a declared time axis"
+                    raise ValueError(msg)
+                if v.convention not in CONVENTIONS or v.action not in ACTIONS:
+                    msg = f"{kind}/{path}: convention or action missing"
+                    raise ValueError(msg)
+                row |= {"stamp": v.stamp, "convention": v.convention, "action": v.action}
+            rows.append(row)
+    return {"conventions": dict(CONVENTIONS), "actions": dict(ACTIONS),
+            "xchan_delay_params": list(XCHAN_DELAY_PARAMS),
+            "files": [{"kind": f.kind, "pattern": f.pattern, "call": f.call, "owner": f.owner,
+                       "source": f.source} for f in OUTPUT_FILES.values()],
+            "vars": rows}
+
+
+# ---------------------------------------------------------------------------
 # derivation
 # ---------------------------------------------------------------------------
 
@@ -507,7 +907,9 @@ def file_starts(*, session: str, fs: float | None, stim_off_s: float | None,
     """Return one file's record: per-analysis starts, or the reason the file is held.
 
     ``electrical_settle_s`` is the ABSOLUTE time from the file start at which rule (j) 6 (i)
-    found every channel settled (stim-off + electrical settling). A file whose stim edges
+    found every channel settled (stim-off + electrical settling); it is also written as
+    ``electrical_settle_sample0``, the one rounding, for the drop mode's input mask.
+    A file whose stim edges
     were not detected, or whose signal never settles, is HELD as a whole (invariant 41):
     no start rows, so Night 6 refuses it by name. Within a measured file, an analysis
     whose own settling is unknown keeps ``fixed_start_s``, labelled, with the missing
@@ -552,7 +954,7 @@ def file_starts(*, session: str, fs: float | None, stim_off_s: float | None,
             "own_settling_s": s.settling_s, "binding_output": s.binding_output,
             "source": (f"{RULING}: stim-off ({stim_off_source}) + electrical settling "
                        f"({electrical_source}) + own settling "
-                       f"(extent.recovery_start.ANALYSES[{name!r}], {SOURCE_COMMIT})")}
+                       f"(extent.recovery_start.ANALYSES[{name!r}], {SOURCE_LABEL})")}
         if k0 < fixed0:
             row["relation"] = "earlier_than_fixed: runs from the fixed start; early part " \
                               "deferred to the add-on"
@@ -563,6 +965,7 @@ def file_starts(*, session: str, fs: float | None, stim_off_s: float | None,
         rows.append(row)
     return {"session": session, "fs": float(fs), "stim_off_s": float(stim_off_s),
             "electrical_settle_s": float(electrical_settle_s),
+            "electrical_settle_sample0": seconds_to_sample(float(electrical_settle_s), fs),
             "electrical_s": float(electrical_settle_s) - float(stim_off_s),
             "analyses": rows}
 
@@ -628,13 +1031,18 @@ def recovery_starts_document(files: Sequence[Mapping[str, Any]], *, fs: float,
                 if not isinstance(k, int) or isinstance(k, bool) or k < 0:
                     msg = f"{sess}/{r['analysis']}: start_sample0 must be an int >= 0"
                     raise TypeError(msg)
+            ke = f.get("electrical_settle_sample0")
+            if not isinstance(ke, int) or isinstance(ke, bool) or ke < 0:
+                msg = f"{sess}: electrical_settle_sample0 must be an int >= 0 (both trim modes)"
+                raise TypeError(msg)
             measured.append(dict(f))
         else:
             held.append(dict(f))
     doc: dict[str, Any] = {
         "schema": SCHEMA, "ruling": RULING, "fs": float(fs),
         "fixed_start_s": float(fixed_start_s), "fixed_start_source": FIXED_START_SOURCE,
-        "source_commit": SOURCE_COMMIT, "table": table_record(fs, table),
+        "source_files": dict(SOURCE_FILES), "trim_modes": list(TRIM_MODES),
+        "output_times": output_times_record(), "table": table_record(fs, table),
         "files": sorted(measured, key=lambda d: str(d["session"])),
         "held": sorted(held, key=lambda d: str(d["session"])),
     }
@@ -659,7 +1067,8 @@ def read_recovery_starts(path: Path) -> dict[str, Any]:
     if doc.get("schema") != SCHEMA:
         msg = f"{path}: schema {doc.get('schema')!r}, expected {SCHEMA!r}"
         raise ValueError(msg)
-    for key in ("fs", "fixed_start_s", "files", "held", "table"):
+    for key in ("fs", "fixed_start_s", "files", "held", "table", "output_times",
+                "source_files", "trim_modes"):
         if doc.get(key) is None:
             msg = f"{path}: required field {key!r} is absent"
             raise ValueError(msg)

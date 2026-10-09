@@ -53,6 +53,13 @@ function records = night6_run_recording(maskFolder, varargin)
 %               (night6_recovery_lead_in), and an analysis with no start is refused by
 %               name. Its path and SHA-256 go into the record; a changed file reruns the
 %               stim_recovery epochs on resume. Default '' (no file: stim_recovery refused).
+%   RecoveryTrimMode  REQUIRED, no default (night6_trim_modes): 'mask_to_own_start' masks
+%               each analysis's input up to its own start; 'mask_to_electrical_drop_outputs'
+%               masks every input up to the electrical settling and then drops or flags
+%               every output stamped before the analysis's own start
+%               (night6_recovery_trim_outputs, by the starts file's output time map). A
+%               missing or unknown mode is refused by name before any work; the mode is
+%               in every record, and a stim_recovery epoch made under another mode reruns.
     ip = inputParser;
     ip.addRequired('maskFolder', @(x) ischar(x) || isstring(x));
     ip.addParameter('GemsRoot', '', @(x) ischar(x) || isstring(x));
@@ -68,6 +75,7 @@ function records = night6_run_recording(maskFolder, varargin)
     ip.addParameter('Step1aFallback', fullfile(fileparts(mfilename('fullpath')), ...
                     'step1a_fallback.json'), @(x) ischar(x) || isstring(x));
     ip.addParameter('RecoveryStarts', '', @(x) ischar(x) || isstring(x));
+    ip.addParameter('RecoveryTrimMode', '', @(x) ischar(x) || isstring(x));
     ip.parse(maskFolder, varargin{:});
     o = ip.Results;
     for req = {'GemsRoot', 'Units', 'OutRoot'}
@@ -78,6 +86,7 @@ function records = night6_run_recording(maskFolder, varargin)
     o = structfun_char(o);
     if isempty(o.CodeCommit), [o.CodeCommit, o.CodeDirty] = code_commit(); else, o.CodeDirty = []; end
     o.fallback = night6_step1a_fallback(o.Step1aFallback);   % read before any work
+    o.RecoveryTrimMode = night6_check_trim_mode(o.RecoveryTrimMode);   % (k) 2: required
     o.RS = night6_recovery_start(o.RecoveryStarts);          % (k) 2; [] when not declared
 
     maskFolder = char(o.maskFolder);
@@ -105,7 +114,7 @@ function records = night6_run_recording(maskFolder, varargin)
             % (same name, new content) must rerun, not be reported as done.
             same = isfield(R, 'mask_file_sha256') && strcmp(R.mask_file_sha256, ...
                 night6_sha256_file(fullfile(files(k).folder, files(k).name))) ...
-                && same_recovery_start(R, o.RS);
+                && same_recovery_start(R, o.RS, o.RecoveryTrimMode);
             if isfield(R, 'status') && strcmp(R.status, 'complete') && same
                 records{k} = R;
                 todo(k) = false;
@@ -167,6 +176,7 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
     R.mask_file = maskFile;
     R.mask_file_sha256 = night6_sha256_file(maskFile);
     R.units = o.Units;
+    R.recovery_trim_mode = o.RecoveryTrimMode;   % (k) 2: declared, never defaulted
     R.dry_run = logical(o.DryRun);
     R.matlab = version;
     R.started = char(datetime('now', 'TimeZone', 'local', 'Format', 'yyyy-MM-dd''T''HH:mm:ssXXX'));
@@ -203,7 +213,8 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
     if isfield(R, 'condition'), condition = R.condition; end
     plan = night6_prepare_epoch(M, S.chanlabels, meta.channels, size(S.signal, 1), S.fs, ...
                                 o.Units, beats, condition, ...
-                                'Recovery', struct('starts', o.RS, 'session', src.session));
+                                'Recovery', struct('starts', o.RS, 'session', src.session, ...
+                                                   'mode', o.RecoveryTrimMode));
     R.recovery_start = plan.recoveryStart;   % (k) 2: each analysis's start, basis, source
     R.epoch = struct('start_s', plan.epochStart_s, 'start_sample_0based', plan.i0, ...
                      'n_samples', plan.n, 'fs', plan.fs, ...
@@ -332,6 +343,11 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
                     d1 = dir(outDir);
                     run.outputs = setdiff({d1.name}, {d0.name});
                     for fn = fieldnames(extra)', run.(fn{1}) = extra.(fn{1}); end
+                    if drop_outputs(plan, o)   % (k) 2 drop mode: cut at each own start
+                        run.recovery_trim = night6_recovery_trim_outputs(outDir, ...
+                            run.outputs, r.consumers, plan.recoveryStart, ...
+                            o.RS.outputTimes, plan.fs);
+                    end
                 end
                 run.status = 'ok';
                 R = set_status(R, r, perChannel, ternary(o.DryRun, 'planned', 'ran'), '');
@@ -447,7 +463,8 @@ function F = function_provenance()
     C = night6_calls();
     ours = {'process_dataset_v2', 'night6_v2_steps', 'night6_v2_params', ...
             'night6_step1a_fallback', 'night6_sha256_file', 'night6_recovery_start', ...
-            'night6_recovery_lead_in'};
+            'night6_recovery_lead_in', 'night6_recovery_trim_outputs', ...
+            'night6_trim_modes', 'night6_check_trim_mode'};
     hers = [setdiff({C.name}, ours, 'stable'), night6_v2_steps(), ...
             {'step1a_blank_cardiac', 'pipeline_params', 'bulk_load_one'}];   % step1a: (j) 1 fallback
     here = fileparts(mfilename('fullpath'));
@@ -678,15 +695,24 @@ function assert_finite(v, where, f)
     end
 end
 
-function tf = same_recovery_start(R, RS)
-% Resume only a stim_recovery epoch made with THIS recovery-starts file: a changed file
-% (or none recorded) reruns it, never reports it done with another set of starts.
+function tf = drop_outputs(plan, o)
+% True when this epoch's outputs are cut at each analysis's own start (the drop mode,
+% on a stim_recovery epoch the starts file applies to).
+    tf = strcmp(o.RecoveryTrimMode, 'mask_to_electrical_drop_outputs') ...
+        && ~isempty(plan.recoveryStart) && plan.recoveryStart.applies;
+end
+
+function tf = same_recovery_start(R, RS, mode)
+% Resume only a stim_recovery epoch made with THIS recovery-starts file and THIS trim
+% mode: a changed file or mode (or none recorded) reruns it, never reports it done with
+% another set of starts or another semantics.
     tf = true;
     applies = isfield(R, 'recovery_start') && isstruct(R.recovery_start) ...
         && isfield(R.recovery_start, 'applies') && R.recovery_start.applies;
     if applies
         tf = ~isempty(RS) && isfield(R.recovery_start, 'sha256') ...
-            && strcmp(R.recovery_start.sha256, RS.sha256);
+            && strcmp(R.recovery_start.sha256, RS.sha256) ...
+            && isfield(R, 'recovery_trim_mode') && strcmp(R.recovery_trim_mode, mode);
     elseif isfield(R, 'condition') && strcmp(R.condition, 'stim_recovery')
         tf = false;
     end

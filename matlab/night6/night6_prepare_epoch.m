@@ -2,7 +2,8 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
 % NIGHT6_PREPARE_EPOCH  Plan one epoch of a Night 6 run from its mask file. No arrays.
 %
 %   plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile, units, beats, condition)
-%   plan = night6_prepare_epoch(..., condition, 'Recovery', struct('starts', RS, 'session', s))
+%   plan = night6_prepare_epoch(..., condition, 'Recovery', ...
+%                               struct('starts', RS, 'session', s, 'mode', trimMode))
 %
 %   M             load() of one e<start>_masks.mat (gems_blanking_v2.emit.handoff)
 %   fileLabels    the recording file's own chanlabels, in column order (authoritative
@@ -52,16 +53,18 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
 % recorded, and a file with no perir_json was written before (k) 1 - never read as "no
 % train". plan.periR states which (train_state 'train' | 'none'); [] when no spike signal.
 %
-% RECOVERY START (RULING 2026-10-08 (k) 2), name-value 'Recovery', struct(starts, session):
+% RECOVERY START (RULING 2026-10-08 (k) 2), name-value 'Recovery', struct(starts, session,
+% mode) - mode is the declared trim mode (night6_trim_modes), refused by name if unknown:
 % starts is night6_recovery_start(file) or []. For a stim_recovery epoch every consumer that
-% runs must have its start there, or the epoch is refused by name; each consumer whose own
-% start is later than the epoch start gets its leading rows masked (NaN, like any motion
+% runs must have its start there, or the epoch is refused by name; each consumer whose
+% input-mask end (its own start, or the electrical settling in the drop mode) is later
+% than the epoch start gets its leading rows masked (NaN, like any motion
 % span) BEFORE the runs are planned, so calls that share a mask still share it exactly
 % (night6_recovery_lead_in). plan.recoveryStart is the record; [] when 'Recovery' is not
 % given (test harnesses that plan an epoch only - night6_run_recording always gives it).
     ip = inputParser;
     ip.addParameter('Recovery', [], @(x) isempty(x) || (isstruct(x) && isscalar(x) ...
-                    && all(isfield(x, {'starts', 'session'}))));
+                    && all(isfield(x, {'starts', 'session', 'mode'}))));
     ip.parse(varargin{:});
     recovery = ip.Results.Recovery;
     known = {'spikes', 'slow_wave', 'mmc', 'hrv', 'breathing', 'velocity'};
@@ -219,7 +222,8 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
     if ~isempty(recovery)
         toRun = known(cellfun(@(c) strcmp(plan.consumers.(c).status, 'to_run'), known));
         [lead, plan.recoveryStart] = night6_recovery_lead_in(recovery.starts, ...
-            char(recovery.session), plan.condition, plan.i0, plan.n, plan.fs, toRun);
+            char(recovery.session), plan.condition, plan.i0, plan.n, plan.fs, toRun, ...
+            recovery.mode);
         masks = apply_lead_in(masks, lead);
         plan.masks = masks;
     end

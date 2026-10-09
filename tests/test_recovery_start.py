@@ -1,7 +1,11 @@
 """RULING 2026-10-08 (k) 2: the per-analysis settling table and the recovery-starts file.
 
 * the table is keyed by exactly the Night 6 consumers, and every cited ``file:line`` still
-  says what the table says (processing_new at the cited commit; skipped without it);
+  says what the table says; every cited processing_new file is the one read, by SHA-256
+  (her working tree is not a commit; skipped without processing_new);
+* the per-output time map (drop mode): every output file kind of every analysis is
+  declared, every path under a declared container, every trimmed output names a declared
+  stamp, a convention and an action, and the anchors of the stamps still say it;
 * every window length the table uses is the one Andrea's code and the wrapper pass;
 * an output's settling is the SUM of its cascade (a window fed by a filter reaches back
   through both), an analysis's the MAXIMUM over its outputs, a centred window counts half,
@@ -18,6 +22,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -51,26 +56,98 @@ def test_the_table_is_keyed_by_the_night6_consumers() -> None:
         assert len({o.name for o in a.outputs}) == len(a.outputs)
 
 
+def _anchored() -> list[tuple[str, str, str]]:
+    """Return (what, source, anchor) of every stage and anchored output variable."""
+    out = [(f"{a.name}/{s.what}", s.source, s.anchor) for a in rs.ANALYSES.values()
+           for o in a.outputs for s in o.stages]
+    out += [(f"{v.file}/{v.path}", v.source, v.anchor) for v in rs.OUTPUT_VARS if v.anchor]
+    return out
+
+
 def test_every_cited_line_still_says_it() -> None:
-    """The anchor of every stage is on (or within) the line range its source cites."""
+    """The anchor of every stage and output is on (or within) the line range it cites."""
     pnew = _processing_new()
     checked = 0
-    for a in rs.ANALYSES.values():
-        for o in a.outputs:
-            for s in o.stages:
-                m = re.match(r"^(\S+?):(\d+)(?:-(\d+))?", s.source)
-                assert m, s.source
-                rel, lo = m.group(1), int(m.group(2))
-                hi = int(m.group(3) or lo)
-                if rel.endswith(".py") or rel.startswith("matlab/"):
-                    path = REPO / rel
-                elif pnew is None:
-                    continue
-                else:
-                    path = pnew / rel
-                assert s.anchor in _lines(path, lo, hi), (a.name, s.what, s.source)
-                checked += 1
-    assert checked >= (4 if pnew is None else 25)
+    for what, source, anchor in _anchored():
+        m = re.match(r"^(\S+?):(\d+)(?:-(\d+))?", source)
+        assert m, source
+        rel, lo = m.group(1), int(m.group(2))
+        hi = int(m.group(3) or lo)
+        if rel.endswith(".py") or rel.startswith("matlab/"):
+            path = REPO / rel
+        elif pnew is None:
+            continue
+        else:
+            assert rel in rs.SOURCE_FILES, f"{what} cites {rel}, which SOURCE_FILES does not hash"
+            path = pnew / rel
+        assert anchor in _lines(path, lo, hi), (what, source)
+        checked += 1
+    assert checked >= (4 if pnew is None else 80)
+
+
+def test_every_cited_file_is_the_one_the_table_was_read_from() -> None:
+    """Her working tree is not a commit: each cited file is pinned by its SHA-256."""
+    pnew = _processing_new()
+    if pnew is None:
+        pytest.skip("processing_new is not on this machine (set GEMS_PROCESSING_NEW)")
+    changed = []
+    for name, want in sorted(rs.SOURCE_FILES.items()):
+        got = hashlib.sha256((pnew / name).read_bytes()).hexdigest()
+        if got != want:
+            changed.append(f"{name}: sha256 {got} != {want}")
+    assert not changed, (
+        "processing_new changed since extent.recovery_start was read from it - re-read "
+        "every line the table cites in these files, then update SOURCE_FILES:\n"
+        + "\n".join(changed))
+
+
+def test_the_output_time_map_is_complete_and_well_formed(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    rec = rs.output_times_record()
+    assert set(rec["conventions"]) == set(rs.CONVENTIONS)
+    assert set(rec["actions"]) == set(rs.ACTIONS)
+    kinds = {f["kind"] for f in rec["files"]}
+    assert kinds == {"spikes_v2", "HRBR", "HRVMeasures", "slowWaves", "mmc"}
+    trims = [v for v in rec["vars"] if v["role"] == "trim"]
+    assert {v["owner"] for v in trims} == set(rs.ANALYSES)  # every analysis is cut somewhere
+    assert {v["file"] for v in trims} == kinds
+    assert {v["convention"] for v in trims} == set(rs.CONVENTIONS)
+    by = {(v["file"], v["path"]): v for v in rec["vars"]}
+    assert by[("mmc", "mmc.delay")]["convention"] == "sec_xchan_delay"
+    assert by[("HRVMeasures", "RR_times")]["convention"] == "sec_row1"
+    assert by[("HRBR", "breathRateSeries")]["owner"] == "breathing"
+    assert by[("HRBR", "heartRateSeries")]["owner"] == "hrv"
+    assert by[("HRBR", "RR_implausibleMask")]["role"] == "unknown"
+    for v in trims:
+        st = by[(v["file"], v["stamp"])]
+        assert st["role"] in ("time_axis", "trim"), v
+    # a malformed map is refused, never half applied
+    orig = rs.OUTPUT_VARS
+    for bad, words in (
+            (rs.OutputVar("HRBR", "nowhere.x", "trim", "x", stamp="metrics_t",
+                          convention="sec0", action="nan"), "not a declared container"),
+            (rs.OutputVar("HRBR", "q", "trim", "x", stamp="nope", convention="sec0",
+                          action="nan"), "not a declared time axis"),
+            (rs.OutputVar("HRBR", "heartlocs", "input", "x"), "declared twice"),
+            (rs.OutputVar("HRBR", "q", "trim", "x", owner="velocity", stamp="t",
+                          convention="sec0", action="nan"), "is not an analysis")):
+        monkeypatch.setattr(rs, "OUTPUT_VARS", (*orig, bad))
+        with pytest.raises(ValueError, match=words):
+            rs.output_times_record()
+
+
+def test_the_mmc_delay_stamp_is_its_window_centre_minus_w_half_minus_s() -> None:
+    """extract_mmc labels the delay window on rate ROWS: true centre = delay_t + W/2 - S."""
+    pnew = _processing_new()
+    if pnew is None:
+        pytest.skip("processing_new is not on this machine (set GEMS_PROCESSING_NEW)")
+    code = (pnew / "extract_mmc.m").read_text(encoding="utf-8", errors="replace")
+    assert "centers = (W/2 : S : (t(end)-W/2)).';" in code   # rate row m at W/2 + (m-1) S
+    assert "delay_t(s) = (lo+hi)/2 * S;" in code              # (lo+hi)/2 rows, times S
+    w, s, lo, hi = 10.0, 1.0, 7, 36
+    centres = [w / 2 + (m - 1) * s for m in range(1, 60)]
+    true = (centres[lo - 1] + centres[hi - 1]) / 2
+    assert true == (lo + hi) / 2 * s + w / 2 - s == (lo + hi) / 2 * s + 4.0
 
 
 VALUES = [
@@ -229,6 +306,7 @@ def test_every_start_is_its_electrical_time_plus_its_own_settling(off: float, el
                                                                   fs: float) -> None:
     f = rs.file_starts(session="x", fs=fs, stim_off_s=off, electrical_settle_s=off + el,
                        stim_off_source="a", electrical_source="b")
+    assert f["electrical_settle_sample0"] == seconds_to_sample(off + el, fs)
     for r in f["analyses"]:
         own = rs.analysis_settling(r["analysis"], fs).settling_s
         assert own is not None
@@ -255,6 +333,9 @@ def test_the_document_refuses_duplicates_and_non_integer_samples() -> None:
     bad["analyses"][0]["start_sample0"] = float(bad["analyses"][0]["start_sample0"])
     with pytest.raises(TypeError, match="start_sample0"):
         _doc(bad)
+    no_el = {k: v for k, v in a.items() if k != "electrical_settle_sample0"}
+    with pytest.raises(TypeError, match="electrical_settle_sample0"):
+        _doc(no_el)
 
 
 def _refuse(token: str) -> None:
@@ -276,6 +357,10 @@ def test_the_file_round_trips_exactly_as_canonical_ascii(tmp_path: Path) -> None
     assert ": null" not in text  # a missing value is an absent key
     back = rs.read_recovery_starts(path)
     assert back == json.loads(json.dumps(doc))
+    assert back["trim_modes"] == list(rs.TRIM_MODES)
+    assert back["source_files"] == dict(rs.SOURCE_FILES)
+    assert back["output_times"] == rs.output_times_record()
+    assert back["files"][0]["electrical_settle_sample0"] == seconds_to_sample(124.2, FS)
     assert [f["session"] for f in back["files"]] == ["b_sr"]
     assert [f["session"] for f in back["held"]] == ["a_sr", "c_sr"]
     assert rs.write_recovery_starts(tmp_path / "again.json", back) == text

@@ -12,6 +12,8 @@ function summary = night6_batch(listFile, nWorkers, varargin)
 %     "label": "free text",                 (optional; copied into every record)
 %     "recovery_starts": "<path>",          (RULING 2026-10-08 (k) 2; required for any
 %                                            stim_recovery recording - see RecoveryStarts)
+%     "recovery_trim_mode": "<mode>",       (REQUIRED, no default: one of
+%                                            night6_trim_modes - see RecoveryTrimMode)
 %     "recordings": [ {"mask_folder": "data/A/<session>/masks/<model-id>",
 %                      "meta_file": "..."} ] }   (meta_file optional)
 % A relative path is POSIX and resolves against gems_root (cross-platform rule 2).
@@ -22,6 +24,13 @@ function summary = night6_batch(listFile, nWorkers, varargin)
 % is raised if needed - the persistent profile is never saved (invariant 39).
 % Resumable: an epoch whose night6_record.json says "complete" is skipped; a failed
 % recording does not stop the batch. Writes <out_root>/night6_batch_<time>.json.
+%
+% Refused AT BATCH START, by name, before any recording is loaded (RULING 2026-10-08
+% (k) 2; review of be402a1): a missing or unknown recovery_trim_mode
+% ('night6:recoveryTrimMode'); any listed mask folder holding a stim_recovery epoch
+% when no recovery_starts is declared ('night6:recoveryStarts' - the conditions are read
+% from the mask files' provenance only, never from the signals); and an unreadable or
+% malformed recovery_starts file (night6_recovery_start, read once here).
     ip = inputParser;
     ip.addParameter('DryRun', false);
     ip.addParameter('Figures', false);
@@ -30,6 +39,9 @@ function summary = night6_batch(listFile, nWorkers, varargin)
     opt = ip.Results;
 
     L = jsondecode(fileread(listFile));
+    mode = '';
+    if isfield(L, 'recovery_trim_mode'), mode = L.recovery_trim_mode; end
+    mode = night6_check_trim_mode(mode);   % (k) 2: required, refused by name here
     here = fileparts(mfilename('fullpath'));
     pnew = fullfile(here, '..', '..', '..', 'processing_new');
     if isfield(L, 'processing_new'), pnew = L.processing_new; end
@@ -51,9 +63,11 @@ function summary = night6_batch(listFile, nWorkers, varargin)
     end
     starts = '';
     if isfield(L, 'recovery_starts'), starts = resolve(L.gems_root, L.recovery_starts); end
+    preflight_recovery(folders, starts);   % (k) 2: before any recording is loaded
     args = {'GemsRoot', L.gems_root, 'Units', L.units, 'OutRoot', L.out_root, ...
             'CodeCommit', commit, 'Label', label, 'DryRun', opt.DryRun, ...
-            'Figures', opt.Figures, 'Force', opt.Force, 'RecoveryStarts', starts};
+            'Figures', opt.Figures, 'Force', opt.Force, 'RecoveryStarts', starts, ...
+            'RecoveryTrimMode', mode};
     status = cell(1, n); wall = zeros(1, n);
     t0 = tic;
     fprintf('[night6] %d recording(s), %d worker(s), commit %s\n', n, nWorkers, commit);
@@ -75,7 +89,7 @@ function summary = night6_batch(listFile, nWorkers, varargin)
         end
     end
     summary = struct('list_file', listFile, 'n', n, 'workers', nWorkers, 'commit', commit, ...
-                     'wall_s', toc(t0), 'label', label);
+                     'wall_s', toc(t0), 'label', label, 'recovery_trim_mode', mode);
     summary.recordings = cellfun(@(f, s, w) struct('mask_folder', f, 'status', s, 'wall_s', w), ...
                                  folders, status, num2cell(wall), 'UniformOutput', false);
     summary.n_ok = nnz(strcmp(status, 'ok'));
@@ -99,6 +113,33 @@ function [s, w] = one(folder, meta, args)
         fprintf(2, '[night6] %s: %s\n', folder, s);
     end
     w = toc(t);
+end
+
+function preflight_recovery(folders, starts)
+% Fail the whole batch early, by name, rather than once per recording after loading its
+% signal: a stim_recovery epoch needs the declared starts, and the file must read.
+    if ~isempty(starts)
+        night6_recovery_start(starts);   % refuses an unreadable or malformed file
+        return
+    end
+    need = {};
+    for i = 1:numel(folders)
+        files = dir(fullfile(folders{i}, 'e*_masks.mat'));
+        for k = 1:numel(files)
+            M = load(fullfile(files(k).folder, files(k).name), 'provenance_json');
+            if ~isfield(M, 'provenance_json'), continue, end
+            prov = jsondecode(char(M.provenance_json));
+            if isfield(prov, 'extra') && isfield(prov.extra, 'condition') ...
+                    && strcmp(prov.extra.condition, 'stim_recovery')
+                need{end + 1} = fullfile(folders{i}, files(k).name); %#ok<AGROW>
+            end
+        end
+    end
+    if ~isempty(need)
+        error('night6:recoveryStarts', ['%d stim_recovery epoch(s) listed and no ' ...
+              'recovery_starts declared (RULING 2026-10-08 (k) 2), e.g. %s'], ...
+              numel(need), need{1});
+    end
 end
 
 function p = resolve(root, rel)

@@ -26,7 +26,8 @@ function night6_check(caseFile, outFile)
     for k = 1:numel(folders)
         try
             night6_run_recording(folders{k}, 'GemsRoot', C.gems_root, 'Units', C.units, ...
-                'OutRoot', C.out_root, 'DryRun', true, 'CodeCommit', 'test');
+                'OutRoot', C.out_root, 'DryRun', true, 'CodeCommit', 'test', ...
+                'RecoveryTrimMode', 'mask_to_own_start');
             out.errors{k} = '';
         catch ME
             out.errors{k} = sprintf('%s: %s', ME.identifier, ME.message);
@@ -49,7 +50,8 @@ function night6_check(caseFile, outFile)
         end
         try
             night6_run_recording(Rz.mask_folder, 'GemsRoot', C.gems_root, 'Units', C.units, ...
-                'OutRoot', C.out_root, 'DryRun', true, 'CodeCommit', 'test');
+                'OutRoot', C.out_root, 'DryRun', true, 'CodeCommit', 'test', ...
+                'RecoveryTrimMode', 'mask_to_own_start');
             out.resume_error = '';
         catch ME
             out.resume_error = sprintf('%s: %s', ME.identifier, ME.message);
@@ -79,6 +81,7 @@ function night6_check(caseFile, outFile)
         try
             night6_run_recording(Fb.mask_folder, 'GemsRoot', C.gems_root, 'Units', C.units, ...
                 'OutRoot', Fb.out_root, 'DryRun', true, 'CodeCommit', 'test', ...
+                'RecoveryTrimMode', 'mask_to_own_start', ...
                 'Step1aFallback', Fb.file_ok);
             out.fallback_error = '';
         catch ME
