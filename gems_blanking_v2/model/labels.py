@@ -9,8 +9,9 @@ Rulings applied (2026-10-07 (b)):
   whose marks are positives only, every unmatched core is ``unjudged``, never a negative.
 * **R1 - I, J and K are the prospective test set.** Their labels never enter training,
   with one declared exception (RULING 2026-10-09 items 3-5): rows judged from a declared
-  adaptation queue (:data:`ADAPTATION_QUEUES`, file name AND SHA-256) whose queue row is
-  tagged ``label_purpose == "adaptation"``. :func:`admit_adaptation` admits exactly those,
+  adaptation queue (:data:`ADAPTATION_QUEUE_SPECS`, file name AND SHA-256, and the
+  row's animal among that queue's declared animals) whose queue row is tagged
+  ``label_purpose == "adaptation"``. :func:`admit_adaptation` admits exactly those,
   after asserting they lie at least :data:`ADAPTATION_MARGIN_S` from every evaluation
   interval, by relabelling them ``label_set = "adapt"``; every other I/J/K row - set A,
   blind audits, the K exam - stays ``test`` and is refused.
@@ -50,6 +51,7 @@ __all__ = [
     "ADAPTATION_MARGIN_S",
     "ADAPTATION_PURPOSE",
     "ADAPTATION_QUEUES",
+    "ADAPTATION_QUEUE_SPECS",
     "ADAPTATION_TRACE_COLUMNS",
     "ADAPT_LABEL_SET",
     "ADJUDICATED_BASIS",
@@ -61,6 +63,7 @@ __all__ = [
     "OLD_TIERS",
     "SET_A_BASIS",
     "TEST_ANIMALS",
+    "AdaptationQueue",
     "AliasRow",
     "BlankmotionLabels",
     "admit_adaptation",
@@ -123,16 +126,40 @@ ADAPT_LABEL_SET: Final = "adapt"
 (the evaluation labels), never ``train`` (R1: no I/J/K label trains the models that are
 evaluated on I/J/K). Only a row meeting :func:`is_adaptation_row` may carry it."""
 
-ADAPTATION_QUEUES: Final[Mapping[str, str]] = MappingProxyType({
-    "setADAPT_IJK.parquet":
+
+@dataclass(frozen=True)
+class AdaptationQueue:
+    """One declared adaptation queue: the SHA-256 of its file and the animals it may hold.
+
+    A row claiming the queue is admitted only for an animal in ``animals`` (new cohort):
+    a J-only queue never admits an I or K row, whatever the row's file name and hash say.
+    """
+
+    sha256: str
+    animals: frozenset[str]
+
+
+ADAPTATION_QUEUE_SPECS: Final[Mapping[str, AdaptationQueue]] = MappingProxyType({
+    # RULING 2026-10-09 items 3-5: 171 rows, 57 each for new-cohort I, J and K, drawn
+    # from recordings holding no evaluation span and >= 60 s from every evaluation span
+    # and judged core (setADAPT_IJK.json).
+    "setADAPT_IJK.parquet": AdaptationQueue(
         "0a728fcaa424c2725e6a3d4c5322c12a4618fe34cd7349a343b0dcb9640172fc",
+        frozenset({"I", "J", "K"})),
+    # RULING 2026-10-09 option (a): J's 57 rows above held no negative, so 57 more J cores
+    # with the LOWEST pooled P(motion), same exclusions, J only (setADAPT_J_topup.json).
+    "setADAPT_J_topup.parquet": AdaptationQueue(
+        "8ea02d7862c6c91803cd069194d676eb926f1b4642659ccba9dbcdbdb4b5d750",
+        frozenset({"J"})),
 })
-"""The declared adaptation queues: queue file name -> SHA-256 of that queue file, as the
-adjudication screen records them on every judgement (``queue_file``, ``queue_sha256``).
-RULING 2026-10-09 items 3-5: 171 rows, 57 each for new-cohort I, J and K, drawn from
-recordings holding no evaluation span and >= 60 s from every evaluation span and judged
-core (``setADAPT_IJK.json``). A different file, or this file with any other content, is
-not an adaptation queue."""
+"""The declared adaptation queues, one entry per file, no wildcard: queue file name ->
+its SHA-256 (as the adjudication screen records it on every judgement, ``queue_file`` and
+``queue_sha256``) and its declared animals. A different file, this file with any other
+content, or an animal outside the declared set is not adaptation."""
+
+ADAPTATION_QUEUES: Final[Mapping[str, str]] = MappingProxyType(
+    {name: q.sha256 for name, q in ADAPTATION_QUEUE_SPECS.items()})
+"""Queue file name -> declared SHA-256, derived from :data:`ADAPTATION_QUEUE_SPECS`."""
 
 ADAPTATION_MARGIN_S: Final = 60.0
 """An admitted adaptation row lies at least this many seconds from every evaluation
@@ -409,15 +436,18 @@ def is_adaptation_row(table: pd.DataFrame) -> npt.NDArray[np.bool_]:
     """Return the declared adaptation criterion per row (RULING 2026-10-09); no heuristic.
 
     True exactly where ALL hold: ``label_purpose == "adaptation"``; ``queue_file`` is a
-    key of :data:`ADAPTATION_QUEUES`; ``queue_sha256`` equals the SHA-256 declared for
-    that file; and the row is new-cohort I, J or K (:func:`is_test_animal`). A missing
-    column makes every row False.
+    key of :data:`ADAPTATION_QUEUE_SPECS`; ``queue_sha256`` equals the SHA-256 declared
+    for that file; the row's animal is one of that queue's declared animals; and the row
+    is new-cohort I, J or K (:func:`is_test_animal`). A missing column makes every row
+    False.
     """
     qf = _text(table, "queue_file")
-    declared = np.array([ADAPTATION_QUEUES.get(str(q), None) for q in qf], dtype=object)
-    sha_ok = np.array([d is not None and d == s for d, s in
-                       zip(declared, _text(table, "queue_sha256"), strict=True)], dtype=bool)
-    out: npt.NDArray[np.bool_] = _tagged(table) & sha_ok & _test_rows(table)
+    animal = _text(table, "animal")
+    declared = [ADAPTATION_QUEUE_SPECS.get(str(q)) for q in qf]
+    ok = np.array([d is not None and d.sha256 == s and a in d.animals for d, s, a in
+                   zip(declared, _text(table, "queue_sha256"), animal, strict=True)],
+                  dtype=bool)
+    out: npt.NDArray[np.bool_] = _tagged(table) & ok & _test_rows(table)
     return out
 
 
@@ -503,17 +533,21 @@ def admit_adaptation(table: pd.DataFrame, evaluation: pd.DataFrame, *,
             _text(sub, "queue_sha256"), strict=True)})
         msg = (f"{int(bad.sum())} row(s) tagged label_purpose={ADAPTATION_PURPOSE!r} are "
                f"refused: (cohort, animal, queue_file, queue_sha256[:16]) {seen[:5]} is not a "
-               f"declared adaptation queue of new-cohort I/J/K ({dict(ADAPTATION_QUEUES)})")
+               "declared adaptation queue of new-cohort I/J/K for that animal ("
+               + "; ".join(f"{n}: sha256 {q.sha256}, animals {sorted(q.animals)}"
+                           for n, q in ADAPTATION_QUEUE_SPECS.items()) + ")")
         raise ValueError(msg)
     rec = assert_adaptation_disjoint(table.loc[ok], evaluation, margin_s=margin_s)
     out = table.copy()
     out.loc[ok, "label_set"] = ADAPT_LABEL_SET
     admitted = out.loc[ok]
     rec.update({
-        "rule": ("RULING 2026-10-09 items 3-5: label_purpose == 'adaptation' AND queue_file "
-                 "in ADAPTATION_QUEUES AND queue_sha256 == the declared value AND new-cohort "
-                 "I/J/K; >= margin_s from every evaluation interval"),
+        "rule": ("RULING 2026-10-09 items 3-5 and option (a): label_purpose == 'adaptation' "
+                 "AND queue_file in ADAPTATION_QUEUE_SPECS AND queue_sha256 == the declared "
+                 "value AND animal in that queue's declared animals AND new-cohort I/J/K; "
+                 ">= margin_s from every evaluation interval"),
         "queues": dict(ADAPTATION_QUEUES),
+        "queue_animals": {n: sorted(q.animals) for n, q in ADAPTATION_QUEUE_SPECS.items()},
         "n_admitted": {str(a): int(n) for a, n in
                        admitted.groupby(admitted["animal"].astype(str)).size().items()},
     })

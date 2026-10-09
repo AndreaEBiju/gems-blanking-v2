@@ -29,6 +29,9 @@ from tests.conftest import make_feature_table
 THREADS = 2
 QUEUE = "setADAPT_IJK.parquet"
 SHA = lb.ADAPTATION_QUEUES[QUEUE]
+TOPUP = "setADAPT_J_topup.parquet"
+TOPUP_SHA = "8ea02d7862c6c91803cd069194d676eb926f1b4642659ccba9dbcdbdb4b5d750"
+"""The J top-up queue's sha256 (setADAPT_J_topup.json, RULING 2026-10-09 option (a))."""
 K_EXAM = ("gems_k_t02_cme2_sr_214535_20260825T014539Z", 228.313, 828.313)
 """The K exam span (k_exam_span.json, RULING 2026-10-09 item 4)."""
 I_SPAN = ("gems_i_t02_es2_bl_215727_20260901T015731Z", 85.0673492614171, 205.06734926141712)
@@ -145,6 +148,60 @@ def test_an_adaptation_row_overlapping_the_k_exam_span_raises() -> None:
         md.refuse_test_rows(late, evaluation=_evaluation())
     with pytest.raises(ValueError, match="within 60 s of an evaluation interval"):
         md.prepare_table(late, evaluation=_evaluation())
+
+
+# ---------------------------------------------------------------------------
+# the J top-up queue (RULING 2026-10-09 option (a)): declared by its sha256, J only
+# ---------------------------------------------------------------------------
+
+
+def test_the_declared_queues_are_exactly_the_two_files_with_their_animals() -> None:
+    assert dict(lb.ADAPTATION_QUEUES) == {QUEUE: SHA, TOPUP: TOPUP_SHA}
+    assert {n: sorted(q.animals) for n, q in lb.ADAPTATION_QUEUE_SPECS.items()} == {
+        QUEUE: ["I", "J", "K"], TOPUP: ["J"]}
+
+
+def test_a_j_topup_row_with_the_right_sha_is_admitted() -> None:
+    j_top = _ijk("J", queue=TOPUP, sha=TOPUP_SHA, seed=8)
+    i_main = _ijk("I", seed=9)
+    t = _table(_base(), j_top, i_main)
+    assert lb.is_adaptation_row(t).sum() == len(j_top) + len(i_main)
+    out, rec = lb.admit_adaptation(t, _evaluation())
+    assert rec["n_admitted"] == {"I": len(i_main), "J": len(j_top)}
+    assert rec["queue_animals"][TOPUP] == ["J"]
+    assert (out.loc[out["animal"] == "J", "label_set"] == lb.ADAPT_LABEL_SET).all()
+    rows = lb.training_rows(out)
+    assert set(rows["animal"]) == {"A", "B", "I", "J"}
+    md.refuse_test_rows(rows, evaluation=_evaluation())  # passes: declared and disjoint
+
+
+def test_a_j_topup_row_with_a_wrong_sha_raises() -> None:
+    for sha in (SHA, "0" * 64, TOPUP_SHA[:-1] + "1", ""):
+        t = _table(_base(), _ijk("J", queue=TOPUP, sha=sha, seed=10))
+        assert not lb.is_adaptation_row(t).any()
+        with pytest.raises(ValueError, match="not a declared adaptation queue"):
+            lb.admit_adaptation(t, _evaluation())
+        forged = t.assign(label_set=np.where(t["animal"] == "J", lb.ADAPT_LABEL_SET, "train"))
+        assert set(lb.training_rows(forged)["animal"]) == {"A", "B"}
+        with pytest.raises(ValueError, match="prospective test set"):
+            md.refuse_test_rows(forged, evaluation=_evaluation())
+
+
+def test_an_i_or_k_row_claiming_the_j_topup_queue_is_refused() -> None:
+    for animal in ("I", "K"):
+        claim = _ijk(animal, queue=TOPUP, sha=TOPUP_SHA, seed=11)
+        t = _table(_base(), claim, _ijk("J", queue=TOPUP, sha=TOPUP_SHA, seed=12))
+        ok = lb.is_adaptation_row(t)
+        assert not ok[(t["animal"] == animal).to_numpy()].any()
+        assert ok[(t["animal"] == "J").to_numpy()].all()  # the J rows beside it qualify
+        with pytest.raises(ValueError, match=r"not a declared adaptation queue.*for that "
+                                             r"animal.*setADAPT_J_topup\.parquet.*\['J'\]"):
+            lb.admit_adaptation(t, _evaluation())
+        forged = t.assign(label_set=np.where(t["animal"].isin(["A", "B"]), "train",
+                                             lb.ADAPT_LABEL_SET))
+        assert set(lb.training_rows(forged)["animal"]) == {"A", "B", "J"}
+        with pytest.raises(ValueError, match="prospective test set"):
+            md.refuse_test_rows(forged, evaluation=_evaluation())
 
 
 # ---------------------------------------------------------------------------
