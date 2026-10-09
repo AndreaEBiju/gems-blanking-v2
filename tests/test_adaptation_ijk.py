@@ -124,14 +124,30 @@ def test_a_valid_adaptation_row_is_admitted() -> None:
 def test_an_adaptation_row_overlapping_the_k_exam_span_raises() -> None:
     k = _ijk("K", seed=4)
     first = k["recording"] == k["recording"].iloc[0]
-    for start, ok in ((300.0, False), (828.0, False), (870.0, False), (888.5, True)):
+    assert K_EXAM[0] in lb.ADAPTATION_EXCLUDED_RECORDINGS
+    # RULING 2026-10-09 item 4: the K exam recording supplies NO adaptation core, so a row
+    # anywhere on it is refused - 888.5 s (60.19 s past the span, outside the margin) and
+    # 1300 s included; the margin applies to other recordings only.
+    for start in (300.0, 828.0, 870.0, 888.5, 1300.0):
         moved = k.copy()
         moved.loc[first, "recording"] = K_EXAM[0]
         n = int(first.sum())
         moved.loc[first, "start_s"] = start + 0.3 * np.arange(n) / n
         moved.loc[first, "stop_s"] = moved.loc[first, "start_s"] + 0.2
         t = _table(_base(), moved)
-        if ok:  # 888.5 - 828.313 = 60.19 s: outside the margin
+        with pytest.raises(ValueError, match="supplies no adaptation row at any distance"):
+            lb.admit_adaptation(t, _evaluation())
+    # the margin still governs a span on another recording: I's span, 888.5-style offsets
+    i = _ijk("I", seed=5)
+    one = i["recording"] == i["recording"].iloc[0]
+    for start, ok in ((150.0, False), (240.0, False), (265.5, True)):
+        moved = i.copy()
+        moved.loc[one, "recording"] = I_SPAN[0]
+        n = int(one.sum())
+        moved.loc[one, "start_s"] = start + 0.3 * np.arange(n) / n
+        moved.loc[one, "stop_s"] = moved.loc[one, "start_s"] + 0.2
+        t = _table(_base(), moved)
+        if ok:  # 265.5 - 205.067 = 60.43 s: outside the margin
             lb.admit_adaptation(t, _evaluation())
             continue
         with pytest.raises(ValueError, match="within 60 s of an evaluation interval"):
@@ -144,8 +160,19 @@ def test_an_adaptation_row_overlapping_the_k_exam_span_raises() -> None:
     late.at[j, "recording"] = K_EXAM[0]
     late.at[j, "start_s"] = 500.0
     late.at[j, "stop_s"] = 500.2
-    with pytest.raises(ValueError, match="within 60 s of an evaluation interval"):
+    with pytest.raises(ValueError, match="supplies no adaptation row at any distance"):
         md.refuse_test_rows(late, evaluation=_evaluation())
+    with pytest.raises(ValueError, match="supplies no adaptation row at any distance"):
+        md.prepare_table(late, evaluation=_evaluation())
+    far = rows.copy()  # far from the span but on the exam recording: refused at training too
+    far.at[j, "recording"] = K_EXAM[0]
+    far.at[j, "start_s"] = 1300.0
+    far.at[j, "stop_s"] = 1300.2
+    with pytest.raises(ValueError, match="supplies no adaptation row at any distance"):
+        md.prepare_table(far, evaluation=_evaluation())
+    late.at[j, "recording"] = I_SPAN[0]  # the margin still governs other recordings
+    late.at[j, "start_s"] = 150.0
+    late.at[j, "stop_s"] = 150.2
     with pytest.raises(ValueError, match="within 60 s of an evaluation interval"):
         md.prepare_table(late, evaluation=_evaluation())
 

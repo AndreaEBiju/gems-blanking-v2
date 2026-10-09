@@ -48,6 +48,7 @@ from scipy.io import loadmat, whosmat
 from gems_blanking_v2.io.recording import spans_from_matlab_intervals
 
 __all__ = [
+    "ADAPTATION_EXCLUDED_RECORDINGS",
     "ADAPTATION_MARGIN_S",
     "ADAPTATION_PURPOSE",
     "ADAPTATION_QUEUES",
@@ -164,6 +165,15 @@ ADAPTATION_QUEUES: Final[Mapping[str, str]] = MappingProxyType(
 ADAPTATION_MARGIN_S: Final = 60.0
 """An admitted adaptation row lies at least this many seconds from every evaluation
 interval of its recording (RULING 2026-10-09 item 3; ruling 2026-10-08 (k) 4)."""
+
+ADAPTATION_EXCLUDED_RECORDINGS: Final[Mapping[str, str]] = MappingProxyType({
+    "gems_k_t02_cme2_sr_214535_20260825T014539Z":
+        "K exam recording (k_exam_span.json, seed 20261009): RULING 2026-10-09 item 4, "
+        "'the recording must not supply adaptation cores'",
+})
+"""Recordings that supply NO adaptation row at any distance from any span - the margin does
+not apply to them. :func:`assert_adaptation_disjoint` refuses any row on one by name, so
+admission and the training-time re-assertion both refuse it."""
 
 ADAPTATION_TRACE_COLUMNS: Final[tuple[str, ...]] = ("label_purpose", "queue_file",
                                                     "queue_sha256")
@@ -463,7 +473,8 @@ def assert_adaptation_disjoint(rows: pd.DataFrame, evaluation: pd.DataFrame, *,
     """Raise unless adaptation rows keep ``margin_s`` from every evaluation interval.
 
     Every row must lie at least ``margin_s`` from every evaluation interval of its own
-    recording; returns the evidence record.
+    recording, and no row may lie on a recording of :data:`ADAPTATION_EXCLUDED_RECORDINGS`
+    (the K exam recording) at all; returns the evidence record.
 
     ``evaluation`` holds ``recording``, ``start_s``, ``stop_s`` (seconds): every evaluation
     span (blind-audit plan spans, current and replaced, and the K exam span) and every
@@ -483,6 +494,14 @@ def assert_adaptation_disjoint(rows: pd.DataFrame, evaluation: pd.DataFrame, *,
         raise ValueError(msg)
     if not (np.isfinite(float(margin_s)) and float(margin_s) >= 0):
         msg = f"margin_s must be finite and >= 0, got {margin_s!r}"
+        raise ValueError(msg)
+    on_excluded = sorted({str(r) for r in rows["recording"].astype(str)
+                          if str(r) in ADAPTATION_EXCLUDED_RECORDINGS})
+    if on_excluded:
+        n_ex = int(rows["recording"].astype(str).isin(on_excluded).sum())
+        msg = (f"{n_ex} adaptation row(s) lie on {on_excluded}, which supplies no adaptation "
+               "row at any distance: " + "; ".join(
+                   ADAPTATION_EXCLUDED_RECORDINGS[r] for r in on_excluded))
         raise ValueError(msg)
     by_rec = {str(r): g[["start_s", "stop_s"]].to_numpy(np.float64)
               for r, g in evaluation.groupby(evaluation["recording"].astype(str))}
