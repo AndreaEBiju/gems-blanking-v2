@@ -30,6 +30,7 @@ from tests.conftest import (
     make_mains_spike_t,
     make_spike_pair,
     make_spike_times,
+    peri_r_like,
 )
 
 FS = 24414.0625
@@ -371,7 +372,7 @@ def _write(tmp_path: Path, masks: dict[mk.MaskKey, mk.ConsumerMask],
            signals: dict[str, tuple[str, ...]] | None = None, name: str = "r.mat") -> Path:
     return ho.write_mask_file(tmp_path / name, masks, prov or _prov(), signals=signals or READS,
                               fs=FS, n_samples=N3, epoch_start_s=0.0, min_retention=0.5,
-                              animal_median={}, line_distrust=line)
+                              animal_median={}, line_distrust=line, peri_r=peri_r_like(line))
 
 
 def test_qc_reports_spike_time_lost_beside_the_mask() -> None:

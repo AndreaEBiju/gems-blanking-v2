@@ -22,8 +22,10 @@ function [D, info] = process_dataset_v2(D, varargin)
 % VOLTS, masked samples NaN), D.fs, D.neuralChannels, D.channelLabels, D.rpeakSamples
 % (1-based SAMPLE indices into D.y, possibly empty), D.rpeakTimes, D.removedSegmentIdx.
 % D.rpeakSamples must be present: among the steps called, step3b_envelope is its only
-% reader (step3b_envelope.m:56-61, the cardiac guard on the activity RMS);
-% step3_detect reads D.rpeakTimes only to draw its figure (step3_detect.m:155).
+% reader (step3b_envelope.m:56-61, the cardiac guard on the activity RMS, which is 0 ms
+% here by RULING 2026-10-08 (k) 3 - night6_v2_params - so it leaves out the R sample
+% alone, inside the peri-R NaN span); step3_detect reads D.rpeakTimes only to draw its
+% figure (step3_detect.m:155).
 %
 % Fallback, RULING 2026-10-08 (j) 1: 'Step1aChannels' (logical, one per neural channel,
 % default none) names the channels of an animal x cuff on the declared fallback list

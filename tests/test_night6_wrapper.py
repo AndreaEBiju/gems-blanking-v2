@@ -79,7 +79,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from scipy.io import loadmat, savemat
 
-from tests.conftest import make_line_distrust, make_mains_spike_t, make_slow
+from tests.conftest import make_line_distrust, make_mains_spike_t, make_slow, peri_r_like
 from tests.test_matlab_acceptance import _matlab, _processing_new
 
 FS = 24414.0625
@@ -174,7 +174,7 @@ def _write_epoch(folder: Path, session: str, reads: dict[str, tuple[str, ...]],
     write_mask_file(folder / f"e{round(start)}_masks.mat", masks, _provenance(session, extra),
                     signals=reads, fs=FS, n_samples=n, epoch_start_s=start, min_retention=0.5,
                     animal_median={f"{c}|{s}|{b}": 0.3 for c, s, b in masks},
-                    line_distrust=line, not_computed=not_computed,
+                    line_distrust=line, peri_r=peri_r_like(line), not_computed=not_computed,
                     epoch_start_sample=seconds_to_sample(start, FS),
                     release="synthetic night6 test: spans are large on purpose")
     return masks
@@ -512,9 +512,10 @@ def _check_joint_mask(r: dict[str, Any]) -> None:
 
 
 SPIKE_PARAMS = {"threshSigma": 4.5, "bandpassLow": 300, "bandpassHigh": 3000, "filterOrder": 4,
-                "envCardiacGuardMs": 15, "edgeBufferMs": 10, "refractoryMs": 1.0,
+                "envCardiacGuardMs": 0, "edgeBufferMs": 10, "refractoryMs": 1.0,
                 "detectPolarity": "neg"}
-"""Her pipeline_params defaults with the band of Andrea 2026-10-09 (300-3000 Hz)."""
+"""Her pipeline_params defaults with the band of Andrea 2026-10-09 (300-3000 Hz) and step3b's
+guard at 0 (RULING 2026-10-08 (k) 3)."""
 
 
 def _check_spike_params(d: Path) -> None:
@@ -693,7 +694,7 @@ def _check_v2(v2: dict[str, Any], r: dict[str, Any], pnew: Path) -> None:
     assert r["mutant_thresh"] == "process_dataset_v2:params"
     assert Path(r["after_mutants_step1"]).resolve().parent == pnew.resolve()
     assert r["step1a_ran"] is False  # ruling (i) 1: heartbeats only as the mask's NaN
-    assert r["rpeak_guard_ms"] == 15  # step3b's guard (her P.envCardiacGuardMs)
+    assert r["rpeak_guard_ms"] == 0  # step3b's guard: 0 by RULING 2026-10-08 (k) 3
     pad = int(np.ceil(V2_PAD_MS * 1e-3 * FS))
     checks = r["spike_check"] if isinstance(r["spike_check"], list) else [r["spike_check"]]
     centers = r["centers"] if isinstance(r["centers"], list) else [r["centers"]]

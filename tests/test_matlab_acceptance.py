@@ -33,7 +33,7 @@ from gems_blanking_v2.emit.provenance import MaskProvenance
 from gems_blanking_v2.extent.grid import n_grid_frames
 from scipy.io import savemat
 
-from tests.conftest import make_line_distrust, make_mains_spike_t
+from tests.conftest import make_line_distrust, make_mains_spike_t, peri_r_like
 
 FS = 24414.0625
 N_SAMPLES = int(120.0 * FS) + 37  # a trailing partial frame, on purpose
@@ -98,7 +98,7 @@ def test_matlab_step1_bandpass_honours_the_emitted_masks(tmp_path: Path) -> None
     assert line.distrusted_spans("L_T") == [(60.0, 120.0)]
     mask_file = write_mask_file(tmp_path / "synthetic_masks.mat", masks, prov, signals=READS,
                                 fs=FS,
-                                line_distrust=line,
+                                line_distrust=line, peri_r=peri_r_like(line),
                                 n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
                                 animal_median=medians,
                                 release="synthetic acceptance test: the slow_wave span "

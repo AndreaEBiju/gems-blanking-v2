@@ -138,6 +138,9 @@ class MaskProvenance:
     (``emit.line_distrust.LineDistrustRecord.provenance``: rule, test version, alpha,
     family, input, cleaner) - absent when the recording has no spike consumer. The MATLAB
     writer fills it from the record it carries, so the two cannot disagree.
+    ``spike_peri_r`` the spike consumer's peri-R spans as applied (RULING 2026-10-08 (k) 1;
+    ``emit.peri_r.PeriRRecord.provenance``: rule, window with its file's sha256, the routed
+    train or why there is none, counts) - filled the same way, by the writer, from the record.
     """
 
     model: Mapping[str, Any]
@@ -151,6 +154,7 @@ class MaskProvenance:
     settling_s: Mapping[str, float] = field(default_factory=dict)
     extra: Mapping[str, Any] = field(default_factory=dict)
     spike_line_distrust: Mapping[str, Any] = field(default_factory=dict)
+    spike_peri_r: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Normalise to the JSON form and validate."""
@@ -158,7 +162,7 @@ class MaskProvenance:
         # round trip is an identity), and a ModelSpec object becomes its record.
         object.__setattr__(self, "model", model_spec_record(self.model))
         for name in ("thresholds", "reference_values", "settling_s", "extra",
-                     "spike_line_distrust"):
+                     "spike_line_distrust", "spike_peri_r"):
             value = _clean(dict(getattr(self, name)))
             object.__setattr__(self, name, json.loads(json.dumps(value, allow_nan=False)))
         self.validate()
@@ -198,6 +202,8 @@ class MaskProvenance:
             rec["extra"] = _clean(dict(self.extra))
         if self.spike_line_distrust:
             rec["spike_line_distrust"] = _clean(dict(self.spike_line_distrust))
+        if self.spike_peri_r:
+            rec["spike_peri_r"] = _clean(dict(self.spike_peri_r))
         return {k: v for k, v in rec.items() if v not in ({}, None)}
 
     def to_json(self) -> str:
@@ -220,4 +226,5 @@ class MaskProvenance:
                    generation_sha=doc["generation_sha"], routing_hash=doc["routing_hash"],
                    created_at=doc["created_at"], recording=doc["recording"],
                    settling_s=doc.get("settling_s") or {}, extra=doc.get("extra") or {},
-                   spike_line_distrust=doc.get("spike_line_distrust") or {})
+                   spike_line_distrust=doc.get("spike_line_distrust") or {},
+                   spike_peri_r=doc.get("spike_peri_r") or {})

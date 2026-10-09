@@ -27,6 +27,7 @@ Design notes that matter for correctness:
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import math
 from dataclasses import dataclass
@@ -42,7 +43,8 @@ from gems_blanking_v2.constants import ENG_BAND, FS_NOMINAL_HZ, GRID_S, MAD_TO_S
 from gems_blanking_v2.emit import line_distrust
 from gems_blanking_v2.emit.line_distrust import LineDistrustRecord
 from gems_blanking_v2.emit.masks import ConsumerMask
-from gems_blanking_v2.extent.grid import n_grid_frames
+from gems_blanking_v2.emit.peri_r import PeriRRecord, PeriRWindow, build_peri_r
+from gems_blanking_v2.extent.grid import n_grid_frames, seconds_to_sample
 from gems_blanking_v2.types import ChannelInfo, Recording
 from scipy.signal import butter, sosfiltfilt
 
@@ -1956,6 +1958,32 @@ def make_line_distrust(raw_t: dict[str, F64], fs: float, *, recording: str,
     p = line_distrust.pass1(raw_t, fs, epoch_start_s=epoch_start_s, motion=motion)
     return line_distrust.decide_animal(animal_key, [(recording, p)])[1][(recording,
                                                                        p.epoch_start_s)]
+
+
+TEST_PERI_R_WINDOW: Final = PeriRWindow(
+    before_ms=16.0, after_ms=9.5, source="test_perir_window.json",
+    sha256=hashlib.sha256(b"synthetic peri-R window for tests").hexdigest())
+"""A fixture window shaped like the measured one (RULING 2026-10-08 (k) 1, 2026-10-09:
+16.0 ms before R, 9.5 ms after). Tests that need the real file's hash write their own."""
+
+
+def peri_r_like(line: LineDistrustRecord | None, *, heartlocs: npt.ArrayLike | None = None,
+                origin_sample: int = 0, window: PeriRWindow = TEST_PERI_R_WINDOW
+                ) -> PeriRRecord | None:
+    """Return the peri-R record for the same epoch and spike signals as ``line``.
+
+    The handoff requires both records whenever the spike consumer reads a signal. With
+    ``heartlocs`` None the record is a recording with no routed train: no spans, so the
+    spike mask is exactly the motion and distrust spans. ``None`` for ``None``.
+    """
+    if line is None:
+        return None
+    has = heartlocs is not None
+    return build_peri_r(recording=line.recording, signals=line.signals, window=window,
+                        fs=line.fs, n_samples=line.n_samples, epoch_start_s=line.epoch_start_s,
+                        epoch_start_sample=seconds_to_sample(line.epoch_start_s, line.fs),
+                        heartlocs=heartlocs, origin_sample=origin_sample if has else None,
+                        train={"file": "synthetic", "grade": "hrv"} if has else None)
 
 
 def make_spike_times(dur_s: float, *, rate_hz: float, locked_keep: float = 0.0,

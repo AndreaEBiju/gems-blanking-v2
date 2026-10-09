@@ -31,6 +31,17 @@ reads anything must carry a record covering exactly those signals, and one that 
 nothing passes ``None``. The record's provenance is copied into ``provenance_json``
 (``spike_line_distrust``) from the record itself.
 
+**Spike-consumer peri-R spans (RULING 2026-10-08 (k) 1).** The same shape: the
+:class:`~gems_blanking_v2.emit.peri_r.PeriRRecord`'s sample-exact spans around every beat of
+the routed train join ``blank_spikes_<cuff>_T`` and no other consumer's spans (invariant 2);
+``perir_spikes_<cuff>_T`` carries them alone and ``perir_json`` the record. ``retention_json``
+and the hold read the motion masks only; ``gate_json`` reports ``spike_peri_r_fraction``.
+``peri_r`` is a required argument like ``line_distrust``: a recording whose spike consumer
+reads anything carries a record (one with no train when the routing gives it none - then
+its spike spans are exactly the motion and distrust spans), and one that reads nothing
+passes ``None``. The record's provenance - the window, its file's sha256, the train - is
+copied into ``provenance_json`` (``spike_peri_r``) from the record itself.
+
 OUTSIDE THE GENERATION HASH.
 """
 
@@ -48,6 +59,7 @@ from scipy.io import savemat
 
 from gems_blanking_v2.emit.line_distrust import LineDistrustRecord
 from gems_blanking_v2.emit.masks import ConsumerMask, MaskKey, mask_sample_spans, mmc_not_measured
+from gems_blanking_v2.emit.peri_r import PeriRRecord
 from gems_blanking_v2.emit.provenance import MaskProvenance, ProvenanceError
 from gems_blanking_v2.emit.qc import emit_gate, line_distrust_listed, spike_time_lost
 from gems_blanking_v2.extent.grid import (
@@ -257,6 +269,43 @@ def _with_line_distrust(provenance: MaskProvenance, line_distrust: LineDistrustR
     return dataclasses.replace(provenance, spike_line_distrust=want)
 
 
+def _with_peri_r(provenance: MaskProvenance, peri_r: PeriRRecord | None, *,
+                 signals: Mapping[str, Sequence[str]], fs: float, n_samples: int,
+                 epoch_start_s: float, epoch_start_sample: float) -> MaskProvenance:
+    """Check the peri-R record against this file and return the provenance that names it."""
+    spike_signals = tuple(sorted(signals.get("spikes", ())))
+    if peri_r is None:
+        if spike_signals:
+            msg = (f"the spike consumer reads {list(spike_signals)}: the file must carry its "
+                   "peri-R record (RULING 2026-10-08 (k) 1; one with no train when the "
+                   "routing gives none); none given")
+            raise ValueError(msg)
+        if provenance.spike_peri_r:
+            msg = "provenance names a peri-R rule but no peri-R record is carried"
+            raise ProvenanceError(msg)
+        return provenance
+    if tuple(sorted(peri_r.signals)) != spike_signals:
+        msg = (f"the peri-R record covers {list(peri_r.signals)} but the spike consumer reads "
+               f"{list(spike_signals)}")
+        raise ValueError(msg)
+    if (peri_r.fs != float(fs) or peri_r.n_samples != int(n_samples)
+            or abs(peri_r.epoch_start_s - epoch_start_s) > T0_TOLERANCE_S
+            or float(peri_r.epoch_start_sample) != float(epoch_start_sample)):
+        msg = (f"the peri-R record is for fs {peri_r.fs}, {peri_r.n_samples} samples from "
+               f"sample {peri_r.epoch_start_sample}; this file is fs {fs}, {n_samples} samples "
+               f"from sample {int(epoch_start_sample)}")
+        raise ValueError(msg)
+    if peri_r.recording != provenance.recording:
+        msg = (f"the peri-R record is for {peri_r.recording!r}, the provenance for "
+               f"{provenance.recording!r}")
+        raise ValueError(msg)
+    want = json.loads(json.dumps(peri_r.provenance(), allow_nan=False))
+    if provenance.spike_peri_r and dict(provenance.spike_peri_r) != want:
+        msg = "provenance names a different peri-R record than the one carried"
+        raise ProvenanceError(msg)
+    return dataclasses.replace(provenance, spike_peri_r=want)
+
+
 def _write_line_distrust(doc: dict[str, Any], masks: Mapping[MaskKey, ConsumerMask],
                          line_distrust: LineDistrustRecord | None
                          ) -> dict[str, dict[str, float | int]] | None:
@@ -271,12 +320,37 @@ def _write_line_distrust(doc: dict[str, Any], masks: Mapping[MaskKey, ConsumerMa
     return spike_time_lost(masks, line_distrust)
 
 
+def _spike_extra(consumer: str, signal: str, line_distrust: LineDistrustRecord | None,
+                 peri_r: PeriRRecord | None) -> list[tuple[int, int]]:
+    """Return the sample spans joining ``consumer``'s motion runs: the spike consumer's only."""
+    if consumer != "spikes":
+        return []
+    distrusted = line_distrust.sample_spans(signal) if line_distrust is not None else []
+    heart = peri_r.sample_spans(signal) if peri_r is not None else []
+    return [*distrusted, *heart]
+
+
+def _write_peri_r(doc: dict[str, Any], peri_r: PeriRRecord | None,
+                  n_samples: int) -> dict[str, float] | None:
+    """Put the peri-R spans and JSON in ``doc``; return the blanked fraction per signal."""
+    if peri_r is None:
+        return None
+    spans = peri_r.matlab_spans()
+    assert_no_zero_runs(spans.ravel(), what="peri-R spans spikes")
+    for sig in peri_r.signals:
+        doc[_matlab_name("perir", "spikes", sig)] = spans
+    doc["perir_json"] = peri_r.to_json()
+    blanked = sum(b - a for a, b in peri_r.spans)
+    return dict.fromkeys(peri_r.signals, blanked / n_samples)
+
+
 def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
                     provenance: MaskProvenance | None, *, signals: Mapping[str, Sequence[str]],
                     fs: float, n_samples: int,
                     epoch_start_s: float, min_retention: float,
                     animal_median: Mapping[str, float | None],
                     line_distrust: LineDistrustRecord | None,
+                    peri_r: PeriRRecord | None,
                     decisions: Iterable[RouteDecision] = (),
                     hum_features: Mapping[str, float] | None = None,
                     release: str | None = None,
@@ -309,8 +383,10 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
     ``epoch_start_s`` or does not have ``floor(n_samples / fs / grid)`` frames; a
     ``line_distrust`` record missing while the spike consumer reads a signal, covering
     other signals than it reads, made for another epoch or recording, or whose rule
-    disagrees with one the provenance already names. Every numeric array is checked for
-    exact-zero runs (invariant 1).
+    disagrees with one the provenance already names; a ``peri_r`` record missing while the
+    spike consumer reads a signal, given while it reads none, or covering other signals,
+    another epoch or another recording. Every numeric array is checked for exact-zero runs
+    (invariant 1).
     """
     if provenance is None:
         msg = "a mask file must carry provenance naming its model (task 15); none given"
@@ -319,8 +395,11 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
     start_fields = epoch_start_fields(epoch_start_s, fs, epoch_start_sample)
     _check_coverage(masks, signals)
     _check_not_computed(not_computed or {}, signals)
-    provenance = _with_line_distrust(provenance, line_distrust, signals=signals, fs=fs,
-                                     n_samples=n_samples, epoch_start_s=epoch_start_s)
+    provenance = _with_peri_r(
+        _with_line_distrust(provenance, line_distrust, signals=signals, fs=fs,
+                            n_samples=n_samples, epoch_start_s=epoch_start_s),
+        peri_r, signals=signals, fs=fs, n_samples=n_samples, epoch_start_s=epoch_start_s,
+        epoch_start_sample=start_fields[EPOCH_START_SAMPLE_KEY])
     gate = emit_gate(masks, min_retention=min_retention, animal_median=animal_median,
                      decisions=decisions, hum_features=hum_features)
     if release is not None and not release.strip():
@@ -341,17 +420,16 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
         if m.invalid.size != want:
             msg = f"{consumer}/{signal}: {m.invalid.size} frames for an epoch of {want}"
             raise ValueError(msg)
-        distrusted = (line_distrust.sample_spans(signal)
-                      if consumer == "spikes" and line_distrust is not None else [])
         doc[_matlab_name("blank", consumer, signal)] = _matlab_spans(
             m.invalid, fs, n_samples, m.grid_s, f"blank spans {consumer}/{signal}",
-            extra=distrusted)
+            extra=_spike_extra(consumer, signal, line_distrust, peri_r))
         retention[f"{consumer}|{signal}|{band}"] = m.retention  # motion only ((e) Q2b)
     for sig, frames in sorted(mmc_not_measured(masks).items()):
         doc[_matlab_name("notmeasured", "mmc", sig)] = _matlab_spans(
             frames, fs, n_samples, masks[("mmc", sig, extent_consumers()["mmc"].band)].grid_s,
             f"not-measured spans mmc/{sig}")
     lost = _write_line_distrust(doc, masks, line_distrust)
+    heart_fraction = _write_peri_r(doc, peri_r, n_samples)
     gate_doc: dict[str, Any] = {"held": gate.held, "reasons": list(gate.reasons),
                                 "retention_flagged": gate.retention_flagged,
                                 "blank_held": gate.blank_held,
@@ -359,7 +437,9 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
                                 "medians_used": dict(gate.medians_used),
                                 "notes": list(gate.notes),
                                 "top_routes": [list(t) for t in gate.top_routes],
-                                "hum_features": dict(gate.hum_features)}
+                                "hum_features": dict(gate.hum_features),
+                                **({"spike_peri_r_fraction": heart_fraction}
+                                   if heart_fraction is not None else {})}
     if lost is not None:
         gate_doc["spike_time_lost"] = lost
         gate_doc["line_distrust_listed"] = line_distrust_listed(lost)

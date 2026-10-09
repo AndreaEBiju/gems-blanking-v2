@@ -161,7 +161,7 @@ function r = v2_case(V)
                           'refractoryMs', info.P.refractoryMs, ...
                           'detectPolarity', info.P.detectPolarity);
         r.step1a_ran = isfield(Dv, 'cardiacBlank');   % ruling (i): it must not
-        r.rpeak_guard_ms = Dv.envelope(1).guardMs;    % step3b kept its guard
+        r.rpeak_guard_ms = Dv.envelope(1).guardMs;    % step3b's guard: 0, RULING (k) 3
     catch ME
         r.error = sprintf('%s: %s', ME.identifier, ME.message);
     end

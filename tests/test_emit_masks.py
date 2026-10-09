@@ -24,7 +24,7 @@ from gems_blanking_v2.io.nan_interop import assert_no_zero_runs, find_zero_runs
 from gems_blanking_v2.types import Candidate, Event
 from scipy.io import loadmat
 
-from tests.conftest import make_band_z, make_line_distrust, make_mains_spike_t
+from tests.conftest import make_band_z, make_line_distrust, make_mains_spike_t, peri_r_like
 
 FS = 24414.0625
 DUR_S = 60.0
@@ -156,7 +156,7 @@ def test_a_recovery_epoch_starting_at_120_s_is_shifted_exactly_once(tmp_path: Pa
     assert a <= ext.start_s and ext.stop_s <= b and a >= 120.0
     path = ho.write_mask_file(tmp_path / "r.mat", masks, _prov(),
                               signals=READS, fs=FS, n_samples=N_SAMPLES,
-                              line_distrust=_ld(120.0),
+                              line_distrust=_ld(120.0), peri_r=peri_r_like(_ld(120.0)),
                               epoch_start_s=120.0, **GATE)
     spans = loadmat(path)["blank_spikes_L_T"]
     i0 = int(np.floor((ext.start_s - 120.0) / 0.01))
@@ -165,7 +165,7 @@ def test_a_recovery_epoch_starting_at_120_s_is_shifted_exactly_once(tmp_path: Pa
     with pytest.raises(ValueError, match="grid starts at 120"):
         ho.write_mask_file(tmp_path / "x.mat", masks, _prov(),
                            signals=READS, fs=FS, n_samples=N_SAMPLES,
-                           line_distrust=_ld(),
+                           line_distrust=_ld(), peri_r=peri_r_like(_ld()),
                            epoch_start_s=0.0, **GATE)
 
 
@@ -175,6 +175,7 @@ def test_the_frame_count_must_match_the_epoch(tmp_path: Path) -> None:
         ho.write_mask_file(tmp_path / "x.mat", masks, _prov(),
                            signals=READS, fs=FS, n_samples=N_SAMPLES // 2,
                            line_distrust=_ld(0.0, N_SAMPLES // 2),
+                           peri_r=peri_r_like(_ld(0.0, N_SAMPLES // 2)),
                            epoch_start_s=0.0, **GATE)
 
 
@@ -228,7 +229,7 @@ def test_the_mask_file_has_no_zero_runs_one_span_set_per_consumer_and_r6(tmp_pat
         "mmc", "ANT1", "2-50", mk.mask_frames([(30.0, 31.0)], N_FRAMES, t0_s=0.0), 0.01, 0.0)
     path = ho.write_mask_file(tmp_path / "rec1_masks.mat", masks, _prov(),
                               signals=READS, fs=FS,
-                              line_distrust=_ld(),
+                              line_distrust=_ld(), peri_r=peri_r_like(_ld()),
                               n_samples=N_SAMPLES, epoch_start_s=0.0, **GATE,
                               events=[{"start": 19.5, "stop": 21.0, "judgement": "motion"}])
     m = loadmat(path)
@@ -252,7 +253,7 @@ def test_a_mask_without_a_model_is_refused_on_write(tmp_path: Path) -> None:
     with pytest.raises(ProvenanceError, match="model"):
         ho.write_mask_file(tmp_path / "x.mat", _eng_only()[0], None,
                            signals=READS, fs=FS,
-                           line_distrust=_ld(),
+                           line_distrust=_ld(), peri_r=peri_r_like(_ld()),
                            n_samples=N_SAMPLES, epoch_start_s=0.0, **GATE)
     assert not list(tmp_path.iterdir())
 
@@ -296,17 +297,17 @@ def test_a_held_recording_is_written_only_with_a_release(tmp_path: Path) -> None
     with pytest.raises(ho.RecordingHeldError, match="release"):
         ho.write_mask_file(tmp_path / "x.mat", over, _prov(),
                            signals=READS, fs=FS, n_samples=N_SAMPLES,
-                           line_distrust=_ld(),
+                           line_distrust=_ld(), peri_r=peri_r_like(_ld()),
                            epoch_start_s=0.0, min_retention=0.5, animal_median=med)
     with pytest.raises(ValueError, match="blank string"):
         ho.write_mask_file(tmp_path / "x.mat", over, _prov(),
                            signals=READS, fs=FS, n_samples=N_SAMPLES,
-                           line_distrust=_ld(),
+                           line_distrust=_ld(), peri_r=peri_r_like(_ld()),
                            epoch_start_s=0.0, min_retention=0.5, animal_median=med,
                            release="   ")
     path = ho.write_mask_file(tmp_path / "x.mat", over, _prov(),
                               signals=READS, fs=FS, n_samples=N_SAMPLES,
-                              line_distrust=_ld(),
+                              line_distrust=_ld(), peri_r=peri_r_like(_ld()),
                               epoch_start_s=0.0, min_retention=0.5, animal_median=med,
                               release="Andrea 2026-10-08: anaesthesia lightened, keep")
     g = json.loads(str(loadmat(path)["gate_json"][0]))
@@ -388,12 +389,12 @@ def test_the_writer_computes_the_gate_from_the_masks(tmp_path: Path) -> None:
     with pytest.raises(ho.RecordingHeldError, match="retention"):
         ho.write_mask_file(tmp_path / "x.mat", over, _prov(),
                            signals=READS, fs=FS, n_samples=N_SAMPLES,
-                           line_distrust=_ld(),
+                           line_distrust=_ld(), peri_r=peri_r_like(_ld()),
                            epoch_start_s=0.0, min_retention=0.5,
                            animal_median={"spikes|L_T|300-3000": 0.9})
     path = ho.write_mask_file(tmp_path / "ok.mat", _masked(0.01), _prov(),
                               signals=READS, fs=FS,
-                              line_distrust=_ld(),
+                              line_distrust=_ld(), peri_r=peri_r_like(_ld()),
                               n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
                               animal_median={})
     g = json.loads(str(loadmat(path)["gate_json"][0]))
@@ -408,7 +409,7 @@ def test_the_retention_gate_alone_holds_the_recording(tmp_path: Path) -> None:
     with pytest.raises(ho.RecordingHeldError, match="retention"):
         ho.write_mask_file(tmp_path / "x.mat", m, _prov(),
                            signals=_reads(spikes=('L_T',)), fs=FS, n_samples=N_SAMPLES,
-                           line_distrust=_ld(),
+                           line_distrust=_ld(), peri_r=peri_r_like(_ld()),
                            epoch_start_s=0.0, min_retention=0.9,
                            animal_median={"spikes|L_T|300-3000": 0.1})
 
@@ -421,12 +422,12 @@ def test_the_writer_refuses_masks_that_leave_a_consumer_out(tmp_path: Path) -> N
     for given in (only_spikes, {}):
         with pytest.raises(ValueError, match=r"do not cover|no masks"):
             ho.write_mask_file(tmp_path / "x.mat", given, _prov(), signals=reads, fs=FS,
-                               line_distrust=_ld(),
+                               line_distrust=_ld(), peri_r=peri_r_like(_ld()),
                                n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
                                animal_median={})
     with pytest.raises(ho.RecordingHeldError):
         ho.write_mask_file(tmp_path / "x.mat", masks, _prov(), signals=reads, fs=FS,
-                           line_distrust=_ld(),
+                           line_distrust=_ld(), peri_r=peri_r_like(_ld()),
                            n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
                            animal_median={})
 
@@ -441,7 +442,7 @@ def test_held_recordings_carry_top_routes_and_hum_features(tmp_path: Path) -> No
     over = _masked(0.3)
     ds = [RouteDecision("e", "spikes", "reject", "x", "in_band_eng")]
     path = ho.write_mask_file(tmp_path / "x.mat", over, _prov(), signals=READS,
-                              line_distrust=_ld(),
+                              line_distrust=_ld(), peri_r=peri_r_like(_ld()),
                               fs=FS, n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
                               animal_median={}, decisions=ds,
                               hum_features={"line_ratio_max": 0.4},
@@ -454,19 +455,19 @@ def test_the_writer_refuses_an_empty_or_partial_signals_map(tmp_path: Path) -> N
     """Signals built from the masks is the hole: they must come from the recording."""
     with pytest.raises(ValueError, match="every consumer"):
         ho.write_mask_file(tmp_path / "x.mat", {}, _prov(), signals={}, fs=FS,
-                           line_distrust=None,
+                           line_distrust=None, peri_r=peri_r_like(None),
                            n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
                            animal_median={})
     with pytest.raises(ValueError, match="no masks"):
         ho.write_mask_file(tmp_path / "x.mat", {}, _prov(),
                            signals=dict.fromkeys(READS, ()), fs=FS, n_samples=N_SAMPLES,
-                           line_distrust=None,
+                           line_distrust=None, peri_r=peri_r_like(None),
                            epoch_start_s=0.0, min_retention=0.5, animal_median={})
     masks = _masked(0.01)
     without_slow = {k: v for k, v in READS.items() if k != "slow_wave"}
     with pytest.raises(ValueError, match=r"every consumer.*slow_wave"):
         ho.write_mask_file(tmp_path / "x.mat", masks, _prov(), signals=without_slow, fs=FS,
-                           line_distrust=_ld(),
+                           line_distrust=_ld(), peri_r=peri_r_like(_ld()),
                            n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
                            animal_median={})
 
@@ -479,7 +480,7 @@ def test_a_mask_on_the_wrong_band_is_refused(tmp_path: Path) -> None:
                                                           m.grid_s, m.t0_s)
     with pytest.raises(ValueError, match="wrong band"):
         ho.write_mask_file(tmp_path / "x.mat", masks, _prov(), signals=READS, fs=FS,
-                           line_distrust=_ld(),
+                           line_distrust=_ld(), peri_r=peri_r_like(_ld()),
                            n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
                            animal_median={})
 
@@ -487,7 +488,7 @@ def test_a_mask_on_the_wrong_band_is_refused(tmp_path: Path) -> None:
 def test_a_non_finite_hum_feature_raises_naming_it(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="line_plv_max"):
         ho.write_mask_file(tmp_path / "x.mat", _masked(0.3), _prov(), signals=READS, fs=FS,
-                           line_distrust=_ld(),
+                           line_distrust=_ld(), peri_r=peri_r_like(_ld()),
                            n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
                            animal_median={}, hum_features={"line_plv_max": float("nan")},
                            release="Andrea: test")
@@ -504,13 +505,13 @@ def test_an_unknown_consumer_is_a_value_error_naming_it(tmp_path: Path) -> None:
     odd = {**masks, ("not_a_consumer", k[1], k[2]): masks[k]}
     with pytest.raises(ValueError, match=r"unknown consumers.*not_a_consumer"):
         ho.write_mask_file(tmp_path / "x.mat", odd, _prov(), signals=READS, fs=FS,
-                           line_distrust=_ld(),
+                           line_distrust=_ld(), peri_r=peri_r_like(_ld()),
                            n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
                            animal_median={})
     with pytest.raises(ValueError, match=r"unknown consumers.*not_a_consumer"):
         ho.write_mask_file(tmp_path / "x.mat", masks, _prov(),
                            signals={**READS, "not_a_consumer": ("L_T",)}, fs=FS,
-                           line_distrust=_ld(),
+                           line_distrust=_ld(), peri_r=peri_r_like(_ld()),
                            n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
                            animal_median={})
 
@@ -520,7 +521,7 @@ def test_a_recording_need_not_name_a_consumer_out_of_this_build(tmp_path: Path) 
     no_velocity = {k: v for k, v in READS.items() if k not in tl.OUT_OF_BUILD_CONSUMERS}
     assert "velocity" in READS and "velocity" not in no_velocity
     path = ho.write_mask_file(tmp_path / "r.mat", _masked(0.01), _prov(), signals=no_velocity,
-                              line_distrust=_ld(),
+                              line_distrust=_ld(), peri_r=peri_r_like(_ld()),
                               fs=FS, n_samples=N_SAMPLES, epoch_start_s=0.0, **GATE)
     assert path.is_file()
 
@@ -552,7 +553,8 @@ def test_a_pairs_lead_hr_channel_is_written_and_loads(tmp_path: Path) -> None:
     masks = mk.build_masks(reads, [mk.MaskSpan("hrv", lead, 1.0, 2.0, "x")],
                            n_frames=N_FRAMES, t0_s=0.0)
     path = ho.write_mask_file(tmp_path / "p.mat", masks, _prov(), signals=reads, fs=FS,
-                              line_distrust=_ld(), n_samples=N_SAMPLES, epoch_start_s=0.0,
+                              line_distrust=_ld(),
+                              peri_r=peri_r_like(_ld()), n_samples=N_SAMPLES, epoch_start_s=0.0,
                               **GATE)
     m = loadmat(str(path))
     assert "blank_hrv_LVN2_minus_RVN2" in m and "blank_breathing_LVN2_minus_RVN2" in m
@@ -569,20 +571,24 @@ def test_hr_not_computed_is_marked_and_refused_while_read(tmp_path: Path) -> Non
     nc = {"hrv": why, "breathing": why}
     masks = mk.build_masks(reads, [], n_frames=N_FRAMES, t0_s=0.0)
     path = ho.write_mask_file(tmp_path / "n.mat", masks, _prov(), signals=reads, fs=FS,
-                              line_distrust=_ld(), n_samples=N_SAMPLES, epoch_start_s=0.0,
+                              line_distrust=_ld(),
+                              peri_r=peri_r_like(_ld()), n_samples=N_SAMPLES, epoch_start_s=0.0,
                               not_computed=nc, **GATE)
     m = loadmat(str(path))
     assert json.loads(str(m["notcomputed_json"][0])) == nc
     assert not any(k.startswith(("blank_hrv", "blank_breathing")) for k in m)
     plain = ho.write_mask_file(tmp_path / "p.mat", _masked(0.01), _prov(), signals=READS,
-                               fs=FS, line_distrust=_ld(), n_samples=N_SAMPLES,
+                               fs=FS, line_distrust=_ld(),
+                               peri_r=peri_r_like(_ld()), n_samples=N_SAMPLES,
                                epoch_start_s=0.0, **GATE)
     assert json.loads(str(loadmat(str(plain))["notcomputed_json"][0])) == {}
     with pytest.raises(ValueError, match="reads nothing"):
         ho.write_mask_file(tmp_path / "x.mat", _masked(0.01), _prov(), signals=READS, fs=FS,
-                           line_distrust=_ld(), n_samples=N_SAMPLES, epoch_start_s=0.0,
+                           line_distrust=_ld(),
+                           peri_r=peri_r_like(_ld()), n_samples=N_SAMPLES, epoch_start_s=0.0,
                            not_computed={"hrv": why}, **GATE)
     with pytest.raises(ValueError, match="known consumer and a reason"):
         ho.write_mask_file(tmp_path / "y.mat", masks, _prov(), signals=reads, fs=FS,
-                           line_distrust=_ld(), n_samples=N_SAMPLES, epoch_start_s=0.0,
+                           line_distrust=_ld(),
+                           peri_r=peri_r_like(_ld()), n_samples=N_SAMPLES, epoch_start_s=0.0,
                            not_computed={"hrv": " "}, **GATE)
