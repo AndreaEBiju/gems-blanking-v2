@@ -126,6 +126,7 @@ __all__ = [
     "SCHEMA",
     "SOURCE_FILES",
     "SOURCE_LABEL",
+    "TRIM_MARKER",
     "TRIM_MODES",
     "Analysis",
     "AnalysisSettling",
@@ -140,6 +141,7 @@ __all__ = [
     "output_times_record",
     "read_recovery_starts",
     "recovery_starts_document",
+    "source_files_record",
     "stage_settling_s",
     "table_record",
     "write_recovery_starts",
@@ -147,7 +149,9 @@ __all__ = [
 
 RULING: Final = "RULING 2026-10-08 (k) 2"
 SCHEMA: Final = "gems-blanking-v2 recovery starts v2"
-"""v2: the electrical settling sample, the output time map and the cited files' hashes."""
+"""v2: the electrical settling sample, the output time map and the cited files' hashes
+(``source_files``: ``[{file, sha256}]`` rows, checked by Night 6 against the files it
+resolves; no v2 file had been written for a run when the rows replaced an object)."""
 SOURCE_FILES: Final[Mapping[str, str]] = {
     "HR_BR_HRVAnalysis_beats.m":
         "14f85d66de4097f5385965f5f6df31e3ce00b51bb86d9295adf19d715a9b9670",
@@ -168,6 +172,16 @@ SOURCE_FILES: Final[Mapping[str, str]] = {
 read on 2026-10-09 (her working tree: not a commit). The same hash Night 6 records for
 each function it calls (``night6_sha256_file``)."""
 SOURCE_LABEL: Final = "processing_new files by SHA-256 (extent.recovery_start.SOURCE_FILES)"
+
+
+def source_files_record() -> list[dict[str, str]]:
+    """Return :data:`SOURCE_FILES` as ``[{file, sha256}]`` rows, sorted by file.
+
+    A list, not an object: MATLAB's ``jsondecode`` mangles keys such as ``extract_mmc.m``
+    into field names (invariant 22), and Night 6 checks every row against the file it
+    resolves at run time (``night6_recovery_start``, ``night6:recoveryStartSource``).
+    """
+    return [{"file": k, "sha256": v} for k, v in sorted(SOURCE_FILES.items())]
 
 TRIM_MODES: Final = ("mask_to_own_start", "mask_to_electrical_drop_outputs")
 """The two Night 6 trim semantics; the batch list must name one (no default). The same
@@ -537,9 +551,21 @@ ACTIONS: Final[Mapping[str, str]] = {
            "(the time axis) is kept, so kept values keep their index",
     "drop": "the entry is removed from its event list (spike, beat, peak, RR interval, "
             "burst), together with every list co-indexed with the same stamps",
-    "false": "a full-rate logical event series: the rows are set false, and the record "
-             "names them as not computed (a logical has no NaN)",
+    "false": "a full-rate logical event series: the rows are set false so her variable "
+             "keeps its type and her readers still load it (a logical has no NaN); a false "
+             "row before the start means NOT COMPUTED, never 'no event', and that is "
+             "recorded in the file itself (TRIM_MARKER). How events are represented in the "
+             "not-computed region is still Andrea's ruling to make",
 }
+"""Every action is recorded in the trimmed file itself (:data:`TRIM_MARKER`)."""
+
+TRIM_MARKER: Final = "night6_recovery_trim"
+"""The top-level variable Night 6 adds to every output file it trims (drop mode): per
+trimmed variable path, the owner, the action, the stamp and its convention, the owner's
+start (seconds and 0-based file sample), the first computed epoch row and sample, the
+mode, and per leaf how many entries are not computed and where. It travels with the
+file, so any reader can tell 'not computed' from a value without the run record. Her
+variables keep their names and types."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -841,7 +867,11 @@ def output_times_record() -> dict[str, Any]:
                     raise ValueError(msg)
                 row |= {"stamp": v.stamp, "convention": v.convention, "action": v.action}
             rows.append(row)
+            if path.split(".")[0] == TRIM_MARKER:
+                msg = f"{kind}/{path}: {TRIM_MARKER!r} is the trim marker, not her variable"
+                raise ValueError(msg)
     return {"conventions": dict(CONVENTIONS), "actions": dict(ACTIONS),
+            "marker_variable": TRIM_MARKER,
             "xchan_delay_params": list(XCHAN_DELAY_PARAMS),
             "files": [{"kind": f.kind, "pattern": f.pattern, "call": f.call, "owner": f.owner,
                        "source": f.source} for f in OUTPUT_FILES.values()],
@@ -1041,7 +1071,7 @@ def recovery_starts_document(files: Sequence[Mapping[str, Any]], *, fs: float,
     doc: dict[str, Any] = {
         "schema": SCHEMA, "ruling": RULING, "fs": float(fs),
         "fixed_start_s": float(fixed_start_s), "fixed_start_source": FIXED_START_SOURCE,
-        "source_files": dict(SOURCE_FILES), "trim_modes": list(TRIM_MODES),
+        "source_files": source_files_record(), "trim_modes": list(TRIM_MODES),
         "output_times": output_times_record(), "table": table_record(fs, table),
         "files": sorted(measured, key=lambda d: str(d["session"])),
         "held": sorted(held, key=lambda d: str(d["session"])),

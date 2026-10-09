@@ -17,8 +17,12 @@ function RS = night6_recovery_start(file)
 % Refused here by name ('night6:recoveryStartFile'): an unreadable file, another schema,
 % a session listed twice (case-insensitively, as the store matches names), a file both
 % measured and held, an analysis listed twice for one file, a start_sample0 or an
-% electrical_settle_sample0 that is not one integer >= 0, and a missing output map. Rows are matched by strcmp on the session and analysis STRINGS,
-% never by jsondecode field names (which mangle keys - invariant 22).
+% electrical_settle_sample0 that is not one integer >= 0, and a missing output map or
+% source list. Refused as 'night6:recoveryStartSource', naming the file: a cited
+% processing_new file (source_files, Python SOURCE_FILES) that is not on the path, or
+% whose SHA-256 is not the one the starts file was computed from. Rows are matched by
+% strcmp on the session and analysis STRINGS, never by jsondecode field names (which
+% mangle keys - invariant 22).
     if isempty(file)
         RS = [];
         return
@@ -32,11 +36,12 @@ function RS = night6_recovery_start(file)
     if ~isstruct(D) || ~isfield(D, 'schema') || ~strcmp(D.schema, want)
         error('night6:recoveryStartFile', '%s is not a ''%s'' file', file, want);
     end
-    for f = {'fs', 'fixed_start_s', 'files', 'held', 'output_times'}
+    for f = {'fs', 'fixed_start_s', 'files', 'held', 'output_times', 'source_files'}
         if ~isfield(D, f{1})
             error('night6:recoveryStartFile', '%s has no %s', file, f{1});
         end
     end
+    check_sources(D.source_files, file);   % the code the starts were read from IS the code run
     RS = struct('file', file, 'sha256', night6_sha256_file(file), 'schema', D.schema, ...
                 'fs', double(D.fs), 'fixed_start_s', double(D.fixed_start_s));
     RS.outputTimes = output_times(D.output_times, file);
@@ -69,17 +74,54 @@ function RS = night6_recovery_start(file)
     end
 end
 
+function check_sources(list, file)
+% Every processing_new file the table and the output time map cite (Python
+% extent.recovery_start.SOURCE_FILES) must be the file MATLAB resolves now, byte for
+% byte: a start or a stamp convention read from one version of her code is never applied
+% to the outputs of another. Rows are {file, sha256}, never JSON keys (invariant 22).
+    rows = as_cells(list);
+    if isempty(rows)
+        error('night6:recoveryStartFile', '%s: source_files is empty', file);
+    end
+    for k = 1:numel(rows)
+        r = rows{k};
+        if ~isstruct(r) || ~all(isfield(r, {'file', 'sha256'})) || ~ischar(r.file) ...
+                || ~ischar(r.sha256)
+            error('night6:recoveryStartFile', '%s: source_files row %d is not {file, sha256}', ...
+                  file, k);
+        end
+        p = which(r.file);
+        if isempty(p) || ~isfile(p)
+            error('night6:recoveryStartSource', ['%s: cited by %s, is not on the MATLAB ' ...
+                  'path, so the code the starts were read from cannot be checked'], r.file, file);
+        end
+        h = night6_sha256_file(p);
+        if ~strcmp(h, lower(r.sha256))
+            error('night6:recoveryStartSource', ['%s resolves to %s with sha256 %s, but %s ' ...
+                  'was computed from sha256 %s: her code changed since the starts and the ' ...
+                  'output time map were read from it'], r.file, p, h, file, r.sha256);
+        end
+    end
+end
+
 function tf = is_sample(k)
     tf = isnumeric(k) && isscalar(k) && k == fix(k) && k >= 0;
 end
 
 function T = output_times(D, file)
 % The output time map as cells of structs; refused by name when malformed.
-    if ~isstruct(D) || ~all(isfield(D, {'files', 'vars', 'xchan_delay_params'}))
-        error('night6:recoveryStartFile', '%s: output_times has no files/vars', file);
+    if ~isstruct(D) || ~all(isfield(D, {'files', 'vars', 'xchan_delay_params', ...
+                                        'marker_variable'})) ...
+            || ~isvarname(D.marker_variable)
+        error('night6:recoveryStartFile', ['%s: output_times has no files/vars/' ...
+              'xchan_delay_params/marker_variable'], file);
     end
     T = struct('files', {as_cells(D.files)}, 'vars', {as_cells(D.vars)}, ...
-               'xchanDelayParams', {cellstr(D.xchan_delay_params(:)')});
+               'xchanDelayParams', {cellstr(D.xchan_delay_params(:)')}, ...
+               'markerVariable', D.marker_variable, 'conventions', struct());
+    if isfield(D, 'conventions') && isstruct(D.conventions)
+        T.conventions = D.conventions;   % name -> meaning (identifiers: jsondecode keeps them)
+    end
     for k = 1:numel(T.vars)
         v = T.vars{k};
         if ~all(isfield(v, {'file', 'path', 'role', 'owner'}))

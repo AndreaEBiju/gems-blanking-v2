@@ -30,7 +30,9 @@ function [lead, rec] = night6_recovery_lead_in(RS, session, condition, i0, n, fs
 %
 % lead.<consumer> = number of leading INPUT rows to mask (0 .. n);
 % rec.consumers.<consumer>.output_rows_before_start = rows whose outputs are dropped in
-% the drop mode (0 in mask_to_own_start: the input is already masked there). A start
+% the drop mode (0 in mask_to_own_start: the input is already masked there);
+% rec.analyses.<analysis> = start_s, start_sample0 and output_rows_before_start of EVERY
+% analysis in the file's row, run or not (the trimmer cuts each output at its owner's). A start
 % before the epoch start is not an error: the analysis runs from the epoch start and its
 % record says "early part deferred to the add-on".
 %
@@ -91,6 +93,20 @@ function [lead, rec] = night6_recovery_lead_in(RS, session, condition, i0, n, fs
     end
     rec.consumers = struct();
     names = cellfun(@(r) char(r.analysis), F.analyses, 'UniformOutput', false);
+    % EVERY analysis's start, run or not: an output is cut at its OWNER's start, and a
+    % byproduct's owner (hrv's heart rate in a breathing-only run) need not be a consumer
+    % of this run (review of 4d008b6, fix 4).
+    rec.analyses = struct();
+    for j = 1:numel(F.analyses)
+        r = F.analyses{j};
+        if ~isvarname(names{j})
+            error('night6:recoveryStartMissing', '%s: analysis name %s is not an identifier', ...
+                  session, names{j});
+        end
+        k0 = double(r.start_sample0);
+        rec.analyses.(names{j}) = struct('start_s', r.start_s, 'start_sample0', k0, ...
+            'output_rows_before_start', ternary(drop, min(n, max(0, k0 - i0)), 0));
+    end
     for c = consumers(:)'
         j = find(strcmp(names, c{1}));
         if numel(j) ~= 1

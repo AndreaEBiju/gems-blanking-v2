@@ -106,6 +106,7 @@ def test_the_output_time_map_is_complete_and_well_formed(
     rec = rs.output_times_record()
     assert set(rec["conventions"]) == set(rs.CONVENTIONS)
     assert set(rec["actions"]) == set(rs.ACTIONS)
+    assert rec["marker_variable"] == rs.TRIM_MARKER == "night6_recovery_trim"
     kinds = {f["kind"] for f in rec["files"]}
     assert kinds == {"spikes_v2", "HRBR", "HRVMeasures", "slowWaves", "mmc"}
     trims = [v for v in rec["vars"] if v["role"] == "trim"]
@@ -130,7 +131,8 @@ def test_the_output_time_map_is_complete_and_well_formed(
                           action="nan"), "not a declared time axis"),
             (rs.OutputVar("HRBR", "heartlocs", "input", "x"), "declared twice"),
             (rs.OutputVar("HRBR", "q", "trim", "x", owner="velocity", stamp="t",
-                          convention="sec0", action="nan"), "is not an analysis")):
+                          convention="sec0", action="nan"), "is not an analysis"),
+            (rs.OutputVar("HRBR", rs.TRIM_MARKER, "parameter", "x"), "the trim marker")):
         monkeypatch.setattr(rs, "OUTPUT_VARS", (*orig, bad))
         with pytest.raises(ValueError, match=words):
             rs.output_times_record()
@@ -358,7 +360,10 @@ def test_the_file_round_trips_exactly_as_canonical_ascii(tmp_path: Path) -> None
     back = rs.read_recovery_starts(path)
     assert back == json.loads(json.dumps(doc))
     assert back["trim_modes"] == list(rs.TRIM_MODES)
-    assert back["source_files"] == dict(rs.SOURCE_FILES)
+    # rows, not an object: MATLAB's jsondecode would mangle the keys (invariant 22)
+    assert back["source_files"] == rs.source_files_record()
+    assert {r["file"]: r["sha256"] for r in back["source_files"]} == dict(rs.SOURCE_FILES)
+    assert [r["file"] for r in back["source_files"]] == sorted(rs.SOURCE_FILES)
     assert back["output_times"] == rs.output_times_record()
     assert back["files"][0]["electrical_settle_sample0"] == seconds_to_sample(124.2, FS)
     assert [f["session"] for f in back["files"]] == ["b_sr"]

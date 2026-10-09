@@ -35,13 +35,23 @@ The two trim modes (review of be402a1; Andrea decides before Night 6):
   1 .. ke - i0 (ke = stim-off + electrical settling, one point for all analyses) - the
   1-sample boundary on both sides - whatever each analysis's own start;
 * the output cut, unit level: every stamp convention of the map (row1, sec0, sec_row1,
-  sec_xchan_delay) at L - 1, L and L + 1; owners with different starts in one file; a
-  byproduct; struct arrays, cells and co-indexed lists; v7.3 kept; an unmapped and an
-  'unknown' variable and a figure listed untrimmed by name; a stamp that does not fit
-  its value refused;
-* end to end, with her real functions: the drop mode against an untrimmed run on the
-  same masked input - every entry before its own start dropped or flagged, every entry
-  at or after it bit-identical, every other variable of every file untouched;
+  sec_xchan_delay) at L - 1, L and L + 1; owners with different starts in one file;
+  byproducts cut at their OWN owner's start whoever ran (an hrv-only, a breathing-only
+  and an hrv+breathing run; an owner with no start refused); struct arrays, cells and
+  co-indexed lists; v7.3 kept; an unmapped and an 'unknown' variable and a figure listed
+  untrimmed by name; a stamp that does not fit its value refused; a file trimmed twice
+  refused;
+* the marker (``rs.TRIM_MARKER``) every trimmed file carries, exact for every action:
+  owner, action, stamp, convention, the owner's start in seconds and samples, the first
+  computed epoch row and sample, the mode, and per leaf the not-computed rows;
+* the cited processing_new files are checked at run time: a stale hash, a missing file,
+  and a changed copy of a cited function first on the path are refused by name
+  (``night6:recoveryStartSource``); a byte-identical copy is not;
+* end to end, with her real functions, on a 73 s epoch: the drop mode against an
+  untrimmed run on the same masked input, through an oracle with its OWN convention table
+  (not the map) - every entry before its owner's start dropped or flagged, every entry at
+  or after it bit-identical, every other variable of every file untouched, the marker
+  exact, and every trimmed variable with entries (and reference values) on both sides;
 * ``night6_batch`` refuses at batch start - before any signal is loaded - a stim_rec mask
   with no recovery_starts, and a missing or unknown mode.
 """
@@ -200,7 +210,14 @@ def _cases(tmp: Path) -> dict[str, Any]:
                        ("v1", lambda j: j.update(schema="gems-blanking-v2 recovery starts v1")),
                        ("no_electrical", lambda j: j["files"][0].pop(
                            "electrical_settle_sample0")),
-                       ("no_map", lambda j: j.pop("output_times"))):
+                       ("no_map", lambda j: j.pop("output_times")),
+                       ("no_sources", lambda j: j.pop("source_files")),
+                       ("sources_as_object", lambda j: j.update(
+                           source_files=dict(rs.SOURCE_FILES))),
+                       ("stale_source", lambda j: j["source_files"][0].update(
+                           sha256="0" * 64)),
+                       ("missing_source", lambda j: j["source_files"].append(
+                           {"file": "no_such_function_k2f.m", "sha256": "0" * 64}))):
         j = json.loads(Path(s["boundary"]).read_text(encoding="utf-8"))
         edit(j)
         f = d / f"reader_{name}.json"
@@ -223,10 +240,20 @@ def _cases(tmp: Path) -> dict[str, Any]:
            "record_rel": f"T/{SESSION}/{MODEL}/e{round(START)}/night6_record.json"}
     unit_dir = tmp / "unit"
     unit_dir.mkdir()
-    unit = {"dir": unit_dir.as_posix(), "starts": s["boundary"], "fs": FS, **UNIT_L}
+    unit = {"dir": unit_dir.as_posix(), "starts": s["boundary"], "fs": FS, "i0": UNIT_I0,
+            **UNIT_L}
     batch = _batch_lists(tmp, st, s["boundary"])
+    shadow = tmp / "shadow"
+    shadow.mkdir()
+    sources = {"dir": shadow.as_posix(), "starts": s["boundary"], "name": SHADOWED}
     return {"plans": plans, "readers": readers, "run": run, "py": py, "own": own,
-            "unit": unit, "batch": batch}
+            "unit": unit, "batch": batch, "sources": sources}
+
+
+SHADOWED = "step3_detect.m"
+"""The cited function the sources case shadows with a changed copy."""
+UNIT_I0 = 500
+"""The unit case's epoch start (0-based file sample): every start is UNIT_I0 + L."""
 
 
 UNIT_L = {"L_hrv": 1000, "L_breathing": 2000, "L_mmc": 3000, "L_spikes": 4000}
@@ -299,7 +326,7 @@ def test_night6_trims_by_masking_the_input_to_the_sample(  # noqa: PLR0915 - one
     case = _cases(tmp_path)
     case_file, res_file = tmp_path / "rs_case.json", tmp_path / "rs_result.json"
     case_file.write_text(json.dumps({k: case[k] for k in ("plans", "readers", "run", "unit",
-                                                          "batch")},
+                                                          "batch", "sources")},
                                     ensure_ascii=True), encoding="utf-8", newline="\n")
     cmd = (f"addpath('{pnew.as_posix()}'); addpath('{NIGHT6.as_posix()}'); "
            f"addpath('{HARNESS.as_posix()}'); "
@@ -392,8 +419,23 @@ def test_night6_trims_by_masking_the_input_to_the_sample(  # noqa: PLR0915 - one
 
     readers = {r["name"]: r for r in res["readers"]}
     assert readers["ok"]["error"] == ""
-    for name in ("schema", "twice", "fractional", "v1", "no_electrical", "no_map"):
+    for name in ("schema", "twice", "fractional", "v1", "no_electrical", "no_map",
+                 "no_sources", "sources_as_object"):
         assert readers[name]["error"] == "night6:recoveryStartFile", (name, readers[name])
+    # the cited code is checked at run time against what MATLAB resolves (fix 2)
+    first = rs.source_files_record()[0]["file"]
+    assert readers["stale_source"]["error"] == "night6:recoveryStartSource"
+    assert first in readers["stale_source"]["message"]
+    assert readers["missing_source"]["error"] == "night6:recoveryStartSource"
+    assert "no_such_function_k2f.m" in readers["missing_source"]["message"]
+    src = res["sources"]
+    shadow = (tmp_path / "shadow" / SHADOWED).as_posix().lower()
+    assert src["same_which"].replace("\\", "/").lower() == shadow
+    assert src["same"]["error"] == ""                       # identical bytes: accepted
+    assert src["changed_which"].replace("\\", "/").lower() == shadow
+    assert src["changed"]["error"] == "night6:recoveryStartSource", src["changed"]
+    assert SHADOWED in src["changed"]["message"]
+    assert src["after"]["error"] == ""                      # her file again: accepted
 
     # the real entry point
     run = res["run"]
@@ -433,7 +475,7 @@ def _col(v: object) -> list[Any]:
     return [None if x is None else x for x in a]
 
 
-def _check_unit(u: dict[str, Any]) -> None:
+def _check_unit(u: dict[str, Any]) -> None:  # noqa: PLR0915 - one hand-built case
     """Every convention cuts at exactly L: the entry at L - 1 goes, L and L + 1 stay."""
     o = u["out"]
     m = o["hrvm"]
@@ -454,19 +496,29 @@ def _check_unit(u: dict[str, Any]) -> None:
     files = u["hrv"]["untrimmed_files"]
     files = [files] if isinstance(files, dict) else files
     assert [f["file"] for f in files] == ["e2_figure.png"]
-    # owners: hrv cut at 1000, breathing at 2000; an hrv-only run's breath rate is a
-    # byproduct cut at the run's own start
-    b1, b2 = o["hrbr"], o["hrbr2"]
-    assert _col(b1["heartRateSeries"]) == [None, 2.0, 3.0, 4.0, 5.0, 6.0]
-    assert _col(b1["breathRateSeries"]) == [None, 12.0, 13.0, 14.0, 15.0, 16.0]
-    assert _col(b2["heartRateSeries"]) == [None, 2.0, 3.0, 4.0, 5.0, 6.0]
-    assert _col(b2["breathRateSeries"]) == [None, None, None, None, 15.0, 16.0]
-    lb = UNIT_L["L_breathing"]
-    assert _col(b2["br_locs_true"]) == [lb + 1, lb + 2]
+    # owners: hrv cut at 1000, breathing at 2000 - in EVERY run, whoever ran (fix 4): an
+    # hrv-only run's breath rate is cut at breathing's start, a breathing-only run's heart
+    # rate and heartlocs at hrv's
+    b1, b2, b3 = o["hrbr"], o["hrbr2"], u["out_breathing"]
+    lh, lb = UNIT_L["L_hrv"], UNIT_L["L_breathing"]
+    for b in (b1, b2, b3):
+        assert _col(b["heartRateSeries"]) == [None, 2.0, 3.0, 4.0, 5.0, 6.0]
+        assert _col(b["breathRateSeries"]) == [None, None, None, None, 15.0, 16.0]
+        assert _col(b["br_locs_true"]) == [lb + 1, lb + 2]
+    assert _col(b3["heartlocs"]) == [lh + 1, lh + 2, lb, lb + 1, lb + 2]
     trimmed = {e["path"]: e for e in u["both"]["files"][0]["trimmed"]}
     assert trimmed["breathRateSeries"]["start_basis"] == "breathing"
     trimmed1 = {e["path"]: e for e in hrbr["trimmed"]}
+    assert trimmed1["breathRateSeries"]["start_basis"].startswith("breathing's own start")
     assert "byproduct" in trimmed1["breathRateSeries"]["start_basis"]
+    assert trimmed1["breathRateSeries"]["rows_before_start"] == lb
+    trimmed3 = {e["path"]: e for e in u["breathing"]["files"][0]["trimmed"]}
+    assert trimmed3["heartRateSeries"]["rows_before_start"] == lh
+    assert trimmed3["heartlocs"]["start_basis"].startswith("hrv's own start")
+    assert u["twice"]["error"] == "night6:trimTwice"
+    assert u["no_owner"]["error"] == "night6:trimOwner"
+    assert "breathRateSeries" in u["no_owner"]["message"]
+    _check_unit_markers(u)
     # mmc: the delay is cut at its TRUE centre (stamp + W/2 - S), not at its stamp
     mm = o["mmc"]["mmc"]
     assert [r[0] for r in mm["delay"]] == [None, 2, 3]
@@ -485,6 +537,77 @@ def _check_unit(u: dict[str, Any]) -> None:
     assert [_col(c) for c in sw["sigma"]] == [[None, 2.0, 3.0], [None, 5.0, 6.0]]
     assert u["spikes_still_v73"] is True
     assert u["shape"]["error"] == "night6:trimShape"
+
+
+def _as_list(v: object) -> list[Any]:
+    return v if isinstance(v, list) else [v]
+
+
+def _check_unit_markers(u: dict[str, Any]) -> None:  # noqa: PLR0915 - one marker per file
+    """Check the marker each trimmed file carries (fix 1): exact, for every action."""
+    o = u["out"]
+    name = u["marker_variable"]
+    assert name == rs.TRIM_MARKER
+    lh, lm, ls = UNIT_L["L_hrv"], UNIT_L["L_mmc"], UNIT_L["L_spikes"]
+
+    def var(m: dict[str, Any], path: str) -> dict[str, Any]:
+        hit = [v for v in _as_list(m["vars"]) if v["path"] == path]
+        assert len(hit) == 1, (path, [v["path"] for v in _as_list(m["vars"])])
+        return hit[0]
+
+    def start(v: dict[str, Any], owner_l: int, conv: str, action: str) -> None:
+        assert v["mode"] == "mask_to_electrical_drop_outputs"
+        assert v["convention"] == conv and v["action"] == action
+        assert v["convention_meaning"] == rs.CONVENTIONS[conv]
+        assert v["start_sample0"] == UNIT_I0 + owner_l
+        assert v["start_s"] == pytest.approx((UNIT_I0 + owner_l) / FS, abs=1e-12)
+        assert v["first_computed_epoch_row"] == owner_l + 1
+        assert v["first_computed_epoch_sample0"] == owner_l
+
+    m = o["hrvm"][name]
+    assert m["mode"] == "mask_to_electrical_drop_outputs"
+    assert m["epoch_start_sample0"] == UNIT_I0 and m["electrical_settle_sample0"] == UNIT_I0 + 7
+    assert _as_list(m["run_consumers"]) == ["hrv"]
+    assert "mystery" in _as_list(m["untrimmed"]) and "hrv" in _as_list(m["epoch_scalars"])
+    assert {v["path"] for v in _as_list(m["vars"])} == {
+        "RR_intervals", "RR_times", "hrv_series", "nRR_used", "heartlocs"}
+    v = var(m, "RR_times")
+    start(v, lh, "sec_row1", "drop")
+    (leaf,) = _as_list(v["leaves"])
+    assert leaf["leaf"] == "RR_times" and leaf["n_entries"] == 3
+    assert leaf["n_not_computed"] == leaf["n_dropped"] == 1
+    assert _rows(leaf["not_computed_rows"]) == []
+    v = var(m, "hrv_series")
+    start(v, lh, "sec0", "nan")
+    (leaf,) = _as_list(v["leaves"])
+    assert leaf["n_not_computed"] == 1 and leaf["n_dropped"] == 0
+    assert _rows(leaf["not_computed_rows"]) == [[1, 1]]
+    # mmc: false (an event series: NOT computed, not "no event") and the delay
+    mm = o["mmc"][name]
+    v = var(mm, "mmc.firing.events")
+    start(v, lm, "sec0", "false")
+    (leaf,) = _as_list(v["leaves"])
+    assert leaf["leaf"] == "mmc.firing.events" and _rows(leaf["not_computed_rows"]) == [[1, 1]]
+    v = var(mm, "mmc.delay")
+    start(v, lm, "sec_xchan_delay", "nan")
+    assert _rows(_as_list(v["leaves"])[0]["not_computed_rows"]) == [[1, 1]]
+    # spikes: a struct array and cells, leaf by leaf (v7.3 file)
+    sm = o["spk"][name]
+    v = var(sm, "spikes.centers")
+    start(v, ls, "row1", "drop")
+    assert [(x["leaf"], x["n_dropped"]) for x in _as_list(v["leaves"])] == [
+        ("spikes(1).centers", 1), ("spikes(2).centers", 0)]
+    v = var(sm, "sigmaWin.sigma")
+    assert [(x["leaf"], _rows(x["not_computed_rows"])) for x in _as_list(v["leaves"])] == [
+        ("sigmaWin.sigma{1}", [[1, 1]]), ("sigmaWin.sigma{2}", [[1, 1]])]
+    # a breathing-only run: hrv's byproducts carry HRV's start
+    bm = u["out_breathing"][name]
+    v = var(bm, "heartRateSeries")
+    start(v, lh, "sec0", "nan")
+    assert v["owner"] == "hrv" and "byproduct" in v["start_basis"]
+    v = var(bm, "breathRateSeries")
+    start(v, UNIT_L["L_breathing"], "sec0", "nan")
+    assert _rows(_as_list(v["leaves"])[0]["not_computed_rows"]) == [[1, 4]]
 
 
 def test_run_epoch_always_hands_the_starts_to_the_planner() -> None:
@@ -509,19 +632,27 @@ def test_the_trim_modes_are_one_list_on_both_sides() -> None:
 
 TRIM_KE = seconds_to_sample(2.5, FS)
 """The electrical settling of the end-to-end case: 0.5 s into the epoch."""
-TRIM_OWN = {"spikes": 3.0, "slow_wave": 3.5, "mmc": 4.0, "hrv": 6.0, "breathing": 7.0}
-"""Each analysis's own start (s): all later than the electrical settling, all different."""
+TRIM_OWN = {"spikes": 32.0, "mmc": 35.0, "hrv": 37.0, "slow_wave": 38.0, "breathing": 42.0}
+"""Each analysis's own start (s): all later than the electrical settling, all different,
+each placed so EVERY variable it owns has entries on both sides (her windows decide where
+values exist in a 73 s epoch: the 60 s HR/BR windows at centres 30-43 s, the 30 s CV2
+windows at 15/45 s, slow-wave peaks 15 s inside the ends, the 30 s mmc delay windows at
+true centres 19.5 + 5k s). mmc at 33 s into the epoch sits in (34.5 - 4, 34.5]: the delay
+whose STAMP is before the start and whose true centre is after it, so a delay cut at its
+stamp is visible. hrv before breathing by 5 s: a breathing-only run's hrv byproducts are
+cut at hrv's start, an hrv-only run's breathing byproducts at breathing's."""
 
 
-TRIM_N_FILE = int(40.0 * FS)
-"""40 s: her gap-aware DFA needs more RR intervals than the 10 s file has (it indexes an
-empty scale list with 22 - processing_new dfaGapAware.m:175, reported, not ours)."""
+TRIM_N_FILE = int(75.0 * FS)
+"""75 s (a 73 s epoch): long enough for every output of her functions to hold entries on
+both sides of every own start (her gap-aware DFA also needs more RR intervals than the
+10 s file has - processing_new dfaGapAware.m:175, reported, not ours)."""
 
 
 def _real_beats(seed: int = 6) -> np.ndarray:
-    """R-peaks every 0.12 +/- 0.01 s, none in BEAT_BLANK_S, inside the 40 s file."""
+    """R-peaks every 0.12 +/- 0.01 s, none in BEAT_BLANK_S, inside the file."""
     rng = np.random.default_rng(seed)
-    t = np.cumsum(0.12 + rng.uniform(-0.01, 0.01, 400)) + 0.05
+    t = np.cumsum(0.12 + rng.uniform(-0.01, 0.01, 700)) + 0.05
     t = t[t < TRIM_N_FILE / FS - 0.1]
     return t[~((t >= BEAT_BLANK_S[0][0]) & (t < BEAT_BLANK_S[0][1]))]
 
@@ -535,48 +666,58 @@ def _real_signal(seed: int = 5) -> np.ndarray:
     shape = -80.0 * np.exp(-0.5 * (np.arange(-30, 31) / 6.0) ** 2)
     for lab in ("LVN2", "RVN2"):
         j = LABELS.index(lab)
-        for s in np.sort(rng.choice(np.arange(40, n_file - 40), 1600, replace=False)):
+        for s in np.sort(rng.choice(np.arange(40, n_file - 40), 3000, replace=False)):
             y[s - 30:s + 31, j] += shape
     for k, lab in enumerate(("ANT1", "ANT2", "ANT3")):
         y[:, LABELS.index(lab)] += 150.0 * np.sin(2.0 * np.pi * 0.25 * t + 0.4 * k)
     return y
 
 
-def test_the_drop_mode_cuts_her_real_outputs_at_each_own_start(tmp_path: Path) -> None:
-    """End to end: dropped or flagged before each own start, bit-identical at and after it.
-
-    The same epoch is run twice with her real functions on the same masked input (every
-    input masked to the electrical settling): the drop mode, and the untrimmed reference
-    (mask_to_own_start with every own start AT the electrical settling). An oracle in the
-    harness, built from the map's definitions, checks every trimmed variable of every
-    output file, and that every other variable is untouched.
-    """
-    matlab, pnew = _matlab(), _processing_new()
-    if matlab is None:
-        pytest.skip("MATLAB is not on this machine (set GEMS_MATLAB)")
-    if pnew is None:
-        pytest.skip("processing_new is not on this machine (set GEMS_PROCESSING_NEW)")
+def _trim_case(tmp_path: Path) -> dict[str, Any]:
     st = _store(tmp_path / "store", signal=_real_signal(), beats_s=_real_beats())
     own = {c: seconds_to_sample(s, FS) for c, s in TRIM_OWN.items()}
     d = tmp_path / "starts"
     d.mkdir()
     drop = _starts(d / "drop.json", [_file([_row(c, own[c]) for c in CONSUMERS], ke=TRIM_KE)])
     ref = _starts(d / "ref.json", [_file([_row(c, TRIM_KE) for c in CONSUMERS], ke=TRIM_KE)])
-    case = {"trim": {"gems_root": (tmp_path / "store").as_posix(),
+    return {"trim": {"gems_root": (tmp_path / "store").as_posix(),
                      "mask_folder": st["mask_folder"].as_posix(),
                      "out_drop": (tmp_path / "out_drop").as_posix(),
                      "out_ref": (tmp_path / "out_ref").as_posix(),
-                     "starts_drop": drop, "starts_ref": ref, "fs": FS,
+                     "starts_drop": drop, "starts_ref": ref, "fs": FS, "i0": I0,
                      "epoch_rel": f"T/{SESSION}/{MODEL}/e{round(START)}",
+                     "start_sample0": own,
                      "L": {c: own[c] - I0 for c in CONSUMERS}},
             "plans": [], "readers": []}
+
+
+def test_the_drop_mode_cuts_her_real_outputs_at_each_own_start(  # noqa: PLR0915 - one run
+        tmp_path: Path) -> None:
+    """End to end: dropped or flagged before each OWNER's start, bit-identical after it.
+
+    The same epoch is run twice with her real functions on the same masked input (every
+    input masked to the electrical settling): the drop mode, and the untrimmed reference
+    (mask_to_own_start with every own start AT the electrical settling). An oracle in the
+    harness with its OWN convention table (``oracle_table``, transcribed from her code, not
+    read from the map) checks every trimmed variable of every output file, the marker
+    each trimmed file carries, and that every other variable is untouched. Every trimmed
+    variable has entries on both sides of its owner's start, with values in the reference
+    on both sides - so a wrong convention, owner or action shows on the data.
+    """
+    matlab, pnew = _matlab(), _processing_new()
+    if matlab is None:
+        pytest.skip("MATLAB is not on this machine (set GEMS_MATLAB)")
+    if pnew is None:
+        pytest.skip("processing_new is not on this machine (set GEMS_PROCESSING_NEW)")
+    case = _trim_case(tmp_path)
+    own = case["trim"]["start_sample0"]
     case_file, res_file = tmp_path / "trim_case.json", tmp_path / "trim_result.json"
     case_file.write_text(json.dumps(case, ensure_ascii=True), encoding="utf-8", newline="\n")
     cmd = (f"addpath('{pnew.as_posix()}'); addpath('{NIGHT6.as_posix()}'); "
            f"addpath('{HARNESS.as_posix()}'); "
            f"check_recovery_start('{case_file.as_posix()}', '{res_file.as_posix()}');")
     done = subprocess.run([str(matlab), "-batch", cmd], capture_output=True, text=True,
-                          timeout=1800, check=False)
+                          timeout=2400, check=False)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
     r = json.loads(res_file.read_text(encoding="utf-8"))["trim"]
     rd, rr = json.loads(r["record_drop"]), json.loads(r["record_ref"])
@@ -587,6 +728,8 @@ def test_the_drop_mode_cuts_her_real_outputs_at_each_own_start(tmp_path: Path) -
         assert rd["recovery_start"]["consumers"][c]["trimmed_rows"] == TRIM_KE - I0
         assert rr["recovery_start"]["consumers"][c]["trimmed_rows"] == TRIM_KE - I0
         assert rd["recovery_start"]["consumers"][c]["output_rows_before_start"] == own[c] - I0
+        a = rd["recovery_start"]["analyses"][c]   # every analysis's start, run or not
+        assert a["start_sample0"] == own[c] and a["output_rows_before_start"] == own[c] - I0
     runs = [x for x in rd["runs"] if x["status"] == "ok"]
     assert runs and all("recovery_trim" in x for x in runs)
     assert not any("recovery_trim" in x for x in rr["runs"])
@@ -597,16 +740,43 @@ def test_the_drop_mode_cuts_her_real_outputs_at_each_own_start(tmp_path: Path) -
                                                           if not f["rest_equal"]]
     bad = [v for v in r["vars"] if not v["ok"]]
     assert not bad, bad
-    both = {(v["file"].split("_", 1)[1], v["path"]) for v in r["vars"]
-            if v["n_before"] > 0 and v["n_after"] > 0}
-    # (hrv's own beats before 6 s sit inside her 0.75 s buffer of the 3.5-5.5 s beat
-    # blank, so its heartlocs have none before the start; the breathing run's do)
-    for want in (("hrv_HRBR.mat", "heartBeatSeries"), ("breathing_HRBR.mat", "heartlocs"),
-                 ("breathing_HRVMeasures.mat", "RR_times"), ("hrv_HRBR.mat", "heartRateSeries"),
-                 ("mmc_in_mmc.mat", "mmc.signal"), ("mmc_in_mmc.mat", "mmc.firing.events"),
-                 ("spikes_v2.mat", "spikes.centers"), ("spikes_v2.mat", "spikes.waveforms"),
-                 ("spikes_v2.mat", "envelope.rms_uv"), ("spikes_v2.mat", "metrics.fr_hz"),
-                 ("spikes_v2.mat", "metrics.burst.onsets"),
-                 ("breathing_HRBR.mat", "br_locs_true"), ("hrv_HRBR.mat", "breathRateSeries")):
-        assert want in both, (want, sorted(both))
-    assert any(p == "slowWaveTimeSeries" for _, p in both)
+    # the marker: in every trimmed file, exact for every variable it cut, nothing else
+    assert r["marker_variable"] == rs.TRIM_MARKER
+    trimmed_files = [f for f in files.values() if f["kind"]]
+    assert all(f["has_marker"] for f in trimmed_files), trimmed_files
+    assert not [f for f in trimmed_files if f["marker_extra"]]
+    bad = [v for v in r["vars"] if v["why"] != "absent" and not v["marker_ok"]]
+    assert not bad, bad
+    # the oracle's table and the map name the same trimmed variables
+    assert r["table_vs_map"] == {"map_only": [], "oracle_only": []}, r["table_vs_map"]
+    # every trimmed variable: entries before AND after its owner's start, and values in
+    # the reference on both sides (otherwise a wrong cut there could not show)
+    cover: dict[tuple[str, str], list[int]] = {}
+    for v in r["vars"]:
+        if v["why"] == "absent":
+            continue
+        kind = files[v["file"]]["kind"]
+        c = cover.setdefault((kind, v["path"]), [0, 0, 0, 0])
+        for i, k in enumerate(("n_before", "n_after", "n_before_value", "n_after_value")):
+            c[i] += v[k]
+    want = {(x.file, x.path) for x in rs.OUTPUT_VARS if x.role == "trim"}
+    assert set(cover) == want, (sorted(want - set(cover)), sorted(set(cover) - want))
+    thin = {k: c for k, c in cover.items() if min(c) == 0}
+    assert not thin, thin
+    # fix 4: in each HR run, every output is cut at its OWNER's start, whoever ran
+    per = {(v["file"].split("_", 1)[1], v["path"]): v for v in r["vars"]
+           if v["why"] != "absent"}
+    for want_cut in (("breathing_HRBR.mat", "heartRateSeries"),     # hrv-owned, breathing run
+                     ("breathing_HRBR.mat", "heartlocs"),
+                     ("breathing_HRVMeasures.mat", "RR_times"),
+                     ("breathing_HRVMeasures.mat", "hrv_series"),
+                     ("hrv_HRBR.mat", "breathRateSeries"),          # breathing-owned, hrv run
+                     ("hrv_HRBR.mat", "br_locs_true")):
+        v = per[want_cut]
+        assert v["n_before"] > 0 and v["n_after"] > 0, (want_cut, v)
+    for x in runs:
+        if x["call"] != "HR_BR_HRVAnalysis_beats":
+            continue
+        for f in _as_list(x["recovery_trim"]["files"]):
+            for e in _as_list(f["trimmed"]):
+                assert e["rows_before_start"] == own[e["owner"]] - I0, (x["consumers"], e)
