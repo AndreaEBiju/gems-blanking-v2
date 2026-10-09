@@ -450,6 +450,7 @@ function [label, extra] = call_one(r, X, plan, base, outDir, o)
             extra.slow_wave = S.slow_wave;
             extra.blank_idx = S.blank_idx;
             extra.slow_wave_rate = S.slow_wave_rate;
+            extra.slow_wave_caveats = S.caveats;   % (h) 2, (f) 1
         case 'extract_mmc'
             label = base;
             f = write_input(fullfile(outDir, [label '_mmc_in.mat']), X, fs);

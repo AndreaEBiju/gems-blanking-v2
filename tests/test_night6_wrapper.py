@@ -525,6 +525,7 @@ def _peri_case(tmp: Path, name: str, *, spikes: bool = True, train: bool = False
                     fs=FS, n_samples=PERI_N, epoch_start_s=0.0, epoch_start_sample=0,
                     min_retention=0.5, animal_median={f"{c}|{s}|{b}": 0.3 for c, s, b in masks},
                     line_distrust=line, peri_r=peri,
+                    no_beat_minutes=[] if train and spikes else None,  # (g) 1: none here
                     release="synthetic night6 test: spans are large on purpose")
     if strip or edit or drop_var:
         m = {k: v for k, v in loadmat(f).items() if not k.startswith("__")}

@@ -141,6 +141,9 @@ class MaskProvenance:
     ``spike_peri_r`` the spike consumer's peri-R spans as applied (RULING 2026-10-08 (k) 1;
     ``emit.peri_r.PeriRRecord.provenance``: rule, window with its file's sha256, the routed
     train or why there is none, counts) - filled the same way, by the writer, from the record.
+    ``spike_no_heartbeat_reference`` the spike consumer's no-beat minutes, KEPT and flagged
+    "no heartbeat reference" per minute (RULING 2026-10-09 (g) 1;
+    ``emit.handoff.no_heartbeat_reference_record``) - filled by the writer the same way.
     """
 
     model: Mapping[str, Any]
@@ -155,6 +158,7 @@ class MaskProvenance:
     extra: Mapping[str, Any] = field(default_factory=dict)
     spike_line_distrust: Mapping[str, Any] = field(default_factory=dict)
     spike_peri_r: Mapping[str, Any] = field(default_factory=dict)
+    spike_no_heartbeat_reference: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Normalise to the JSON form and validate."""
@@ -162,7 +166,7 @@ class MaskProvenance:
         # round trip is an identity), and a ModelSpec object becomes its record.
         object.__setattr__(self, "model", model_spec_record(self.model))
         for name in ("thresholds", "reference_values", "settling_s", "extra",
-                     "spike_line_distrust", "spike_peri_r"):
+                     "spike_line_distrust", "spike_peri_r", "spike_no_heartbeat_reference"):
             value = _clean(dict(getattr(self, name)))
             object.__setattr__(self, name, json.loads(json.dumps(value, allow_nan=False)))
         self.validate()
@@ -204,6 +208,8 @@ class MaskProvenance:
             rec["spike_line_distrust"] = _clean(dict(self.spike_line_distrust))
         if self.spike_peri_r:
             rec["spike_peri_r"] = _clean(dict(self.spike_peri_r))
+        if self.spike_no_heartbeat_reference:
+            rec["spike_no_heartbeat_reference"] = _clean(dict(self.spike_no_heartbeat_reference))
         return {k: v for k, v in rec.items() if v not in ({}, None)}
 
     def to_json(self) -> str:
@@ -227,4 +233,5 @@ class MaskProvenance:
                    created_at=doc["created_at"], recording=doc["recording"],
                    settling_s=doc.get("settling_s") or {}, extra=doc.get("extra") or {},
                    spike_line_distrust=doc.get("spike_line_distrust") or {},
-                   spike_peri_r=doc.get("spike_peri_r") or {})
+                   spike_peri_r=doc.get("spike_peri_r") or {},
+                   spike_no_heartbeat_reference=doc.get("spike_no_heartbeat_reference") or {})

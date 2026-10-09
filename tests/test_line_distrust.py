@@ -17,7 +17,7 @@ from gems_blanking_v2.emit import line_distrust as ld
 from gems_blanking_v2.emit import masks as mk
 from gems_blanking_v2.emit import qc
 from gems_blanking_v2.emit.provenance import MaskProvenance, ProvenanceError
-from gems_blanking_v2.extent.grid import n_grid_frames, to_matlab_inclusive
+from gems_blanking_v2.extent.grid import n_grid_frames, seconds_to_sample, to_matlab_inclusive
 from gems_blanking_v2.io.nan_interop import assert_no_zero_runs
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -40,6 +40,10 @@ READS: dict[str, tuple[str, ...]] = {"spikes": ("L_T",), "slow_wave": ("ANT1",),
                                      "breathing": ("RVN2",), "velocity": ()}
 MODEL = {"mode": "pooled", "version": "0.3.0", "corpus_hash": "ab" * 16,
          "calibrator": "models/x/calibrator.json"}
+
+
+PAD_S = seconds_to_sample(ld.INVALID_PAD_S, FS) / FS
+"""Step2's 10.5 ms pad as the test applies it: 256 samples at 24414.0625 Hz."""
 
 
 def _distrusted(rec: ld.LineDistrustRecord, sig: str) -> set[int]:
@@ -168,8 +172,9 @@ def test_q4_gaps_flat_and_short_minutes() -> None:
     assert _status(rec, "L_T") == {0: "tested", 1: "untested_short_valid",
                                    2: "untested_no_signal", 3: "not_assessable_short"}
     m0, m1 = _row(rec, "L_T", 0), _row(rec, "L_T", 1)
-    assert m0.valid_s == pytest.approx(50.0, abs=1e-3) and m1.valid_s == pytest.approx(25.0,
-                                                                                      abs=1e-3)
+    # (g) 5: each gap is padded by step2's 10.5 ms on both sides
+    assert m0.valid_s == pytest.approx(50.0 - 2 * PAD_S, abs=1e-3)
+    assert m1.valid_s == pytest.approx(25.0 - 2 * PAD_S, abs=1e-3)
     assert _distrusted(rec, "L_T") == {0}  # 50 s of finite stretches are tested
     # an interval across the gap is not an interval: two stretches, one interval each fewer
     assert m0.m_intervals == m0.n_spikes - 2
@@ -200,7 +205,7 @@ def test_q5_spikes_under_the_motion_mask_are_not_read() -> None:
     rec = make_line_distrust({"L_T": sig}, FS, recording="r", motion=motion)
     m1 = _row(rec, "L_T", 1)
     assert m1.status == "tested" and _distrusted(rec, "L_T") == set()
-    assert m1.valid_s == pytest.approx(32.0, abs=0.02)
+    assert m1.valid_s == pytest.approx(32.0 - 2 * PAD_S, abs=1e-3)  # (g) 5: padded blank
     assert m1.n_spikes is not None and m1.n_spikes < _row(plain, "L_T", 1).n_spikes  # type: ignore[operator]
 
 
@@ -232,6 +237,51 @@ def test_the_test_reads_only_the_samples_spike_detection_uses() -> None:
     with pytest.raises(ValueError, match="not inside the epoch"):
         ld.minute_tests({"L_T": sig}, FS, epoch_start_s=0.0, motion=motion,
                         exclude={"L_T": [(0, sig.size + 1)]})
+
+
+def _planted(x: np.ndarray, t_s: float, depth: float) -> np.ndarray:
+    """Return ``x`` with one sharp negative spike (0.25 ms Gaussian, ``depth`` deep) at ``t_s``."""
+    y = np.array(x, copy=True)
+    k = np.arange(-20, 21)
+    y[int(round(t_s * FS)) + k] -= depth * np.exp(-0.5 * (k / (0.25e-3 * FS / 2.355)) ** 2)
+    return y
+
+
+def test_the_motion_blanks_are_padded_like_step2s_edge_buffer() -> None:
+    """RULING 2026-10-09 (g) 5: 10.5 ms beside every motion blank is not read.
+
+    Step2 dilates every invalid sample by ``P.edgeBufferMs`` (``movmax(invalid, [pad pad])``),
+    so spike detection never reads the 256 samples on each side of a blank. A spike planted
+    5 ms after a blank is not counted; one planted 15 ms after it is; the valid time is
+    exactly the epoch less the padded blank (MATLAB's dilation, computed independently).
+    """
+    assert ld.INVALID_PAD_S == 0.0105 and seconds_to_sample(ld.INVALID_PAD_S, FS) == 256
+    base = make_mains_spike_t(FS, 60.0, seed=31).signal
+    depth = 40.0 * float(np.std(base))
+    blank = ((20.0, 20.5),)  # on the 10 ms grid
+    motion = {"L_T": _motion("L_T", base.size, blank)}
+
+    def count(x: np.ndarray) -> ld.MinuteTest:
+        return ld.minute_tests({"L_T": x}, FS, epoch_start_s=0.0, motion=motion)[0]
+
+    ref = count(base)
+    inside = count(_planted(base, 20.5 + 0.005, depth))
+    outside = count(_planted(base, 20.5 + 0.015, depth))
+    assert ref.n_spikes is not None and outside.n_spikes == ref.n_spikes + 1
+    assert inside.n_spikes == ref.n_spikes  # in the pad: never read
+    # the read samples are exactly the complement of MATLAB's movmax dilation
+    inv = mk.frames_to_samples(motion["L_T"].invalid, FS, base.size)
+    pad = 256
+    dil = np.convolve(inv.astype(np.int64), np.ones(2 * pad + 1, dtype=np.int64), "same") > 0
+    assert ref.valid_s == pytest.approx(float((~dil).sum()) / FS, abs=0.5 / FS)
+    assert ref.valid_s == pytest.approx(60.0 - 0.5 - 2 * PAD_S, abs=1e-3)
+    # a non-finite run is padded the same way (step2 pads isnan as well)
+    gap = np.array(base, copy=True)
+    gap[int(round(30.0 * FS)) + 3:int(round(30.2 * FS)) + 3] = np.nan
+    g = count(gap)
+    assert g.valid_s == pytest.approx(ref.valid_s - 0.2 - 2 * PAD_S, abs=1e-3)
+    assert ld.lock_test_parameters()["invalid_pad_s"] == 0.0105
+    assert ld.TEST_VERSION == "mains_lock_binom_v4"
 
 
 def test_the_motion_masks_must_be_the_spike_consumers_own_on_this_epoch() -> None:
@@ -504,7 +554,7 @@ def test_provenance_records_the_rules_and_round_trips(tmp_path: Path) -> None:
                                         ["provenance_json"][0]))
     sld = prov.spike_line_distrust
     assert sld["rule"] == "RULING 2026-10-08 (d) item 2; (e) Q1-Q5" and sld["alpha"] == 0.01
-    assert sld["test_version"] == "mains_lock_binom_v3" == ld.TEST_VERSION
+    assert sld["test_version"] == "mains_lock_binom_v4" == ld.TEST_VERSION
     assert "interval MLE" in sld["parameters"]["chance"]
     assert "n / (n - 1)" in sld["parameters"]["chance"]
     assert sld["family"]["kind"] == "animal_x_cohort" and sld["family"]["size"] == 2

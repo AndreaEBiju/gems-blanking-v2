@@ -459,3 +459,69 @@ def test_expected_consumers_is_the_table_without_what_is_out_of_this_build() -> 
     assert tl.expected_consumers() == ("breathing", "hrv", "mmc", "slow_wave", "spikes")
     assert "velocity" in tl.extent_consumers()
     assert set(tl.extent_consumers()) - set(tl.expected_consumers()) == {"velocity"}
+
+
+# --- RULING 2026-10-09 (g) 7: the stand-in tolerance table, pilot only -----------------------
+
+_PRODUCTION = {"rows_rule": "gate", "source": "tolmap", "z_tol": {"spikes": 4.1, "mmc": 3.2}}
+
+
+def _roots(tmp_path: Path) -> tuple[Path, Path, Path]:
+    pilot = tmp_path / "scratch" / "pilot"
+    pilot.mkdir(parents=True)
+    return pilot, pilot / "work", pilot / "masks_root"
+
+
+def test_the_stand_in_is_z_3_for_every_consumer_and_labelled() -> None:
+    doc = tl.stand_in_tolerance_doc()
+    assert doc["label"] == tl.STAND_IN_TOLERANCE_LABEL == (
+        "STAND-IN (pilot only, RULING 2026-10-09 (g) 7)")
+    assert doc["z_tol"] == {c: 3.0 for c in tl.extent_consumers() if c != "hrv"}
+    table = tl.ToleranceTable({k: float(v) for k, v in doc["z_tol"].items()}, doc["source"])
+    assert all(table.for_consumer(c) == 3.0 for c in tl.expected_consumers() if c != "hrv")
+    assert doc["source"].startswith(tl.STAND_IN_TOLERANCE_LABEL)
+
+
+def test_the_stand_in_is_accepted_only_for_outputs_under_the_pilot_folder(
+        tmp_path: Path) -> None:
+    pilot, work, masks = _roots(tmp_path)
+    doc = tl.stand_in_tolerance_doc()
+    assert tl.tolerance_table_use(doc, output_roots=[work, masks], pilot_root=pilot) == "stand_in"
+    store = tmp_path / "store" / "data"
+    night4 = tmp_path / "scratch" / "night4" / "work"
+    for roots in ([store], [night4], [work, store], [masks, night4],
+                  [tmp_path / "scratch" / "pilot_other"], [pilot / ".." / "pr"]):
+        with pytest.raises(ValueError, match=r"refused for outputs outside the pilot folder"):
+            tl.tolerance_table_use(doc, output_roots=roots, pilot_root=pilot)
+    with pytest.raises(ValueError, match="output roots"):
+        tl.tolerance_table_use(doc, output_roots=[], pilot_root=pilot)
+
+
+def test_a_table_that_claims_to_be_a_stand_in_must_be_exactly_the_ruled_one(
+        tmp_path: Path) -> None:
+    pilot, work, _masks = _roots(tmp_path)
+    good = tl.stand_in_tolerance_doc()
+    for bad in ({**good, "z_tol": {**good["z_tol"], "spikes": 2.5}},
+                {**good, "label": "STAND-IN"}, {**_PRODUCTION, "stand_in": True},
+                {**_PRODUCTION, "note": "a stand-in for now"}):
+        with pytest.raises(ValueError, match="must be exactly"):
+            tl.tolerance_table_use(bad, output_roots=[work], pilot_root=pilot)
+
+
+def test_not_for_production_and_non_gate_tables_are_refused_everywhere(tmp_path: Path) -> None:
+    pilot, work, _masks = _roots(tmp_path)
+    smoke = {**_PRODUCTION, "rows_rule": "any-finite",
+             "flags": ["NOT FOR PRODUCTION: rows that are not gate_eligible were used"]}
+    marked = {**_PRODUCTION, "source": "NOT FOR PRODUCTION: a gate-rows table marked by hand"}
+    for roots in ([work], [tmp_path / "store"]):
+        for doc in (smoke, marked):  # the mark alone refuses, whatever else the table says
+            with pytest.raises(ValueError, match=r"marked 'NOT FOR PRODUCTION' \(a smoke"):
+                tl.tolerance_table_use(doc, output_roots=roots, pilot_root=pilot)
+        with pytest.raises(ValueError, match="production gate-rows"):
+            tl.tolerance_table_use({**_PRODUCTION, "rows_rule": "x"}, output_roots=roots,
+                                   pilot_root=pilot)
+        with pytest.raises(ValueError, match="no z_tol"):
+            tl.tolerance_table_use({**_PRODUCTION, "z_tol": {}}, output_roots=roots,
+                                   pilot_root=pilot)
+        assert tl.tolerance_table_use(_PRODUCTION, output_roots=roots,
+                                      pilot_root=pilot) == "production"

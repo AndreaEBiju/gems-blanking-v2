@@ -202,6 +202,21 @@ def test_blank_idx_is_exactly_each_runs_masked_spans(result: dict[str, Any], rat
             assert "peaks_called" not in e
 
 
+@pytest.mark.parametrize("rate", ["full", "decimated"])
+def test_every_slow_wave_call_records_the_amplitude_caveat_and_known_properties(
+        result: dict[str, Any], rate: str) -> None:
+    """RULING 2026-10-09 (h) 2 and (f) 1, at both rates, in the call's provenance."""
+    for run in ("shared", "own"):
+        cav = result["calls"][f"{rate}_{run}"]["caveats"]
+        assert "(h) 2" in cav["amplitude"] and "0.15 Hz-filtered wave" in cav["amplitude"]
+        assert "whole-epoch detrend" in cav["amplitude"]
+        assert "either sampling rate" in cav["amplitude"]
+        assert "(h) 1" in cav["setting"] and "decimated x78" in cav["setting"]
+        props = cav["known_properties"]
+        assert len(props) == 2 and all("(f) 1" in p and "both rates" in p for p in props)
+        assert "findpeaks near-ties" in props[0] and "30 s clean-length gate" in props[1]
+
+
 def test_spans_that_are_not_the_inputs_nan_are_refused(result: dict[str, Any]) -> None:
     assert result["calls"]["not_the_nan"] == "night6:blankIdx"
 

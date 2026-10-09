@@ -48,6 +48,9 @@ Every :class:`Extent` carries that ``resolution_s``; nothing pretends otherwise.
 
 Tolerances are an explicit input (:class:`ToleranceTable`), never a default: they come
 from task T's measured tolerance surfaces (MATLAB, step 9), with their source recorded.
+Where a table may be used is :func:`tolerance_table_use`: the production table anywhere,
+the labelled stand-in (z 3.0 for every consumer, RULING 2026-10-09 (g) 7) only for outputs
+under the pilot folder, and a "NOT FOR PRODUCTION" table nowhere.
 
 Consumer table: built from ``constants.CONSUMERS`` with the two corrections the spec
 already ruled and ``constants.py`` does not yet carry (:data:`STRUCK_CONSUMERS`,
@@ -63,6 +66,7 @@ import functools
 import hashlib
 import json
 import math
+import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -89,7 +93,10 @@ __all__ = [
     "SPIKE_STEP1_EDGE_S",
     "SPIKE_WAVEFORM_AFTER_PEAK_S",
     "SPIKE_WAVEFORM_BEFORE_PEAK_S",
+    "STAND_IN_TOLERANCE_LABEL",
+    "STAND_IN_TOLERANCE_Z",
     "STRUCK_CONSUMERS",
+    "TOLERANCES_NOT_PRODUCTION",
     "CardiacVerdict",
     "ConsumerFilter",
     "ConsumerSettling",
@@ -118,7 +125,9 @@ __all__ = [
     "is_confirmed_motion",
     "mmc_not_measured_spans",
     "settling_provenance",
+    "stand_in_tolerance_doc",
     "step_settling_s",
+    "tolerance_table_use",
 ]
 
 F64 = npt.NDArray[np.float64]
@@ -574,6 +583,82 @@ class ToleranceTable:
                 msg = f"{Path(path).name}: required field {key!r} is absent"
                 raise ValueError(msg)
         return cls({str(k): float(v) for k, v in doc["z_tol"].items()}, str(doc["source"]))
+
+
+STAND_IN_TOLERANCE_LABEL: Final = "STAND-IN (pilot only, RULING 2026-10-09 (g) 7)"
+"""The label a stand-in tolerance table carries, verbatim, and every mask made with it."""
+STAND_IN_TOLERANCE_Z: Final = 3.0
+"""RULING 2026-10-09 (g) 7: the pilot's stand-in threshold, z 3.0 for every consumer."""
+TOLERANCES_NOT_PRODUCTION: Final = "NOT FOR PRODUCTION"
+"""tolmap's mark on a smoke variant (``--rows any-finite``): never used for masks."""
+
+
+def stand_in_tolerance_doc() -> dict[str, Any]:
+    """Return the stand-in tolerance table (RULING 2026-10-09 (g) 7), the one form accepted.
+
+    z :data:`STAND_IN_TOLERANCE_Z` for every z-thresholded consumer (``hrv`` is operational
+    and carries none), labelled :data:`STAND_IN_TOLERANCE_LABEL`. It stands in for the
+    mapped tolerances until the tolerance-mapping ruling; blanked time and the HRV vs
+    breathing comparison made with it are recomputed then.
+    """
+    z = {c: STAND_IN_TOLERANCE_Z for c in extent_consumers() if c != "hrv"}
+    return {"label": STAND_IN_TOLERANCE_LABEL, "stand_in": True,
+            "source": (f"{STAND_IN_TOLERANCE_LABEL}: z {STAND_IN_TOLERANCE_Z:g} for every "
+                       "consumer, not a measurement; recomputed once the tolerance-mapping "
+                       "ruling is made"),
+            "z_tol": z}
+
+
+def _under(path: Path, root: Path) -> bool:
+    """Whether ``path`` resolves inside ``root`` (case-folded where the OS folds case)."""
+    p = Path(os.path.normcase(Path(path).resolve()))
+    r = Path(os.path.normcase(Path(root).resolve()))
+    return p == r or p.is_relative_to(r)
+
+
+def tolerance_table_use(doc: Mapping[str, Any], *, output_roots: Sequence[Path],
+                        pilot_root: Path) -> Literal["production", "stand_in"]:
+    """Return how ``doc`` may be used for masks written under ``output_roots``, or raise.
+
+    * Anything marked :data:`TOLERANCES_NOT_PRODUCTION` is refused everywhere.
+    * A table that says it is a stand-in (``stand_in``, its label, or "STAND-IN" anywhere)
+      is accepted only when it is exactly :func:`stand_in_tolerance_doc` AND every output
+      root lies under ``pilot_root`` (RULING 2026-10-09 (g) 7: "written to the pilot folder
+      only. Night 5 refuses stand-ins"). Returns ``"stand_in"``.
+    * Otherwise it must be tolmap's production output - ``rows_rule == "gate"``, no
+      ``flags``, a non-empty ``z_tol`` - and is accepted anywhere: ``"production"``.
+
+    Raises ``ValueError`` naming the reason. ``output_roots`` must not be empty.
+    """
+    text = json.dumps(dict(doc), sort_keys=True, ensure_ascii=True, allow_nan=False)
+    if TOLERANCES_NOT_PRODUCTION in text:
+        msg = (f"the tolerance table is marked {TOLERANCES_NOT_PRODUCTION!r} (a smoke variant): "
+               "never used for masks")
+        raise ValueError(msg)
+    if not output_roots:
+        msg = "tolerance_table_use needs the output roots the masks will be written under"
+        raise ValueError(msg)
+    claims = bool(doc.get("stand_in")) or "stand-in" in text.lower() or "stand_in" in text
+    if claims:
+        if dict(doc) != stand_in_tolerance_doc():
+            msg = (f"a stand-in tolerance table must be exactly the {STAND_IN_TOLERANCE_LABEL} "
+                   f"table (z {STAND_IN_TOLERANCE_Z:g} for every consumer, "
+                   "stand_in_tolerance_doc()); this one differs")
+            raise ValueError(msg)
+        outside = [str(p) for p in output_roots if not _under(Path(p), pilot_root)]
+        if outside:
+            msg = (f"{STAND_IN_TOLERANCE_LABEL}: refused for outputs outside the pilot folder "
+                   f"{pilot_root}: {outside}. Night 5 / production refuses stand-ins")
+            raise ValueError(msg)
+        return "stand_in"
+    if doc.get("rows_rule") != "gate" or doc.get("flags"):
+        msg = (f"rows_rule {doc.get('rows_rule')!r}, flags {doc.get('flags')!r}: only tolmap's "
+               "production gate-rows output (rows_rule 'gate', no flags) is accepted")
+        raise ValueError(msg)
+    if not isinstance(doc.get("z_tol"), Mapping) or not doc["z_tol"]:
+        msg = "the tolerance table has no z_tol table"
+        raise ValueError(msg)
+    return "production"
 
 
 # ---------------------------------------------------------------------------

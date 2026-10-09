@@ -87,6 +87,7 @@ function check_slow_wave_rate(caseFile, outFile)
                                           signals, keep, ms, sp, rate{1}, false);
                 rec.blank_idx = r.blank_idx;
                 rec.rate = r.slow_wave_rate;
+                rec.caveats = r.caveats;
                 rec.files = r.slow_wave.files;
                 rec.kept = struct();
                 for k = keep(:)'
