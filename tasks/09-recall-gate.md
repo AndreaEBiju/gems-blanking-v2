@@ -2424,6 +2424,20 @@ The rulings headed **2026-10-08**, **(b)** and **(c)** were written on **2026-10
    - **Variables are classed by what they actually compute.** Andrea's ≥ 50%-valid rule governs only the outputs it is written for, and each classification cites the rule it relies on. Accepted.
    - **mmc rate:** its cut moves 5 s later than its input's settling, because its rate window looks back 5 s (ruling 2026-10-09 (c) 3(d)).
 
+### RULING 2026-10-09 (e) — run when ready; the pilot; Sunday target (amends ruling 2026-10-08 (c))
+
+**Andrea, 2026-10-09:** she finishes her daily items by noon and wants the build to move as fast as the machine allows.
+
+1. **Run when ready.** Any job whose inputs are ready starts then, day or night, within memory. "Night 5" and "Night 6" are names, not start times. The 00:30 auto-start remains only as a fallback for queued work.
+2. **Pilot.** After the sweep and the reviewed merge, run inference, masks and Night 6 on about 10 already-routed recordings (A, B, H, I, J, K; stim_rec, baseline and pre).
+   - The pilot pauses between recordings if free memory falls under 6 GB, and must never slow routing.
+   - Its reports are ready by Saturday 08:45: v2 validation, HRV vs breathing, mmc recovered, trimmed outputs, no-beat spike loss, and blanked time per consumer.
+3. **The v2 spike-only tolerance pass runs after the pilot,** overnight beside routing, as far as memory allows without slowing routing.
+   - **If it finishes before Night 5,** the spike masks use it.
+   - **If not,** they use the ECAP tolerance, named in provenance. The spike masks are then re-emitted from the v2 tolerance after Night 5, if that costs no critical-path time.
+4. **Target finish: Sunday 10-11.** Night 5 starts when routing is finished and Andrea's Saturday-morning decisions are in. Night 6 follows straight after, and task 19 runs on Sunday.
+5. **Andrea's queue** is one list with minutes, ordered so that whatever unblocks the machine comes first. Items go out as soon as they are ready.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
