@@ -1,7 +1,7 @@
-function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile, units, beats)
+function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile, units, beats, condition)
 % NIGHT6_PREPARE_EPOCH  Plan one epoch of a Night 6 run from its mask file. No arrays.
 %
-%   plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile, units, beats)
+%   plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile, units, beats, condition)
 %
 %   M             load() of one e<start>_masks.mat (gems_blanking_v2.emit.handoff)
 %   fileLabels    the recording file's own chanlabels, in column order (authoritative
@@ -12,17 +12,30 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
 %   units         'V' | 'mV' | 'uV' - declared, never inferred (invariant 14).
 %                 processing_new works in VOLTS, so the plan carries the scale to volts.
 %   beats         the recording's whole-file beats file (load()), or [] when it has none
+%   condition     the recording's condition from the mask provenance ('baseline',
+%                 'stim_recovery', 'pre'), or '' when the provenance names none
 %
-% The epoch is samples i0+1 .. i0+n of the file (1-based), with
-% i0 = round_half_even(epochStart_s * fs) - Python's round, the rule the mask writer
-% used - and n = nSamples. Every blank_<consumer>_<token> span is 1-based inclusive
-% into the EPOCH (task 15), so it lands on epoch rows sp(k,1):sp(k,2) unchanged.
+% The epoch is samples i0+1 .. i0+n of the file (1-based), with i0 = epochStartSample0,
+% the exact 0-based start sample the mask writer sliced with, and n = nSamples
+% (Andrea, 2026-10-09: the mask file carries the sample and MATLAB never converts
+% seconds to samples - invariants 15, 22). epochStart_s is carried into the record only.
+% Every blank_<consumer>_<token> span is 1-based inclusive into the EPOCH (task 15), so
+% it lands on epoch rows sp(k,1):sp(k,2) unchanged.
 %
 % plan.runs lists the calls to make, in night6_calls() order. A run serves consumers
 % that share one call AND one mask; hrv and breathing get two HR runs when their masks
 % differ (invariant 2: a mask is never merged across consumers). Consumers in
 % notcomputed_json are skipped with their reason (RULING 2026-10-08 (f) 6); mmc,
-% which needs R-peaks, is skipped when the recording has no beats in the epoch.
+% which needs R-peaks, is skipped when the recording has no beats in the epoch - and
+% on a 'pre' recording with no beat train at all it is "not computed" (Andrea,
+% 2026-10-09: pre files were often recorded with the laptop charger plugged in).
+%
+% slow_wave runs ONE ANT CHANNEL AT A TIME (Andrea, 2026-10-09): for channel i the run
+% applies channel i's mask to all three ANT columns (run.maskSignal), so
+% slowWaveAnalysis_new's joint any(isnan) mask equals mask i, and only channel i's
+% outputs are kept (run.keep). Channels whose masks are identical get bit-identical
+% inputs, so they share one call and each keeps its own column - the outputs are those
+% of separate calls exactly, at a third of the cost.
     known = {'spikes', 'slow_wave', 'mmc', 'hrv', 'breathing', 'velocity'};
     if ~ismember(units, {'V', 'mV', 'uV'})
         error('night6:units', 'units must be declared as V, mV or uV; got ''%s''', char(units));
@@ -32,8 +45,17 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
     plan = struct();
     plan.fs = double(M.fs);
     plan.n = double(M.nSamples);
-    plan.epochStart_s = double(M.epochStart_s);
-    plan.i0 = night6_round_half_even(plan.epochStart_s * plan.fs);
+    plan.epochStart_s = double(M.epochStart_s);   % for the record only, never for indexing
+    if ~isfield(M, 'epochStartSample0')
+        error('night6:startSample', ['the mask file has no epochStartSample0 (the exact ' ...
+              'epoch start sample, written by emit.handoff since 2026-10-09); MATLAB does ' ...
+              'not derive it from epochStart_s']);
+    end
+    plan.i0 = double(M.epochStartSample0);
+    if ~isscalar(plan.i0) || plan.i0 ~= fix(plan.i0)
+        error('night6:startSample', 'epochStartSample0 must be one integer sample index');
+    end
+    plan.condition = char(condition);
     plan.units = char(units);
     plan.scaleToVolts = scale.(char(units));
     if abs(double(fsFile) - plan.fs) > 1e-9
@@ -148,27 +170,61 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
                 'train'], plan.beats.nWholeFile);
         end
     end
-    if strcmp(plan.consumers.mmc.status, 'to_run') && ...
+    if strcmp(plan.consumers.mmc.status, 'to_run') && isempty(plan.beats) ...
+            && strcmp(plan.condition, 'pre')
+        plan.consumers.mmc.status = 'skipped_not_computed';
+        plan.consumers.mmc.reason = ['no count-gated beat train on a "pre" recording: mmc ' ...
+            'is not computed (Andrea, 2026-10-09: pre files were often recorded with the ' ...
+            'laptop charger plugged in, which adds line noise)'];
+    elseif strcmp(plan.consumers.mmc.status, 'to_run') && ...
             (isempty(plan.beats) || isempty(plan.beats.heartlocs))
         plan.consumers.mmc.status = 'skipped_no_rpeaks';
         plan.consumers.mmc.reason = ['extract_mmc needs R-peaks for its cardiac blanking ' ...
             'and this epoch has no stored beats (no beats file, or none in the epoch)'];
     end
 
-    plan.runs = struct('call', {}, 'consumers', {}, 'signals', {});
+    plan.runs = struct('call', {}, 'consumers', {}, 'signals', {}, 'maskSignal', {}, 'keep', {});
     for C = night6_calls()
         want = C.consumers(cellfun(@(c) strcmp(plan.consumers.(c).status, 'to_run'), C.consumers));
+        if strcmp(C.name, 'slowWaveAnalysis_new') && ~isempty(want)
+            plan.runs = [plan.runs, slow_wave_runs(masks, gastric)]; %#ok<AGROW>
+            continue
+        end
         while ~isempty(want)
             lead = want{1};
             same = cellfun(@(c) same_mask(masks, lead, c), want);
             sigs = plan.consumers.(lead).signals;
-            if strcmp(C.name, 'slowWaveAnalysis_new') || strcmp(C.name, 'extract_mmc')
+            if strcmp(C.name, 'extract_mmc')
                 sigs = gastric;          % her column order: ANT1, ANT2, ANT3
             end
             plan.runs(end + 1) = struct('call', C.name, 'consumers', {want(same)}, ...
-                                        'signals', {sigs}); %#ok<AGROW>
+                                        'signals', {sigs}, 'maskSignal', '', ...
+                                        'keep', {sigs}); %#ok<AGROW>
             want = want(~same);
         end
+    end
+end
+
+% ==========================================================================
+function runs = slow_wave_runs(masks, gastric)
+% One slowWaveAnalysis_new run per distinct slow_wave mask (Andrea, 2026-10-09). Run k
+% applies the mask of its first channel to ALL THREE ANT columns (maskSignal) and keeps
+% the outputs of every channel whose own mask is identical (keep) - their inputs are
+% bit-identical, so one call gives each of them exactly what its own call would.
+    runs = struct('call', {}, 'consumers', {}, 'signals', {}, 'maskSignal', {}, 'keep', {});
+    sw = masks(strcmp({masks.consumer}, 'slow_wave'));
+    todo = gastric;
+    while ~isempty(todo)
+        lead = sw(strcmp({sw.signal}, todo{1}));
+        if numel(lead) ~= 1
+            error('night6:slowWaveMask', 'expected one slow_wave mask for %s, found %d', ...
+                  todo{1}, numel(lead));
+        end
+        same = cellfun(@(s) isequal(sw(strcmp({sw.signal}, s)).spans, lead.spans), todo);
+        runs(end + 1) = struct('call', 'slowWaveAnalysis_new', 'consumers', {{'slow_wave'}}, ...
+                               'signals', {gastric}, 'maskSignal', todo{1}, ...
+                               'keep', {todo(same)}); %#ok<AGROW>
+        todo = todo(~same);
     end
 end
 
@@ -253,9 +309,19 @@ function E = slice_beats(B, plan)
     if abs(double(B.fs) - plan.fs) > 1e-9
         error('night6:beatsFs', 'beats fs %.6f, recording fs %.6f', double(B.fs), plan.fs);
     end
+    % The beats' own origin, as a SAMPLE (never seconds x fs here - invariant 15). Every
+    % production beats file is whole-file (epochStart_s = 0, hr10_pass.py); a file with
+    % another origin must carry it as epochStartSample0 or it is refused.
     off = 0;
-    if isfield(B, 'epochStart_s')
-        off = night6_round_half_even(double(B.epochStart_s) * plan.fs);
+    if isfield(B, 'epochStartSample0')
+        off = double(B.epochStartSample0);
+        if ~isscalar(off) || off ~= fix(off) || off < 0
+            error('night6:beatsStart', 'beats epochStartSample0 must be one integer >= 0');
+        end
+    elseif isfield(B, 'epochStart_s') && double(B.epochStart_s) ~= 0
+        error('night6:beatsStart', ['beats file starts at %.9g s and carries no ' ...
+              'epochStartSample0: MATLAB does not convert seconds to samples'], ...
+              double(B.epochStart_s));
     end
     h = double(B.heartlocs(:)) + off - plan.i0;
     keep = h >= 1 & h <= plan.n;

@@ -10,17 +10,21 @@ function records = night6_run_recording(maskFolder, varargin)
 % (RULING 2026-10-08 (f) 5: "pre" recordings are baseline-type and never paired).
 %
 % Per epoch:
-%   1. slice the recording by epochStart_s / nSamples (night6_prepare_epoch);
+%   1. slice the recording by epochStartSample0 / nSamples - the exact sample the mask
+%      writer sliced with; seconds are never converted here (night6_prepare_epoch);
 %   2. build each consumer's input from the file's columns - raw contacts, the pairs
 %      lead "<plus>-<minus>" (mask token <plus>_minus_<minus>), or the software
 %      tripole <cuff>_T = 0.5*V1 + 0.5*V3 - V2 - in VOLTS, with that consumer's spans
 %      as NaN and nobody else's (night6_consumer_input; invariants 1, 2);
-%   3. call Andrea's functions from processing_new UNCHANGED, in night6_calls() order:
-%        detectSortNerveSpikesECAP  spikes      (batch_spike_detect's parameter set)
+%   3. call, in night6_calls() order:
+%        process_dataset_v2         spikes      (her process_dataset steps minus step1b,
+%                                                via her bulk_load_one; Andrea 2026-10-09)
 %        HR_BR_HRVAnalysis_beats    hrv, breathing (stored beats; batch_process's HR args)
-%        slowWaveAnalysis_new       slow_wave   (batch_process / T configuration)
+%        slowWaveAnalysis_new       slow_wave   (batch_process / T configuration), one
+%                                   ANT channel at a time (Andrea 2026-10-09)
 %        extract_mmc                mmc         (ANT1-3 raw, R8; R-peaks = stored beats)
-%      skipping, with the reason logged, every consumer in notcomputed_json;
+%      Andrea's functions come from processing_new UNCHANGED; skipping, with the reason
+%      logged, every consumer in notcomputed_json;
 %   4. write night6_record.json beside the outputs: mask folder, model id, mask file
 %      hash, code commit, every called function's path and SHA-256, parameters, and
 %      per-consumer status. The record is written last; an epoch whose record says
@@ -169,11 +173,14 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
         beats = load(R.source.beats_file);
     end
 
+    condition = '';
+    if isfield(R, 'condition'), condition = R.condition; end
     plan = night6_prepare_epoch(M, S.chanlabels, meta.channels, size(S.signal, 1), S.fs, ...
-                                o.Units, beats);
+                                o.Units, beats, condition);
     R.epoch = struct('start_s', plan.epochStart_s, 'start_sample_0based', plan.i0, ...
                      'n_samples', plan.n, 'fs', plan.fs, ...
-                     'rule', 'file samples i0+1..i0+n, i0 = round_half_even(epochStart_s*fs)');
+                     'rule', ['file samples i0+1..i0+n, i0 = the mask file''s ' ...
+                              'epochStartSample0 (never derived from seconds)']);
     R.not_computed = plan.notComputed;
     R.not_measured_mmc = plan.notMeasuredMmc;   % R6: reported, never blanked
     if ~isempty(plan.beats)
@@ -198,9 +205,11 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
     base = src.epoch_tag;
     check_path_budget(outDir, base);
     o.beatsEpochFile = '';
-    if any(ismember({plan.runs.call}, {'HR_BR_HRVAnalysis_beats', 'extract_mmc'}))
-        % Both calls read heartlocs + fs from a FILE, 1-based into the signal they are
+    if ~isempty(plan.beats) && ~isempty(plan.beats.heartlocs) && any(ismember({plan.runs.call}, ...
+            {'HR_BR_HRVAnalysis_beats', 'extract_mmc', 'process_dataset_v2'}))
+        % These calls read heartlocs + fs from a FILE, 1-based into the signal they are
         % given - so the whole-file beats are re-based to this epoch and written here.
+        % (process_dataset_v2 reads them through her bulk_load_one as D.rpeakSamples.)
         o.beatsEpochFile = fullfile(outDir, [base '_beats_epoch.mat']);
         B = plan.beats;
         heartlocs = B.heartlocs; gapAfter = B.gapAfter; blankSpans = B.blankSpans; %#ok<NASGU>
@@ -214,54 +223,53 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
     failed = false;
     for r = plan.runs
         run = struct('call', r.call, 'consumers', {r.consumers}, 'signals', {r.signals});
+        perChannel = ~isempty(r.maskSignal);     % slow_wave, one ANT channel at a time
+        if perChannel
+            run.mask_signal = r.maskSignal;
+            run.keep = r.keep;
+        end
         tRun = tic;
         try
             X = night6_consumer_input(plan, S.signal, r);
             run.inputs = summarise(X, r.signals);
-            % Invariant 41: an input with no valid sample is refused by name, never
-            % handed to a function that would fail on it (or answer from nothing).
-            % Spike channels are independent, so a dead one is dropped and the rest run.
-            empty = all(isnan(X), 1);
-            if strcmp(r.call, 'detectSortNerveSpikesECAP') && any(empty) && ~all(empty)
+            % Invariant 41: an input with no valid sample, or a constant one, is refused
+            % by name, never handed to a function that would fail on it (or answer from
+            % nothing). Spike channels are independent, so a dead one is dropped and the
+            % rest run.
+            % A constant input is refused for the spike consumer (process_dataset_v2,
+            % Andrea 2026-10-09); the other calls keep the all-NaN refusal they had.
+            isSpk = strcmp(r.call, 'process_dataset_v2');
+            [empty, why] = dead_columns(X, r.signals, isSpk);
+            if isSpk && any(empty) && ~all(empty)
                 run.dropped_no_valid_samples = r.signals(empty);
                 R.consumers.spikes.dropped_no_valid_samples = r.signals(empty);
-                R.consumers.spikes.reason = sprintf(['[%s] dropped: no valid sample, ' ...
-                    'blanked for the whole epoch'], strjoin(r.signals(empty), ' '));
+                R.consumers.spikes.reason = sprintf('dropped: %s', why);
                 X = X(:, ~empty);
                 r.signals = r.signals(~empty);
             end
-            empty = all(isnan(X), 1);
+            [empty, why] = dead_columns(X, r.signals, isSpk);
             if any(empty)
-                why = sprintf('no valid sample in [%s]: blanked for the whole epoch', ...
-                              strjoin(r.signals(empty), ' '));
                 run.status = 'skipped_no_valid_samples';
                 run.reason = why;
-                for c = r.consumers
-                    R.consumers.(c{1}).status = 'skipped_no_valid_samples';
-                    R.consumers.(c{1}).reason = why;
-                end
+                R = set_status(R, r, perChannel, 'skipped_no_valid_samples', why);
                 fprintf('[night6] %s %s: %s [%s] skipped - %s\n', src.session, ...
                         src.epoch_tag, r.call, strjoin(r.consumers, ','), why);
             else
                 if ~o.DryRun
                     d0 = dir(outDir);
-                    run.condition_label = call_one(r, X, plan, base, outDir, o);
+                    [run.condition_label, extra] = call_one(r, X, plan, base, outDir, o);
                     d1 = dir(outDir);
                     run.outputs = setdiff({d1.name}, {d0.name});
+                    for fn = fieldnames(extra)', run.(fn{1}) = extra.(fn{1}); end
                 end
                 run.status = 'ok';
-                for c = r.consumers
-                    R.consumers.(c{1}).status = ternary(o.DryRun, 'planned', 'ran');
-                end
+                R = set_status(R, r, perChannel, ternary(o.DryRun, 'planned', 'ran'), '');
             end
         catch ME
             failed = true;
             run.status = 'failed';
             run.error = sprintf('%s: %s', ME.identifier, ME.message);
-            for c = r.consumers
-                R.consumers.(c{1}).status = 'failed';
-                R.consumers.(c{1}).reason = run.error;
-            end
+            R = set_status(R, r, perChannel, 'failed', run.error);
             fprintf(2, '[night6] %s %s: %s FAILED - %s\n', src.session, src.epoch_tag, ...
                     r.call, run.error);
         end
@@ -272,42 +280,41 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
         clear X
         close all force
     end
+    R = slow_wave_status(R);
     R.wall_s = toc(tEpoch);
     R.finished = char(datetime('now', 'TimeZone', 'local', 'Format', 'yyyy-MM-dd''T''HH:mm:ssXXX'));
     R.status = ternary(failed, 'failed', ternary(o.DryRun, 'dry_run', 'complete'));
     write_json(fullfile(outDir, 'night6_record.json'), R);
 end
 
-function label = call_one(r, X, plan, base, outDir, o)
-% The one place Andrea's functions are called. Arguments by position follow her own
+function [label, extra] = call_one(r, X, plan, base, outDir, o)
+% The one place the consumers' calls are made. Arguments by position follow Andrea's own
 % drivers exactly (invariant 40); see params() for where each value comes from.
+% extra: anything the run record should carry from the call.
     P = params();
     figs = logical(o.Figures);
     fs = plan.fs;
+    extra = struct();
     switch r.call
-        case 'detectSortNerveSpikesECAP'
+        case 'process_dataset_v2'
             label = base;
             f = write_input(fullfile(outDir, [label '_spikes_in.mat']), X, fs);
             cleanup = onCleanup(@() drop(f, o.KeepInputs)); %#ok<NASGU>
-            S = P.spikes;
-            labels = r.signals;
-            detectSortNerveSpikesECAP(f, fullfile(outDir, [label '_detectsort']), ...
-                'NerveChannels', 1:numel(labels), 'ChannelLabels', labels, ...
-                'BandpassLow', S.bandpassLow, 'BandpassHigh', S.bandpassHigh, ...
-                'FilterOrder', S.filterOrder, 'DetectionPolarity', S.detectPolarity, ...
-                'ThreshSigma', S.threshSigma, 'MaxThreshSigma', S.maxThreshSigma, ...
-                'PreMs', S.wfPreMs, 'PostMs', S.wfPostMs, 'RefractoryMs', S.refractoryMs, ...
-                'EdgeBufferMs', S.edgeBufferMs, 'MinAmpUV', S.minAmpUV, ...
-                'MaxAmpUV', S.maxAmpUV, 'MinWidthMs', S.minWidthMs, ...
-                'MaxWidthMs', S.maxWidthMs, 'FRBinSec', S.frBinSec, ...
-                'SmoothFRSec', S.smoothFRSec, 'DoSorting', S.doSorting, ...
-                'NumClusters', S.numClusters, 'NumPCs', S.numPCs, ...
-                'MinClusterSize', S.minClusterSize, 'MinSpikesForBurst', S.minSpikesForBurst, ...
-                'MinMeanRateForBurst', S.minMeanRateForBurst, ...
-                'UseBlankSegmentsAsStimTimes', false, ...
-                'ECAPPreMs', S.ecapPreMs, 'ECAPPostMs', S.ecapPostMs, ...
-                'ECAPArtifactPreMs', S.ecapArtifactPreMs, ...
-                'ECAPArtifactPostMs', S.ecapArtifactPostMs, 'MakePlots', figs);
+            % Her headless loader builds D exactly as her bulk driver does: yOut in
+            % volts with the masked samples NaN, R-peaks from the epoch's beats file
+            % (heartlocs, 1-based samples into this input) or none.
+            w = warning('off', 'MATLAB:load:variableNotFound');   % no t in the input
+            restoreW = onCleanup(@() warning(w)); %#ok<NASGU>
+            D = bulk_load_one(f, o.beatsEpochFile, struct('neuralCols', 1:numel(r.signals), ...
+                                                         'labels', {r.signals}));
+            D.condition = plan.condition;
+            [D, info] = process_dataset_v2(D, 'PlotMode', figs, 'NanPadMs', P.spikes.nanPadMs);
+            save_spikes_v2(fullfile(outDir, [label '_spikes_v2.mat']), D, info, r.signals);
+            extra.n_rpeaks = info.n_rpeaks;
+            extra.spike_check = info.spike_check;
+            if figs
+                save_all_figures(outDir, [label '_spikes_v2'], {'png', 'fig'});   % hers
+            end
         case 'HR_BR_HRVAnalysis_beats'
             label = [base '_' strjoin(r.consumers, '_')];
             B = plan.beats;
@@ -316,10 +323,16 @@ function label = call_one(r, X, plan, base, outDir, o)
                 [], H.edgeBufferSec, H.winSec, H.stepSec, figs, H.hrBrWinSec, ...
                 'GapAfter', B.gapAfter, 'BlankSpans', B.blankSpans);
         case 'slowWaveAnalysis_new'
-            label = base;
+            % One ANT channel at a time: X carries mask r.maskSignal on all three
+            % columns; only the kept channels' outputs survive (night6_keep_slow_wave).
+            label = sprintf('%s_swm_%s', base, r.maskSignal);
             W = P.slow_wave;
+            d0 = dir(outDir);
             slowWaveAnalysis_new(X, W.lowPassOn, W.lowPassCutoff, W.lowPassOrder, fs, ...
                 W.smoothWindow, figs, outDir, label, [], W.edgeBufferSec);
+            d1 = dir(outDir);
+            extra.slow_wave = night6_keep_slow_wave(outDir, label, base, r.signals, r.keep, ...
+                r.maskSignal, setdiff({d1.name}, {d0.name}));
         case 'extract_mmc'
             label = base;
             f = write_input(fullfile(outDir, [label '_mmc_in.mat']), X, fs);
@@ -332,21 +345,13 @@ function label = call_one(r, X, plan, base, outDir, o)
 end
 
 function P = params()
-% Every argument handed to Andrea's functions, and where it came from.
-    s = pipeline_params();
-    s.frBinSec = 5; s.smoothFRSec = 5; s.doSorting = true; s.numClusters = 3; s.numPCs = 3;
-    s.minClusterSize = 10; s.minSpikesForBurst = 500; s.minMeanRateForBurst = 0.5;
-    s.ecapPreMs = 2; s.ecapPostMs = 10; s.ecapArtifactPreMs = 5; s.ecapArtifactPostMs = 5;
-    keep = {'bandpassLow', 'bandpassHigh', 'filterOrder', 'detectPolarity', 'threshSigma', ...
-            'maxThreshSigma', 'wfPreMs', 'wfPostMs', 'refractoryMs', 'edgeBufferMs', ...
-            'minAmpUV', 'maxAmpUV', 'minWidthMs', 'maxWidthMs', 'frBinSec', 'smoothFRSec', ...
-            'doSorting', 'numClusters', 'numPCs', 'minClusterSize', 'minSpikesForBurst', ...
-            'minMeanRateForBurst', 'ecapPreMs', 'ecapPostMs', 'ecapArtifactPreMs', ...
-            'ecapArtifactPostMs'};
-    P.spikes = struct();
-    for k = keep, P.spikes.(k{1}) = s.(k{1}); end
-    P.spikes.source = ['pipeline_params() + batch_spike_detect.m driver constants; ' ...
-                       'Sigma [] (estimated from the masked input itself)'];
+% Every argument handed to the calls, and where it came from.
+    P.spikes = struct('method', 'process_dataset_v2', 'steps', {night6_v2_steps()}, ...
+                      'bandpassLow', 300, 'bandpassHigh', 3000, 'nanPadMs', 5, ...
+                      'source', ['Andrea 2026-10-09: P = pipeline_params(); P.bandpassLow = ' ...
+                                 '300; P.bandpassHigh = 3000; everything else default ' ...
+                                 '(threshSigma 4.5); her process_dataset steps minus ' ...
+                                 'step1b; D from her bulk_load_one with D.rpeakSamples']);
     P.hr = struct('cutoff', 8, 'order', 4, 'edgeBufferSec', 0.75, 'winSec', 20, ...
                   'stepSec', 1, 'hrBrWinSec', 60, 'chanidx', 1, ...
                   'source', 'batch_process.m P.hr_* (= run_continuous.m, = T)');
@@ -360,24 +365,89 @@ function P = params()
 end
 
 function F = function_provenance()
-% Andrea's functions must resolve to processing_new - a stray copy would shadow them.
+% Andrea's functions must resolve to processing_new - a stray copy would shadow them -
+% and the wrapper's own (process_dataset_v2 and its step list) to this folder.
     F = struct();
     C = night6_calls();
-    for name = [{C.name}, {'pipeline_params'}]
+    ours = {'process_dataset_v2', 'night6_v2_steps'};
+    hers = [setdiff({C.name}, ours, 'stable'), night6_v2_steps(), ...
+            {'pipeline_params', 'bulk_load_one'}];
+    here = fileparts(mfilename('fullpath'));
+    for name = [hers, ours]
         p = which(name{1});
         [d, ~] = fileparts(p);
         [~, leaf] = fileparts(d);
-        if ~strcmp(leaf, 'processing_new')
+        if ismember(name{1}, ours)
+            if ~strcmp(d, here)
+                error('night6:shadow', '%s resolves to %s, not this wrapper (%s)', name{1}, p, here);
+            end
+        elseif ~strcmp(leaf, 'processing_new')
             error('night6:shadow', '%s resolves to %s, not processing_new', name{1}, p);
         end
         F.(name{1}) = struct('path', p, 'sha256', sha256_file(p));
     end
-    % Not called, but params() copies their constants: their hashes say which
-    % version of each driver the parameters were taken from.
-    for name = {'batch_spike_detect', 'batch_process'}
-        p = which(name{1});
-        F.(name{1}) = struct('path', p, 'sha256', sha256_file(p), 'role', 'parameter source');
+    % Not called, but params() copies its constants (HR, slow wave): its hash says
+    % which version of the driver the parameters were taken from.
+    p = which('batch_process');
+    F.batch_process = struct('path', p, 'sha256', sha256_file(p), 'role', 'parameter source');
+end
+
+function [dead, why] = dead_columns(X, signals, checkConstant)
+% Columns with no finite sample - or, with checkConstant, whose finite samples are all
+% equal (invariant 41) - and one sentence naming them.
+    noValid = all(isnan(X), 1);
+    constant = false(size(noValid));
+    if checkConstant
+        hi = max(X, [], 1, 'omitnan');
+        lo = min(X, [], 1, 'omitnan');
+        constant = ~noValid & hi == lo;
     end
+    dead = noValid | constant;
+    parts = {};
+    if any(noValid)
+        parts{end + 1} = sprintf('no valid sample in [%s]: blanked for the whole epoch', ...
+                                 strjoin(signals(noValid), ' '));
+    end
+    if any(constant)
+        parts{end + 1} = sprintf('constant input in [%s]: no signal to analyse', ...
+                                 strjoin(signals(constant), ' '));
+    end
+    why = strjoin(parts, '; ');
+end
+
+function R = set_status(R, r, perChannel, status, reason)
+% A run's outcome for its consumers. slow_wave runs one ANT channel at a time, so its
+% outcome is recorded per kept channel and summarised once after the loop.
+    if perChannel
+        for s = r.keep
+            st = struct('status', status, 'mask_signal', r.maskSignal);
+            if ~isempty(reason), st.reason = reason; end
+            R.consumers.slow_wave.channels.(matlab.lang.makeValidName(s{1})) = st;
+        end
+        return
+    end
+    for c = r.consumers
+        R.consumers.(c{1}).status = status;
+        if ~isempty(reason), R.consumers.(c{1}).reason = reason; end
+    end
+end
+
+function R = slow_wave_status(R)
+% slow_wave's overall status from its channels: failed if any failed, else ran/planned
+% if any did, else skipped (every channel's reason is in .channels).
+    if ~isfield(R.consumers, 'slow_wave') || ~isfield(R.consumers.slow_wave, 'channels')
+        return
+    end
+    ch = struct2cell(R.consumers.slow_wave.channels);
+    st = cellfun(@(c) c.status, ch, 'UniformOutput', false);
+    order = {'failed', 'ran', 'planned', 'skipped_no_valid_samples'};
+    for k = 1:numel(order)
+        if any(strcmp(st, order{k}))
+            R.consumers.slow_wave.status = order{k};
+            break
+        end
+    end
+    R.consumers.slow_wave.reason = 'per ANT channel; see channels (Andrea, 2026-10-09)';
 end
 
 function s = summarise(X, signals)
@@ -413,6 +483,26 @@ function check_path_budget(outDir, base)
         error('night6:maxPath', ['outputs under %s could reach %d characters, over ' ...
               'Windows MAX_PATH (260): choose a shorter OutRoot'], outDir, deepest);
     end
+end
+
+function save_spikes_v2(f, D, info, signals)
+% process_dataset_v2's outputs: everything her steps added to D except the per-sample
+% arrays (D.y, D.t, D.filtered, D.sigma, D.cardiacBlank - each as long as the epoch),
+% plus each channel's invalid samples as 1-based inclusive runs (validMask inverted).
+    keep = intersect(fieldnames(D), {'fs', 'neuralChannels', 'channelLabels', ...
+        'rpeakSamples', 'rpeakTimes', 'condition', 'cardiacBlankWinMs', 'bandInfo', ...
+        'noiseInfo', 'sigmaWin', 'spikes', 'detectInfo', 'envelope', 'modality', 'metrics'});
+    out = struct();
+    for k = keep(:)', out.(k{1}) = D.(k{1}); end
+    out.invalidRuns = cell(1, size(D.validMask, 2));
+    for k = 1:size(D.validMask, 2)
+        d = diff([false; ~D.validMask(:, k); false]);
+        out.invalidRuns{k} = [find(d == 1), find(d == -1) - 1];
+    end
+    out.signals = signals;
+    out.info = info;
+    out.nSamples = size(D.validMask, 1);
+    save(f, '-struct', 'out', '-v7.3');
 end
 
 function f = write_input(f, X, fs)

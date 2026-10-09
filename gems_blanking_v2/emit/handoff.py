@@ -10,7 +10,9 @@ used, the unknown-median notes and the release.
 The file holds one ``blank_<consumer>_<signal>`` (N x 2, 1-based inclusive samples into
 the epoch, via ``extent.grid`` - invariant 15) per mask key, never a merged one, plus
 ``notmeasured_mmc_<signal>`` (R6), ``provenance_json``, ``events_json``,
-``retention_json`` and ``gate_json``. Provenance that does not name a model is refused.
+``retention_json`` and ``gate_json``, and the epoch's ``fs``, ``nSamples``,
+``epochStart_s`` and exact first sample ``epochStartSample0`` (MATLAB slices by the
+sample, never by the seconds). Provenance that does not name a model is refused.
 ``<signal>`` is :func:`matlab_signal_token` of the signal name: a pairs-lead HR channel
 ``LVN2-RVN2`` is written ``LVN2_minus_RVN2`` (``-`` is illegal in a MATLAB name).
 
@@ -48,7 +50,12 @@ from gems_blanking_v2.emit.line_distrust import LineDistrustRecord
 from gems_blanking_v2.emit.masks import ConsumerMask, MaskKey, mask_sample_spans, mmc_not_measured
 from gems_blanking_v2.emit.provenance import MaskProvenance, ProvenanceError
 from gems_blanking_v2.emit.qc import emit_gate, line_distrust_listed, spike_time_lost
-from gems_blanking_v2.extent.grid import T0_TOLERANCE_S, n_grid_frames, to_matlab_inclusive
+from gems_blanking_v2.extent.grid import (
+    T0_TOLERANCE_S,
+    n_grid_frames,
+    seconds_to_sample,
+    to_matlab_inclusive,
+)
 from gems_blanking_v2.extent.routing import RouteDecision
 from gems_blanking_v2.extent.tolerance import (
     OUT_OF_BUILD_CONSUMERS,
@@ -57,8 +64,9 @@ from gems_blanking_v2.extent.tolerance import (
 )
 from gems_blanking_v2.io.nan_interop import assert_no_zero_runs
 
-__all__ = ["PAIR_LEAD_TOKEN", "RecordingHeldError", "matlab_signal_token",
-           "signal_from_matlab_token", "write_mask_file"]
+__all__ = ["EPOCH_START_SAMPLE_KEY", "PAIR_LEAD_TOKEN", "RecordingHeldError",
+           "epoch_start_fields", "matlab_signal_token", "signal_from_matlab_token",
+           "write_mask_file"]
 
 F64 = npt.NDArray[np.float64]
 Bool = npt.NDArray[np.bool_]
@@ -72,6 +80,44 @@ adopted for HR by ruling 2026-10-02 (c)) appears inside a MATLAB variable name, 
 
 class RecordingHeldError(RuntimeError):
     """QC holds the recording; it is emitted only with an explicit release."""
+
+
+EPOCH_START_SAMPLE_KEY: Final = "epochStartSample0"
+"""The mask file variable holding the epoch's exact first sample (Andrea, 2026-10-09).
+
+0-based: the epoch is file samples ``[i0, i0 + nSamples)`` here, which are MATLAB rows
+``i0 + 1 .. i0 + nSamples``. MATLAB slices by this value and never converts
+``epochStart_s`` to samples (invariant 15). Stored as an integer-valued double, like
+``nSamples``, which is exact below 2**53."""
+
+
+def epoch_start_fields(epoch_start_s: float, fs: float,
+                       epoch_start_sample: int | None = None) -> dict[str, float]:
+    """Return the epoch-start variables of a mask file: seconds and the exact sample.
+
+    The ONE place the start sample is formed (invariants 22, 33). It is
+    :func:`~gems_blanking_v2.extent.grid.seconds_to_sample` of the start, the rule the
+    Night 4/5 runner slices with (``round(lo * fs)``). A caller that passes the sample
+    it actually sliced with must agree with that rule; two sources of truth that disagree
+    raise rather than letting MATLAB and Python index different samples.
+    """
+    canonical = seconds_to_sample(epoch_start_s, fs)
+    if canonical < 0:
+        msg = f"epoch start {epoch_start_s} s is before the recording's first sample"
+        raise ValueError(msg)
+    if epoch_start_sample is not None:
+        if isinstance(epoch_start_sample, bool) or not isinstance(epoch_start_sample,
+                                                                  int | np.integer):
+            msg = f"epoch_start_sample must be an integer sample index, got {epoch_start_sample!r}"
+            raise TypeError(msg)
+        if int(epoch_start_sample) != canonical:
+            msg = (f"epoch_start_sample {int(epoch_start_sample)} disagrees with "
+                   f"round({epoch_start_s} s x {fs} Hz) = {canonical}")
+            raise ValueError(msg)
+    if canonical >= 2**53:
+        msg = f"epoch start sample {canonical} is not exact as a double"
+        raise ValueError(msg)
+    return {"epochStart_s": float(epoch_start_s), EPOCH_START_SAMPLE_KEY: float(canonical)}
 
 
 def matlab_signal_token(signal: str) -> str:
@@ -235,8 +281,13 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
                     hum_features: Mapping[str, float] | None = None,
                     release: str | None = None,
                     events: Sequence[Mapping[str, Any]] = (),
-                    not_computed: Mapping[str, str] | None = None) -> Path:
+                    not_computed: Mapping[str, str] | None = None,
+                    epoch_start_sample: int | None = None) -> Path:
     """Write the masks as MATLAB blank spans with their provenance and QC gate.
+
+    The file carries the epoch's exact first sample as :data:`EPOCH_START_SAMPLE_KEY`
+    (Andrea, 2026-10-09), formed by :func:`epoch_start_fields`; ``epoch_start_sample``,
+    when given, is the sample the caller sliced with and must agree with that rule.
 
     ``not_computed`` maps a consumer the recording cannot run to the reason (RULING
     2026-10-08 (f) 6: no beat train passed, so no beats file - ``hrv`` and ``breathing``,
@@ -265,6 +316,7 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
         msg = "a mask file must carry provenance naming its model (task 15); none given"
         raise ProvenanceError(msg)
     provenance.validate()
+    start_fields = epoch_start_fields(epoch_start_s, fs, epoch_start_sample)
     _check_coverage(masks, signals)
     _check_not_computed(not_computed or {}, signals)
     provenance = _with_line_distrust(provenance, line_distrust, signals=signals, fs=fs,
@@ -324,7 +376,7 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
                                                 (not_computed or {}).items()},
                                                sort_keys=True, ensure_ascii=True,
                                                allow_nan=False),
-                "fs": float(fs), "epochStart_s": float(epoch_start_s),
+                "fs": float(fs), **start_fields,
                 "nSamples": float(n_samples)})
     path = Path(path)
     tmp = path.with_name(f".{path.name}.tmp")

@@ -8,10 +8,15 @@ function X = night6_consumer_input(plan, Y, run)
 %
 % Returns plan.n x numel(run.signals) double: the epoch rows i0+1 .. i0+n of each
 % signal's recipe (raw contact, pairs lead, or software tripole), scaled to volts,
-% then NaN at every span of blank_<consumer>_<signal> for the run's consumer - and
-% only that consumer's (invariant 2). Masked samples are NaN, never 0 (invariant 1):
-% Andrea's functions test isnan. The spans are 1-based inclusive into the epoch, so
-% span [a b] is X(a:b) here and file samples i0+a .. i0+b.
+% then NaN at every span of the run's consumer's mask - and only that consumer's
+% (invariant 2). Masked samples are NaN, never 0 (invariant 1): Andrea's functions
+% test isnan. The spans are 1-based inclusive into the epoch, so span [a b] is X(a:b)
+% here and file samples i0+a .. i0+b.
+%
+% Which mask: each column gets the mask of its own signal, except in a run with a
+% maskSignal (slow_wave, one ANT channel at a time - Andrea, 2026-10-09), where EVERY
+% column gets the mask of run.maskSignal, so slowWaveAnalysis_new's joint any(isnan)
+% mask is exactly that channel's mask.
     rows = plan.i0 + (1:plan.n);
     lead = run.consumers{1};
     X = zeros(plan.n, numel(run.signals));
@@ -19,9 +24,13 @@ function X = night6_consumer_input(plan, Y, run)
         sig = run.signals{j};
         r = plan.recipes.(matlab.lang.makeValidName(sig));
         X(:, j) = (double(Y(rows, r.cols)) * r.weights) * plan.scaleToVolts;
-        m = plan.masks(strcmp({plan.masks.consumer}, lead) & strcmp({plan.masks.signal}, sig));
+        maskSig = sig;
+        if isfield(run, 'maskSignal') && ~isempty(run.maskSignal)
+            maskSig = run.maskSignal;
+        end
+        m = plan.masks(strcmp({plan.masks.consumer}, lead) & strcmp({plan.masks.signal}, maskSig));
         if numel(m) ~= 1
-            error('night6:mask', 'expected one mask for %s/%s, found %d', lead, sig, numel(m));
+            error('night6:mask', 'expected one mask for %s/%s, found %d', lead, maskSig, numel(m));
         end
         for k = 1:size(m.spans, 1)
             X(m.spans(k, 1):m.spans(k, 2), j) = NaN;
