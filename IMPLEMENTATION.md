@@ -6143,6 +6143,27 @@ The rulings headed **2026-10-08**, **(b)** and **(c)** were written on **2026-10
 7. **The pilot runs tonight on a labelled stand-in threshold** (z 3.0 for every consumer), written to the pilot folder only. Night 5 refuses stand-ins.
    - Blanked time per consumer and the HRV vs breathing comparison are recomputed once the tolerance-mapping ruling is made.
 
+### RULING 2026-10-09 (h) — slow-wave setting; slow-wave morphology after the build
+
+**Measured (settings test, 18 epochs, decimated ×78 with `blankIdx`; criteria hashed 12:45, addendum 17:43):**
+- The top-ranked setting (low-pass 0.10 Hz, order 4) leads largely because criterion (b) rewards rates inside 4–6 cpm and its corner sits at 6 cpm. It moves tachygastric windows from 8.6% to 0.25%, bradygastric windows from 14% to 32%, and the mean rate from 5.30 to 4.72 cpm.
+- **17 of the 18 epochs were unmasked,** so motion artifacts affected the scores. For example, on H's middle epoch an artifact at about 297 s added peaks under `batch_process`.
+- At 0.15 Hz, order 4 with smoothing scores the same as `batch_process` (0.759 against 0.757).
+- **The faster spectral content is mostly a harmonic:** on H's middle epoch, about 9.5 cpm against a 4.7 cpm fundamental.
+
+**Andrea, 2026-10-09:**
+
+1. **Night 6's slow-wave rate and timing keep `batch_process`:** low-pass 0.15 Hz, order 2, 5 s smoothing, 15 s edge, decimated ×78, with `blankIdx`.
+   - **Why:** there is no high-pass, only her detrend, so the passband is effectively 0–9 cpm. It covers the bradygastric (down to her rate rule's 3 cpm floor), normal and tachygastric (up to her 8 cpm flag) ranges, and excludes the slow wave's harmonic above about 9 cpm.
+   - It is covered by her 15 s buffer (7.5 s settling), so no tolerance re-run and no mask re-emission is needed.
+2. **Amplitude caveat, recorded in provenance:** `slowWaveTimeSeries` and the peak amplitudes are amplitudes of the 0.15 Hz-filtered wave, not the true waveform. Near a masked epoch start they are also sensitive at the few-µV level to her whole-epoch detrend, at either sampling rate.
+3. **After task 19, a slow-wave morphology analysis:**
+   - use the cycle times from (1) to locate each slow wave;
+   - measure the same stretches in a wide band (up to about 1–2 Hz; the decimated rate is sufficient): upstroke, plateau, duration and true amplitude;
+   - cycle-aligned, per channel, with its own blank handling and edge settling;
+   - specified with Andrea before it is built.
+4. **The scoring is a lesson for any future filter choice:** score against setting-independent spectral agreement and Andrea's own cycle marks on masked data, never against membership of the normal band.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
