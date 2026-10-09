@@ -2348,6 +2348,54 @@ The rulings headed **2026-10-08**, **(b)** and **(c)** were written on **2026-10
    - **The production beat trains are published** through the corrected publisher, as byte-identical copies.
    - **The routing writers' fix is deferred** until after task 19.
 
+### RULING 2026-10-09 (b) — peri-R window per recording class; adapted I/J/K scoring; open item 4 parts
+
+**Measured (build, 2026-10-09):**
+- **gems_a_t02_2_3_bl_215610:** its −16 ms edge is reproducible on the left cuff. Odd beats, even beats, the first half and the second half all give −15.5 to −15.0 ms, at 3.8–4.4× chance; the right cuff gives −15 ms.
+- **The 11.5 ms runner-up (gems_a_t06_2_1_bl_191057 L)** rests on a handful of spikes: its first half gives −6 ms.
+- **Across the other 121 cuffs,** after these two recordings the widest extent is 10.5 ms.
+
+**Andrea, 2026-10-09:**
+
+1. **The peri-R window is 11.5 ms before R and 9.5 ms after R for every recording, with one exception:** gems_a_t02_2_3_bl_215610 (both cuffs) uses 16.0 ms before R and 9.5 ms after.
+   - **A recording that needs more than 11.5 ms** (in the rest of routing or the final re-measurement) uses its own routed extent instead. It is listed in the window file and reported, never silently under-blanked.
+   - The (k) 1 refusal stays: a recording whose routed extent exceeds the window that applies to it is refused.
+   - The window file lists both classes, and its hash goes into provenance.
+   - (k) 1's "maximum over all files" is replaced by this rule.
+2. **Item 4's two other parts, as recommended:**
+   - **Minutes where the HR train has no beats:** the spike consumer distrusts the minute, because heartbeat leak continues there but no spans can be placed. Report the spike time lost, by animal.
+   - **The line-noise test** (ruling 2026-10-08 (d)) runs on the samples spike detection actually uses, so the peri-R spans are excluded.
+3. **Adapted I/J/K, from the builder's points:**
+   - **Offline comparison scores** of adapted against pooled on the I/J evaluation spans and the K exam span are accepted, as RULING 2026-10-09 item 5 asks. The registry keeps its "never scores evaluation spans" flag, so production masks inside evaluation spans come from the pooled model.
+   - **Pooled is not accepted** as the main I/J/K model in Night 5.
+   - **The labelling session's user name "User"** is accepted for setADAPT_IJK only, and recorded.
+   - **The adapted calibrators' weak validation** is stated on the model-options page and in provenance. Andrea confirms the I/J/K ids from the scores.
+
+### RULING 2026-10-09 (c) — edge pads and settling; K exam order; J top-up; slow wave at masked edges
+
+**Measured (build, 2026-10-09):**
+- **Spike edge settling:** `step1_bandpass` at a NaN edge, run as v2 calls it, settles in at most 7.8 ms. Her `fillmissing` holds an edge value across the gap, which turns an edge spike into a step. `step4_waveforms` then reads up to 2.5 ms further, for 10.3 ms in total. Task 13's 5.1 ms was a one-way impulse response and understates this.
+- **mmc:** `extract_mmc` fills NaN only for its 2–50 Hz `filtfilt` (extract_mmc.m:104–107). Its 15 s `movmedian` and MAD skip NaN (:231–232). The worst-case settling at a blanked edge is 1.16 s.
+- **Slow-wave decimation check:** it failed its fixed criteria on all 5 recordings, at both factors. The cause is mask edges, not decimation:
+  - Away from masks, decimated peaks match full rate within 21 ms.
+  - At full rate, growing a mask by 3.2 ms moves peaks by up to 1.17 s, because Night 6 passed `blankIdx = []`. Her 15 s edge buffer therefore guarded only the epoch ends.
+
+**Andrea, 2026-10-09:**
+
+1. **Spike edge pad:** v2 sets `P.edgeBufferMs = 10.5` ms (invariant 19, rounded up to 0.5 ms). The measured zero-phase edge settling replaces 5.1 ms wherever spike settling is used.
+2. **mmc padding at a blanked edge: 1.5 s,** replacing task 13's 15 s `extra_edge_s`.
+3. **Settling rules for trim mode (B) and the recovery-start table:**
+   - **(b)** Chained stages add up only where they run on filled or filtered data. A stage that skips NaN contributes nothing at a blanked edge.
+   - **(c)** The CV2 bins and the mmc delay window are kept.
+   - **(d)** Peak spacing and event grouping count where they look back in time. The refractory period is negligible.
+   - Recompute the table, and report every value used.
+4. **The K exam span (seed 20261009)** was marked after Andrea's K adaptation labels. It stays valid, because it is a different recording and no model output was shown either time. The order is recorded in provenance.
+5. **J top-up:** 57 low-P J cores (`setADAPT_J_topup.parquet`), tagged as adaptation and admitted for J only by their checksum. The retrain preflight requires J negatives.
+6. **Slow wave at masked edges: option (a).**
+   - Night 6 passes each channel's masked spans to `slowWaveAnalysis_new` as `blankIdx` as well as NaN, so her 15 s `edgeBufferSec` guards every masked span. Her 15 s covers the ~8 s low-pass settling.
+   - Re-run the decimation check this way (factor 78, which divides 24414, with the same fixed criteria). Night 6 runs decimated only if it passes.
+   - Any decimation factor must divide 24414.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
