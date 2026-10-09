@@ -19,6 +19,13 @@ only because the slow-wave low-pass is order 2. Where a chain has a further stag
 touches the edge (slow wave's 5 s Gaussian ``smoothdata``), the settling is the
 maximum of the terms. A consumer with no declared chain has settling ``None``.
 
+Where the chain's settling at a blanked edge has been MEASURED as v2 runs it
+(:data:`EDGE_SETTLING`, RULING 2026-10-09 (c)), the measurement replaces the impulse
+response: her chains fill across the NaN and filter zero phase, which the one-way
+impulse response understates. Spikes: 7.78 ms (``step1_bandpass``) + 2.5 ms
+(``step4_waveforms`` before a gap) = 10.28 ms, against task 13's 5.1 ms. mmc: 1.16 s
+measured, padded 1.5 s, against task 13's 15 s (its moving median and MAD skip NaN).
+
 The cardiac tolerance is operational
 ------------------------------------
 For ``hrv`` the question is not an amplitude: suppress the span, re-run the beat
@@ -62,12 +69,17 @@ from gems_blanking_v2.types import Event
 __all__ = [
     "CONSUMER_FILTERS",
     "CONSUMER_SIGNAL_ERRATA",
+    "EDGE_SETTLING",
     "MMC_NOT_MEASURED_HALF_S",
     "OUT_OF_BUILD_CONSUMERS",
+    "SPIKE_STEP1_EDGE_S",
+    "SPIKE_WAVEFORM_AFTER_PEAK_S",
+    "SPIKE_WAVEFORM_BEFORE_PEAK_S",
     "STRUCK_CONSUMERS",
     "CardiacVerdict",
     "ConsumerFilter",
     "ConsumerSettling",
+    "EdgeSettling",
     "Extent",
     "ExtentNotAssessableError",
     "NotAssessable",
@@ -77,6 +89,7 @@ __all__ = [
     "compute_extent",
     "consumer_settling",
     "consumer_signals",
+    "edge_settling_record",
     "expected_consumers",
     "extent_consumers",
     "extents_for_events",
@@ -85,6 +98,7 @@ __all__ = [
     "impulse_settling_s",
     "is_confirmed_motion",
     "mmc_not_measured_spans",
+    "settling_provenance",
     "step_settling_s",
 ]
 
@@ -182,6 +196,116 @@ class ConsumerFilter:
     extra_source: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class EdgeSettling:
+    """A consumer chain's settling at a NaN (blanked) edge, MEASURED as v2 runs the chain.
+
+    RULING 2026-10-09 (c): the one-way impulse response (``impz``, :func:`impulse_settling_s`)
+    understates the edge: her chains ``fillmissing`` across the NaN and then ``filtfilt``
+    (zero phase), so the edge itself is filtered, in both directions. These figures are
+    the measured settling of that, by task 13's rule (the last distance from the edge at
+    which the error still exceeds 1 % of its peak), worst case over input and side.
+
+    ``filter_s`` - the chain's filter alone, zero phase over her fill, worst side;
+    ``before_gap_s`` / ``after_gap_s`` - every stage that touches the edge, on the valid
+    data BEFORE a gap (the gap is ahead of it) and AFTER a gap (the recovery-start side);
+    ``total_s`` - their maximum (invariant 19);
+    ``pad_s`` - the pad Andrea ruled at a blanked edge (``total_s`` rounded up);
+    ``extent_pad_s`` - what an extent is padded by (:func:`consumer_settling`): the ruling
+    says which of the two;
+    ``files`` - ``(measurement file, sha256)``, relative to the build session's scratchpad
+    (where they were made; they are not in the repo), so the record names exactly the
+    measurement it rests on.
+    """
+
+    consumer: str
+    filter_s: float
+    before_gap_s: float
+    after_gap_s: float
+    pad_s: float
+    extent_pad_s: float
+    ruling: str
+    method: str
+    files: tuple[tuple[str, str], ...]
+
+    @property
+    def total_s(self) -> float:
+        """The worse side (invariant 19: a maximum over every stage that touches the edge)."""
+        return max(self.before_gap_s, self.after_gap_s)
+
+
+SPIKE_WAVEFORM_BEFORE_PEAK_S: Final = 0.0015
+"""``step4_waveforms.m:44-46``: wfPreMs 1 ms + wfAlignSearchMs 0.5 ms read before an aligned
+peak - the part of the waveform window that reaches back into a gap BEHIND the spike
+(the recovery-start side). Measured file: ``settling.json`` ``step4_reach_ms.lead``."""
+SPIKE_WAVEFORM_AFTER_PEAK_S: Final = 0.0025
+"""wfPostMs 2 ms + wfAlignSearchMs 0.5 ms read after it - into a gap AHEAD of the spike
+(``settling.json`` ``step4_reach_ms.trail``)."""
+SPIKE_STEP1_EDGE_S: Final = 0.007782
+"""``step1_bandpass`` (300-3000 Hz order 4, ``fillmissing`` + ``filtfilt``) at a NaN edge,
+as v2 calls it: 7.782 ms on either side (``settling.json`` ``worst``, input
+``bump_*_G21``). Task 13's one-way impulse response gave 5.1 ms."""
+
+EDGE_SETTLING: Final[Mapping[str, EdgeSettling]] = {
+    "spikes": EdgeSettling(
+        "spikes", SPIKE_STEP1_EDGE_S,
+        before_gap_s=SPIKE_STEP1_EDGE_S + SPIKE_WAVEFORM_AFTER_PEAK_S,
+        after_gap_s=SPIKE_STEP1_EDGE_S + SPIKE_WAVEFORM_BEFORE_PEAK_S,
+        pad_s=0.0105, extent_pad_s=SPIKE_STEP1_EDGE_S + SPIKE_WAVEFORM_AFTER_PEAK_S,
+        ruling="RULING 2026-10-09 (c) 1: P.edgeBufferMs = 10.5 ms (invariant 19, rounded up "
+               "to 0.5 ms); the measured zero-phase edge settling replaces task 13's 5.1 ms "
+               "wherever spike settling is used",
+        method="edgepad/edgepad_run.m runs her step1_bandpass (night6_v2_params) on "
+               "synthetic, noise and real snippets with NaN gaps; edgepad/analyse_settling.py "
+               "takes the last distance from the gap at which the error exceeds 1 % of its "
+               "peak (task 13's rule), worst over input and side: step1 7.782 ms; step4 reads "
+               "2.5 ms further before a gap and 1.5 ms after one: 10.282 ms in total",
+        files=(("edgepad/settling.json",
+                "908feb679d6bd378e2d2849ba9a0e706008f8c70dbcb4c0292b71ffe48e2c4e9"),
+               ("edgepad/pad_savings.json",
+                "3995aef33b143cac47d3e0f6f9ecd5e39eefe38bcd3c56bb195f5b4147d3b4a3"),
+               ("edgepad/analyse_settling.py",
+                "658b7b31f7104224ff30f5e8888e22fc7be905e92c8e447151dc0fca615d7fee"),
+               ("edgepad/edgepad_run.m",
+                "e1cb67e1c79a7ad3de25688129d8bfbcd5a0e879e2e2ebe5907731ac06663ef6"))),
+    "mmc": EdgeSettling(
+        "mmc", 1.1594, before_gap_s=1.1594, after_gap_s=1.1594, pad_s=1.5, extent_pad_s=1.5,
+        ruling="RULING 2026-10-09 (c) 2: mmc padding at a blanked edge 1.5 s, replacing task "
+               "13's 15 s extra_edge_s",
+        method="edgepad/mmc_edge_settling.py: extract_mmc.m:103-107 (butter(4, [2 50]) -> "
+               "zp2sos -> fillmissing linear -> filtfilt, NaN restored); error = filtered "
+               "with the gap filled - filtered without the gap; last distance above 1 % of "
+               "its peak, worst over input (step, white noise, 5 and 20 Hz sines, a burst at "
+               "the edge), gap (25 ms - 10 s) and side: 1.1594 s. Her moving median and MAD "
+               "(:231-232) are 'omitnan': they skip the blank and add nothing",
+        files=(("edgepad/mmc_edge_settling.json",
+                "321aae64d6847dc3d5acee10fe90c939dcb7fba38a47e127afb6f462f65b1f2b"),
+               ("edgepad/mmc_edge_settling.py",
+                "0adf4782392246fba90d50c575aa991ef68d8956ffb2e25160930399b4e974cf"))),
+}
+"""THE measured edge settlings (invariant 33): :func:`consumer_settling`, the recovery-start
+table (``extent.recovery_start``) and the Night 6 declaration
+(``matlab/night6/edge_settling.json``, held equal to :func:`edge_settling_record` by a test)
+all read them from here."""
+
+
+def edge_settling_record() -> dict[str, Any]:
+    """Return :data:`EDGE_SETTLING` as JSON-ready data (what Night 6 declares and records).
+
+    Seconds AND, for the spike pad, the ``P.edgeBufferMs`` value in ms that
+    ``night6_v2_params`` sets, so MATLAB never converts. Files are ``[{file, sha256}]`` rows
+    (MATLAB's ``jsondecode`` would mangle a file name used as a key, invariant 22).
+    """
+    out: dict[str, Any] = {"schema": 1, "ruling": "RULING 2026-10-09 (c) 1-2"}
+    for name, e in sorted(EDGE_SETTLING.items()):
+        out[name] = {"filter_s": e.filter_s, "before_gap_s": e.before_gap_s,
+                     "after_gap_s": e.after_gap_s, "total_s": e.total_s, "pad_s": e.pad_s,
+                     "extent_pad_s": e.extent_pad_s, "ruling": e.ruling, "method": e.method,
+                     "files": [{"file": f, "sha256": h} for f, h in e.files]}
+    out["spikes"]["edge_buffer_ms"] = round(EDGE_SETTLING["spikes"].pad_s * 1e3, 6)
+    return out
+
+
 CONSUMER_FILTERS: Final[Mapping[str, ConsumerFilter]] = {
     "spikes": ConsumerFilter(
         "spikes", "bandpass", 300.0, 3000.0, 4,
@@ -191,9 +315,10 @@ CONSUMER_FILTERS: Final[Mapping[str, ConsumerFilter]] = {
         "the ENG band (A.4); task 18 is out of this build (ruling (b) R5)"),
     "mmc": ConsumerFilter(
         "mmc", "bandpass", 2.0, 50.0, 4, "extract_mmc.m: butter(4, [2 50]) + filtfilt",
-        extra_edge_s=15.0,
-        extra_source="extract_mmc.m movmedian threshold, sigmaWin 30 s: its half-window "
-                     "reaches 15 s across an edge (ruling (b) R6)"),
+        extra_source="none: extract_mmc.m's moving median and MAD (:231-232, sigmaWin 30 s) "
+                     "are 'omitnan', so they skip a blank and add nothing at its edge "
+                     "(RULING 2026-10-09 (c) 3 (b)); task 13's 15 s half-window is withdrawn "
+                     "by (c) 2 - the edge is EDGE_SETTLING['mmc']"),
     "slow_wave": ConsumerFilter(
         "slow_wave", "lowpass", 0.0, 0.15, 2,
         "batch_process.m P.sw_lowPassCutoff=0.15, P.sw_lowPassOrder=2; "
@@ -262,15 +387,25 @@ def step_settling_s(f: ConsumerFilter, fs: float) -> float:
 
 @dataclass(frozen=True, slots=True)
 class ConsumerSettling:
-    """A consumer chain's settling: each term, and the binding maximum."""
+    """A consumer chain's settling: each term, and the binding figure.
+
+    ``edge`` is the chain's MEASURED zero-phase settling at a blanked edge
+    (:data:`EDGE_SETTLING`) where one exists: it REPLACES the one-way impulse response,
+    which measures the same filter less faithfully (RULING 2026-10-09 (c)), and the extent
+    is padded by its ``extent_pad_s``. Elsewhere the settling is the maximum of the impulse
+    response and any further stage that touches the edge (invariant 19).
+    """
 
     consumer: str
     impulse_s: float
     extra_s: float
+    edge: EdgeSettling | None = None
 
     @property
     def total_s(self) -> float:
-        """``max`` over every stage that touches the edge (invariant 19)."""
+        """The measured edge pad where there is one, else ``max`` over the stages."""
+        if self.edge is not None:
+            return self.edge.extent_pad_s
         return max(self.impulse_s, self.extra_s)
 
 
@@ -279,7 +414,30 @@ def consumer_settling(consumer: str, fs: float) -> ConsumerSettling | None:
     f = CONSUMER_FILTERS.get(consumer)
     if f is None:
         return None
-    return ConsumerSettling(consumer, impulse_settling_s(f, float(fs)), f.extra_edge_s)
+    return ConsumerSettling(consumer, impulse_settling_s(f, float(fs)), f.extra_edge_s,
+                            EDGE_SETTLING.get(consumer))
+
+
+def settling_provenance(fs: float) -> dict[str, Any]:
+    """Every consumer's settling at ``fs`` as JSON-ready provenance, with its basis.
+
+    Per consumer: ``total_s`` (what an extent is padded by), the impulse and extra terms,
+    and, where the edge was measured, the :func:`edge_settling_record` entry (ruling,
+    method and the measurement files' SHA-256). Missing values are absent keys. A mask
+    writer records this beside ``MaskProvenance.settling_s`` so the numbers carry their
+    measurement.
+    """
+    rec = edge_settling_record()
+    out: dict[str, Any] = {}
+    for name in sorted(CONSUMER_FILTERS):
+        s = consumer_settling(name, fs)
+        assert s is not None
+        row: dict[str, Any] = {"total_s": s.total_s, "impulse_s": s.impulse_s,
+                               "extra_s": s.extra_s}
+        if s.edge is not None:
+            row["edge"] = rec[name]
+        out[name] = row
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -505,7 +663,13 @@ def extents_for_events(
 MMC_NOT_MEASURED_HALF_S: Final = 15.0
 """Ruling 2026-10-07 (b) R6: mmc output within +/-15 s of ANY blank is reported "not
 measured" - the half-width of its 30 s moving threshold (2026-10-06). A sensitivity
-carried beside the mask, not a fix; ``extract_mmc.m`` is unchanged."""
+carried beside the mask, not a fix; ``extract_mmc.m`` is unchanged.
+
+The same derivation as task 13's withdrawn 15 s ``extra_edge_s`` (the moving threshold's
+half-window), but a different use: this is a reported span, never blanked, and R6 rules
+it separately. RULING 2026-10-09 (c) 2 replaces only the PADDING (now
+``EDGE_SETTLING['mmc']``, 1.5 s), so this stays 15 s until Andrea rules on it; (c) 3 (b)
+(the moving median and MAD skip NaN) undercuts its basis - flagged, not changed."""
 
 
 def mmc_not_measured_spans(blanks_s: Sequence[tuple[float, float]], duration_s: float

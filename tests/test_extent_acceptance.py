@@ -34,7 +34,8 @@ HERMETIC PART, built with task 13 (2026-10-07): a 200 ms synthetic mark inside a
 synthetic candidate whose z sits between ``z_exit`` and the tolerance everywhere but the
 mark. The bound, stated against the measured settling: the spike extent may exceed the
 mark by at most ``2 * settling + 2 * GRID_S`` (padding both sides, plus one frame of
-quantisation at each edge) - at the TDT rate 2 x 5.1 ms + 20 ms = 30 ms - and must be
+quantisation at each edge) - at the TDT rate 2 x 10.28 ms + 20 ms = 40.6 ms (the measured
+edge settling, RULING 2026-10-09 (c) 1; task 13's impz gave 5.1 ms) - and must be
 far below the candidate's width. The store-based measurement (rounds 1-4, per
 consumer, per condition) needs the audit marks and is a measurement run, not a unit test.
 """

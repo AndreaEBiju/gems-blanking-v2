@@ -1,0 +1,53 @@
+{
+ "mmc": {
+  "after_gap_s": 1.1594,
+  "before_gap_s": 1.1594,
+  "extent_pad_s": 1.5,
+  "files": [
+   {
+    "file": "edgepad/mmc_edge_settling.json",
+    "sha256": "321aae64d6847dc3d5acee10fe90c939dcb7fba38a47e127afb6f462f65b1f2b"
+   },
+   {
+    "file": "edgepad/mmc_edge_settling.py",
+    "sha256": "0adf4782392246fba90d50c575aa991ef68d8956ffb2e25160930399b4e974cf"
+   }
+  ],
+  "filter_s": 1.1594,
+  "method": "edgepad/mmc_edge_settling.py: extract_mmc.m:103-107 (butter(4, [2 50]) -> zp2sos -> fillmissing linear -> filtfilt, NaN restored); error = filtered with the gap filled - filtered without the gap; last distance above 1 % of its peak, worst over input (step, white noise, 5 and 20 Hz sines, a burst at the edge), gap (25 ms - 10 s) and side: 1.1594 s. Her moving median and MAD (:231-232) are 'omitnan': they skip the blank and add nothing",
+  "pad_s": 1.5,
+  "ruling": "RULING 2026-10-09 (c) 2: mmc padding at a blanked edge 1.5 s, replacing task 13's 15 s extra_edge_s",
+  "total_s": 1.1594
+ },
+ "ruling": "RULING 2026-10-09 (c) 1-2",
+ "schema": 1,
+ "spikes": {
+  "after_gap_s": 0.009282,
+  "before_gap_s": 0.010282,
+  "edge_buffer_ms": 10.5,
+  "extent_pad_s": 0.010282,
+  "files": [
+   {
+    "file": "edgepad/settling.json",
+    "sha256": "908feb679d6bd378e2d2849ba9a0e706008f8c70dbcb4c0292b71ffe48e2c4e9"
+   },
+   {
+    "file": "edgepad/pad_savings.json",
+    "sha256": "3995aef33b143cac47d3e0f6f9ecd5e39eefe38bcd3c56bb195f5b4147d3b4a3"
+   },
+   {
+    "file": "edgepad/analyse_settling.py",
+    "sha256": "658b7b31f7104224ff30f5e8888e22fc7be905e92c8e447151dc0fca615d7fee"
+   },
+   {
+    "file": "edgepad/edgepad_run.m",
+    "sha256": "e1cb67e1c79a7ad3de25688129d8bfbcd5a0e879e2e2ebe5907731ac06663ef6"
+   }
+  ],
+  "filter_s": 0.007782,
+  "method": "edgepad/edgepad_run.m runs her step1_bandpass (night6_v2_params) on synthetic, noise and real snippets with NaN gaps; edgepad/analyse_settling.py takes the last distance from the gap at which the error exceeds 1 % of its peak (task 13's rule), worst over input and side: step1 7.782 ms; step4 reads 2.5 ms further before a gap and 1.5 ms after one: 10.282 ms in total",
+  "pad_s": 0.0105,
+  "ruling": "RULING 2026-10-09 (c) 1: P.edgeBufferMs = 10.5 ms (invariant 19, rounded up to 0.5 ms); the measured zero-phase edge settling replaces task 13's 5.1 ms wherever spike settling is used",
+  "total_s": 0.010282
+ }
+}

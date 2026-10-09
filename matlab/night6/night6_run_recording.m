@@ -247,6 +247,12 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
     o.animal = src.animal;
     R.functions = function_provenance();
     R.params = params();
+    % RULING 2026-10-09 (c) 1-2: the measured edge settlings this build applies (the spike
+    % edge pad here; the mmc 1.5 s pad in the masks' extents), with the measurement files'
+    % SHA-256 - the whole declaration, so the record names what every pad rests on.
+    Ed = night6_edge_settling();
+    R.edge_settling = struct('declaration', Ed.file, 'sha256', Ed.sha256, ...
+                             'spikes', Ed.spikes, 'mmc', Ed.mmc);
     % Labels are the epoch tag alone: the folder already names animal, session and
     % model, and Windows MAX_PATH is 260 (cross-platform rule 5) - the smoke run's
     % first version, <session>_<epoch>_spikes_input.mat, reached ~306 and save failed.
@@ -465,7 +471,7 @@ function F = function_provenance()
     ours = {'process_dataset_v2', 'night6_v2_steps', 'night6_v2_params', ...
             'night6_step1a_fallback', 'night6_sha256_file', 'night6_recovery_start', ...
             'night6_recovery_lead_in', 'night6_recovery_trim_outputs', ...
-            'night6_trim_modes', 'night6_check_trim_mode'};
+            'night6_trim_modes', 'night6_check_trim_mode', 'night6_edge_settling'};
     hers = [setdiff({C.name}, ours, 'stable'), night6_v2_steps(), ...
             {'step1a_blank_cardiac', 'pipeline_params', 'bulk_load_one'}];   % step1a: (j) 1 fallback
     here = fileparts(mfilename('fullpath'));
@@ -500,6 +506,16 @@ function s = spike_param_record(P)
         s.(f{1}) = P.(f{1});
     end
     s.source = 'night6_v2_params (pipeline_params + 300-3000 Hz), as handed to her steps';
+    % RULING 2026-10-09 (c) 1: where edgeBufferMs came from - the declaration, its hash, the
+    % measured settling it covers and the measurement files' SHA-256.
+    s.edgeBufferMs_source = edge_settling_record(night6_edge_settling(), 'spikes');
+end
+
+function r = edge_settling_record(E, consumer)
+% One consumer's measured edge settling as applied, with the declaration it was read from.
+    r = E.(consumer);
+    r.declaration = E.file;
+    r.declaration_sha256 = E.sha256;
 end
 
 function tf = step1a_channels(signals, o)

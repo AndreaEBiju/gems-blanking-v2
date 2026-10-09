@@ -32,6 +32,7 @@ from gems_blanking_v2.emit import masks as mk
 from gems_blanking_v2.emit import peri_r as pr
 from gems_blanking_v2.emit.provenance import MaskProvenance, ProvenanceError
 from gems_blanking_v2.extent.grid import n_grid_frames, seconds_to_sample
+from gems_blanking_v2.extent.tolerance import EDGE_SETTLING
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from scipy.io import loadmat, savemat
@@ -315,13 +316,13 @@ V2_DUR_S = 20.0
 RR_S = 0.17
 WINDOWS = {"measured_shape": (16.0, 9.5), "narrow": (2.0, 3.0)}
 """The fixture shaped like the measured window, and a narrow one Andrea could choose: a
-+/-15 ms guard reaches past span + 10 ms pad only when a side is under 5 ms."""
++/-15 ms guard reaches past span + 10.5 ms pad only when a side is under 4.5 ms."""
 
 
 def _guard_case(tmp: Path) -> dict[str, Any]:
     n = int(V2_DUR_S * FS)
     beats = np.round(np.arange(0.11, V2_DUR_S - 0.05, RR_S) * FS).astype(np.int64) + 1  # 1-based
-    pad = seconds_to_sample(10e-3, FS)  # her P.edgeBufferMs, asserted by the harness
+    pad = seconds_to_sample(EDGE_SETTLING["spikes"].pad_s, FS)  # v2's P.edgeBufferMs, (c) 1
     cases: dict[str, Any] = {}
     for name, (before, after) in WINDOWS.items():
         w = pr.PeriRWindow(before, after, f"{name}.json", "0" * 64)
@@ -368,7 +369,7 @@ def test_step3b_excludes_exactly_the_peri_r_span_plus_the_edge_pad(tmp_path: Pat
     for name, case in cases.items():
         r = res[name]
         assert r["error"] == "", (name, r["error"])
-        assert r["edge_buffer_ms"] == 10, name
+        assert r["edge_buffer_ms"] == 10.5, name  # RULING 2026-10-09 (c) 1
         n_bin = int(r["bin_n"])
         exc = case["excluded"]
         n = exc.size

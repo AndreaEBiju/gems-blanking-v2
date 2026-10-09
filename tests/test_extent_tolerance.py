@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
+import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -94,15 +98,88 @@ def test_order_4_chains_measure_exactly_what_the_detection_side_measures(
 
 
 def test_measured_settling_per_consumer_at_the_tdt_rate() -> None:
-    """The numbers this build reports (impz, 1% of peak, at 24414.0625 Hz)."""
+    """The numbers this build reports (impz, 1% of peak, at 24414.0625 Hz; edges measured).
+
+    RULING 2026-10-09 (c): spikes and mmc use the MEASURED zero-phase edge settling, not
+    task 13's one-way impulse response (5.1 ms) or 15 s half-window.
+    """
     got = {c: _settle(c) for c in tl.CONSUMER_FILTERS}
-    assert got["spikes"].total_s == pytest.approx(0.00512, abs=1e-4)
+    assert got["spikes"].impulse_s == pytest.approx(0.00512, abs=1e-4)  # task 13, superseded
+    assert got["spikes"].total_s == pytest.approx(0.010282, abs=1e-12)  # 7.782 + 2.5 ms
     assert got["hrv"].total_s == pytest.approx(0.1402, abs=1e-3)
     assert got["mmc"].impulse_s == pytest.approx(0.4858, abs=1e-3)
-    assert got["mmc"].total_s == 15.0  # the 30 s moving threshold's half-window (R6)
+    assert got["mmc"].extra_s == 0.0  # her moving median/MAD skip NaN ((c) 3 (b))
+    assert got["mmc"].total_s == 1.5  # (c) 2: was 15.0
     sw = got["slow_wave"]
     assert sw.impulse_s == pytest.approx(8.167, abs=0.01)  # the spec's measured 8.17 s
     assert sw.total_s == sw.impulse_s > sw.extra_s == 2.5
+    assert sw.edge is None and got["hrv"].edge is None  # not measured: impz stands
+
+
+def test_the_edge_settlings_are_the_measured_ones_and_the_pads_round_them_up() -> None:
+    """(c) 1-2: 7.782 ms + 2.5 ms before a gap (1.5 ms after) -> 10.5 ms; 1.1594 s -> 1.5 s."""
+    sp, mmc = tl.EDGE_SETTLING["spikes"], tl.EDGE_SETTLING["mmc"]
+    assert sp.filter_s == tl.SPIKE_STEP1_EDGE_S == 0.007782
+    assert sp.before_gap_s == pytest.approx(0.007782 + 0.0025, abs=1e-15)
+    assert sp.after_gap_s == pytest.approx(0.007782 + 0.0015, abs=1e-15)
+    assert sp.total_s == sp.before_gap_s == sp.extent_pad_s
+    assert sp.pad_s == 0.0105 == math.ceil(sp.total_s * 2e3) / 2e3  # rounded up to 0.5 ms
+    assert sp.filter_s > sp.total_s - 0.003 > tl.impulse_settling_s(  # zero phase > one way
+        tl.CONSUMER_FILTERS["spikes"], FS)
+    assert mmc.filter_s == mmc.total_s == 1.1594
+    assert mmc.pad_s == mmc.extent_pad_s == 1.5 == math.ceil(mmc.total_s * 2) / 2
+    for e in tl.EDGE_SETTLING.values():
+        assert e.ruling.startswith("RULING 2026-10-09 (c)") and e.files
+        assert all(re.fullmatch(r"[0-9a-f]{64}", h) for _, h in e.files)
+
+
+def test_the_measurement_files_are_the_ones_hashed() -> None:
+    """Where the build session's scratchpad still holds them, the recorded SHA-256 matches."""
+    root = os.environ.get("GEMS_BUILD_SCRATCHPAD")
+    if not root:
+        pytest.skip("GEMS_BUILD_SCRATCHPAD (the build session's scratchpad) is not set")
+    for e in tl.EDGE_SETTLING.values():
+        for f, h in e.files:
+            assert hashlib.sha256((Path(root) / f).read_bytes()).hexdigest() == h, f
+
+
+def test_night6_declares_exactly_the_python_edge_settlings() -> None:
+    """``matlab/night6/edge_settling.json`` is :func:`edge_settling_record`, byte for byte."""
+    f = Path(__file__).resolve().parents[1] / "matlab" / "night6" / "edge_settling.json"
+    rec = tl.edge_settling_record()
+    assert json.loads(f.read_text(encoding="utf-8")) == rec
+    assert f.read_bytes() == (json.dumps(rec, ensure_ascii=True, sort_keys=True, indent=1,
+                                         allow_nan=False) + "\n").encode("ascii")
+    assert rec["spikes"]["edge_buffer_ms"] == 10.5
+    params = (f.parent / "night6_v2_params.m").read_text(encoding="utf-8")
+    assert "P.edgeBufferMs = E.spikes.edge_buffer_ms;" in params  # read, never typed
+    assert "'edgeBufferMs', 10.5" in params  # and asserted
+
+
+def test_an_extent_is_padded_by_the_measured_edge_settling() -> None:
+    """(c) 1-2: a spike extent gains 10.282 ms a side (not 5.1 ms), an mmc one 1.5 s (not 15)."""
+    ev = _event(19.5, 21.0)
+    z = _z(eng_bump=12.0, slow_bump=1.0)
+    sp = tl.compute_extent(ev, z, "spikes", signal="L_T", tolerances=TOL, fs=FS, z_t0_s=0.0)
+    assert sp is not None and sp.settling_s == pytest.approx(0.010282, abs=1e-12)
+    assert sp.core_start_s - sp.start_s == pytest.approx(0.010282, abs=1e-9)
+    assert sp.stop_s - sp.core_stop_s == pytest.approx(0.010282, abs=1e-9)
+    mz = {("ANT1", "2-50"): make_band_z("2-50", 120.0, bumps=((50.0, 52.0, 12.0, "ANT1"),),
+                                         signal="ANT1").z_max}
+    m = tl.compute_extent(_event(49.5, 52.5), mz, "mmc", signal="ANT1", tolerances=TOL,
+                          fs=FS, z_t0_s=0.0)
+    assert m is not None and m.settling_s == 1.5
+    assert m.core_start_s - m.start_s == pytest.approx(1.5, abs=1e-9)
+    assert m.stop_s - m.core_stop_s == pytest.approx(1.5, abs=1e-9)
+
+
+def test_settling_provenance_carries_each_measurement() -> None:
+    p = tl.settling_provenance(FS)
+    assert p["spikes"]["total_s"] == pytest.approx(0.010282, abs=1e-12)
+    assert p["mmc"]["total_s"] == 1.5
+    assert p["mmc"]["edge"] == tl.edge_settling_record()["mmc"]
+    assert "edge" not in p["slow_wave"] and "edge" not in p["hrv"]
+    json.dumps(p, allow_nan=False)
 
 
 def test_a_consumer_without_a_chain_has_unknown_settling() -> None:

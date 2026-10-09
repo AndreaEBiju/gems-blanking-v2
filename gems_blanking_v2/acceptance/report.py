@@ -999,8 +999,9 @@ KNOWN_DISAGREEMENTS: Final[tuple[Disagreement, ...]] = (
     Disagreement("sigma reduction, 300-5000 -> 300-3000", "24% (implied by A.5b)",
                  "12-14% measured", "IMPLEMENTATION.md A.5", ""),
     Disagreement("spike consumer settling (task 13)", "expect 30-50 ms",
-                 "5.1 ms (impz, 1% of peak, 300-3000 Hz order-4 at 24414 Hz)",
-                 "extent.tolerance.consumer_settling", "2026-10-07"),
+                 "10.3 ms measured at a NaN edge as v2 runs it (step1 7.78 ms zero phase "
+                 "over her fill + step4 2.5 ms; task 13's one-way impz gave 5.1 ms)",
+                 "extent.tolerance.EDGE_SETTLING (RULING 2026-10-09 (c) 1)", "2026-10-09"),
     Disagreement("tripole sigma reduction", "~6x and 2.5-2.8x (both carried as constants)",
                  "not a constant: under 2 to ~10 as common mode varies; report per recording",
                  "IMPLEMENTATION.md task 04 (common-mode sweep)", ""),

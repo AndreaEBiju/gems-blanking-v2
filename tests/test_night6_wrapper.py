@@ -87,7 +87,7 @@ from gems_blanking_v2.emit.hr_beats import beats_file_record, write_hr_beats
 from gems_blanking_v2.emit.peri_r import build_peri_r
 from gems_blanking_v2.emit.provenance import MaskProvenance
 from gems_blanking_v2.extent.grid import n_grid_frames, seconds_to_sample
-from gems_blanking_v2.extent.tolerance import extent_consumers
+from gems_blanking_v2.extent.tolerance import edge_settling_record, extent_consumers
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from scipy.io import loadmat, savemat
@@ -753,10 +753,10 @@ def _check_joint_mask(r: dict[str, Any]) -> None:
 
 
 SPIKE_PARAMS = {"threshSigma": 4.5, "bandpassLow": 300, "bandpassHigh": 3000, "filterOrder": 4,
-                "envCardiacGuardMs": 0, "edgeBufferMs": 10, "refractoryMs": 1.0,
+                "envCardiacGuardMs": 0, "edgeBufferMs": 10.5, "refractoryMs": 1.0,
                 "detectPolarity": "neg"}
 """Her pipeline_params defaults with the band of Andrea 2026-10-09 (300-3000 Hz) and step3b's
-guard at 0 (RULING 2026-10-08 (k) 3)."""
+guard at 0 (RULING 2026-10-08 (k) 3), and the 10.5 ms edge pad (RULING 2026-10-09 (c) 1)."""
 
 
 def _check_spike_params(d: Path) -> None:
@@ -764,8 +764,17 @@ def _check_spike_params(d: Path) -> None:
     rec = json.loads((d / "night6_record.json").read_text(encoding="utf-8"))
     run = rec["runs"][0]
     assert run["call"] == "process_dataset_v2"
-    got = {k: v for k, v in run["spike_params"].items() if k != "source"}
+    got = {k: v for k, v in run["spike_params"].items()
+           if k not in ("source", "edgeBufferMs_source")}
     assert got == SPIKE_PARAMS
+    # (c) 1: the pad names its declaration and the measurement it rests on, by SHA-256
+    src = run["spike_params"]["edgeBufferMs_source"]
+    want = edge_settling_record()["spikes"]
+    assert {k: src[k] for k in want} == want
+    assert src["declaration_sha256"] == hashlib.sha256(
+        (NIGHT6 / "edge_settling.json").read_bytes()).hexdigest()
+    assert rec["edge_settling"]["sha256"] == src["declaration_sha256"]
+    assert rec["edge_settling"]["mmc"]["files"] == edge_settling_record()["mmc"]["files"]
     assert "threshSigma" not in json.dumps(rec["params"]["spikes"])  # no literal copy
 
 
