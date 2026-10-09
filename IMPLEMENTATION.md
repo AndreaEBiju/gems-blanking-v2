@@ -6044,6 +6044,34 @@ The rulings headed **2026-10-08**, **(b)** and **(c)** were written on **2026-10
    - Re-run the decimation check this way (factor 78, which divides 24414, with the same fixed criteria). Night 6 runs decimated only if it passes.
    - Any decimation factor must divide 24414.
 
+### RULING 2026-10-09 (d) — I/J/K models and decision rule; trim (B) classification
+
+**Measured (`run_20261009d`):** the adapted I/J/K calibrators were fitted only on uncertainty-sampled cores, plus J's low-P top-up. That is not a representative sample of any animal, so the calibrated probabilities are distorted by construction.
+- On I's evaluation span, every model's calibrated decision has F1 0.060. Raw F1 is 0.455 for pooled and 0.494 for adapted w=30.
+- The early run's J ids (4df226e4…, 0a549391…, bfe5abd9…, c8cce59c…) are superseded.
+
+**Andrea, 2026-10-09:**
+
+1. **Decision rule for I, J and K: raw P(motion) ≥ 0.5.** This amends ruling 2026-10-08 (f) item 2 for these three animals only.
+   - The reason is the biased calibration sample, which was known from the design and not chosen from the scores.
+   - Calibrated decisions at 0.3, 0.5 and 0.7 are still reported as sensitivity.
+   - A, B and H keep calibrated P ≥ 0.5: their calibrators were fitted on held-out LOAO_ADAPT predictions, and pass.
+   - **Caveat recorded in provenance:** the rule was settled after the I/J/K scores were seen, so those scores are optimistic as an estimate of production performance.
+2. **Models:**
+
+   | Animal | Mode | w | Model id | Raw F1, adapted vs pooled |
+   |---|---|---|---|---|
+   | new:I | adapted | 30 | `9dca81e0…` | 0.494 vs 0.455 |
+   | new:J | adapted | 10 | `6b52f1e3…` | 0.806 vs 0.597 |
+   | new:K | adapted | 10 | `6321bf9f…` | 0.601 vs 0.626; passes the cohort probe, pooled does not |
+
+   - Pooled `0b83f04d…` is the `evaluation_span_choices` model for I, J and K.
+   - Record in provenance: K's marks recall on the exam span (0.38 of 29), J's false positives on set A's J cores, and the single-span block-bootstrap confidence intervals.
+   - **The pilot must report blanked time per consumer for I, J and K,** so over-blanking (J) and under-detection (K) can be judged on real masks.
+3. **Trim (B):**
+   - **Variables are classed by what they actually compute.** Andrea's ≥ 50%-valid rule governs only the outputs it is written for, and each classification cites the rule it relies on. Accepted.
+   - **mmc rate:** its cut moves 5 s later than its input's settling, because its rate window looks back 5 s (ruling 2026-10-09 (c) 3(d)).
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
