@@ -2239,6 +2239,40 @@ The rulings headed **2026-10-08**, **(b)** and **(c)** were written on **2026-10
    - Cost it and place it within the slack. If it cannot run before the inference night, say what slips.
    - Until it exists, the spike tolerance's provenance names the method it was measured with.
 
+### RULING 2026-10-08 (j) — step1a, the validation baseline, fast per-channel slow wave, recovery start
+
+**Correction:** ruling (i) was written from a May copy of `process_dataset`. The current one (process_dataset.m:16) runs `step1a_blank_cardiac` first, which sets ±15 ms around every R-peak to NaN (about 51 ms per beat after step2's pad). `step1b_remove_cardiac` is never called. **Andrea, 2026-10-08:**
+
+1. **v2 drops `step1a` too.** Heartbeats reach the spike consumer only as the pipeline's peri-R NaN spans. v2 is the 7 steps listed in (i).
+   - **Fallback:** if the peri-R test of (i) 3(b) shows an excess for a channel, apply ruling 2026-10-07 (e)'s leak-or-firing classification to it.
+     - If it is classified as leak, that animal × cuff falls back to `step1a` in v2, and Andrea is told.
+     - If it is classified as firing, it is kept: heartbeat-locked vagal firing is signal.
+2. **The validation compares three methods:**
+   - v1 is Andrea's current `process_dataset`, unchanged, including step1a;
+   - v2;
+   - `detectSortNerveSpikesECAP` as a third column, because the old spike tolerance was measured with it.
+
+   Her flow does not cluster (steps 5 and 5b are not called), so cluster counts are "not applicable" for v1 and v2.
+3. **Spike tolerance provenance:** until the v2 spike-only pass exists, the spike tolerance names `detectSortNerveSpikesECAP`.
+4. **Pasted answers, now in the spec:**
+   - **(h) 7, no beat train:** count the list by condition. "Pre" files skip mmc, marked not computed. Diagnose only the non-"pre" files: 35 of 115 so far are baselines, so the diagnosis is needed for those. Also report the share of routed recordings with no beat train, by animal and condition; 115 of 424 is higher than expected.
+   - **(h) 8, HRV and breathing:** the mask-difference fraction is measured from Night 5's masks on Sunday morning. Andrea chooses after.
+5. **Slow wave stays one channel at a time, and must be made fast.** Andrea will do any check needed.
+   - **(a) Exact shortcut:** where the three ANT masks are identical within an epoch, one call gives exactly the per-channel result, so make one call there. Split into per-channel calls only where the masks differ. Report the fraction of epochs that need the split.
+   - **(b) Decimation check ((h) 4) on Friday:** use the criteria already fixed. Andrea reviews the side-by-side panels.
+   - **(c) Cost:** report Night 6's runtime with (a) alone and with (a) + (b).
+6. **Recovery starts at each file's own detected stim-off plus a measured settling time,** not a fixed 132 s.
+   - **Settling measures the electrical recovery after stimulation, never the physiological response.** The post-stim response is the science, so it must not be cut away. Never use HR, firing rate or slow-wave rate to define settling.
+   - **Rule, fixed before results:** settling ends at the later of:
+     - (i) the first time after stim-off from which the raw signal on every channel stays inside that file's own late-recovery range (median ± 10·MAD of 140–200 s) for at least 1 s, in both the 0–2 Hz band and the broadband signal;
+     - (ii) stim-off plus the longest settling time of any consumer filter (invariant 19).
+   - **Report:**
+     - the distribution of stim-off and of settling over the 229 stim_rec files;
+     - 5 example panels (raw signal around stim-off, with the chosen start marked) for Andrea;
+     - where 132 s came from;
+     - the cost of re-routing only the stim_rec files.
+   - **Nothing is re-routed until Andrea has seen the cost and the critical-path effect.** The 132 s routes stay valid for everything after 132 s.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
