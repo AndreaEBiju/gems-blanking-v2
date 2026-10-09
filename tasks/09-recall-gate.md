@@ -2465,6 +2465,36 @@ The rulings headed **2026-10-08**, **(b)** and **(c)** were written on **2026-10
 
    None of this delays the other consumers.
 
+### RULING 2026-10-09 (g) — no-beat minutes, heartbeat recovery from leak, mains phase-gating, pilot on a stand-in
+
+**Andrea, 2026-10-09.** This replaces ruling 2026-10-09 (b) item 2 (no-beat minutes distrusted for spikes). The principle is: where the timing reference is known, remove only the locked part of each cycle, never whole minutes; where it isn't known, recover it from the data first.
+
+1. **For Night 5, no-beat minutes are kept for the spike consumer and flagged** "no heartbeat reference", per minute.
+   - They are not blanked, and they never count toward the 80% retention hold. No recording is held for them.
+   - Report the flagged minutes per recording and animal.
+2. **Heartbeat recovery from the nerve leak** is built in parallel, for no-beat minutes, spike consumer only. Criteria are fixed before any result:
+   - **Template:** each recording × cuff's own R-aligned leak waveform from its beat minutes, 300–3000 Hz, ±20 ms. If no significant leak core exists, there is nothing to recover.
+   - **Detection:** a matched filter in no-beat minutes. Its threshold is set on beat minutes with the known beats hidden: recall ≥ 0.90 of known beats, and false matches ≤ 1% of matches. Matches must also have plausible spacing (RR 120–240 ms).
+   - **Use:** recovered positions are measured fiducials, used only to place peri-R spans in the spike mask. They are never used for HR, HRV or breathing, and never written as beats.
+   - **Validation:** after blanking, the peri-R spike histogram against the recovered positions shows no excess, by the same test as (i) 3(b).
+   - **Report:** per recording, the share of no-beat minutes where leak was found, and the spike time removed.
+   - **Where no leak is found,** the minute stays kept and flagged.
+3. **Mains phase-gating replaces per-minute line distrust** (ruling 2026-10-08 (d)), spike consumer only, in the minutes that test flags. Criteria are fixed before any result:
+   - **Phase:** the mains phase is estimated per minute from the ripple itself.
+   - **Gate:** the spike phase histogram (fixed bins) defines the gated phases. These are contiguous bins whose excess over chance is significant at Holm α = 0.01, plus the 10.5 ms edge rule converted to phase.
+   - **Blanking:** those phases are blanked in each cycle of the flagged minutes, and the rate is computed over the remaining time.
+   - **Pass condition:** after gating, the mains-lock test is no longer significant, and injected-spike recovery in gated minutes is at least 0.9.
+   - **Report:** time lost against whole-minute distrust.
+   - **If a minute fails the pass condition,** that minute keeps whole-minute distrust.
+4. **Order:**
+   - Night 5 runs as planned, with point 1 and ruling (d) unchanged for now.
+   - Points 2 and 3 are built and validated in parallel.
+   - Then the spike masks alone are re-emitted, and only the spike analysis of Night 6 is re-run. No other consumer waits.
+5. **The line-noise test pads motion blanks too** (10.5 ms), so it uses exactly the samples spike detection uses.
+6. **"User" is accepted** as the labeller name for the J top-up queue (`setADAPT_J_topup.parquet`), as for setADAPT_IJK, and recorded.
+7. **The pilot runs tonight on a labelled stand-in threshold** (z 3.0 for every consumer), written to the pilot folder only. Night 5 refuses stand-ins.
+   - Blanked time per consumer and the HRV vs breathing comparison are recomputed once the tolerance-mapping ruling is made.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
