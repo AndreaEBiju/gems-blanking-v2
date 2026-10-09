@@ -2273,6 +2273,30 @@ The rulings headed **2026-10-08**, **(b)** and **(c)** were written on **2026-10
      - the cost of re-routing only the stim_rec files.
    - **Nothing is re-routed until Andrea has seen the cost and the critical-path effect.** The 132 s routes stay valid for everything after 132 s.
 
+### RULING 2026-10-08 (k) — peri-R spans in the spike mask; recovery start per analysis; step3b guard; I/J/K adaptation clarifications
+
+**Found (build, 2026-10-08):** no code writes heartbeat spans into the spike mask. `night4.py` builds it from routed events and cuff distrust only, and nothing reads the routing entries' `peri_r_ms`. Rulings (i) and (j) assumed those spans exist. The 132 s start came from the 12 s tolerance on the detected stim duration (task 03B), never from a settling measurement.
+
+**Andrea, 2026-10-08:**
+
+1. **Peri-R spans are written into the spike mask (option a), with one constant window for every file.**
+   - **The window:** take the distribution of routed `peri_r_ms` over all routing tables (64c2e1ea and production), separately before and after R. The constant window is its **maximum** on each side, so no file is under-blanked.
+   - Report the distribution, and the data lost against step1a's ±15 ms. If the maximum is set by a few outliers, report them; Andrea may then choose a lower value.
+   - The spans are NaN around every beat of the recording's routed train, in the spike consumer only (invariant 2). A recording without a train has no peri-R spans, and its spike mask is unchanged.
+   - This is outside the hash scope; routing is untouched. Test it and revert-check the test. The (j) 1 peri-R test then validates it.
+2. **Recovery starts per analysis, and the early part comes later.**
+   - **Each analysis starts at:** the file's detected stim-off, plus the measured electrical settling ((j) 6 (i)), plus **that analysis's own** filter or window settling. There is no shared maximum over analyses.
+   - **For a moving window:** settling is the part of the window that reaches back before *t*. That is half the window if the window is centred, the whole window if it trails. Read which one from the code.
+   - **Now:** everything runs from 132 s on the current schedule (finish Mon 10-12). An analysis whose own start is later than 132 s is trimmed at Night 6.
+   - **Afterwards, as an add-on:** route the window from stim-off to 132 s for the stim_rec files, emit those masks, and append the early recovery to each analysis whose start is before 132 s. It must not delay the main finish. Cost it and schedule it after task 19.
+3. **step3b's cardiac guard keeps Andrea's default of 15 ms.** The ±20 ms in (i) came from the May copy.
+4. **I/J/K adaptation clarifications** (from existing rulings, no amendment needed):
+   - Set A's I/J/K judgements are evaluation-only ((b) 8). They never count toward adaptation labels, and are never used in training or calibration.
+   - Adaptation cores come from recordings that hold no evaluation span; if that isn't possible, at least 60 s from any evaluation span. The two sets are asserted disjoint at write time.
+   - The package change allows only rows tagged as adaptation; an evaluation-tagged row is still refused, tested and revert-checked.
+   - K has no evaluation span, so K uses the zero-label option Andrea picks. Adaptation labels, if chosen, are for I and J only.
+5. **The wrapper branch merges on Friday,** after the sweep ends and before routing resumes, as Claude Code planned.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
