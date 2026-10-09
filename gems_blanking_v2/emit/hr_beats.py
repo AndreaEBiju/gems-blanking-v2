@@ -27,25 +27,46 @@ convention as ``blankIdx``: an N x 2 array of 1-BASED INCLUSIVE sample indices
 ``[round((a - epoch) * fs) + 1, round((b - epoch) * fs)]`` - so ``[4/fs, 5/fs)``, one
 sample, is ``[5 5]`` (invariant 15).
 
+THE ORIGIN OF A TRAIN (found 2026-10-09, fix (c) of ``origin_check/REPORT.md``): the
+routing wrote every train with ``epoch_start_s = 0`` while detecting its beats on the
+routing REGION ``data[round(lo fs) : round(hi fs)]``. For a stim_rec recording that
+region starts at 132 s, so ``heartlocs`` are 1-based into the region while the file
+declares 0 - and the routing readers rely on that 0, so the files are not rewritten.
+The origin is instead taken from the build record that sliced the region, by
+:func:`train_origin` (the ONE place, invariant 33), and every consumer is handed it as a
+0-based FILE SAMPLE, ``origin_sample0``: heartloc ``h`` is file sample
+``origin_sample0 + h - 1``. :func:`beats_file_record` is the one construction site of
+the mask provenance's ``extra.beats_file``, which the Night 6 wrapper slices with.
+
 OUTSIDE THE GENERATION HASH.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
+import math
+import re
+from collections.abc import Sequence
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any, Final
 
 import numpy as np
 import numpy.typing as npt
 from scipy.io import loadmat, savemat
 
+from gems_blanking_v2.emit.peri_r import beat_epoch_samples
+from gems_blanking_v2.extent.grid import seconds_to_sample
+
 __all__ = [
+    "BEATS_FILE_PATH_KEY",
     "MASK_BEATS_SUFFIX",
+    "beats_file_record",
     "read_blank_spans",
     "read_gap_after",
     "read_hr_beats",
     "read_mask_beats",
     "to_blank_spans",
     "to_heartlocs",
+    "train_origin",
     "write_hr_beats",
     "write_mask_beats",
 ]
@@ -54,6 +75,96 @@ F64 = npt.NDArray[np.float64]
 
 MASK_BEATS_SUFFIX = "_peri_r_beats.mat"
 """Every mask-grade beats file, and no HRV beats file, ends with this."""
+
+BEATS_FILE_PATH_KEY: Final = {"hrv": "hrv_beats", "mask": "mask_grade_beats"}
+"""``extra.beats_file`` key naming the train's store path, by grade. The Night 6 wrapper
+reads only ``hrv_beats`` - a mask-grade train places the peri-R mask and nothing else."""
+
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def train_origin(region_s: Sequence[float], fs: float, *, what: str,
+                 n_region_samples: int | None = None, declared_sample0: int | None = None,
+                 declared_start_s: float | None = None) -> tuple[int, int]:
+    """Return ``(origin_sample0, n_region)`` of a train from its build record's region.
+
+    ``origin_sample0`` is the 0-based file sample of heartloc 1, through the handoff's own
+    :func:`~gems_blanking_v2.emit.handoff.epoch_start_fields` (``round(lo fs)``, the rule
+    the region was sliced with - invariants 15, 22); ``n_region`` is the region's length in
+    samples. Refuses, naming ``what``: a malformed or negative region; a build record whose
+    ``n_samples`` disagrees with the region; a file that DECLARES its origin as
+    ``epochStartSample0`` (``declared_sample0``) or as a nonzero ``epochStart_s``
+    (``declared_start_s``) that disagrees with the build record. A declared ``epochStart_s``
+    of 0 is the routing's stored 0 (module docstring) and is not a declaration.
+    """
+    from gems_blanking_v2.emit.handoff import (  # noqa: PLC0415 - handoff imports heavy modules
+        EPOCH_START_SAMPLE_KEY,
+        epoch_start_fields,
+    )
+    try:
+        lo, hi = (float(x) for x in region_s)
+    except (TypeError, ValueError):
+        msg = f"{what}: build record region_s must be [start, stop] seconds, got {region_s!r}"
+        raise ValueError(msg) from None
+    if not (math.isfinite(lo) and math.isfinite(hi)) or hi <= lo:
+        msg = f"{what}: build record region_s {region_s!r} is not a finite [start, stop)"
+        raise ValueError(msg)
+    origin = int(epoch_start_fields(lo, fs)[EPOCH_START_SAMPLE_KEY])
+    n_region = seconds_to_sample(hi, fs) - origin
+    if n_region_samples is not None and int(n_region_samples) != n_region:
+        msg = (f"{what}: build record n_samples {int(n_region_samples)} disagrees with its "
+               f"region_s {[lo, hi]} ({n_region} samples at {fs} Hz)")
+        raise ValueError(msg)
+    if declared_sample0 is not None and int(declared_sample0) != origin:
+        msg = (f"{what}: the beats file declares epochStartSample0 {int(declared_sample0)} but "
+               f"its build record's region starts at file sample {origin}")
+        raise ValueError(msg)
+    if declared_start_s is not None and float(declared_start_s) != 0.0 and (
+            seconds_to_sample(float(declared_start_s), fs) != origin):
+        msg = (f"{what}: the beats file declares epochStart_s {float(declared_start_s)} but its "
+               f"build record's region starts at file sample {origin}")
+        raise ValueError(msg)
+    return origin, n_region
+
+
+def beats_file_record(*, grade: str, store_rel: str, sha256: str, origin_sample0: int,
+                      heartlocs: npt.ArrayLike, epoch_start_sample: int, n_samples: int,
+                      published: bool, read_from: str) -> dict[str, Any]:
+    """Return one epoch's ``extra.beats_file``: the train, its origin and its beat count.
+
+    ``store_rel`` is where the train is (or will be) published, POSIX and relative to
+    ``gems_root`` (cross-platform rule 2); ``read_from`` is where it was read for this
+    record. ``n_in_epoch`` counts the beats whose file sample
+    ``origin_sample0 + h - 1`` lies in ``[epoch_start_sample, epoch_start_sample + n)``,
+    through :func:`~gems_blanking_v2.emit.peri_r.beat_epoch_samples` - the count the
+    Night 6 wrapper must reproduce or refuse.
+    """
+    if grade not in BEATS_FILE_PATH_KEY:
+        msg = f"grade must be one of {sorted(BEATS_FILE_PATH_KEY)}, got {grade!r}"
+        raise ValueError(msg)
+    if (PurePosixPath(store_rel).is_absolute() or PureWindowsPath(store_rel).drive
+            or "\\" in store_rel):
+        msg = f"store_rel must be a relative POSIX path, got {store_rel!r}"
+        raise ValueError(msg)
+    if not _SHA256.match(sha256):
+        msg = f"sha256 must be 64 lowercase hex characters, got {sha256!r}"
+        raise ValueError(msg)
+    for name, v in (("origin_sample0", origin_sample0), ("epoch_start_sample", epoch_start_sample),
+                    ("n_samples", n_samples)):
+        if isinstance(v, bool) or not isinstance(v, int | np.integer) or int(v) < 0:
+            msg = f"{name} must be a non-negative integer sample count, got {v!r}"
+            raise TypeError(msg)
+    r = beat_epoch_samples(heartlocs, origin_sample=int(origin_sample0),
+                           epoch_start_sample=int(epoch_start_sample))
+    return {BEATS_FILE_PATH_KEY[grade]: store_rel, "grade": grade, "sha256": sha256,
+            "origin_sample0": int(origin_sample0),
+            "origin_rule": "heartloc h is 0-based file sample origin_sample0 + h - 1; the "
+                           "origin is the routing build record's region start, never the "
+                           "file's epochStart_s",
+            "epoch_start_sample0": int(epoch_start_sample),
+            "n_in_epoch": int(((r >= 0) & (r < int(n_samples))).sum()),
+            "n_beats": int(r.size), "published_at_mask_time": bool(published),
+            "read_from": read_from}
 
 
 def to_heartlocs(beats_s: npt.ArrayLike, fs: float, epoch_start_s: float, n_samples: int) -> F64:

@@ -11,7 +11,12 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
 %   nFile, fsFile samples and sample rate of the recording file
 %   units         'V' | 'mV' | 'uV' - declared, never inferred (invariant 14).
 %                 processing_new works in VOLTS, so the plan carries the scale to volts.
-%   beats         the recording's whole-file beats file (load()), or [] when it has none
+%   beats         the recording's beat train, or [] when it has none: a struct with
+%                   data    load() of the train file (heartlocs 1-based from its ORIGIN)
+%                   record  the mask provenance's extra.beats_file (jsondecode), written
+%                           by the one train resolver: origin_sample0 (0-based file
+%                           sample of heartloc 1), sha256, n_in_epoch
+%                   sha256  the train file's SHA-256 as read here
 %   condition     the recording's condition from the mask provenance ('baseline',
 %                 'stim_recovery', 'pre'), or '' when the provenance names none
 %
@@ -304,33 +309,62 @@ function tf = same_mask(masks, a, b)
     end
 end
 
-function E = slice_beats(B, plan)
-% Whole-file beats -> the epoch: heartlocs (1-based) in (i0, i0+n] re-based by i0,
+function E = slice_beats(T, plan)
+% The recording's beat train -> the epoch: heartlocs in the epoch re-based to it,
 % gapAfter kept with its beat, blankSpans clipped to the epoch and re-based (the
-% trim_blank rule of batch_process.m). The beats file's own epochStart_s is honoured.
-    if isempty(B), E = []; return, end
+% trim_blank rule of batch_process.m).
+%
+% THE ORIGIN (fix (c), origin_check/REPORT.md, 2026-10-09): a stored heartloc h is
+% 1-based into the routing REGION the beats were detected on, not into the file. The
+% stim_rec trains' region starts at round(132 fs) while the file still declares
+% epochStart_s = 0 (the routing readers rely on that 0), so the file's epochStart_s is
+% NOT the origin and is never read here. The origin comes from the mask provenance's
+% record (T.record.origin_sample0, the resolver's 0-based file sample of heartloc 1):
+%     file sample (0-based)  f   = origin_sample0 + h - 1
+%     epoch row   (1-based)  row = f - i0 + 1
+% (never seconds x fs - invariant 15). Refused by name: a record without the origin, a
+% train whose sha256 is not the record's, a file whose own epochStartSample0 disagrees
+% with the record, and a beat count in the epoch other than the one Python computed.
+    if isempty(T), E = []; return, end
+    if ~isstruct(T) || ~all(isfield(T, {'data', 'record', 'sha256'}))
+        error('night6:beatsArg', 'beats must be struct(data, record, sha256) or []');
+    end
+    B = T.data;
+    ref = T.record;
+    if ~isfield(ref, 'origin_sample0')
+        error('night6:beatsOrigin', ['the mask provenance''s beats_file record has no ' ...
+              'origin_sample0: the train''s origin is unknown, so its beats are not placed']);
+    end
+    off = double(ref.origin_sample0);
+    if ~isscalar(off) || off ~= fix(off) || off < 0
+        error('night6:beatsOrigin', 'beats_file origin_sample0 must be one integer >= 0');
+    end
+    if ~isfield(ref, 'sha256') || ~strcmpi(char(ref.sha256), char(T.sha256))
+        error('night6:beatsSha', ['the beat train''s sha256 %s is not the one the mask ' ...
+              'provenance records: the file changed since the masks were made'], char(T.sha256));
+    end
+    if ~isfield(ref, 'n_in_epoch')
+        error('night6:beatsCount', 'the beats_file record has no n_in_epoch to reconcile against');
+    end
     if abs(double(B.fs) - plan.fs) > 1e-9
         error('night6:beatsFs', 'beats fs %.6f, recording fs %.6f', double(B.fs), plan.fs);
     end
-    % The beats' own origin, as a SAMPLE (never seconds x fs here - invariant 15). Every
-    % production beats file is whole-file (epochStart_s = 0, hr10_pass.py); a file with
-    % another origin must carry it as epochStartSample0 or it is refused.
-    off = 0;
-    if isfield(B, 'epochStartSample0')
-        off = double(B.epochStartSample0);
-        if ~isscalar(off) || off ~= fix(off) || off < 0
-            error('night6:beatsStart', 'beats epochStartSample0 must be one integer >= 0');
-        end
-    elseif isfield(B, 'epochStart_s') && double(B.epochStart_s) ~= 0
-        error('night6:beatsStart', ['beats file starts at %.9g s and carries no ' ...
-              'epochStartSample0: MATLAB does not convert seconds to samples'], ...
-              double(B.epochStart_s));
+    if isfield(B, 'epochStartSample0') && double(B.epochStartSample0) ~= off
+        error('night6:beatsStart', ['the beats file declares epochStartSample0 %d but the ' ...
+              'mask provenance records origin_sample0 %d'], double(B.epochStartSample0), off);
     end
-    h = double(B.heartlocs(:)) + off - plan.i0;
-    keep = h >= 1 & h <= plan.n;
-    E = struct('heartlocs', h(keep), 'beatChannel', char(B.beatChannel), ...
+    h = double(B.heartlocs(:));
+    fileSample0 = off + h - 1;
+    row = fileSample0 - plan.i0 + 1;
+    keep = row >= 1 & row <= plan.n;
+    if nnz(keep) ~= double(ref.n_in_epoch)
+        error('night6:beatsCount', ['%d beats fall in this epoch here, %d by the Python ' ...
+              'side''s count (n_in_epoch): the two disagree on the origin or the epoch'], ...
+              nnz(keep), double(ref.n_in_epoch));
+    end
+    E = struct('heartlocs', row(keep), 'beatChannel', char(B.beatChannel), ...
                'gapAfter', false(nnz(keep), 1), 'blankSpans', zeros(0, 2), ...
-               'nWholeFile', numel(h));
+               'nWholeFile', numel(h), 'originSample0', off, 'sha256', char(T.sha256));
     if isfield(B, 'gapAfter') && ~isempty(B.gapAfter)
         g = logical(B.gapAfter(:));
         if numel(g) ~= numel(h)
@@ -339,7 +373,7 @@ function E = slice_beats(B, plan)
         E.gapAfter = g(keep);
     end
     if isfield(B, 'blankSpans') && ~isempty(B.blankSpans)
-        s = double(B.blankSpans) + off - plan.i0;
+        s = (off + double(B.blankSpans) - 1) - plan.i0 + 1;   % same frame as heartlocs
         s(s(:, 2) < 1 | s(:, 1) > plan.n, :) = [];
         s(:, 1) = max(s(:, 1), 1);
         s(:, 2) = min(s(:, 2), plan.n);

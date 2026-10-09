@@ -1986,6 +1986,55 @@ def peri_r_like(line: LineDistrustRecord | None, *, heartlocs: npt.ArrayLike | N
                         train={"file": "synthetic", "grade": "hrv"} if has else None)
 
 
+class RoutedTrain(NamedTuple):
+    """A beat train as the routing stored it: detected on a REGION of the file."""
+
+    fs: float
+    n_file: int                 # samples in the recording file
+    region_s: tuple[float, float]
+    origin_sample0: int         # round(region_s[0] * fs): the file sample of region row 1
+    n_region: int               # samples in the region
+    beats_s: F64                # REGION-relative beat times (s), on the sample grid
+    file_samples0: npt.NDArray[np.int64]  # the same beats as 0-based FILE samples
+    gap_after: npt.NDArray[np.bool_]
+    blank_spans_s: list[list[float]]      # REGION-relative half-open rejected minutes
+
+
+def make_routed_train(*, fs: float = FS_NOMINAL_HZ, file_s: float = 1320.78,
+                      region_start_s: float = 132.0, rejected_minutes: tuple[int, ...] = (3, 11),
+                      drop_fraction: float = 0.005, seed: int = 0) -> RoutedTrain:
+    """Return an Andrea-like stored train: a stim_rec recording's recovery region by default.
+
+    Shaped on the 28 stored stim_rec trains (origin_check/REPORT.md, 2026-10-09): a
+    1320.78 s file, the routing region [132 s, end) - round(132 fs) = 3,222,656 is not a
+    whole multiple of fs - rat RR 155-185 ms (~350 bpm), per-minute storage (each rejected
+    region minute's beats removed and its span kept as a blank span), and ~0.5% of beats
+    dropped with the beat before each drop tagged ``gap_after``. Beat times lie on the
+    region's sample grid, exactly as ``hr10_pass.py`` writes them (``epoch_start_s = 0``
+    into the region). ``region_start_s = 0`` is a bl / pre train.
+    """
+    rng = np.random.default_rng(seed)
+    n_file = _n_samples(fs, file_s)
+    origin = seconds_to_sample(region_start_s, fs)
+    n_region = seconds_to_sample(file_s, fs) - origin
+    t = np.cumsum(rng.uniform(0.155, 0.185, int(file_s / 0.15) + 10))
+    k = np.unique(np.round(t * fs).astype(np.int64))
+    k = k[(k >= 0) & (k < n_region)]
+    blank = [[60.0 * m, min(60.0 * (m + 1), n_region / fs)] for m in rejected_minutes
+             if 60.0 * m < n_region / fs]
+    keep = np.ones(k.size, dtype=bool)
+    for a, b in blank:
+        keep &= ~((k >= seconds_to_sample(a, fs)) & (k < seconds_to_sample(b, fs)))
+    drop = rng.random(k.size) < drop_fraction
+    gap = np.zeros(k.size, dtype=bool)
+    gap[:-1] = drop[1:]
+    keep &= ~drop
+    k, gap = k[keep], gap[keep]
+    return RoutedTrain(fs=fs, n_file=n_file, region_s=(float(region_start_s), float(file_s)),
+                       origin_sample0=origin, n_region=n_region, beats_s=k / fs,
+                       file_samples0=k + origin, gap_after=gap, blank_spans_s=blank)
+
+
 def make_spike_times(dur_s: float, *, rate_hz: float, locked_keep: float = 0.0,
                      seed: int = 0) -> F64:
     """Return spike TIMES only (s), for statistics of the lock test without a signal.

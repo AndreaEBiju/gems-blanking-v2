@@ -176,8 +176,17 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
     beats = [];
     if isfield(prov, 'extra') && isfield(prov.extra, 'beats_file') ...
             && isfield(prov.extra.beats_file, 'hrv_beats')
-        R.source.beats_file = from_root(o.GemsRoot, prov.extra.beats_file.hrv_beats);
-        beats = load(R.source.beats_file);
+        % The record (gems_blanking_v2.emit.hr_beats.beats_file_record, written by the one
+        % train resolver) names the train's store path, its sha256, its origin as a 0-based
+        % file sample and the epoch's beat count; night6_prepare_epoch slices with them.
+        ref = prov.extra.beats_file;
+        R.source.beats_file = from_root(o.GemsRoot, ref.hrv_beats);
+        if ~isfile(R.source.beats_file)
+            error('night6:beatsMissing', ['the mask provenance names the beat train %s, which ' ...
+                  'is not in the store (not yet published?)'], ref.hrv_beats);
+        end
+        beats = struct('data', load(R.source.beats_file), 'record', ref, ...
+                       'sha256', night6_sha256_file(R.source.beats_file));
     end
 
     condition = '';
@@ -194,7 +203,9 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
         R.beats = struct('n_in_epoch', numel(plan.beats.heartlocs), ...
                          'n_whole_file', plan.beats.nWholeFile, ...
                          'beat_channel', plan.beats.beatChannel, ...
-                         'n_blank_spans', size(plan.beats.blankSpans, 1));
+                         'n_blank_spans', size(plan.beats.blankSpans, 1), ...
+                         'origin_sample0', plan.beats.originSample0, ...
+                         'sha256', plan.beats.sha256);
     end
     R.consumers = plan.consumers;
     for c = fieldnames(plan.consumers)'
@@ -225,8 +236,10 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
         heartlocs = B.heartlocs; gapAfter = B.gapAfter; blankSpans = B.blankSpans; %#ok<NASGU>
         beatChannel = B.beatChannel; epochStart_s = plan.epochStart_s; fs = plan.fs; %#ok<NASGU>
         epochStartSample0 = plan.i0; sourceBeatsFile = R.source.beats_file; %#ok<NASGU>
+        sourceOriginSample0 = B.originSample0; sourceSha256 = B.sha256; %#ok<NASGU>
         save(o.beatsEpochFile, 'heartlocs', 'fs', 'gapAfter', 'blankSpans', 'beatChannel', ...
-             'epochStart_s', 'epochStartSample0', 'sourceBeatsFile');
+             'epochStart_s', 'epochStartSample0', 'sourceBeatsFile', 'sourceOriginSample0', ...
+             'sourceSha256');
         R.beats.epoch_file = o.beatsEpochFile;
     end
     R.runs = {};

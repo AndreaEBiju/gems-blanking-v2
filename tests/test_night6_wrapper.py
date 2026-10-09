@@ -24,6 +24,12 @@ masking and skip logic; the consumers' calls are not made). Checks:
   ``i0 + row``, through the raw, pairs-lead and tripole recipes, in volts from declared
   microvolts;
 * the whole-file beats are re-based to each epoch (heartlocs, gapAfter, blankSpans);
+* the beat train's origin (fix (c), origin_check/REPORT.md, 2026-10-09): heartlocs are
+  1-based from the origin the mask provenance records (``extra.beats_file.origin_sample0``,
+  from the one resolver), never from the file's ``epochStart_s`` - an Andrea-like stim_rec
+  train on its e132 epoch keeps its stored heartlocs, a beat at file sample s lands on
+  epoch row s - i0 + 1, and a missing origin, a changed file, a count other than Python's
+  and a contradicting declared origin are refused by name;
 * the spike consumer is ``process_dataset_v2`` (RULING 2026-10-08 (i)): the ruled step
   list (her process_dataset steps in her order, without step1a or step1b), resolved from
   processing_new, P = 300-3000 Hz and 4.5 sigma, step3b's R-peak guard kept; masked
@@ -71,7 +77,7 @@ from gems_blanking_v2.emit.handoff import (
     signal_from_matlab_token,
     write_mask_file,
 )
-from gems_blanking_v2.emit.hr_beats import write_hr_beats
+from gems_blanking_v2.emit.hr_beats import beats_file_record, write_hr_beats
 from gems_blanking_v2.emit.provenance import MaskProvenance
 from gems_blanking_v2.extent.grid import n_grid_frames, seconds_to_sample
 from gems_blanking_v2.extent.tolerance import extent_consumers
@@ -79,7 +85,13 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from scipy.io import loadmat, savemat
 
-from tests.conftest import make_line_distrust, make_mains_spike_t, make_slow, peri_r_like
+from tests.conftest import (
+    make_line_distrust,
+    make_mains_spike_t,
+    make_routed_train,
+    make_slow,
+    peri_r_like,
+)
 from tests.test_matlab_acceptance import _matlab, _processing_new
 
 FS = 24414.0625
@@ -226,15 +238,22 @@ def _store(root: Path) -> dict[str, Any]:
                 "source_path": f"rec/{session}_sig.mat"}
         (sdir / "meta.json").write_text(json.dumps(meta), encoding="utf-8", newline="\n")
         extra: dict[str, Any] = {"condition": cond}
-        if beats is not None:
-            write_hr_beats(sdir / f"{session}_beats.mat", beats, fs=FS, epoch_start_s=0.0,
+        bfile = sdir / f"{session}_beats.mat"
+        if beats is not None:  # a whole-file train: origin 0, as every bl / pre train
+            write_hr_beats(bfile, beats, fs=FS, epoch_start_s=0.0,
                            n_samples=N_FILE, channel=HR, source="synthetic",
                            gap_after=np.arange(beats.size) % 7 == 3,
                            blank_spans_s=BEAT_BLANK_S)
-            extra["beats_file"] = {"hrv_beats": f"data/T/{session}/{session}_beats.mat"}
         elif nc is not None:
             extra["hr_channel"] = {"not_computed": nc["hrv"]}
         for start, n in epochs:
+            if beats is not None:  # the resolver's record (night4 via perir_train)
+                extra["beats_file"] = beats_file_record(
+                    grade="hrv", store_rel=f"data/T/{session}/{session}_beats.mat",
+                    sha256=hashlib.sha256(bfile.read_bytes()).hexdigest(), origin_sample0=0,
+                    heartlocs=loadmat(bfile)["heartlocs"].ravel(),
+                    epoch_start_sample=seconds_to_sample(start, FS), n_samples=n,
+                    published=True, read_from=f"gems_root:data/T/{session}/{bfile.name}")
             masks = _write_epoch(mdir, session, reads, spans, start, n, extra, nc)
             if session == SESSION_D:
                 _shift_start_seconds(mdir / f"e{round(start)}_masks.mat")
@@ -340,6 +359,128 @@ def test_matlab_never_converts_seconds_to_samples() -> None:
         assert "round_half_even" not in code, f.name
         assert not re.search(r"epochStart_s\)?\s*\*|\*\s*[\w.()]*epochStart_s", code), f.name
     assert "epochStartSample0" in (NIGHT6 / "night6_prepare_epoch.m").read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------- the beat train's origin
+
+I0_132 = 3_222_656
+"""round(132 x FS): the stim_rec routing region's first file sample (origin_check/REPORT.md)."""
+
+
+def _routed_file(path: Path, beats_s: np.ndarray, n_region: int, *,
+                 gap_after: np.ndarray | None = None,
+                 blank_spans_s: list[list[float]] | None = None) -> Path:
+    """Write a train exactly as hr10_pass.py does: region-relative, epoch_start_s = 0."""
+    return write_hr_beats(path, beats_s, fs=FS, epoch_start_s=0.0, n_samples=n_region,
+                          channel=HR, source="synthetic routed train", gap_after=gap_after,
+                          blank_spans_s=blank_spans_s)
+
+
+def _slice_case(name: str, path: Path, origin: int, i0: int, n: int, n_file: int, *,
+                record: dict[str, Any] | None = None, drop: tuple[str, ...] = (),
+                sha256_override: str | None = None) -> dict[str, Any]:
+    h = loadmat(path)["heartlocs"].ravel()
+    rec = beats_file_record(grade="hrv", store_rel=f"data/T/x/{path.name}",
+                            sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                            origin_sample0=origin, heartlocs=h, epoch_start_sample=i0,
+                            n_samples=n, published=True, read_from="gems_root:x")
+    rec.update(record or {})
+    for k in drop:
+        del rec[k]
+    case = {"name": name, "beats_file": path.as_posix(), "fs": FS, "i0": i0, "n": n,
+            "start_s": i0 / FS, "n_file": n_file, "condition": "stim_recovery",
+            "record_json": json.dumps(rec, ensure_ascii=True)}
+    if sha256_override is not None:
+        case["sha256_override"] = sha256_override
+    return case
+
+
+def _row_list(v: object) -> list[int]:
+    return [int(x) for x in np.atleast_1d(np.asarray(v, dtype=np.float64)).ravel()]
+
+
+def test_slice_beats_places_a_routed_train_by_its_origin(tmp_path: Path) -> None:
+    """night6_prepare_epoch's slice_beats on Andrea-like stored trains (fix (c), 2026-10-09).
+
+    * stim_rec: a train detected on the recovery region [132 s, end) - heartlocs 1-based
+      into the REGION, epochStart_s = 0 in the file - sliced for the e132 epoch
+      (i0 = round(132 fs)) gives epoch heartlocs EQUAL to the stored heartlocs, with
+      gapAfter and blankSpans unchanged;
+    * a beat at file sample s lands on epoch row s - i0 + 1, for an epoch that starts
+      inside the region (origin != i0), first and last rows included, neighbours out;
+    * a bl train (origin 0) on the e0 epoch is unchanged;
+    * refused by name: a record without origin_sample0, a train whose sha256 is not the
+      record's, a beat count other than the Python side's, and a file whose own
+      epochStartSample0 disagrees with the record.
+    """
+    matlab, pnew = _matlab(), _processing_new()
+    if matlab is None:
+        pytest.skip("MATLAB is not on this machine (set GEMS_MATLAB)")
+    if pnew is None:
+        pytest.skip("processing_new is not on this machine (set GEMS_PROCESSING_NEW)")
+    sr = make_routed_train(seed=11)
+    assert sr.origin_sample0 == I0_132
+    sr_file = _routed_file(tmp_path / "sr_beats.mat", sr.beats_s, sr.n_region,
+                           gap_after=sr.gap_after, blank_spans_s=sr.blank_spans_s)
+    n132 = sr.n_file - I0_132
+    stored = loadmat(sr_file)
+    # probes: file samples around an epoch that starts 1,000,003 samples into the region
+    j0, m = I0_132 + 1_000_003, 500_000
+    probe_s = np.array([j0 - 1, j0, j0 + 1, j0 + 12_345, j0 + m - 1, j0 + m], dtype=np.int64)
+    pr_file = _routed_file(tmp_path / "probe_beats.mat", (probe_s - I0_132) / FS, sr.n_region)
+    bl = make_routed_train(region_start_s=0.0, file_s=1189.0, seed=12)
+    bl_file = _routed_file(tmp_path / "bl_beats.mat", bl.beats_s, bl.n_region,
+                           gap_after=bl.gap_after, blank_spans_s=bl.blank_spans_s)
+    declared = {k: v for k, v in loadmat(sr_file).items() if not k.startswith("__")}
+    declared["epochStartSample0"] = 0.0  # a file declaring an origin the record denies
+    dec_file = tmp_path / "declared_beats.mat"
+    savemat(dec_file, declared)
+    cases = [
+        _slice_case("stim_rec", sr_file, I0_132, I0_132, n132, sr.n_file),
+        _slice_case("probe", pr_file, I0_132, j0, m, sr.n_file),
+        _slice_case("bl", bl_file, 0, 0, bl.n_file, bl.n_file),
+        _slice_case("no_origin", sr_file, I0_132, I0_132, n132, sr.n_file,
+                    drop=("origin_sample0",)),
+        _slice_case("sha", sr_file, I0_132, I0_132, n132, sr.n_file,
+                    sha256_override="0" * 64),
+        _slice_case("count", sr_file, I0_132, I0_132, n132, sr.n_file,
+                    record={"n_in_epoch": int(stored["heartlocs"].size) - 1}),
+        _slice_case("declared", dec_file, I0_132, I0_132, n132, sr.n_file),
+    ]
+    case_file, res_file = tmp_path / "slice_case.json", tmp_path / "slice_result.json"
+    case_file.write_text(json.dumps({"cases": cases}, ensure_ascii=True), encoding="utf-8",
+                         newline="\n")
+    cmd = (f"addpath('{pnew.as_posix()}'); addpath('{NIGHT6.as_posix()}'); "
+           f"addpath('{HARNESS.as_posix()}'); "
+           f"check_slice_beats('{case_file.as_posix()}', '{res_file.as_posix()}');")
+    done = subprocess.run([str(matlab), "-batch", cmd], capture_output=True, text=True,
+                          timeout=900, check=False)
+    assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
+    got = {c["name"]: c for c in json.loads(res_file.read_text(encoding="utf-8"))["cases"]}
+
+    s = got["stim_rec"]
+    assert s["error"] == "", s["error"]
+    h = stored["heartlocs"].ravel().astype(np.int64)
+    assert (h <= I0_132).sum() > 0  # read in the file's frame (origin 0) these would be lost
+    assert _row_list(s["heartlocs"]) == h.tolist()
+    assert _row_list(s["gapAfter"]) == stored["gapAfter"].ravel().astype(int).tolist()
+    assert (np.asarray(s["blankSpans"], dtype=np.int64).reshape(-1, 2).tolist()
+            == stored["blankSpans"].astype(np.int64).reshape(-1, 2).tolist())
+    assert int(s["originSample0"]) == I0_132 and int(s["nWholeFile"]) == h.size
+
+    p = got["probe"]
+    assert p["error"] == "", p["error"]
+    inside = probe_s[(probe_s >= j0) & (probe_s < j0 + m)]
+    assert _row_list(p["heartlocs"]) == (inside - j0 + 1).tolist() == [1, 2, 12_346, m]
+
+    b = got["bl"]
+    assert b["error"] == "", b["error"]
+    assert _row_list(b["heartlocs"]) == loadmat(bl_file)["heartlocs"].ravel().astype(int).tolist()
+
+    assert got["no_origin"]["error"] == "night6:beatsOrigin"
+    assert got["sha"]["error"] == "night6:beatsSha"
+    assert got["count"]["error"] == "night6:beatsCount"
+    assert got["declared"]["error"] == "night6:beatsStart"
 
 
 # ---------------------------------------------------------------- item 3: her step list

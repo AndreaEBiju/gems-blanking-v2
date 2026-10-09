@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import tempfile
 from pathlib import Path
 
@@ -9,15 +11,20 @@ import numpy as np
 import pytest
 from gems_blanking_v2.detect import chain
 from gems_blanking_v2.emit.hr_beats import (
+    beats_file_record,
     read_blank_spans,
     read_hr_beats,
     to_blank_spans,
     to_heartlocs,
+    train_origin,
     write_hr_beats,
 )
+from gems_blanking_v2.extent.grid import seconds_to_sample
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from scipy.io import loadmat
+
+from tests.conftest import RoutedTrain, make_routed_train
 
 FS = 24414.0625
 
@@ -173,3 +180,135 @@ def test_without_blank_spans_the_file_has_no_field(tmp_path: Path) -> None:
     p = write_hr_beats(tmp_path / "b.mat", [4 / FS], fs=FS, epoch_start_s=0.0, n_samples=100,
                        channel="x", source="t")
     assert "blankSpans" not in loadmat(p) and read_blank_spans(p) is None
+
+
+# ---------------------------------------------------------------------------
+# the origin of a stored train (fix (c), origin_check/REPORT.md, 2026-10-09)
+# ---------------------------------------------------------------------------
+
+I0_132 = 3_222_656
+"""round(132 x 24414.0625): the stim_rec routing region's first file sample (REPORT.md)."""
+
+
+def _sha(p: Path) -> str:
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def _write_routed(tmp: Path, tr: RoutedTrain) -> Path:
+    """Write ``tr`` exactly as hr10_pass.py does: region-relative, epoch_start_s = 0."""
+    return write_hr_beats(tmp / "x_beats.mat", tr.beats_s, fs=tr.fs, epoch_start_s=0.0,
+                          n_samples=tr.n_region, channel="LVN2-RVN2", source="synthetic",
+                          gap_after=tr.gap_after, blank_spans_s=tr.blank_spans_s)
+
+
+def test_a_stim_rec_train_takes_its_origin_from_the_region_not_the_file(tmp_path: Path) -> None:
+    """The stored file says 0; the build record's region says round(132 fs). The latter wins."""
+    tr = make_routed_train(seed=4)
+    assert tr.origin_sample0 == I0_132
+    p = _write_routed(tmp_path, tr)
+    m = loadmat(p)
+    assert float(m["epochStart_s"].squeeze()) == 0.0  # the stored, load-bearing 0
+    origin, n_region = train_origin(list(tr.region_s), tr.fs, what="x",
+                                    n_region_samples=tr.n_region,
+                                    declared_start_s=float(m["epochStart_s"].squeeze()))
+    assert (origin, n_region) == (I0_132, tr.n_region)
+    h = m["heartlocs"].ravel().astype(np.int64)
+    np.testing.assert_array_equal(origin + h - 1, tr.file_samples0)
+    assert int(h.max()) <= n_region <= tr.n_file - origin
+
+
+def test_a_bl_train_has_origin_zero() -> None:
+    tr = make_routed_train(region_start_s=0.0, file_s=1189.0, seed=1)
+    assert train_origin(list(tr.region_s), tr.fs, what="bl", n_region_samples=tr.n_region,
+                        declared_start_s=0.0) == (0, tr.n_region)
+
+
+@settings(max_examples=300, deadline=None)
+@given(region_start=st.floats(min_value=0.0, max_value=200.0, allow_nan=False),
+       offset=st.integers(0, 50_000), fs=st.sampled_from([FS, 24414.0, 1000.0, 610.3515625]))
+def test_a_beat_at_file_time_t_comes_back_as_t(region_start: float, offset: int,
+                                               fs: float) -> None:
+    """Write a beat region-relative (hr10_pass.py), resolve the origin, read it back.
+
+    The writer side is hr10_pass.py's own slice, ``data[round(lo*fs):round(hi*fs)]`` (a
+    ``range`` stands in for the file's rows, so the beat's region row is found, not
+    computed), independent of :func:`train_origin`. Includes fractional-sample region
+    starts: only round(lo x fs) returns the beat to its own file sample.
+    """
+    hi = region_start + 300.0
+    file_rows = range(round(hi * fs) + 10)
+    region = file_rows[round(region_start * fs):round(hi * fs)]  # hr10_pass.py:50-53
+    s = region[min(offset, len(region) - 1)]  # the beat's 0-based file sample
+    t = s / fs                                # its file time
+    with tempfile.TemporaryDirectory() as d:
+        p = write_hr_beats(Path(d) / "b.mat", [region.index(s) / fs], fs=fs, epoch_start_s=0.0,
+                           n_samples=len(region), channel="x", source="t")
+        h = int(loadmat(p)["heartlocs"].squeeze())
+    origin, n_region = train_origin([region_start, hi], fs, what="h")
+    assert n_region == len(region)
+    back = origin + h - 1
+    assert back == s and back / fs == t
+
+
+def test_the_build_record_and_a_declared_origin_must_agree() -> None:
+    r = [132.0, 1320.78]
+    n = seconds_to_sample(1320.78, FS) - I0_132
+    assert train_origin(r, FS, what="a", declared_sample0=I0_132)[0] == I0_132
+    assert train_origin(r, FS, what="a", declared_start_s=132.0)[0] == I0_132
+    with pytest.raises(ValueError, match="rid_x: the beats file declares epochStartSample0 0"):
+        train_origin(r, FS, what="rid_x", declared_sample0=0)
+    with pytest.raises(ValueError, match="rid_x: the beats file declares epochStart_s 100"):
+        train_origin(r, FS, what="rid_x", declared_start_s=100.0)
+    with pytest.raises(ValueError, match="rid_x: build record n_samples"):
+        train_origin(r, FS, what="rid_x", n_region_samples=n + 1)
+    with pytest.raises(ValueError, match="rid_x: build record region_s"):
+        train_origin([132.0], FS, what="rid_x")
+    with pytest.raises(ValueError, match="rid_x: build record region_s"):
+        train_origin([132.0, 100.0], FS, what="rid_x")
+    with pytest.raises(ValueError, match="before the recording's first sample"):
+        train_origin([-1.0, 10.0], FS, what="rid_x")
+
+
+def test_the_beats_file_record_counts_the_beats_in_the_epoch(tmp_path: Path) -> None:
+    tr = make_routed_train(seed=2)
+    p = _write_routed(tmp_path, tr)
+    h = loadmat(p)["heartlocs"].ravel()
+    i0, n = tr.origin_sample0, tr.n_file - tr.origin_sample0
+    rec = beats_file_record(grade="hrv", store_rel="data/A/x/x_beats.mat", sha256=_sha(p),
+                            origin_sample0=tr.origin_sample0, heartlocs=h,
+                            epoch_start_sample=i0, n_samples=n, published=False,
+                            read_from="scratchpad:pr/b1/hrc_g/x_beats.mat")
+    assert rec["hrv_beats"] == "data/A/x/x_beats.mat" and "mask_grade_beats" not in rec
+    assert rec["origin_sample0"] == I0_132 and rec["n_beats"] == h.size
+    assert rec["n_in_epoch"] == h.size  # the recovery epoch holds the whole train
+    # a later sub-epoch: exactly the beats whose file sample lies in [j0, j0 + m)
+    j0, m = i0 + 1_000_000, 2_000_000
+    sub = beats_file_record(grade="mask", store_rel="data/A/x/x_peri_r_beats.mat",
+                            sha256=_sha(p), origin_sample0=tr.origin_sample0, heartlocs=h,
+                            epoch_start_sample=j0, n_samples=m, published=True,
+                            read_from="gems_root:data/A/x/x_peri_r_beats.mat")
+    f = tr.file_samples0
+    assert sub["mask_grade_beats"].endswith("_peri_r_beats.mat")
+    assert sub["n_in_epoch"] == int(((f >= j0) & (f < j0 + m)).sum()) > 0
+    # with the origin taken as the file's 0, the count is wrong: the defect, measured
+    wrong = beats_file_record(grade="hrv", store_rel="data/A/x/x_beats.mat", sha256=_sha(p),
+                              origin_sample0=0, heartlocs=h, epoch_start_sample=i0,
+                              n_samples=n, published=False, read_from="x")
+    assert wrong["n_in_epoch"] < rec["n_in_epoch"]
+    json.dumps(rec, allow_nan=False)
+
+
+@pytest.mark.parametrize(("kw", "err"), [
+    ({"grade": "x"}, ValueError), ({"store_rel": "/data/a.mat"}, ValueError),
+    ({"store_rel": "C:/data/a.mat"}, ValueError), ({"store_rel": "data\\a.mat"}, ValueError),
+    ({"sha256": "ABC"}, ValueError), ({"origin_sample0": 1.0}, TypeError),
+    ({"origin_sample0": True}, TypeError), ({"epoch_start_sample": -1}, TypeError)])
+def test_the_beats_file_record_refuses_malformed_fields(kw: dict[str, object],
+                                                         err: type[Exception]) -> None:
+    good: dict[str, object] = {"grade": "hrv", "store_rel": "data/A/x/x_beats.mat",
+                               "sha256": "0" * 64, "origin_sample0": 0, "heartlocs": [1, 5],
+                               "epoch_start_sample": 0, "n_samples": 10, "published": True,
+                               "read_from": "x"}
+    beats_file_record(**good)  # type: ignore[arg-type]
+    with pytest.raises(err):
+        beats_file_record(**{**good, **kw})  # type: ignore[arg-type]
