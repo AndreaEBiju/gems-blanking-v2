@@ -72,15 +72,19 @@ from gems_blanking_v2.model.evaluate import (
     scores,
 )
 from gems_blanking_v2.model.labels import (
+    ADAPT_LABEL_SET,
     HUMAN_OLD_BASES,
     OLD_TIERS,
     animal_key,
+    assert_adaptation_disjoint,
+    is_adaptation_row,
     is_test_animal,
 )
 from gems_blanking_v2.model.provenance import build_provenance, corpus_composition
 from gems_blanking_v2.model.registry import (
     ModelSpec,
     Registry,
+    adaptation_separation,
     calibrator_relpath,
     model_content_id,
 )
@@ -105,6 +109,7 @@ from gems_blanking_v2.model.tuning import Tuner, tuning_record
 from gems_blanking_v2.types import TrainingMode
 
 __all__ = [
+    "ADAPT_IJK_PROTOCOL",
     "TIER_CHAIN",
     "TIER_STEPS",
     "UNKNOWN_ANIMAL",
@@ -113,6 +118,8 @@ __all__ = [
     "ModeRefusedError",
     "ModeRun",
     "Refusal",
+    "TestAnimalAdaptation",
+    "adapt_test_animal",
     "adapted_folds",
     "animal_key",
     "animal_letter",
@@ -261,7 +268,8 @@ class Fold:
 
 
 def prepare_table(table: pd.DataFrame, *,
-                  renames: Path | None = None) -> pd.DataFrame:
+                  renames: Path | None = None,
+                  evaluation: pd.DataFrame | None = None) -> pd.DataFrame:
     """Return a positional copy with ``animal_key``, ``cluster`` and ``name_letter`` added.
 
     ``table`` is the output of :func:`~gems_blanking_v2.model.labels.training_rows`
@@ -276,12 +284,16 @@ def prepare_table(table: pd.DataFrame, *,
     authoritative for meaning (Andrea, 2026-09-26; CLAUDE.md invariant 30). An
     acknowledged recording's
     ``name_letter`` is its declared animal; an unacknowledged mismatch never passes.
+
+    ``evaluation`` is passed to :func:`refuse_test_rows`: only with it may admitted I/J/K
+    adaptation rows (``label_set == "adapt"``) pass, re-checked against it (RULING
+    2026-10-09).
     """
     for col in ("recording", "animal", "cohort", "y", "label_set", "label_source"):
         if col not in table.columns:
             msg = f"table is missing required column {col!r}"
             raise ValueError(msg)
-    refuse_test_rows(table)
+    refuse_test_rows(table, evaluation=evaluation)
     check_feature_version(table)
     per_rec = table.groupby(table["recording"].astype(str))[["animal", "cohort"]].nunique()
     multi = per_rec[(per_rec > 1).any(axis=1)]
@@ -325,19 +337,42 @@ def prepare_table(table: pd.DataFrame, *,
     return out
 
 
-def refuse_test_rows(table: pd.DataFrame, *, context: str = "training") -> None:
+def refuse_test_rows(table: pd.DataFrame, *, context: str = "training",
+                     evaluation: pd.DataFrame | None = None) -> None:
     """R1: no new-cohort I/J/K row and no row with label_set != 'train' may be used.
 
     ``context`` names the use in the message ("training", "a SHAP review", ...).
+
+    The one exception (RULING 2026-10-09 items 3-5) is an ADMITTED adaptation row:
+    ``label_set == "adapt"`` (:func:`~gems_blanking_v2.model.labels.admit_adaptation`)
+    and the declared criterion (:func:`~gems_blanking_v2.model.labels.is_adaptation_row`).
+    Such rows pass only when ``evaluation`` is given, and their disjointness from it is
+    re-asserted here, at training time
+    (:func:`~gems_blanking_v2.model.labels.assert_adaptation_disjoint`, 60 s margin);
+    without ``evaluation`` any ``adapt`` row raises. So every caller that does not pass
+    the evaluation intervals - :func:`run_modes`, the pooled and LOAO passes, a SHAP
+    review - still refuses every I/J/K row. A row labelled ``adapt`` that fails the
+    criterion is refused like any other test row.
     """
     test = np.array([is_test_animal(c, a) for c, a in
                      zip(table["cohort"].astype(str), table["animal"].astype(str), strict=True)],
                     dtype=bool)
-    not_train = (table["label_set"] != "train").to_numpy()
+    adapt = (table["label_set"] == ADAPT_LABEL_SET).to_numpy()
+    admitted = adapt & is_adaptation_row(table)
+    if adapt.any() and evaluation is None:
+        msg = (f"{int(adapt.sum())} adaptation row(s) (label_set {ADAPT_LABEL_SET!r}) reached "
+               f"{context} without the evaluation intervals to re-assert their disjointness "
+               "against (RULING 2026-10-09); only a test-animal adaptation fit passes them")
+        raise ValueError(msg)
+    if admitted.any() and evaluation is not None:  # adapt without evaluation raised above
+        assert_adaptation_disjoint(table.loc[admitted], evaluation)
+    test &= ~admitted
+    not_train = (table["label_set"] != "train").to_numpy() & ~admitted
     if test.any() or not_train.any():
         msg = (f"{int(test.sum())} row(s) of the prospective test set (new-cohort I/J/K) and "
                f"{int(not_train.sum())} row(s) with label_set != 'train' reached {context}; "
-               "R1: they are never trained on and never scored")
+               "R1: they are never trained on and never scored (only declared adaptation "
+               "rows are admitted, RULING 2026-10-09)")
         raise ValueError(msg)
 
 
@@ -1101,6 +1136,242 @@ def _register_finals(table: pd.DataFrame, preds: pd.DataFrame, *,  # noqa: PLR09
                 put(TrainingMode.ADAPTED, target, booster, rows, held,
                     PROTOCOL[TrainingMode.ADAPTED], float(wa), base)
     return out
+
+
+ADAPT_IJK_PROTOCOL: Final = "ADAPT_LORO"
+"""Held-out protocol of a test animal's ADAPTED model (RULING 2026-10-09 items 3-5): leave
+one ADAPTATION recording out, scored on that recording's admitted adaptation cores. Those
+cores were uncertainty-sampled (nearest calibrated P = 0.5 under the pooled model), so the
+metrics describe the decision boundary, not the animal. Deliberately not in
+:data:`~gems_blanking_v2.model.registry.HELD_OUT_PROTOCOLS`: the animal-level scores are
+made on its evaluation spans, by a caller that never trains or calibrates on them, with
+the pooled model scored on the same cores under the same protocol (invariant 12)."""
+
+
+@dataclass(frozen=True)
+class TestAnimalAdaptation:
+    """What :func:`adapt_test_animal` produced for one test animal."""
+
+    predictions: pd.DataFrame
+    """Held-out predictions over the adaptation recordings, one row per (w_adapt, core):
+    ``target, protocol, w_adapt, fold, row, recording, cluster, y, raw, yhat, p_cal``."""
+    finals: Mapping[float, tuple[lgb.Booster, Calibrator]]
+    """Per ``w_adapt``: the final booster (pooled prior + every adaptation row) and its
+    calibrator (fitted on that w's held-out predictions)."""
+    registered: Mapping[float, str]
+    """Per ``w_adapt``: the registered model id (empty without a registry)."""
+    refusals: tuple[Refusal, ...]
+    admission: Mapping[str, object]
+    """The training-time disjointness record (:func:`assert_adaptation_disjoint`)."""
+
+
+def _spans_present(evaluation: pd.DataFrame,
+                   spans: Mapping[str, Sequence[tuple[float, float]]]) -> None:
+    """Every span to be stored must be one of the evaluation intervals asserted against."""
+    have: dict[str, npt.NDArray[np.float64]] = {
+        str(r): g[["start_s", "stop_s"]].to_numpy(np.float64)
+        for r, g in evaluation.groupby(evaluation["recording"].astype(str))}
+    missing = [(r, a, b) for r, v in spans.items() for a, b in v
+               if r not in have or not np.isclose(have[r], [float(a), float(b)], rtol=0.0,
+                                                  atol=1e-9).all(axis=1).any()]
+    if missing or not spans:
+        msg = (f"target_spans must be non-empty and each one an evaluation interval; not found "
+               f"among them: {missing[:3]}")
+        raise ValueError(msg)
+
+
+def adapt_test_animal(table: pd.DataFrame, *, target: str,  # noqa: PLR0912, PLR0915
+                      prior: lgb.Booster, prior_spec: ModelSpec, prior_calibrator: Calibrator,
+                      evaluation: pd.DataFrame,
+                      target_spans: Mapping[str, Sequence[tuple[float, float]]],
+                      record_path: Path, num_threads: int,
+                      old_rate: OldRateEstimate | None,
+                      old_tiers: Mapping[str, str] | None,
+                      label_opt_ins: LabelOptIns | None = None,
+                      registry: Registry | None = None, user: str = "",
+                      w_adapt_grid: Sequence[float] = W_ADAPT_GRID,
+                      adapt_rounds: int = ADAPT_ROUNDS) -> TestAnimalAdaptation:
+    """ADAPTED models of one test animal (new-cohort I, J or K; RULING 2026-10-09 items 3-5).
+
+    The same fit as mode B's final model (:func:`_register_finals`): ``prior`` continued
+    for ``adapt_rounds`` rounds on the prior's own rows plus the target's adaptation rows
+    at weight ``w_adapt``, old-cohort positives prior-corrected (``old_rate``), the fixed
+    parameters, one model per ``w_adapt`` of the recorded grid. What differs is forced by
+    R1: the target's evaluation rows never reach a fit or a calibrator, so the held-out
+    predictions that fit each calibrator come from leaving one ADAPTATION recording out
+    (:data:`ADAPT_IJK_PROTOCOL`), not from the evaluation spans.
+
+    Refuses, naming the cause:
+
+    * ``table`` (from :func:`prepare_table` with ``evaluation``) must hold no test-animal
+      row other than the target's admitted adaptation rows; :func:`refuse_test_rows`
+      re-asserts, here, that each lies at least 60 s from every ``evaluation`` interval
+      (every evaluation span, the K exam span included, and every judged I/J/K evaluation
+      core), so any overlap raises;
+    * ``prior_spec`` must be a POOLED model whose content id is ``prior`` +
+      ``prior_calibrator`` and whose corpus hash is exactly the table's non-test rows -
+      the prior is the pooled model it is compared with, and nothing else;
+    * fewer than two adaptation recordings, or one class among the adaptation labels.
+
+    With ``registry`` each model is registered (never promoted, never a default), flagged
+    ``never_scores_evaluation_spans``, with
+    :func:`~gems_blanking_v2.model.registry.adaptation_separation` against
+    ``target_spans`` (the target's own evaluation spans, each of which must be among
+    ``evaluation``) and the admission record in provenance.
+    """
+    require_run_record(record_path)
+    parts_t = target.split(":", 1)
+    if len(parts_t) != 2 or not is_test_animal(parts_t[0], parts_t[1]):  # noqa: PLR2004
+        msg = f"adapt_test_animal is for new-cohort I/J/K animal keys, got {target!r}"
+        raise ValueError(msg)
+    refuse_test_rows(table, context=f"the adaptation fit of {target}", evaluation=evaluation)
+    _check_renames_recorded(table, record_path)
+    _check_tuning_recorded(record_path, None)
+    if TrainingMode(prior_spec.mode) is not TrainingMode.POOLED:
+        msg = f"the prior must be a POOLED model, got {prior_spec.mode} {prior_spec.model_id}"
+        raise ValueError(msg)
+    want = model_content_id(prior, prior_calibrator, mode=TrainingMode.POOLED, animal=None,
+                            corpus_hash=prior_spec.corpus_hash)
+    if want != prior_spec.model_id:
+        msg = (f"the prior booster and calibrator have content id {want}, not "
+               f"{prior_spec.model_id}; load both from the registry entry of the spec")
+        raise ValueError(msg)
+    keys = table["animal_key"].astype(str).to_numpy()
+    test = np.array([is_test_animal(c, a) for c, a in zip(
+        table["cohort"].astype(str), table["animal"].astype(str), strict=True)], dtype=bool)
+    is_t = keys == target
+    stray = test & ~is_t
+    if stray.any():
+        msg = (f"{int(stray.sum())} row(s) of another test animal "
+               f"({sorted(set(keys[stray].tolist()))}) reached the adaptation fit of {target}; "
+               "one test animal per fit, and the pooled prior holds no I/J/K row")
+        raise ValueError(msg)
+    if not is_t.any():
+        raise ModeRefusedError(TrainingMode.ADAPTED, target, "no admitted adaptation rows")
+    prior_rows = _rows(~test)
+    chash = corpus_hash(table.iloc[prior_rows])
+    if chash != prior_spec.corpus_hash:
+        msg = (f"the table's non-test rows hash to corpus {chash[:16]}, not the prior's "
+               f"{prior_spec.corpus_hash[:16]}: the prior must be the model trained on "
+               "exactly these rows")
+        raise ValueError(msg)
+    _spans_present(evaluation, target_spans)
+    if registry is not None:
+        if not user:
+            msg = "registering models needs the acting user"
+            raise ValueError(msg)
+        if not isinstance(label_opt_ins, LabelOptIns):
+            msg = ("a registering pass records the label opt-ins it trained under: "
+                   "label_opt_ins=LabelOptIns(allow_model_labels=..., keep_tiers=(...))")
+            raise ValueError(msg)
+        label_opt_ins.check(table, old_tiers)
+    off_grid = sorted(set(map(float, w_adapt_grid)) - set(W_ADAPT_GRID))
+    if off_grid or not w_adapt_grid:
+        msg = f"w_adapt {off_grid or '(none)'} is not on the recorded grid {W_ADAPT_GRID}"
+        raise ValueError(msg)
+    prior_correction(table, rate=old_rate)  # raises before any fit if old rows lack set A
+    feats = feature_columns(table, prior.feature_name())
+    x = table[feats]
+    check_leakage(x, table["recording"].astype(str).to_numpy())
+    y = table["y"].to_numpy().astype(np.int8)
+    w_all = sample_weights(table)
+    rec = table["recording"].astype(str).to_numpy()
+    t_rows = _rows(is_t)
+    recs = sorted(set(rec[t_rows].tolist()))
+    if len(recs) < 2:  # noqa: PLR2004
+        raise ModeRefusedError(TrainingMode.ADAPTED, target,
+                               f"needs >= 2 adaptation recordings to hold one out, has {recs}")
+    if np.unique(y[t_rows]).size < 2:  # noqa: PLR2004
+        raise ModeRefusedError(TrainingMode.ADAPTED, target,
+                               f"adaptation labels hold one class ({sorted(set(y[t_rows]))})")
+    admission = assert_adaptation_disjoint(table.iloc[t_rows], evaluation)
+    params = dict(FIXED_PARAMS)
+
+    def adapt_fit(adapt_rows: I64, wa: float
+                  ) -> tuple[lgb.Booster, I64, npt.NDArray[np.float64]]:
+        rows = np.concatenate([prior_rows, adapt_rows])
+        base = np.concatenate([w_all[prior_rows], wa * w_all[adapt_rows]])
+        mult, _corr = prior_weights(table.iloc[rows], rate=old_rate, base=base)
+        booster = fit(x.iloc[rows], y[rows], base * mult, num_threads=num_threads,
+                      rounds=adapt_rounds, init_model=prior, params=params)
+        return booster, rows, base
+
+    run_id = str(json.loads(Path(record_path).read_text(encoding="utf-8"))["run_id"])
+    preds: list[pd.DataFrame] = []
+    finals: dict[float, tuple[lgb.Booster, Calibrator]] = {}
+    registered: dict[float, str] = {}
+    refusals: list[Refusal] = []
+    for wa in map(float, w_adapt_grid):
+        parts: list[pd.DataFrame] = []
+        for r in recs:
+            ev_rows = _rows(is_t & (rec == r))
+            fold_booster, _fold_rows, _fold_base = adapt_fit(_rows(is_t & (rec != r)), wa)
+            raw = predict_raw(fold_booster, x.iloc[ev_rows])
+            parts.append(pd.DataFrame({
+                "target": target, "protocol": ADAPT_IJK_PROTOCOL, "w_adapt": wa, "fold": r,
+                "row": ev_rows, "recording": rec[ev_rows], "cluster": rec[ev_rows],
+                "y": y[ev_rows], "raw": raw, "yhat": (raw >= DECISION_P).astype(np.int8)}))
+        held = pd.concat(parts, ignore_index=True)
+        held["p_cal"] = crossfit_calibrate(held["raw"].to_numpy(), held["y"].to_numpy(),
+                                           held["cluster"].to_numpy(), kind=CALIBRATION_KIND)
+        preds.append(held)
+        if held["y"].nunique() < 2:  # noqa: PLR2004
+            refusals.append(Refusal(str(TrainingMode.ADAPTED), target,
+                                    f"no two-class held-out predictions at w_adapt={wa:g}",
+                                    "final"))
+            continue
+        booster, rows, base = adapt_fit(t_rows, wa)
+        cal = Calibrator.fit(held["raw"].to_numpy(), held["y"].to_numpy(), CALIBRATION_KIND)
+        finals[wa] = (booster, cal)
+        if registry is None:
+            continue
+        corpus_rows = table.iloc[rows]
+        ch = corpus_hash(corpus_rows)
+        mid = model_content_id(booster, cal, mode=TrainingMode.ADAPTED, animal=target,
+                               corpus_hash=ch, w_adapt=wa)
+        spec = ModelSpec(mode=TrainingMode.ADAPTED, animal=target, version=run_id,
+                         corpus_hash=ch, calibrator=calibrator_relpath(mid),
+                         trained_at=datetime.now(UTC),
+                         metrics={ADAPT_IJK_PROTOCOL: _protocol_metrics(held)},
+                         n_train_events=int(rows.size), never_scores_evaluation_spans=True)
+        prov = build_provenance(spec, corpus=corpus_composition(corpus_rows, old_tiers),
+                                record_path=record_path, w_adapt=wa, calibration={
+                                    "kind": CALIBRATION_KIND,
+                                    "fitted_on": (
+                                        "held-out predictions of this target's leave-one-"
+                                        "adaptation-recording-out folds, on its admitted "
+                                        "adaptation cores (uncertainty-sampled near P = 0.5 "
+                                        "by the pooled prior); never the evaluation spans; "
+                                        "NOT of this final model, which is trained on all "
+                                        "of the target's adaptation rows"),
+                                    "protocol": ADAPT_IJK_PROTOCOL, "targets": [target],
+                                    "n_predictions": len(held)})
+        if label_opt_ins is not None:
+            prov["label_opt_ins"] = label_opt_ins.to_dict()
+        corr = prior_correction(corpus_rows, rate=old_rate, base=base)
+        if corr is not None:
+            prov["prior_correction"] = corr.to_dict()
+        prov["metric_basis"] = dict(METRIC_BASIS)
+        prov["adaptation_separation"] = adaptation_separation(
+            table.iloc[t_rows], animal=target, evaluation_spans=target_spans)
+        trace = table.iloc[t_rows]
+        prov["adaptation"] = {
+            **admission, "ruling": "RULING 2026-10-09 items 3-5",
+            "queues": sorted({f"{q}|{h}" for q, h in zip(
+                trace["queue_file"].astype(str), trace["queue_sha256"].astype(str),
+                strict=True)}),
+            "prior_model_id": prior_spec.model_id, "prior_corpus_hash": prior_spec.corpus_hash,
+            "n_adaptation_rows": int(t_rows.size), "adaptation_recordings": recs,
+            "n_adaptation_positives": int(y[t_rows].sum()), "adapt_rounds": int(adapt_rounds),
+            "evaluation_rows_in_training": 0,
+            "scored_on_evaluation_spans_by": ("the caller, never by a fit or calibrator; "
+                                              "registry inference still refuses them "
+                                              "(never_scores_evaluation_spans)")}
+        registered[wa] = registry.register(spec, booster, cal, user=user, provenance=prov,
+                                           corpus_id=run_id)
+    return TestAnimalAdaptation(
+        predictions=pd.concat(preds, ignore_index=True), finals=finals, registered=registered,
+        refusals=tuple(refusals), admission=admission)
 
 
 TIER_CHAIN: Final[tuple[str, ...]] = ("1", "1+2a", "1+2a+2b")

@@ -7,7 +7,13 @@ Rulings applied (2026-10-07 (b)):
   A core that touches no mark *inside an exhaustively marked audit span* is a human-
   confirmed negative (``physiology``: Change 1's "not motion" key). In the old cohort,
   whose marks are positives only, every unmatched core is ``unjudged``, never a negative.
-* **R1 - I, J and K are the prospective test set.** Their labels never enter training.
+* **R1 - I, J and K are the prospective test set.** Their labels never enter training,
+  with one declared exception (RULING 2026-10-09 items 3-5): rows judged from a declared
+  adaptation queue (:data:`ADAPTATION_QUEUES`, file name AND SHA-256) whose queue row is
+  tagged ``label_purpose == "adaptation"``. :func:`admit_adaptation` admits exactly those,
+  after asserting they lie at least :data:`ADAPTATION_MARGIN_S` from every evaluation
+  interval, by relabelling them ``label_set = "adapt"``; every other I/J/K row - set A,
+  blind audits, the K exam - stays ``test`` and is refused.
 * **label_source is required (task 10).** A recording without one is ``unknown`` and is
   excluded, not assumed human; ``model`` labels need an explicit opt-in recorded in
   provenance.
@@ -24,10 +30,12 @@ exclusion (the hand-blanked stim epoch), counted as ``excluded_epoch``, never an
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final, Literal
 
 import h5py
@@ -39,6 +47,11 @@ from scipy.io import loadmat, whosmat
 from gems_blanking_v2.io.recording import spans_from_matlab_intervals
 
 __all__ = [
+    "ADAPTATION_MARGIN_S",
+    "ADAPTATION_PURPOSE",
+    "ADAPTATION_QUEUES",
+    "ADAPTATION_TRACE_COLUMNS",
+    "ADAPT_LABEL_SET",
     "ADJUDICATED_BASIS",
     "ADJUDICATION_JUDGEMENTS",
     "EXCLUDED_EPOCH_FRACTION",
@@ -50,9 +63,12 @@ __all__ = [
     "TEST_ANIMALS",
     "AliasRow",
     "BlankmotionLabels",
+    "admit_adaptation",
     "alias_table",
     "animal_key",
     "apply_adjudications",
+    "assert_adaptation_disjoint",
+    "is_adaptation_row",
     "is_test_animal",
     "judge_core",
     "read_blankmotion_labels",
@@ -95,6 +111,37 @@ def animal_key(cohort: str, animal: str) -> str:
     grouping on the bare letter would put two animals in one fold.
     """
     return f"{cohort}:{animal}"
+
+
+ADAPTATION_PURPOSE: Final = "adaptation"
+"""``label_purpose`` of a queue row drawn to adapt a model to I, J or K (RULING 2026-10-09
+item 3). The screen writes ``label_set = "test"`` on every I/J/K row (R1), so the purpose
+is a separate column, carried from the queue row onto its judgement."""
+
+ADAPT_LABEL_SET: Final = "adapt"
+"""``label_set`` of an ADMITTED adaptation row (:func:`admit_adaptation`): never ``test``
+(the evaluation labels), never ``train`` (R1: no I/J/K label trains the models that are
+evaluated on I/J/K). Only a row meeting :func:`is_adaptation_row` may carry it."""
+
+ADAPTATION_QUEUES: Final[Mapping[str, str]] = MappingProxyType({
+    "setADAPT_IJK.parquet":
+        "0a728fcaa424c2725e6a3d4c5322c12a4618fe34cd7349a343b0dcb9640172fc",
+})
+"""The declared adaptation queues: queue file name -> SHA-256 of that queue file, as the
+adjudication screen records them on every judgement (``queue_file``, ``queue_sha256``).
+RULING 2026-10-09 items 3-5: 171 rows, 57 each for new-cohort I, J and K, drawn from
+recordings holding no evaluation span and >= 60 s from every evaluation span and judged
+core (``setADAPT_IJK.json``). A different file, or this file with any other content, is
+not an adaptation queue."""
+
+ADAPTATION_MARGIN_S: Final = 60.0
+"""An admitted adaptation row lies at least this many seconds from every evaluation
+interval of its recording (RULING 2026-10-09 item 3; ruling 2026-10-08 (k) 4)."""
+
+ADAPTATION_TRACE_COLUMNS: Final[tuple[str, ...]] = ("label_purpose", "queue_file",
+                                                    "queue_sha256")
+"""The columns the admission criterion reads; :func:`apply_adjudications` carries each
+one present on the judgements onto the core it judged."""
 
 LABEL_COLUMNS: Final[tuple[str, ...]] = (
     "recording", "animal", "cohort", "start_s", "stop_s", "judgement", "source",
@@ -297,6 +344,9 @@ def training_rows(table: pd.DataFrame, *, allow_model_labels: bool = False,
     Drops ``unjudged`` and ``unsure`` (never negatives), every test-set row and animal
     (R1), and every recording whose ``label_source`` is ``unknown`` - or ``model`` /
     ``mixed`` unless ``allow_model_labels`` (an opt-in the caller records in provenance).
+    The one I/J/K exception is a row :func:`admit_adaptation` admitted
+    (``label_set == "adapt"`` and :func:`is_adaptation_row`, RULING 2026-10-09); a row
+    labelled ``adapt`` that fails the criterion is dropped like any test row.
 
     Old-cohort rows (rulings 2026-10-07 (i), (j)) are kept only for recordings whose tier
     in ``old_tiers`` is one of ``keep_tiers`` (labels from :data:`OLD_TIERS`; default tier 1
@@ -314,9 +364,11 @@ def training_rows(table: pd.DataFrame, *, allow_model_labels: bool = False,
         msg = "label_source is null on some rows; write 'unknown' explicitly so it is excluded"
         raise ValueError(msg)
     ok_src = {"human"} | ({"model", "mixed"} if allow_model_labels else set())
+    trainable = ((table["label_set"] == "train")
+                 & ~(table["cohort"].eq("new") & table["animal"].isin(TEST_ANIMALS)))
+    admitted = (table["label_set"] == ADAPT_LABEL_SET) & is_adaptation_row(table)
     keep = (table["judgement"].isin(["motion", *NEGATIVE_JUDGEMENTS])
-            & (table["label_set"] == "train")
-            & ~(table["cohort"].eq("new") & table["animal"].isin(TEST_ANIMALS))
+            & (trainable | admitted)
             & table["label_source"].isin(ok_src))
     allowed = set(keep_tiers)
     unknown = allowed - set(OLD_TIERS)
@@ -329,6 +381,143 @@ def training_rows(table: pd.DataFrame, *, allow_model_labels: bool = False,
     out = table.loc[keep].copy()
     out["y"] = (out["judgement"] == "motion").astype(np.int8)
     return out
+
+
+# ---------------------------------------------------------------------------
+# I/J/K adaptation rows (RULING 2026-10-09 items 3-5)
+# ---------------------------------------------------------------------------
+
+
+def _test_rows(table: pd.DataFrame) -> npt.NDArray[np.bool_]:
+    return np.array([is_test_animal(c, a) for c, a in zip(
+        table["cohort"].astype(str), table["animal"].astype(str), strict=True)], dtype=bool)
+
+
+def _text(table: pd.DataFrame, col: str) -> npt.NDArray[np.object_]:
+    """Return the column as text: ``""`` where absent or missing, never ``"None"``/``"nan"``."""
+    if col not in table.columns:
+        return np.full(len(table), "", dtype=object)
+    v = table[col]
+    return np.where(v.isna().to_numpy(), "", v.astype(str).to_numpy()).astype(object)
+
+
+def _tagged(table: pd.DataFrame) -> npt.NDArray[np.bool_]:
+    return np.asarray(_text(table, "label_purpose") == ADAPTATION_PURPOSE, dtype=bool)
+
+
+def is_adaptation_row(table: pd.DataFrame) -> npt.NDArray[np.bool_]:
+    """Return the declared adaptation criterion per row (RULING 2026-10-09); no heuristic.
+
+    True exactly where ALL hold: ``label_purpose == "adaptation"``; ``queue_file`` is a
+    key of :data:`ADAPTATION_QUEUES`; ``queue_sha256`` equals the SHA-256 declared for
+    that file; and the row is new-cohort I, J or K (:func:`is_test_animal`). A missing
+    column makes every row False.
+    """
+    qf = _text(table, "queue_file")
+    declared = np.array([ADAPTATION_QUEUES.get(str(q), None) for q in qf], dtype=object)
+    sha_ok = np.array([d is not None and d == s for d, s in
+                       zip(declared, _text(table, "queue_sha256"), strict=True)], dtype=bool)
+    out: npt.NDArray[np.bool_] = _tagged(table) & sha_ok & _test_rows(table)
+    return out
+
+
+def _intervals_sha256(df: pd.DataFrame) -> str:
+    body = sorted(json.dumps([str(r), float(a), float(b)], ensure_ascii=True,
+                             allow_nan=False) for r, a, b in zip(
+        df["recording"].astype(str), df["start_s"], df["stop_s"], strict=True))
+    return hashlib.sha256("\n".join(body).encode("ascii")).hexdigest()
+
+
+def assert_adaptation_disjoint(rows: pd.DataFrame, evaluation: pd.DataFrame, *,
+                               margin_s: float = ADAPTATION_MARGIN_S) -> dict[str, object]:
+    """Raise unless adaptation rows keep ``margin_s`` from every evaluation interval.
+
+    Every row must lie at least ``margin_s`` from every evaluation interval of its own
+    recording; returns the evidence record.
+
+    ``evaluation`` holds ``recording``, ``start_s``, ``stop_s`` (seconds): every evaluation
+    span (blind-audit plan spans, current and replaced, and the K exam span) and every
+    judged evaluation core of I/J/K (set A and the other non-adaptation queues; ruling
+    2026-10-08 (k) 4). A row overlapping one, or nearer than ``margin_s`` to one, raises -
+    naming the row and the interval. An empty ``evaluation`` raises too: the check would
+    pass vacuously, and "no evaluation span anywhere" is never true of this corpus.
+    """
+    for name, df in (("adaptation rows", rows), ("evaluation", evaluation)):
+        gap = [c for c in ("recording", "start_s", "stop_s") if c not in df.columns]
+        if gap:
+            msg = f"{name} lack column(s) {gap}"
+            raise ValueError(msg)
+    if evaluation.empty:
+        msg = ("no evaluation intervals were given; adaptation disjointness would pass "
+               "vacuously (RULING 2026-10-09)")
+        raise ValueError(msg)
+    if not (np.isfinite(float(margin_s)) and float(margin_s) >= 0):
+        msg = f"margin_s must be finite and >= 0, got {margin_s!r}"
+        raise ValueError(msg)
+    by_rec = {str(r): g[["start_s", "stop_s"]].to_numpy(np.float64)
+              for r, g in evaluation.groupby(evaluation["recording"].astype(str))}
+    hits: list[tuple[str, float, float, float, float]] = []
+    for r, a, b in zip(rows["recording"].astype(str), rows["start_s"].astype(float),
+                       rows["stop_s"].astype(float), strict=True):
+        iv = by_rec.get(r)
+        if iv is None:
+            continue
+        near = (a < iv[:, 1] + margin_s) & (iv[:, 0] - margin_s < b)
+        if near.any():
+            e0, e1 = iv[np.flatnonzero(near)[0]]
+            hits.append((r, a, b, float(e0), float(e1)))
+    if hits:
+        msg = (f"{len(hits)} adaptation row(s) overlap or lie within {margin_s:g} s of an "
+               f"evaluation interval, e.g. (recording, row start, row stop, eval start, eval "
+               f"stop) {hits[:3]}; adaptation and evaluation cores are disjoint "
+               "(RULING 2026-10-09 item 3)")
+        raise ValueError(msg)
+    return {"checked": True, "margin_s": float(margin_s), "n_rows": len(rows),
+            "n_evaluation_intervals": len(evaluation),
+            "n_evaluation_recordings": len(by_rec),
+            "evaluation_sha256": _intervals_sha256(evaluation),
+            "rows_sha256": _intervals_sha256(rows)}
+
+
+def admit_adaptation(table: pd.DataFrame, evaluation: pd.DataFrame, *,
+                     margin_s: float = ADAPTATION_MARGIN_S
+                     ) -> tuple[pd.DataFrame, dict[str, object]]:
+    """Admit the declared I/J/K adaptation rows: relabel them ``label_set = "adapt"``.
+
+    Rows meeting :func:`is_adaptation_row` are checked by
+    :func:`assert_adaptation_disjoint` against ``evaluation`` (raises on any overlap or
+    any row within ``margin_s``) and then carry :data:`ADAPT_LABEL_SET`. A row tagged
+    ``label_purpose == "adaptation"`` that fails the criterion - another queue file, a
+    different SHA-256, or not new-cohort I/J/K - raises, naming what it carries: an
+    adaptation tag is never ignored. Every other row is returned unchanged, so set A's
+    I/J/K judgements, the blind audits and the K exam stay ``test`` (and refused by
+    training). Returns the table and the admission record for provenance.
+    """
+    tagged = _tagged(table)
+    ok = is_adaptation_row(table)
+    bad = tagged & ~ok
+    if bad.any():
+        sub = table.loc[bad]
+        seen = sorted({(str(c), str(a), str(q), str(s)[:16]) for c, a, q, s in zip(
+            sub["cohort"], sub["animal"], _text(sub, "queue_file"),
+            _text(sub, "queue_sha256"), strict=True)})
+        msg = (f"{int(bad.sum())} row(s) tagged label_purpose={ADAPTATION_PURPOSE!r} are "
+               f"refused: (cohort, animal, queue_file, queue_sha256[:16]) {seen[:5]} is not a "
+               f"declared adaptation queue of new-cohort I/J/K ({dict(ADAPTATION_QUEUES)})")
+        raise ValueError(msg)
+    rec = assert_adaptation_disjoint(table.loc[ok], evaluation, margin_s=margin_s)
+    out = table.copy()
+    out.loc[ok, "label_set"] = ADAPT_LABEL_SET
+    admitted = out.loc[ok]
+    rec.update({
+        "rule": ("RULING 2026-10-09 items 3-5: label_purpose == 'adaptation' AND queue_file "
+                 "in ADAPTATION_QUEUES AND queue_sha256 == the declared value AND new-cohort "
+                 "I/J/K; >= margin_s from every evaluation interval"),
+        "queues": dict(ADAPTATION_QUEUES),
+        "n_admitted": {str(a): int(n) for a, n in
+                       admitted.groupby(admitted["animal"].astype(str)).size().items()},
+    })
+    return out, rec
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +591,11 @@ def apply_adjudications(cores: pd.DataFrame, adj: pd.DataFrame, *,
     "old_random"``), matched by core key, never by queue file - and
     :data:`ADJUDICATED_BASIS` otherwise.
 
+    Each of :data:`ADAPTATION_TRACE_COLUMNS` present on ``adj`` (``queue_file``,
+    ``queue_sha256``, and ``label_purpose`` once the caller has joined it from the queue
+    row) is copied onto the judged core from the judgement that won, so the adaptation
+    criterion (:func:`is_adaptation_row`) reads the judgement that actually labels it.
+
     A core judged twice keeps the later judgement (``at``). A judgement that would
     overwrite a core that already carries a different judgement (an audit-span label, an
     inherited mark) is not applied: the core becomes ``unjudged`` with basis
@@ -444,6 +638,12 @@ def apply_adjudications(cores: pd.DataFrame, adj: pd.DataFrame, *,
     out.loc[out.index[ok], "judgement"] = new[~conflict]
     out.loc[out.index[ok], "basis"] = basis[~conflict]
     out.loc[out.index[ok], ["source", "label_source"]] = "human"
+    for col in ADAPTATION_TRACE_COLUMNS:  # the admission criterion's inputs, newest wins
+        if col in a.columns:
+            if col not in out.columns:
+                out[col] = pd.Series([None] * len(out), index=out.index, dtype=object)
+            out[col] = out[col].astype(object)
+            out.loc[out.index[ok], col] = a[col].to_numpy(dtype=object)[~conflict]
     out.loc[out.index[rows[conflict]], "judgement"] = "unjudged"
     out.loc[out.index[rows[conflict]], "basis"] = "adjudication_conflict"
     counts = (a.assign(basis=basis).groupby(["cohort", "basis", "judgement"]).size()

@@ -53,7 +53,7 @@ from gems_blanking_v2.io.registry_log import (
 )
 from gems_blanking_v2.io.store import GemsStore, atomic_write_text, utc_stamp
 from gems_blanking_v2.model.evaluate import Calibrator
-from gems_blanking_v2.model.labels import animal_key, is_test_animal
+from gems_blanking_v2.model.labels import ADAPT_LABEL_SET, animal_key, is_test_animal
 from gems_blanking_v2.model.provenance import PROVENANCE_NAME, write_provenance
 from gems_blanking_v2.model.train import (
     check_feature_version,
@@ -386,12 +386,6 @@ class Registry:
         """Load the calibrator of a registered spec."""
         p = self.store.abspath(PurePosixPath(Path(spec.calibrator).as_posix()).as_posix())
         return Calibrator.from_json(p.read_text(encoding="utf-8"))
-
-
-ADAPT_LABEL_SET: Final = "adapt"
-"""``label_set`` of a prospective test animal's adaptation labels: never ``test`` (the
-evaluation labels), never ``train`` (R1: no I/J/K label enters training of the models
-that are evaluated)."""
 
 
 def adaptation_separation(rows: pd.DataFrame, *, animal: str,
