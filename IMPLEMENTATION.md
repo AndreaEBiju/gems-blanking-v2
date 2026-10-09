@@ -5950,6 +5950,52 @@ The rulings headed **2026-10-08**, **(b)** and **(c)** were written on **2026-10
    - K has no evaluation span, so K uses the zero-label option Andrea picks. Adaptation labels, if chosen, are for I and J only.
 5. **The wrapper branch merges on Friday,** after the sweep ends and before routing resumes, as Claude Code planned.
 
+### RULING 2026-10-09 — model choice; I/J/K adaptation with a new K exam span; Night 6 trim mode; stim_rec beat-train origin
+
+**Andrea, 2026-10-09** (US Eastern date), from the model-options page of `run_20261008b`:
+
+1. **Models for the animals with labels:**
+
+   | Animal | Mode | w | Model id | F1 | ECE |
+   |---|---|---|---|---|---|
+   | new:A | adapted | 1 | `b0a8bb20b6e66cb02331a8a59301717b` | 0.459 | 0.010 |
+   | new:B | adapted | 1 | `8f1fa22a7d346d9c6fa56b7c3369d93c` | 0.524 | 0.063 |
+   | new:H | adapted | 30 | `9569a31bd6181ef3b1c0d8d9be1c39f2` | 0.731 | 0.035 |
+
+   - **B:** every B option misses ECE ≤ 0.05. w = 1 is the best calibrated, and its F1 is within noise of the rest. Record the ECE miss in provenance.
+   - **H:** the per-animal > adapted flag (task 11) stays open, as an investigation after task 19. It does not block.
+2. **Zero-label options are rejected for I, J and K.**
+   - EM prior-shift fails its own assumption: its rate estimates sit at 0 or 1 in 11 of 18 cases (B: 0 against a true 0.25).
+   - The other-animal threshold scores below plain P ≥ 0.5 on every LOAO target.
+3. **I, J and K all get adaptation labels** (ruling (b) 2 and (k) 4).
+   - **How many:** about 30 usable cores each, uncertainty-sampled from recordings that hold no evaluation span (or at least 60 s from one). The sets are asserted disjoint at write time.
+   - **Set A's I/J/K judgements stay evaluation-only.**
+4. **K gets an exam span first, because it has none.**
+   - **Choose it before anything else:** one contiguous ~10 min stretch from a K recording, chosen at random before the adaptation queue is drawn and before any K model output is shown. The recording must not supply adaptation cores. If the stretch is mostly unusable, draw again at random and report the redraw.
+   - **Andrea marks it blind,** by the blind-audit protocol (BLIND_AUDIT_STEPS.md), before she labels K's adaptation cores.
+   - It is K's evaluation span from then on: scored only by models that never saw it, with set A's 25 K judgements reported alongside.
+   - Report in one line why no audit span came from K originally.
+5. **Scoring I/J/K:**
+   - I and J's adapted models are scored on their existing evaluation spans (I 447 cores, J 173), with set A's I/J judgements reported alongside.
+   - K's adapted model is scored on the new span.
+   - Each is compared with the pooled model on the same cores, under the same protocol (invariant 12).
+   - The chosen I/J/K model ids are added to the model-choice file after the retrain. Andrea confirms them from the scores.
+6. **Night 6 trim mode: (B).**
+   - **Inputs:** masked only through the electrical settling.
+   - **Outputs, trimmed per variable:**
+     - An output computed over valid samples or events only, which Andrea's ≥ 50%-valid window rule governs (HR and HRV from beat intervals, spike rates), is trimmed only by the filter settling of its own input, not by half its window. Her rule decides the edge windows.
+     - An output computed on filled-in or filtered data (for example slow wave's `fillmissing` before the low-pass) is trimmed by its full reach.
+   - **Each windowed output value carries its valid fraction,** so edge values can be placed where their data lies.
+   - **Corrections:**
+     - Whole-epoch averages (`avgHeartRate`, `avgSlowWave` and the like) are recomputed from the kept values and labelled as recomputed.
+     - Not-computed mmc events are NaN, never "no event". The `night6_recovery_trim` marker stays.
+   - **Windows stay centred** (Andrea's convention). Right-extending windows would only move the time labels earlier.
+7. **Stim_rec beat-train origin.**
+   - **The 28 store files are not overwritten,** because routing reads their stored 0. A corrected start (132 s region origin) is added beside each one, with a note.
+   - Andrea has not used any of them, so nothing is re-run on her side.
+   - **The production beat trains are published** through the corrected publisher, as byte-identical copies.
+   - **The routing writers' fix is deferred** until after task 19.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
