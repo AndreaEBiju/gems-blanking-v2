@@ -2289,7 +2289,12 @@ The rulings headed **2026-10-08**, **(b)** and **(c)** were written on **2026-10
    - **For a moving window:** settling is the part of the window that reaches back before *t*. That is half the window if the window is centred, the whole window if it trails. Read which one from the code.
    - **Now:** everything runs from 132 s on the current schedule (finish Mon 10-12). An analysis whose own start is later than 132 s is trimmed at Night 6.
    - **Afterwards, as an add-on:** route the window from stim-off to 132 s for the stim_rec files, emit those masks, and append the early recovery to each analysis whose start is before 132 s. It must not delay the main finish. Cost it and schedule it after task 19.
-3. **step3b's cardiac guard keeps Andrea's default of 15 ms.** The ±20 ms in (i) came from the May copy.
+3. **step3b's cardiac guard follows the heartbeat window (Andrea, 2026-10-08).** v2 sets `P.envCardiacGuardMs = 0`.
+   - The constant peri-R NaN spans of item 1 already remove those samples from the activity RMS (through `validMask`), so spike detection and the activity trace exclude exactly the same samples around each beat.
+   - A separate 15 ms guard would cut a different window from the RMS than from the spikes.
+   - Test: the samples excluded from the RMS around each R equal the peri-R span plus the edge pad. Revert-check it.
+   - For a recording with no beat train, there are neither spans nor R-peaks, so the guard has nothing to act on either way.
+   - The ±20 ms in (i) came from the May copy and is withdrawn.
 4. **I/J/K adaptation clarifications** (from existing rulings, no amendment needed):
    - Set A's I/J/K judgements are evaluation-only ((b) 8). They never count toward adaptation labels, and are never used in training or calibration.
    - Adaptation cores come from recordings that hold no evaluation span; if that isn't possible, at least 60 s from any evaluation span. The two sets are asserted disjoint at write time.
