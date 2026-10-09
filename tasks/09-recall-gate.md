@@ -2438,6 +2438,33 @@ The rulings headed **2026-10-08**, **(b)** and **(c)** were written on **2026-10
 4. **Target finish: Sunday 10-11.** Night 5 starts when routing is finished and Andrea's Saturday-morning decisions are in. Night 6 follows straight after, and task 19 runs on Sunday.
 5. **Andrea's queue** is one list with minutes, ordered so that whatever unblocks the machine comes first. Items go out as soon as they are ready.
 
+### RULING 2026-10-09 (f) — decimation accepted; slow-wave band-pass candidates
+
+**Andrea, 2026-10-09:**
+
+1. **Slow-wave decimation (factor 78) is equivalent to full rate. Night 6 runs `slow_wave_rate = decimated78`.**
+   - The remaining failures of the fixed criteria all reproduce full rate against full rate:
+     - findpeaks near-ties (A ANT1 542.9 against 548.0 s; B ANT1 250.6 s);
+     - rate-window validity flips at the 30 s clean-length gate on synthetic whole-second masks.
+   - They are recorded as a known property of her peak and rate rules at both rates.
+   - Away from masks, peaks match within 21 ms and rates within 0.0006 cpm.
+   - **Not covered by the check:** slow-wave amplitude. A's ANT1 shows a few-µV offset between the rates for about 250 s after the masked span at the epoch start. Report whether any amplitude output is affected.
+2. **The slow-wave settings test gains band-pass candidates covering all slow-wave activity** (Andrea, antrum, awake), including bradygastria and tachygastria.
+   - **The band-pass is built from two parts:** a zero-phase high-pass applied in the wrapper (on the decimated signal, with fill and restore) followed by her own low-pass. Her function is not edited.
+   - **Candidates added** (before any result is seen; the criteria hashed at 12:45 are unchanged):
+     - 0.02–0.2 Hz (1.2–12 cpm), with and without the 5 s smoothing;
+     - 0.03–0.2 Hz (1.8–12 cpm), with and without the smoothing;
+     - 0.05–0.2 Hz (3–12 cpm, Andrea's first suggestion), with and without the smoothing.
+   - **Compared against the existing candidates:** `batch_process` (low-pass 0.15 Hz order 2 plus smoothing), low-pass only, and smoothing only.
+   - **Report each candidate's edge settling at a masked edge,** because a low high-pass corner settles slowly. That settling sets the slow-wave blank padding and the recovery start.
+   - **The physiological range** is narrowed to the awake rat antrum, with citations, and bradygastric and tachygastric bands are reported separately from the normal band.
+3. **If Andrea chooses a setting other than `batch_process`:**
+   - the slow-wave-only tolerance pass is re-run with it (about 6–8 h);
+   - the slow-wave masks are re-emitted after Night 5;
+   - Night 6's slow wave uses the new setting.
+
+   None of this delays the other consumers.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
