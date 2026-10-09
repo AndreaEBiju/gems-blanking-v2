@@ -413,7 +413,7 @@ FALLBACK_BAD_IDS = {"top_key": "night6:fallbackKey", "entry_key": "night6:fallba
 
 
 def _fallback_case(tmp: Path, root: Path) -> dict[str, Any]:
-    """A fallback list naming T x L, and one malformed list per refusal."""
+    """Write a fallback list naming T x L, and one malformed list per refusal."""
     d = tmp / "fb"
     d.mkdir()
     (d / "ok.json").write_text(json.dumps(FALLBACK_OK), encoding="utf-8", newline="\n")
