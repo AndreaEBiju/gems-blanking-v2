@@ -8,7 +8,12 @@ function night6_check(caseFile, outFile)
 %     loading, slicing, masking and skip logic; the consumers' calls are not made);
 %   * slow wave, one channel at a time: Andrea's slowWaveAnalysis_new on a small
 %     three-column input, directly and through night6_keep_slow_wave;
-%   * process_dataset_v2 on a small synthetic spike input, and its refusals.
+%   * slow wave with two channels kept from one shared call;
+%   * night6_consumer_input's joint-mask assertion on a hand-built plan;
+%   * the step1a fallback list's hash (raw bytes) on LF, CRLF and non-ASCII files;
+%   * process_dataset_v2 on a small synthetic spike input, its refusals, and two
+%     mutants from tests/matlab/mutants (a zero-filling step 1; threshSigma 5), each
+%     on the path only for its own call.
 % Writes what it measured as JSON; the records land under the case's out_root.
     C = jsondecode(fileread(caseFile));
     out = struct();
@@ -80,7 +85,15 @@ function night6_check(caseFile, outFile)
             out.fallback_error = sprintf('%s: %s', ME.identifier, ME.message);
         end
     end
+    % The fallback list's hash is of the raw bytes (night6_sha256_file), so an LF file,
+    % its CRLF copy and a non-ASCII file each hash as Python's hashlib does.
+    if isfield(C, 'fallback_hash')
+        out.fallback_sha = cellfun(@fallback_sha, cellstr(C.fallback_hash), ...
+                                   'UniformOutput', false);
+    end
+    out.joint = joint_mask_case();
     if isfield(C, 'slow_wave'), out.slow_wave = slow_wave_case(C.slow_wave); end
+    if isfield(C, 'slow_wave2'), out.slow_wave2 = slow_wave_case(C.slow_wave2); end
     if isfield(C, 'v2'), out.v2 = v2_case(C.v2); end
     fid = fopen(outFile, 'w', 'n', 'UTF-8');
     fwrite(fid, jsonencode(out), 'char');
@@ -140,7 +153,13 @@ function r = v2_case(V)
         r.n_rpeaks = info.n_rpeaks;
         r.bandpass = [info.P.bandpassLow, info.P.bandpassHigh, info.P.threshSigma];
         r.centers = arrayfun(@(s) s.alignedCenters(:)', Dv.spikes, 'UniformOutput', false);
-        r.input_nan_still_nan = all(isnan(Dv.y(isnan(D.y))));
+        % Invariant 1 on what the steps WROTE (columns = neural channels 1:2 here).
+        r.input_nan_filtered_nan = all(isnan(Dv.filtered(isnan(D.y))));
+        r.input_nan_invalid = ~any(Dv.validMask(isnan(D.y)));
+        r.n_input_nan = nnz(isnan(D.y));
+        r.info_P = struct('threshSigma', info.P.threshSigma, ...
+                          'refractoryMs', info.P.refractoryMs, ...
+                          'detectPolarity', info.P.detectPolarity);
         r.step1a_ran = isfield(Dv, 'cardiacBlank');   % ruling (i): it must not
         r.rpeak_guard_ms = Dv.envelope(1).guardMs;    % step3b kept its guard
     catch ME
@@ -167,6 +186,56 @@ function r = v2_case(V)
     r.constant = attempt_id(@() process_dataset_v2(E));
     E = D; E.rpeakSamples(1) = E.rpeakSamples(1) + 0.5;
     r.bad_rpeaks = attempt_id(@() process_dataset_v2(E));
+    % Mutants: a step 1 that zero-fills NaN, and her default threshold changed. Each is
+    % on the path only for its own call; which() proves the mutant was the one called.
+    [r.mutant_zero_fill, r.mutant_zero_fill_path] = with_mutant('step1_zero_fill', ...
+        'step1_bandpass', @() process_dataset_v2(D));
+    [r.mutant_thresh, r.mutant_thresh_path] = with_mutant('thresh_sigma_5', ...
+        'pipeline_params', @() process_dataset_v2(D));
+    r.after_mutants_step1 = which('step1_bandpass');   % back to hers
+end
+
+function [id, where] = with_mutant(dirName, fname, f)
+% Run f with tests/matlab/mutants/<dirName> first on the path; report the error id and
+% where fname resolved while it was there. The path is restored whatever happens.
+    d = fullfile(fileparts(mfilename('fullpath')), 'mutants', dirName);
+    addpath(d, '-begin');
+    restore = onCleanup(@() rmpath(d));
+    where = which(fname);
+    id = attempt_id(f);
+    clear restore
+end
+
+function h = fallback_sha(f)
+    F = night6_step1a_fallback(f);
+    h = F.sha256;
+end
+
+function r = joint_mask_case()
+% night6_consumer_input on a hand-built 12-row plan: a slow-wave run on ANT1's mask is
+% accepted when the joint NaN mask IS ANT1's mask, and refused by name
+% ('night6:jointMask') when the recording itself carries a NaN elsewhere.
+    plan = struct('i0', 2, 'n', 12, 'scaleToVolts', 1);
+    plan.recipes = struct();
+    for c = 1:3
+        plan.recipes.(sprintf('ANT%d', c)) = struct('kind', 'raw', 'cols', c, 'weights', 1);
+    end
+    plan.masks = struct('consumer', {'slow_wave', 'slow_wave', 'slow_wave'}, ...
+                        'signal', {'ANT1', 'ANT2', 'ANT3'}, 'token', {'ANT1', 'ANT2', 'ANT3'}, ...
+                        'spans', {[3 4; 9 9], zeros(0, 2), [1 1]});
+    run = struct('call', 'slowWaveAnalysis_new', 'consumers', {{'slow_wave'}}, ...
+                 'signals', {{'ANT1', 'ANT2', 'ANT3'}}, 'maskSignal', 'ANT1', 'keep', {{'ANT1'}});
+    Y = reshape(1:16 * 3, 16, 3);
+    r = struct();
+    try
+        X = night6_consumer_input(plan, Y, run);
+        r.ok_error = '';
+        r.ok_nan_rows = find(any(isnan(X), 2))';
+    catch ME
+        r.ok_error = ME.identifier;
+    end
+    Y(2 + 6, 2) = NaN;   % epoch row 6 of ANT2: not in ANT1's mask
+    r.stray_nan = attempt_id(@() night6_consumer_input(plan, Y, run));
 end
 
 function id = attempt_id(f)

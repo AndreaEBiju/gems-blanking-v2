@@ -16,7 +16,7 @@ function X = night6_consumer_input(plan, Y, run)
 % Which mask: each column gets the mask of its own signal, except in a run with a
 % maskSignal (slow_wave, one ANT channel at a time - Andrea, 2026-10-09), where EVERY
 % column gets the mask of run.maskSignal, so slowWaveAnalysis_new's joint any(isnan)
-% mask is exactly that channel's mask.
+% mask is exactly that channel's mask - asserted ('night6:jointMask'), not assumed.
     rows = plan.i0 + (1:plan.n);
     lead = run.consumers{1};
     X = zeros(plan.n, numel(run.signals));
@@ -34,6 +34,22 @@ function X = night6_consumer_input(plan, Y, run)
         end
         for k = 1:size(m.spans, 1)
             X(m.spans(k, 1):m.spans(k, 2), j) = NaN;
+        end
+    end
+    if isfield(run, 'maskSignal') && ~isempty(run.maskSignal)
+        % Asserted, not assumed: slowWaveAnalysis_new's joint any(isnan) mask must be
+        % exactly mask i - a NaN anywhere else (in the recording itself, or from a
+        % column built otherwise) would silently widen it for the kept channels.
+        mask_i = false(plan.n, 1);
+        for k = 1:size(m.spans, 1)
+            mask_i(m.spans(k, 1):m.spans(k, 2)) = true;
+        end
+        joint = any(isnan(X), 2);
+        if ~isequal(joint, mask_i)
+            error('night6:jointMask', ['slow_wave run on %s: the joint NaN mask differs ' ...
+                  'from %s''s mask at %d sample(s) (first at epoch row %d)'], ...
+                  run.maskSignal, run.maskSignal, nnz(joint ~= mask_i), ...
+                  find(joint ~= mask_i, 1));
         end
     end
 end

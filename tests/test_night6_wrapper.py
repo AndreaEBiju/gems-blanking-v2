@@ -30,6 +30,17 @@ masking and skip logic; the consumers' calls are not made). Checks:
   samples stay NaN, no spike lies in a NaN span or its 5 ms pad, a pad wider than her
   own fires the check, and an all-NaN, a constant or a non-integer R-peak input
   is refused by name (invariant 41); a constant spike channel is dropped by the wrapper;
+  every masked input sample is NaN in ``D.filtered`` and invalid in ``D.validMask`` (a
+  mutant step 1 that zero-fills NaN is refused by name); threshSigma 4.5 and the band are
+  asserted (a mutant ``pipeline_params`` with 5 is refused) and the parameters as used are
+  recorded from the struct, not as text;
+* the constant / all-NaN refusal covers every call (invariant 41): an exactly-zero ANT
+  column refuses mmc and that channel's slow wave by name while the other kept channels
+  run, and a constant HR lead refuses both HR runs;
+* a slow-wave run's joint NaN mask is asserted to be its channel's mask, and a run that
+  keeps two channels from one shared call keeps both, each equal to a direct call;
+* the step1a fallback list is hashed as raw bytes (LF, CRLF, UTF-8 and Latin-1 files hash as
+  hashlib does, and the CRLF copy differs from the LF file);
 * a recording whose hrv/breathing are "not computed" skips them with the reason; mmc is
   "not computed" on a "pre" recording with no beat train, and skipped for want of R-peaks
   on any other recording without beats.
@@ -40,6 +51,7 @@ Skips, with the reason, when MATLAB or ``processing_new`` is absent (as
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import string
@@ -88,7 +100,8 @@ SESSION_B = "syn_b_pre01_110000_20260101T160000Z"
 SESSION_C = "syn_c_t01_bl_120000_20260101T170000Z"
 SESSION_D = "syn_d_t01_bl_130000_20260101T180000Z"
 SESSION_E = "syn_e_t01_bl_140000_20260101T190000Z"
-SESSIONS = (SESSION_A, SESSION_B, SESSION_C, SESSION_D, SESSION_E)
+SESSION_F = "syn_f_t01_bl_150000_20260101T200000Z"
+SESSIONS = (SESSION_A, SESSION_B, SESSION_C, SESSION_D, SESSION_E, SESSION_F)
 READS_A: dict[str, tuple[str, ...]] = {"spikes": ("L_T", "R_T"), "slow_wave": GASTRIC,
                                        "mmc": GASTRIC, "hrv": (HR,), "breathing": (HR,),
                                        "velocity": ()}
@@ -121,6 +134,10 @@ SHIFT_SAMPLES = 3.4
 a reader that rounded seconds x fs would slice 3 samples late."""
 CONSTANT_UV = {"LVN1": 5.0, "LVN2": 7.0, "LVN3": 11.0}
 """Session E's left contacts are constant, so its L_T is constant (1 uV)."""
+ZERO_ANT = "ANT2"
+CONSTANT_HR_UV = 4.0
+"""Session F: ANT2 is exactly zero, and LVN2 = RVN2 = 4 uV, so the HR lead LVN2-RVN2 is
+exactly zero too (invariant 41 for slow wave, mmc and HR)."""
 V2_STEPS_HERS = re.compile(r"^\s*D\s*=\s*(step\w+)\(D,\s*P,\s*plotMode\);", re.MULTILINE)
 
 
@@ -176,6 +193,10 @@ def _signal(session: str) -> np.ndarray:
     if session == SESSION_E:
         for lab, v in CONSTANT_UV.items():
             y[:, LABELS.index(lab)] = v
+    if session == SESSION_F:
+        y[:, LABELS.index(ZERO_ANT)] = 0.0
+        for lab in HR.split("-"):
+            y[:, LABELS.index(lab)] = CONSTANT_HR_UV
     return y
 
 
@@ -192,7 +213,9 @@ def _store(root: Path) -> dict[str, Any]:
             # epochStart_s moved after writing: slicing must follow the stored sample
             (SESSION_D, READS_A, SPANS_A, (EPOCHS_A[1],), None, BEATS_S, "baseline"),
             # a baseline with no beat train and a constant left cuff
-            (SESSION_E, READS_E, SPANS_E, ((0.0, N_FILE),), NOT_COMPUTED, None, "baseline")):
+            (SESSION_E, READS_E, SPANS_E, ((0.0, N_FILE),), NOT_COMPUTED, None, "baseline"),
+            # an exactly-zero ANT column and a constant HR lead, with beats
+            (SESSION_F, READS_A, SPANS_A, (EPOCHS_A[1],), None, BEATS_S, "baseline")):
         sdir = root / "data" / "T" / session
         mdir = sdir / "masks" / MODEL
         mdir.mkdir(parents=True)
@@ -360,6 +383,8 @@ def test_night6_wrapper_slices_masks_and_skips(tmp_path: Path) -> None:
     mmc_units = _mmc_units_case(tmp_path)
     sw = _slow_wave_case(tmp_path)
     v2 = _v2_case(tmp_path)
+    sw2 = _slow_wave_two_kept_case(tmp_path)
+    fb_hash = _fallback_hash_case(tmp_path)
     case: dict[str, Any] = {"tokens": names, "signals": names,
             "gems_root": root.as_posix(), "units": "uV", "out_root": out_root.as_posix(),
             "mask_folders": [(root / "data" / "T" / s / "masks" / MODEL).as_posix()
@@ -369,6 +394,7 @@ def test_night6_wrapper_slices_masks_and_skips(tmp_path: Path) -> None:
                        "out_dir": (out_root / "T" / SESSION_A / MODEL).as_posix(),
                        "keep_tag": "e0", "stale_tag": "e5"},
             "mmc_units": mmc_units, "slow_wave": sw["case"], "v2": v2["case"],
+            "slow_wave2": sw2, "fallback_hash": [p.as_posix() for p in fb_hash],
             "fallback": _fallback_case(tmp_path, root)}
     case_file, res_file = tmp_path / "case.json", tmp_path / "result.json"
     case_file.write_text(json.dumps(case, ensure_ascii=True), encoding="utf-8", newline="\n")
@@ -386,13 +412,19 @@ def test_night6_wrapper_slices_masks_and_skips(tmp_path: Path) -> None:
     for key, e in expect.items():
         if key.startswith(SESSION_E):
             _check_constant_cuff(out_root / "T" / SESSION_E / MODEL / "e0")
+        elif key.startswith(SESSION_F):
+            _check_zero_ant(out_root / "T" / SESSION_F / MODEL / "e5")
         else:
             _check_epoch(key, e, root, out_root)
     _check_resume(out_root / "T" / SESSION_A / MODEL)
     _check_mmc_units(mmc_units, res)
     _check_slow_wave_keep(sw, res["slow_wave"])
+    _check_slow_wave_two_kept(res["slow_wave2"])
     _check_v2(v2, res["v2"], pnew)
     _check_fallback(res, out_root, tmp_path / "out_fb")
+    _check_fallback_hash(fb_hash, res["fallback_sha"])
+    _check_joint_mask(res["joint"])
+    _check_spike_params(out_root / "T" / SESSION_A / MODEL / "e5")
 
 
 FALLBACK_OK = {"schema": 1, "ruling": "test", "entries": [
@@ -441,6 +473,95 @@ def _check_fallback(res: dict[str, Any], out_root: Path, out_fb: Path) -> None:
     assert len(listed["step1a_fallback"]["sha256"]) == 64
     assert listed["runs"][0]["call"] == "process_dataset_v2"
     assert np.atleast_1d(listed["runs"][0]["step1a_fallback"]).tolist() == ["L_T"]
+
+
+def _fallback_hash_case(tmp: Path) -> list[Path]:
+    """Write the list as LF, as a CRLF copy, as non-ASCII UTF-8, and with one Latin-1 byte.
+
+    The Latin-1 file is the one a decoded-text hash gets wrong: MATLAB decodes the stray
+    byte to U+FFFD, so re-encoding the text does not give back the bytes on disk. (The
+    CRLF and UTF-8 files hash the same either way in R2026a, whose fileread keeps CR and
+    decodes UTF-8 losslessly; they pin the raw-byte contract, not the defect.)
+    """
+    d = tmp / "fb_hash"
+    d.mkdir()
+    lf = json.dumps(FALLBACK_OK, indent=1) + "\n"
+    (d / "lf.json").write_bytes(lf.encode("utf-8"))
+    (d / "crlf.json").write_bytes(lf.replace("\n", "\r\n").encode("utf-8"))
+    doc = {**FALLBACK_OK, "note": "peri-R excess \u2014 leak, 5 \u00b5V"}
+    (d / "utf8.json").write_bytes((json.dumps(doc, ensure_ascii=False) + "\n").encode("utf-8"))
+    (d / "latin1.json").write_bytes(
+        (json.dumps({**FALLBACK_OK, "note": "5 \u00b5V"}, ensure_ascii=False) + "\n")
+        .encode("latin-1"))
+    return [d / "lf.json", d / "crlf.json", d / "utf8.json", d / "latin1.json"]
+
+
+def _check_fallback_hash(files: list[Path], got: list[str]) -> None:
+    """Check the recorded hash is of the bytes on disk: hashlib's, and CRLF != LF."""
+    want = [hashlib.sha256(f.read_bytes()).hexdigest() for f in files]
+    assert list(got) == want
+    assert want[0] != want[1]  # the CRLF copy is a different file
+    assert b"\xb5" in files[3].read_bytes()  # really not UTF-8
+
+
+def _check_joint_mask(r: dict[str, Any]) -> None:
+    """Check the joint NaN mask is ANT1's exactly; a stray recording NaN is refused."""
+    assert r["ok_error"] == ""
+    assert np.atleast_1d(r["ok_nan_rows"]).tolist() == [3, 4, 9]
+    assert r["stray_nan"] == "night6:jointMask"
+
+
+SPIKE_PARAMS = {"threshSigma": 4.5, "bandpassLow": 300, "bandpassHigh": 3000, "filterOrder": 4,
+                "envCardiacGuardMs": 15, "edgeBufferMs": 10, "refractoryMs": 1.0,
+                "detectPolarity": "neg"}
+"""Her pipeline_params defaults with the band of Andrea 2026-10-09 (300-3000 Hz)."""
+
+
+def _check_spike_params(d: Path) -> None:
+    """Check the record carries the spike P as used, field by field, not as text."""
+    rec = json.loads((d / "night6_record.json").read_text(encoding="utf-8"))
+    run = rec["runs"][0]
+    assert run["call"] == "process_dataset_v2"
+    got = {k: v for k, v in run["spike_params"].items() if k != "source"}
+    assert got == SPIKE_PARAMS
+    assert "threshSigma" not in json.dumps(rec["params"]["spikes"])  # no literal copy
+
+
+def _check_zero_ant(d: Path) -> None:
+    """Session F: zero ANT2 refuses mmc and ANT2's slow wave by name; ANT1 and ANT3 run.
+
+    The HR lead is exactly zero, so both HR runs (hrv, breathing: different masks) are
+    refused by name too. Spikes still run (R_T dead and dropped, L_T planned).
+    """
+    rec = json.loads((d / "night6_record.json").read_text(encoding="utf-8"))
+    cons, runs = rec["consumers"], rec["runs"]
+    assert [r["call"] for r in runs] == ["process_dataset_v2", "HR_BR_HRVAnalysis_beats",
+                                         "HR_BR_HRVAnalysis_beats", "slowWaveAnalysis_new",
+                                         "slowWaveAnalysis_new", "extract_mmc"]
+    assert cons["spikes"]["status"] == "planned"
+    for r in runs[1:3]:
+        assert r["status"] == "skipped_no_valid_samples"
+        assert f"constant input in [{HR}]" in r["reason"]
+    for c in ("hrv", "breathing"):
+        assert cons[c]["status"] == "skipped_no_valid_samples"
+        assert f"constant input in [{HR}]" in cons[c]["reason"]
+    sw1, sw2 = runs[3], runs[4]
+    assert (sw1["mask_signal"], np.atleast_1d(sw1["keep"]).tolist()) == ("ANT1", ["ANT1"])
+    assert sw1["status"] == "ok"
+    assert np.atleast_1d(sw1["dead_not_kept"]).tolist() == [ZERO_ANT]  # named, discarded
+    assert f"constant input in [{ZERO_ANT}]" in sw1["dead_not_kept_reason"]
+    assert sw2["mask_signal"] == ZERO_ANT
+    assert np.atleast_1d(sw2["refused_keep"]).tolist() == [ZERO_ANT]
+    assert np.atleast_1d(sw2["keep"]).tolist() == ["ANT3"]
+    assert sw2["status"] == "ok"
+    ch = cons["slow_wave"]["channels"]
+    assert ch[ZERO_ANT]["status"] == "skipped_no_valid_samples"
+    assert f"constant input in [{ZERO_ANT}]" in ch[ZERO_ANT]["reason"]
+    assert ch["ANT1"]["status"] == ch["ANT3"]["status"] == "planned"
+    assert cons["slow_wave"]["status"] == "planned"
+    assert runs[5]["status"] == "skipped_no_valid_samples"
+    assert f"constant input in [{ZERO_ANT}]" in runs[5]["reason"]
+    assert cons["mmc"]["status"] == "skipped_no_valid_samples"
 
 
 MMC_FS = 2000.0
@@ -497,6 +618,30 @@ def _slow_wave_case(tmp: Path) -> dict[str, Any]:
     return {"case": case}
 
 
+def _slow_wave_two_kept_case(tmp: Path) -> dict[str, Any]:
+    """Return a case: the same columns, ANT1's mask on all, ANT1 AND ANT3 kept (one call)."""
+    return {"input_file": (tmp / "sw_in.mat").as_posix(), "signals": list(GASTRIC),
+            "keep": ["ANT1", "ANT3"], "mask_signal": "ANT1", "base": "e0",
+            "low_pass_on": True, "cutoff": 0.15, "order": 2, "window": 5.0, "edge_s": 15.0,
+            "direct_dir": (tmp / "sw2_direct").as_posix(),
+            "run_dir": (tmp / "sw2_run").as_posix()}
+
+
+def _check_slow_wave_two_kept(r: dict[str, Any]) -> None:
+    """Both kept channels survive, each equal to ITS column of a direct call."""
+    assert r["error"] == "", r["error"]
+    assert r["files"] == ["e0_slowWaves_ANT1.mat", "e0_slowWaves_ANT3.mat"]
+    direct = [np.atleast_1d(p).tolist() for p in r["direct_peaks"]]
+    avg = np.atleast_1d(r["direct_avg"])
+    assert len({tuple(p) for p in direct}) == 3
+    for s, col in (("ANT1", 0), ("ANT3", 2)):
+        assert np.atleast_1d(r["kept_peaks"][s]).tolist() == direct[col], s
+        assert r["kept_avg"][s] == pytest.approx(avg[col], rel=0, abs=0), s
+        assert r["kept_cols"][s] == 1
+        assert r["kept_channel"][s] == s
+    assert np.atleast_1d(r["kept"]["deleted"]).tolist() == ["e0_swm_ANT1_slowWaves.mat"]
+
+
 def _check_slow_wave_keep(sw: dict[str, Any], r: dict[str, Any]) -> None:
     """Only ANT2's outputs survive, equal to column 2 of a direct call, not column 1 or 3."""
     assert r["error"] == "", r["error"]
@@ -537,7 +682,16 @@ def _check_v2(v2: dict[str, Any], r: dict[str, Any], pnew: Path) -> None:
     assert {Path(d).resolve() for d in np.atleast_1d(r["step_dirs"]).tolist()} == {pnew.resolve()}
     assert np.atleast_1d(r["bandpass"]).tolist() == [300, 3000, 4.5]
     assert r["n_rpeaks"] == v2["n_rpeaks"]
-    assert r["input_nan_still_nan"] is True
+    assert r["n_input_nan"] > 0
+    assert r["input_nan_filtered_nan"] is True  # what step 1 wrote, not D.y
+    assert r["input_nan_invalid"] is True
+    assert r["info_P"] == {"threshSigma": 4.5, "refractoryMs": 1.0, "detectPolarity": "neg"}
+    # mutants: each was the function actually called, and each is refused by name
+    assert Path(r["mutant_zero_fill_path"]).parent.name == "step1_zero_fill"
+    assert r["mutant_zero_fill"] == "process_dataset_v2:nanFilled"
+    assert Path(r["mutant_thresh_path"]).parent.name == "thresh_sigma_5"
+    assert r["mutant_thresh"] == "process_dataset_v2:params"
+    assert Path(r["after_mutants_step1"]).resolve().parent == pnew.resolve()
     assert r["step1a_ran"] is False  # ruling (i) 1: heartbeats only as the mask's NaN
     assert r["rpeak_guard_ms"] == 15  # step3b's guard (her P.envCardiacGuardMs)
     pad = int(np.ceil(V2_PAD_MS * 1e-3 * FS))

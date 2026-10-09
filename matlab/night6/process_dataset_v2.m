@@ -14,8 +14,9 @@ function [D, info] = process_dataset_v2(D, varargin)
 % called: heartbeats reach the spike consumer only as the peri-R NaN spans of its own
 % mask (ruling (i) 1).
 %
-%   P = pipeline_params();  P.bandpassLow = 300;  P.bandpassHigh = 3000;
-%   everything else her default (threshSigma 4.5, polarity 'neg', refractory 1 ms).
+%   P = night6_v2_params(): pipeline_params(), bandpassLow = 300, bandpassHigh = 3000,
+%   everything else her default; threshSigma 4.5 and the band are ASSERTED there
+%   ('process_dataset_v2:params'), and info.P is what was used.
 %
 % D is the struct her headless loader bulk_load_one builds: D.y (samples x channels,
 % VOLTS, masked samples NaN), D.fs, D.neuralChannels, D.channelLabels, D.rpeakSamples
@@ -35,8 +36,11 @@ function [D, info] = process_dataset_v2(D, varargin)
 % ('process_dataset_v2:constantInput'), and R-peaks that are not integer samples in D.y.
 %
 % NaN (invariant 1): this file fills nothing. Her step1_bandpass fills NaN only to
-% filter and restores them (step1_bandpass.m:51-58); every masked input sample is
-% checked to be NaN again in the returned D.y.
+% filter and restores them in D.filtered (step1_bandpass.m:51-58). After the steps,
+% every masked input sample of neural channel k must be NaN in D.filtered(:, k)
+% ('process_dataset_v2:nanFilled') and invalid in D.validMask(:, k)
+% ('process_dataset_v2:nanValid'), the channel named. D.y is not checked: no step
+% writes it, so a check on it could never fail.
 %
 % Spikes in masked time: VERIFIED, not enforced. After the steps, no accepted spike
 % (D.spikes(k).alignedCenters) may lie on a NaN sample of D.y or within NanPadMs of one
@@ -84,9 +88,7 @@ function [D, info] = process_dataset_v2(D, varargin)
         error('process_dataset_v2:rpeaks', 'D.rpeakSamples must be integer samples in 1..%d', N);
     end
 
-    P = pipeline_params();
-    P.bandpassLow = 300;
-    P.bandpassHigh = 3000;
+    P = night6_v2_params();   % asserts threshSigma 4.5 and 300-3000 Hz
 
     nanIn = isnan(D.y(:, ch));
     steps = night6_v2_steps();
@@ -119,10 +121,23 @@ function [D, info] = process_dataset_v2(D, varargin)
         D = feval(s{1}, D, P, plotMode);
     end
 
-    still = isnan(D.y(:, ch));
-    if any(nanIn(:) & ~still(:))
-        error('process_dataset_v2:nanFilled', 'a masked input sample is no longer NaN (invariant 1)');
+    % Invariant 1, on what the steps WROTE: the input's NaN must stay NaN in D.filtered
+    % and be invalid in D.validMask, channel by channel.
+    for k = 1:numel(ch)
+        lost = nanIn(:, k) & ~isnan(D.filtered(:, k));
+        if any(lost)
+            error('process_dataset_v2:nanFilled', ['channel %s: %d masked input sample(s) ' ...
+                  'are not NaN in D.filtered (first at sample %d; invariant 1)'], ...
+                  labels{k}, nnz(lost), find(lost, 1));
+        end
+        lost = nanIn(:, k) & D.validMask(:, k);
+        if any(lost)
+            error('process_dataset_v2:nanValid', ['channel %s: %d masked input sample(s) ' ...
+                  'are valid in D.validMask (first at sample %d; invariant 1)'], ...
+                  labels{k}, nnz(lost), find(lost, 1));
+        end
     end
+    still = isnan(D.y(:, ch));   % the spike check's NaN: the input's, plus any step1a span
     pad = ceil(padMs * 1e-3 * D.fs);
     info.P = P;
     info.n_rpeaks = numel(r);

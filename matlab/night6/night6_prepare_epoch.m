@@ -170,6 +170,9 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
                 'train'], plan.beats.nWholeFile);
         end
     end
+    % RULING 2026-10-08 (j) 4 ((h) 7): "pre" files skip mmc, marked not computed. Only a
+    % pre file WITH NO BEAT TRAIN takes this branch; a pre file with beats runs mmc, and
+    % a non-pre file without beats is skipped_no_rpeaks below (diagnosed, not excused).
     if strcmp(plan.consumers.mmc.status, 'to_run') && isempty(plan.beats) ...
             && strcmp(plan.condition, 'pre')
         plan.consumers.mmc.status = 'skipped_not_computed';

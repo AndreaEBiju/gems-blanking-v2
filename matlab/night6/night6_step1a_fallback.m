@@ -17,9 +17,10 @@ function F = night6_step1a_fallback(file)
 % that is not a single upper-case token, and a duplicate animal x cuff. Nothing is
 % defaulted: a list that cannot be read stops the run.
 %
-% F.file, F.sha256 (of the exact bytes read), F.entries (cell of structs, possibly empty),
-% F.keys (cellstr "<animal>|<cuff>").
-    txt = fileread(file);
+% F.file, F.sha256 (of the file's raw bytes, night6_sha256_file - never of the decoded
+% text, which would hide a CRLF, BOM or encoding difference), F.entries (cell of structs,
+% possibly empty), F.keys (cellstr "<animal>|<cuff>").
+    txt = fileread(file, 'Encoding', 'UTF-8');
     J = jsondecode(txt);
     top = {'schema', 'ruling', 'note', 'entries'};
     bad = setdiff(fieldnames(J), top);
@@ -66,9 +67,6 @@ function F = night6_step1a_fallback(file)
     if numel(unique(keys)) ~= numel(keys)
         error('night6:fallbackDuplicate', '%s: an animal x cuff is listed twice', file);
     end
-    md = java.security.MessageDigest.getInstance('SHA-256');
-    md.update(unicode2native(txt, 'UTF-8'));
-    F = struct('file', char(file), ...
-               'sha256', lower(reshape(dec2hex(typecast(md.digest(), 'uint8'), 2)', 1, [])), ...
+    F = struct('file', char(file), 'sha256', night6_sha256_file(file), ...
                'entries', {E}, 'keys', {keys});
 end

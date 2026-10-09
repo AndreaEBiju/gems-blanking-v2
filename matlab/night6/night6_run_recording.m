@@ -95,7 +95,7 @@ function records = night6_run_recording(maskFolder, varargin)
             % Resume only what was made from THIS mask file: a rewritten mask file
             % (same name, new content) must rerun, not be reported as done.
             same = isfield(R, 'mask_file_sha256') && strcmp(R.mask_file_sha256, ...
-                sha256_file(fullfile(files(k).folder, files(k).name)));
+                night6_sha256_file(fullfile(files(k).folder, files(k).name)));
             if isfield(R, 'status') && strcmp(R.status, 'complete') && same
                 records{k} = R;
                 todo(k) = false;
@@ -155,7 +155,7 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
     if ~isempty(o.CodeDirty), R.code.dirty = o.CodeDirty; end
     R.source = src;
     R.mask_file = maskFile;
-    R.mask_file_sha256 = sha256_file(maskFile);
+    R.mask_file_sha256 = night6_sha256_file(maskFile);
     R.units = o.Units;
     R.dry_run = logical(o.DryRun);
     R.matlab = version;
@@ -242,24 +242,54 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
         try
             X = night6_consumer_input(plan, S.signal, r);
             run.inputs = summarise(X, r.signals);
-            % Invariant 41: an input with no valid sample, or a constant one, is refused
-            % by name, never handed to a function that would fail on it (or answer from
-            % nothing). Spike channels are independent, so a dead one is dropped and the
-            % rest run.
-            % A constant input is refused for the spike consumer (process_dataset_v2,
-            % Andrea 2026-10-09); the other calls keep the all-NaN refusal they had.
+            % Invariant 41, for EVERY call: an input column with no valid sample, or a
+            % constant one (an exactly-zero column included), is refused by name, never
+            % handed to a function that would fail on it or answer from nothing.
+            %   spikes     channels are independent: a dead one is dropped, the rest run;
+            %   slow_wave  a dead KEPT channel is refused by name and the run keeps the
+            %              others; a dead column that is not kept is named
+            %              (dead_not_kept) - night6_keep_slow_wave discards its output;
+            %   HR, mmc    a dead column refuses the whole call.
             isSpk = strcmp(r.call, 'process_dataset_v2');
-            [empty, why] = dead_columns(X, r.signals, isSpk);
+            [empty, why] = dead_columns(X, r.signals);
             if isSpk && any(empty) && ~all(empty)
                 run.dropped_no_valid_samples = r.signals(empty);
                 R.consumers.spikes.dropped_no_valid_samples = r.signals(empty);
                 R.consumers.spikes.reason = sprintf('dropped: %s', why);
                 X = X(:, ~empty);
                 r.signals = r.signals(~empty);
+                [empty, why] = dead_columns(X, r.signals);
+            elseif perChannel && any(empty)
+                isKept = ismember(r.signals, r.keep);
+                deadKept = r.signals(empty & isKept);
+                if ~isempty(deadKept) && numel(deadKept) < numel(r.keep)
+                    [~, whyKept] = dead_columns(X(:, empty & isKept), deadKept);
+                    refused = r;
+                    refused.keep = deadKept;
+                    R = set_status(R, refused, true, 'skipped_no_valid_samples', whyKept);
+                    run.refused_keep = deadKept;
+                    run.refused_reason = whyKept;
+                    r.keep = setdiff(r.keep, deadKept, 'stable');
+                    run.keep = r.keep;
+                    fprintf('[night6] %s %s: %s [%s] refused - %s\n', src.session, ...
+                            src.epoch_tag, r.call, strjoin(deadKept, ','), whyKept);
+                end
+                if numel(deadKept) < nnz(isKept)
+                    if any(empty & ~isKept)
+                        [~, run.dead_not_kept_reason] = dead_columns(X(:, empty & ~isKept), ...
+                                                                    r.signals(empty & ~isKept));
+                        run.dead_not_kept = r.signals(empty & ~isKept);
+                    end
+                    empty = false(size(empty));   % the kept channels that remain run
+                else
+                    [~, why] = dead_columns(X(:, empty & isKept), deadKept);
+                end
             end
-            [empty, why] = dead_columns(X, r.signals, isSpk);
             if isSpk
                 run.step1a_fallback = r.signals(step1a_channels(r.signals, o));
+                if o.DryRun   % a real run records info.P from the call itself
+                    run.spike_params = spike_param_record(night6_v2_params());
+                end
             end
             if any(empty)
                 run.status = 'skipped_no_valid_samples';
@@ -326,6 +356,7 @@ function [label, extra] = call_one(r, X, plan, base, outDir, o)
             save_spikes_v2(fullfile(outDir, [label '_spikes_v2.mat']), D, info, r.signals);
             extra.n_rpeaks = info.n_rpeaks;
             extra.spike_check = info.spike_check;
+            extra.spike_params = spike_param_record(info.P);   % what her steps were given
             if figs
                 save_all_figures(outDir, [label '_spikes_v2'], {'png', 'fig'});   % hers
             end
@@ -360,12 +391,15 @@ end
 
 function P = params()
 % Every argument handed to the calls, and where it came from.
+    % The spike P is NOT written here as text: night6_v2_params builds it (Andrea
+    % 2026-10-09) and asserts threshSigma and the band; the values actually used are in
+    % runs{}.spike_params, read from the struct (info.P after a real call).
     P.spikes = struct('method', 'process_dataset_v2', 'steps', {night6_v2_steps()}, ...
-                      'bandpassLow', 300, 'bandpassHigh', 3000, 'nanPadMs', 5, ...
-                      'source', ['Andrea 2026-10-09: P = pipeline_params(); P.bandpassLow = ' ...
-                                 '300; P.bandpassHigh = 3000; everything else default ' ...
-                                 '(threshSigma 4.5); her process_dataset steps minus ' ...
-                                 'step1b; D from her bulk_load_one with D.rpeakSamples']);
+                      'nanPadMs', 5, ...
+                      'source', ['Andrea 2026-10-09: P = night6_v2_params() (her ' ...
+                                 'pipeline_params, bandpass 300-3000 Hz); values used: ' ...
+                                 'runs{}.spike_params; her process_dataset steps minus ' ...
+                                 'step1a and step1b; D from her bulk_load_one with D.rpeakSamples']);
     P.hr = struct('cutoff', 8, 'order', 4, 'edgeBufferSec', 0.75, 'winSec', 20, ...
                   'stepSec', 1, 'hrBrWinSec', 60, 'chanidx', 1, ...
                   'source', 'batch_process.m P.hr_* (= run_continuous.m, = T)');
@@ -383,7 +417,8 @@ function F = function_provenance()
 % and the wrapper's own (process_dataset_v2 and its step list) to this folder.
     F = struct();
     C = night6_calls();
-    ours = {'process_dataset_v2', 'night6_v2_steps', 'night6_step1a_fallback'};
+    ours = {'process_dataset_v2', 'night6_v2_steps', 'night6_v2_params', ...
+            'night6_step1a_fallback', 'night6_sha256_file'};
     hers = [setdiff({C.name}, ours, 'stable'), night6_v2_steps(), ...
             {'step1a_blank_cardiac', 'pipeline_params', 'bulk_load_one'}];   % step1a: (j) 1 fallback
     here = fileparts(mfilename('fullpath'));
@@ -398,12 +433,26 @@ function F = function_provenance()
         elseif ~strcmp(leaf, 'processing_new')
             error('night6:shadow', '%s resolves to %s, not processing_new', name{1}, p);
         end
-        F.(name{1}) = struct('path', p, 'sha256', sha256_file(p));
+        F.(name{1}) = struct('path', p, 'sha256', night6_sha256_file(p));
     end
     % Not called, but params() copies its constants (HR, slow wave): its hash says
     % which version of the driver the parameters were taken from.
     p = which('batch_process');
-    F.batch_process = struct('path', p, 'sha256', sha256_file(p), 'role', 'parameter source');
+    F.batch_process = struct('path', p, 'sha256', night6_sha256_file(p), 'role', 'parameter source');
+end
+
+function s = spike_param_record(P)
+% The spike parameters as USED, copied from the struct handed to her steps (never
+% literal text): detection threshold, band, filter, guards, refractory, polarity.
+    s = struct();
+    for f = {'threshSigma', 'bandpassLow', 'bandpassHigh', 'filterOrder', ...
+             'envCardiacGuardMs', 'edgeBufferMs', 'refractoryMs', 'detectPolarity'}
+        if ~isfield(P, f{1})
+            error('night6:spikeParams', 'P has no %s: cannot record what was used', f{1});
+        end
+        s.(f{1}) = P.(f{1});
+    end
+    s.source = 'night6_v2_params (pipeline_params + 300-3000 Hz), as handed to her steps';
 end
 
 function tf = step1a_channels(signals, o)
@@ -419,16 +468,13 @@ function tf = step1a_channels(signals, o)
     end
 end
 
-function [dead, why] = dead_columns(X, signals, checkConstant)
-% Columns with no finite sample - or, with checkConstant, whose finite samples are all
-% equal (invariant 41) - and one sentence naming them.
+function [dead, why] = dead_columns(X, signals)
+% Columns with no finite sample, or whose finite samples are all equal (an exactly-zero
+% column included; invariant 41), for every call - and one sentence naming them.
     noValid = all(isnan(X), 1);
-    constant = false(size(noValid));
-    if checkConstant
-        hi = max(X, [], 1, 'omitnan');
-        lo = min(X, [], 1, 'omitnan');
-        constant = ~noValid & hi == lo;
-    end
+    hi = max(X, [], 1, 'omitnan');
+    lo = min(X, [], 1, 'omitnan');
+    constant = ~noValid & hi == lo;
     dead = noValid | constant;
     parts = {};
     if any(noValid)
@@ -572,15 +618,6 @@ function [c, dirty] = code_commit()
     c = strtrim(out);
     [~, out] = system(sprintf('git -C "%s" status --porcelain --untracked-files=no', here));
     dirty = ~isempty(strtrim(out));
-end
-
-function h = sha256_file(f)
-    fid = fopen(f, 'r');
-    b = fread(fid, inf, '*uint8');
-    fclose(fid);
-    md = java.security.MessageDigest.getInstance('SHA-256');
-    md.update(typecast(b, 'int8'));
-    h = lower(reshape(dec2hex(typecast(md.digest(), 'uint8'), 2)', 1, []));
 end
 
 function write_json(f, R)
