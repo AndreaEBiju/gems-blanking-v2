@@ -5794,6 +5794,77 @@ The rulings headed **2026-10-08**, **(b)** and **(c)** were written on **2026-10
    - **Night 6 MATLAB** (Andrea, 2026-10-08): a **new wrapper in its own folder, outside processing_new**, reads the mask files, slices by `epochStart_s`, maps the `_minus_` HR-channel names, and calls Andrea's existing functions unchanged. No file in processing_new is edited or committed.
    - **A failed recording does not block its animal's pass 2.** Holm runs over the recordings that completed, and the family size and exclusions are recorded. The failed recording gets no masks and is listed.
 
+### RULING 2026-10-08 (g) — the sweep's mmc R-peak units; mmc callers; zero-label calibration for I/J/K
+
+**Measured (build, 2026-10-08):**
+- **mmc R-peak units:** `tolerance_sweep.m` (processing_new, unedited) passes `rpeakVar='heartlocs'` to `extract_mmc`. `heartlocs` holds sample indices, but `rpeakUnits` defaults to `'seconds'`. So the R-peaks land past the end of the signal, and cardiac blanking was effectively off whenever an mmc tolerance was measured. The recovered config drops mmc from the replicate pass only, so `mmc_burst` still appears in the seed-depth cells.
+- **The full sweep re-run takes about 14–15 h,** not 6.6 h, and peaks at about 42 GB. If `tolscratch` is not found, Night 3 runs the sweep alone and routing pauses. That gives a **Mon 10-12** finish with 2 days of slack, against Sun 10-11 if `tolscratch` is found.
+- **Zero-label pooled model (mode A):** no recalibration fitted on other animals reaches ECE ≤ 0.05 for A, B or H. Best ECE: A 0.28–0.32, B 0.08–0.10, H 0.15–0.17. Motion rates differ widely (A ~6%, B 25%, H 49%). Platt and isotonic fitted on all other targets fail the cohort probe; raw, temperature and the threshold pass it.
+- **No old-cohort recordings** are in the Nights 4–5 inference list or the production routing table.
+
+**Rulings:**
+
+1. **The sweep re-run runs as is (option a):** same seeds and config, and it must reproduce the original 1710 and 105 counts or stop.
+   - Every mmc or `mmc_burst` value in the regenerated `consumer_tolerances.json` is flagged in its provenance: `measured with cardiac blanking off (rpeakUnits defect)`.
+   - **A corrected mmc-only measurement follows the re-run.** A sweep-side wrapper, outside processing_new, passes the R-peaks in the unit `extract_mmc` is told (invariant 14: units are declared). It runs on the same cells and seeds. Cost it first; it must not delay the inference night. Report both mmc values side by side.
+   - **Andrea chooses which mmc value the production masks use.** Until she does, the flagged value is used and the masks' provenance says so.
+2. **Check every `extract_mmc` caller for the same unit mismatch.**
+   - **The Night 6 wrapper:** confirm it passes R-peaks with an explicit `rpeakUnits` that matches what it passes. Add a test that fails if the units disagree; revert-check it.
+   - **processing_new, read only:** list every caller of `extract_mmc` (and any other function taking `rpeakUnits`), and say for each whether the unit passed matches the unit declared. Report it to Andrea, because it may affect mmc results she already has. Nothing in processing_new is edited.
+3. **Zero-label calibration for I/J/K: ruling (f) item 2 cannot be met as written for mode A.** Before Andrea decides, measure two more zero-label options, scored leave-one-animal-out on A, B and H exactly like the diagnosis:
+   - **(i) prior-shift correction:** estimate the target animal's motion rate from its own unlabelled scores by EM (Saerens et al., 2002), then adjust the other-animal calibrator to that rate;
+   - **(ii) the other-animal F1 threshold,** already measured.
+   - For each, report audit-span F1 with CI, ECE, the cohort probe, recall of target marks and blanked time per consumer.
+   - **The alternative is adaptation labels for I/J/K** (ruling (f) item 7). That means about 30 cores per animal, drawn apart from the evaluation spans and never scored against them (R1). Cost it in Andrea's minutes and say what it would do to the critical path.
+   - **Andrea chooses** among these at model-choice time. Nothing is adopted before then.
+4. **mmc on recordings with no beat train:** Andrea's question, as the builder proposed. Report the count once routing finishes. Ruling (f) gives HR and HRV "not computed" only; it says nothing about mmc.
+
+### RULING 2026-10-08 (h) — Night 6 wrapper questions: Andrea's answers and the measurements she asked for
+
+**Decided (Andrea, 2026-10-08):**
+1. **The mask file carries each epoch's exact start sample.** MATLAB never converts seconds to samples (invariant 15).
+2. **Slow wave runs one channel at a time.** For ANT channel *i*, the wrapper applies channel *i*'s mask to all three ANT columns, so the function's joint `any(isnan)` mask equals mask *i*. Only channel *i*'s outputs are kept. `slowWaveAnalysis_new` is called unchanged.
+
+**Measure before Andrea decides:**
+
+3. **Slow-wave settings: choose by physiology, then apply one setting to every recording.** Andrea's instruction: test which low-pass and/or smoothing gives slow waves that agree with normal rat physiology.
+   - **Candidates:**
+     - `batch_process` (low-pass 0.15 Hz, order 2, 5 s smoothing, 15 s edge);
+     - `run_continuous` (low-pass off; 10 s smoothing, 3 s edge);
+     - low-pass only; smoothing only;
+     - a small grid around each (cutoff 0.1–0.3 Hz, order 2–4, smoothing 2–10 s).
+     - All are passed as arguments to her function, never by editing it.
+   - **Criteria, fixed before results:**
+     - (a) **Spectral agreement:** the peak-detected rate agrees with the dominant frequency of the same channel's spectrum (0.03–0.2 Hz, Welch, same 60 s windows). This check does not depend on any setting.
+     - (b) **Physiological range:** the rate lies within the rat gastric slow-wave range. Take the range from the literature with citations, and write it down before any result is seen.
+     - (c) **No spurious peaks:** a low fraction of implausible rates (> 8 cpm) and of doublets.
+     - (d) **Channel agreement:** the three ANT channels agree with each other.
+   - **Data:** clean baseline epochs from A, B and H, plus I/J/K, which are allowed here because this is not model evaluation.
+   - **Report:**
+     - per-candidate scores;
+     - 3 example panels per animal (raw, filtered, detected peaks, spectrum) for Andrea to eyeball;
+     - the ranking.
+   - **Andrea chooses.**
+   - **If the choice differs from `batch_process`,** the slow-wave tolerance was measured with other settings. Cost a slow-wave-only tolerance pass with the chosen settings, and show the critical-path effect.
+4. **Speed check (invariant 35):** slow wave is about 60% of Night 6, and per-channel calls triple it.
+   - Test whether decimating before the call, done in the wrapper, gives the same results as full rate. Use zero-phase FIR decimation; a decimated sample is masked if any of its source samples is masked; any fill is temporary and reverted to NaN.
+   - **Equivalence criteria, fixed before results:** peak times within 0.1 s, rate within 0.1 cpm, on 5 recordings.
+   - Report the time saved. Do not adopt it without equivalence.
+5. **Spike method: a full comparison of `detectSortNerveSpikesECAP` and the `process_dataset` pipeline,** read only, from the current processing_new.
+   - **Step by step, with file and line references:** filtering, threshold rule and its σ estimate, polarity, refractory period, sorting or clustering, ECAP and stimulus handling, NaN handling, outputs and units.
+   - **On real data:** run both on clean baseline epochs from 3 recordings (A, B and H). Report spike counts and rates, the fraction matched within ±0.5 ms, unmatched spikes in each direction, and waveform overlays.
+   - Say which method the sweep's spike tolerance was measured with.
+   - **Andrea chooses.**
+6. **Recovery start, not a fixed 132 s.** Andrea sets 120 s of stim, but the real on and off times can be offset by hardware delays.
+   - Explain where 132 s came from.
+   - Report the stim on and off times detected from the stim monitor channels (the 03B edge code) for every stim_rec file: the distribution of duration and offset against 120 s.
+   - **Proposal for Andrea:** recovery starts at each file's own detected stim-off plus a settling buffer, which needs a stated basis. A file whose edges cannot be detected is listed and held, never assumed (invariant 41).
+7. **mmc with no beat train: diagnose before Andrea decides.** The beat train is already shared across consumers. A recording lands on this list only if no channel or pair produced a train passing the count gate.
+   - For each of the 30 (and the final count), report the channels and pairs tried, the best candidate's beat count against the gate range, and why each failed.
+   - Plot 3 examples, and check whether the "pre" files (B: 21) fail on the gate's upper bound (high heart rate before trials) rather than on signal quality.
+   - Report only: the routing rules are frozen.
+8. **HRV and breathing as two calls:** waiting for Andrea, after the explanation.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
