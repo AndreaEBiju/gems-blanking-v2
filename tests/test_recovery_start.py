@@ -46,6 +46,7 @@ from pathlib import Path
 
 import pytest
 from gems_blanking_v2.extent import recovery_start as rs
+from gems_blanking_v2.extent import tolerance as tl
 from gems_blanking_v2.extent.grid import seconds_to_sample
 from gems_blanking_v2.extent.tolerance import (
     CONSUMER_FILTERS,
@@ -472,6 +473,40 @@ def test_the_file_round_trips_exactly_as_canonical_ascii(tmp_path: Path) -> None
     (tmp_path / "bad.json").write_text(json.dumps(bad), encoding="utf-8", newline="\n")
     with pytest.raises(ValueError, match="'fs' is absent"):
         rs.read_recovery_starts(tmp_path / "bad.json")
+
+
+def test_a_starts_file_from_other_edge_settlings_is_refused(tmp_path: Path) -> None:
+    """Review 2026-10-09: v4 records the edge settlings' sha256; a stale file is refused."""
+    files = [rs.file_starts(session="b_sr", fs=FS, stim_off_s=120.79, electrical_settle_s=124.2,
+                            stim_off_source="03B", electrical_source="(j) 6 (i)")]
+    doc = rs.recovery_starts_document(files, fs=FS)
+    assert rs.SCHEMA == "gems-blanking-v2 recovery starts v4"
+    assert doc["edge_settling_sha256"] == tl.edge_settling_sha256()
+    assert doc["edge_settling"] == tl.edge_settling_record()
+    good = tmp_path / "good.json"
+    rs.write_recovery_starts(good, doc)
+    assert rs.read_recovery_starts(good)["edge_settling_sha256"] == tl.edge_settling_sha256()
+    for name, change in (
+            ("hash", lambda j: j.update(edge_settling_sha256="0" * 64)),
+            ("content", lambda j: j["edge_settling"]["mmc"].update(pad_s=1.0)),
+            ("both", lambda j: (j["edge_settling"]["mmc"].update(pad_s=1.0),
+                                j.update(edge_settling_sha256="1" * 64)))):
+        j = json.loads(good.read_text(encoding="utf-8"))
+        change(j)
+        f = tmp_path / f"{name}.json"
+        f.write_text(json.dumps(j), encoding="utf-8", newline="\n")
+        with pytest.raises(ValueError, match="not this build's"):
+            rs.read_recovery_starts(f)
+    j = json.loads(good.read_text(encoding="utf-8"))
+    del j["edge_settling_sha256"]
+    f = tmp_path / "absent.json"
+    f.write_text(json.dumps(j), encoding="utf-8", newline="\n")
+    with pytest.raises(ValueError, match="'edge_settling_sha256' is absent"):
+        rs.read_recovery_starts(f)
+    j["schema"] = "gems-blanking-v2 recovery starts v3"
+    f.write_text(json.dumps(j), encoding="utf-8", newline="\n")
+    with pytest.raises(ValueError, match="expected 'gems-blanking-v2 recovery starts v4'"):
+        rs.read_recovery_starts(f)
 
 
 def test_the_table_record_carries_every_stage_and_exclusion() -> None:

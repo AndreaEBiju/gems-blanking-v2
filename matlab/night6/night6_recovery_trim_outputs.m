@@ -1,7 +1,8 @@
-function T = night6_recovery_trim_outputs(outDir, files, consumers, rec, OT, fs)
+function T = night6_recovery_trim_outputs(outDir, files, consumers, rec, OT, fs, varargin)
 % NIGHT6_RECOVERY_TRIM_OUTPUTS  Trim every output variable at its own cut (mode (B)).
 %
 %   T = night6_recovery_trim_outputs(outDir, files, consumers, rec, OT, fs)
+%   T = night6_recovery_trim_outputs(..., 'SlowWaveRate', R)
 %
 %   outDir     the epoch's output folder
 %   files      the names of the files this run created (after night6_keep_slow_wave)
@@ -10,6 +11,11 @@ function T = night6_recovery_trim_outputs(outDir, files, consumers, rec, OT, fs)
 %              row (night6_recovery_lead_in), rec.analyses.<analysis> every start
 %   OT         RS.outputTimes: the output time map (Python extent.recovery_start.OUTPUT_VARS)
 %   fs         the epoch's sample rate
+%   SlowWaveRate  (name-value) the run's DECLARED slow-wave rate, R from
+%              night6_slow_wave_rates (name, factors, factor). Required to compute a
+%              slow-wave valid fraction from her saved rate: her rate must be exactly
+%              fs / R.factor (fs for 'full', fs / 78 for 'decimated78'), else
+%              'night6:slowWaveRate' - never inferred from whatever fraction of fs it is.
 %
 % RULING 2026-10-09 item 6, mode (B). The input of every analysis was masked only through
 % the electrical settling; here each output file the run kept is matched to its kind in
@@ -59,6 +65,27 @@ function T = night6_recovery_trim_outputs(outDir, files, consumers, rec, OT, fs)
 % UNTRIMMED and listed by name (in the record and in the marker); a file matching no kind
 % (a figure) is listed untrimmed; a stamp or a window whose length does not match its
 % value is refused ('night6:trimShape').
+    if mod(numel(varargin), 2) ~= 0
+        error('night6:trimArgs', 'name-value arguments come in pairs');
+    end
+    OT.slowWaveRate = [];
+    for a = 1:2:numel(varargin)
+        if ~strcmp(varargin{a}, 'SlowWaveRate')
+            error('night6:trimArgs', 'unknown argument ''%s'' (only SlowWaveRate)', ...
+                  char(string(varargin{a})));
+        end
+        R = varargin{a + 1};
+        if ~isstruct(R) || ~all(isfield(R, {'name', 'factor'}))
+            error('night6:slowWaveRate', ['SlowWaveRate must be the declared rate from ' ...
+                  'night6_slow_wave_rates (name, factor)']);
+        end
+        [~, R0] = night6_slow_wave_rates(R.name);   % a declared name, its declared factor
+        if ~isequal(double(R0.factor), double(R.factor))
+            error('night6:slowWaveRate', ['SlowWaveRate %s carries factor %g; the declared ' ...
+                  'factor is %g'], R.name, R.factor, R0.factor);
+        end
+        OT.slowWaveRate = R0;
+    end
     T = struct('mode', 'mask_to_electrical_drop_outputs', 'ruling', char(OT.ruling), ...
                'files', {{}}, 'untrimmed_files', {{}});
     if ~isfield(rec, 'cuts') || ~iscell(rec.cuts)
@@ -200,7 +227,7 @@ function [S, info, marker] = trim_one(S0, decl, rec, cuts, consumers, fs, OT)
         if isfield(d, 'edge') && isstruct(d.edge), edge = d.edge; end
         vfr = [];
         if isfield(d, 'valid_fraction') && isstruct(d.valid_fraction)
-            [S, vfr] = add_valid_fraction(S, S0, d, sparts, sibling, fixed, fs, OT.suffix);
+            [S, vfr] = add_valid_fraction(S, S0, d, sparts, sibling, fixed, fs, OT);
             if vfr.added
                 info.added_variables{end + 1} = vfr.variable;
                 marker.added_variables{end + 1} = vfr.variable;
@@ -401,8 +428,9 @@ end
 % ==========================================================================
 % valid fractions (RULING 2026-10-09 item 6)
 
-function [S, vfr] = add_valid_fraction(S, S0, d, sparts, sibling, fixed, fs, suffix)
+function [S, vfr] = add_valid_fraction(S, S0, d, sparts, sibling, fixed, fs, OT)
 % The fraction of valid input rows in each value's window, over every leaf of d.path.
+    suffix = OT.suffix;
     vf = d.valid_fraction;
     vfr = struct('kind', vf.kind, 'source', vf.source, 'variable', '', 'added', false);
     if strcmp(vf.kind, 'her')
@@ -428,10 +456,10 @@ function [S, vfr] = add_valid_fraction(S, S0, d, sparts, sibling, fixed, fs, suf
         if iscell(val)
             fr = cell(size(val));
             for c = 1:numel(val)
-                fr{c} = fraction(vf, val{c}, stamp{c}, c, S0, fs, d.path);
+                fr{c} = fraction(vf, val{c}, stamp{c}, c, S0, fs, d.path, OT.slowWaveRate);
             end
         else
-            fr = fraction(vf, val, stamp, L{i}.k, S0, fs, d.path);
+            fr = fraction(vf, val, stamp, L{i}.k, S0, fs, d.path, OT.slowWaveRate);
         end
         S = subsasgn(S, [ch(1:end - 1), substruct('.', sib)], fr);
     end
@@ -459,7 +487,7 @@ function L = leaf_chains(S, parts)
     for i = 1:numel(L), L{i}.chain = [L{i}.chain, substruct('.', parts{end})]; end
 end
 
-function fr = fraction(vf, val, stamp, k, S0, fs, what)
+function fr = fraction(vf, val, stamp, k, S0, fs, what, sw)
 % One leaf's fractions, the shape of its value (VALID_FRACTION_KINDS, Python).
     switch vf.kind
         case 'hr_window'        % HR_BR_HRVAnalysis_beats.m:835-838, :873-876
@@ -474,15 +502,21 @@ function fr = fraction(vf, val, stamp, k, S0, fs, what)
             W = width(vf, S0, what);
             valid = ~logical(resolve_scalar(S0, strsplit(vf.validity, '.'), what));
             N = numel(valid);
-            % her rows are at the rate she ran at (her saved fs): the epoch's, or fs / 78
-            % when Night 6 ran her decimated (RULING 2026-10-09 (c) 6)
+            % her rows are at the rate she ran at (her saved fs): EXACTLY the epoch's
+            % fs / the DECLARED factor (1 for 'full', 78 for 'decimated78'; RULING
+            % 2026-10-09 (c) 6). Any other rate is refused, never read as some fs / k.
             fv = fs;
             if isfield(vf, 'rate') && ~isempty(vf.rate)
+                if isempty(sw)
+                    error('night6:slowWaveRate', ['%s: no declared SlowWaveRate was passed, ' ...
+                          'so her saved rate cannot be checked'], what);
+                end
                 fv = double(resolve_scalar(S0, strsplit(vf.rate, '.'), what));
-                q = fs / fv;
-                if ~(fv > 0 && fv <= fs && abs(q - round(q)) < 1e-9 * q)
-                    error('night6:trimShape', '%s: her rate %.6f Hz is not the epoch''s %.6f / k', ...
-                          what, fv, fs);
+                want = fs / double(sw.factor);
+                if ~(isscalar(fv) && abs(fv - want) <= 1e-9 * want)
+                    error('night6:slowWaveRate', ['%s: her rate %.9f Hz is not the declared ' ...
+                          '%s rate %.9f Hz (epoch %.6f Hz / factor %d)'], what, fv, sw.name, ...
+                          want, fs, sw.factor);
                 end
             end
             c = round(double(stamp(:)) * fv) + 1;
@@ -627,10 +661,12 @@ function [S, e] = recompute(S, S0, d, fs)
             case 'events_per_valid_s'
                 sig = by_element(S0, rc.validity, L{i}.k, numel(L), d.path);
                 kept = ~isnan(x);
-                new = zeros(1, size(x, 2));
+                new = NaN(1, size(x, 2));   % no valid second kept: not computed (NaN, inv. 1)
                 for c = 1:size(x, 2)
-                    new(c) = nnz(x(kept(:, c), c) == 1) / ...
-                             max(nnz(kept(:, c) & ~isnan(sig(:, c))) / fs, eps);
+                    validS = nnz(kept(:, c) & ~isnan(sig(:, c))) / fs;
+                    if validS > 0
+                        new(c) = nnz(x(kept(:, c), c) == 1) / validS;
+                    end
                 end
             otherwise
                 error('night6:trimShape', '%s: unknown recompute kind %s', d.path, rc.kind);

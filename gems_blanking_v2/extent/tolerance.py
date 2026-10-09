@@ -60,6 +60,7 @@ OUTSIDE THE GENERATION HASH.
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
 import math
 from collections.abc import Callable, Mapping, Sequence
@@ -106,6 +107,8 @@ __all__ = [
     "consumer_signals",
     "decision_rule",
     "edge_settling_record",
+    "edge_settling_sha256",
+    "edge_settling_text",
     "expected_consumers",
     "extent_consumers",
     "extents_for_events",
@@ -363,6 +366,26 @@ def edge_settling_record() -> dict[str, Any]:
                      "files": [{"file": f, "sha256": h} for f, h in e.files]}
     out["spikes"]["edge_buffer_ms"] = round(EDGE_SETTLING["spikes"].pad_s * 1e3, 6)
     return out
+
+
+def edge_settling_text() -> str:
+    """Return :func:`edge_settling_record` as the canonical text of ``edge_settling.json``.
+
+    Sorted keys, ASCII-escaped, indent 1, no NaN, one trailing LF: the exact bytes Night 6
+    reads (a test holds the file equal to this, byte for byte).
+    """
+    return json.dumps(edge_settling_record(), ensure_ascii=True, sort_keys=True, indent=1,
+                      allow_nan=False) + "\n"
+
+
+def edge_settling_sha256() -> str:
+    """Return the SHA-256 (hex) of :func:`edge_settling_text`.
+
+    It is what ``night6_edge_settling`` reports as ``E.sha256`` for the declaration it
+    reads, so a recovery-starts file and a Night 6 record name the same edge settlings by
+    the same hash.
+    """
+    return hashlib.sha256(edge_settling_text().encode("ascii")).hexdigest()
 
 
 CONSUMER_FILTERS: Final[Mapping[str, ConsumerFilter]] = {

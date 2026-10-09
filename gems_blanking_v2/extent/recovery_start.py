@@ -136,6 +136,7 @@ from gems_blanking_v2.extent.tolerance import (
     ConsumerFilter,
     EdgeSettling,
     edge_settling_record,
+    edge_settling_sha256,
     expected_consumers,
     impulse_settling_s,
 )
@@ -203,8 +204,11 @@ __all__ = [
 
 RULING: Final = "RULING 2026-10-08 (k) 2"
 RULING_TRIM: Final = "RULING 2026-10-09 item 6"
-SCHEMA: Final = "gems-blanking-v2 recovery starts v3"
-"""v3: per-file ``cuts`` (one cut point per owner, output and trim class, RULING
+SCHEMA: Final = "gems-blanking-v2 recovery starts v4"
+"""v4: ``edge_settling_sha256`` (``tolerance.edge_settling_sha256``) beside
+``edge_settling``; a file whose edge settlings are not this build's is stale and refused
+here and by ``night6_recovery_start`` (review 2026-10-09). v3: per-file ``cuts`` (one cut
+point per owner, output and trim class, RULING
 2026-10-09 item 6) and the per-variable classes, valid fractions and recomputed averages
 in the output time map. v2 (no cuts) is refused: its owner-start cut is not mode (B).
 v2 added the electrical settling sample, the output time map and the cited files'
@@ -1736,6 +1740,7 @@ def recovery_starts_document(files: Sequence[Mapping[str, Any]], *, fs: float,
         "withdrawn_trim_modes": dict(WITHDRAWN_TRIM_MODES),
         "output_times": output_times_record(), "table": table_record(fs, table),
         "settling_rules": RULING_SETTLING, "edge_settling": edge_settling_record(),
+        "edge_settling_sha256": edge_settling_sha256(),
         "files": sorted(measured, key=lambda d: str(d["session"])),
         "held": sorted(held, key=lambda d: str(d["session"])),
     }
@@ -1761,10 +1766,16 @@ def read_recovery_starts(path: Path) -> dict[str, Any]:
         msg = f"{path}: schema {doc.get('schema')!r}, expected {SCHEMA!r}"
         raise ValueError(msg)
     for key in ("fs", "fixed_start_s", "files", "held", "table", "output_times",
-                "source_files", "trim_modes"):
+                "source_files", "trim_modes", "edge_settling", "edge_settling_sha256"):
         if doc.get(key) is None:
             msg = f"{path}: required field {key!r} is absent"
             raise ValueError(msg)
+    if (doc["edge_settling"] != edge_settling_record()
+            or doc["edge_settling_sha256"] != edge_settling_sha256()):
+        msg = (f"{path}: its edge_settling (sha256 {str(doc['edge_settling_sha256'])[:16]}) is "
+               f"not this build's (sha256 {edge_settling_sha256()[:16]}): the starts were "
+               "derived under other edge settlings - regenerate the file (schema v4)")
+        raise ValueError(msg)
     recovery_starts_document([*doc["files"], *doc["held"]], fs=float(doc["fs"]),
                              fixed_start_s=float(doc["fixed_start_s"]))
     known = set(expected_consumers())

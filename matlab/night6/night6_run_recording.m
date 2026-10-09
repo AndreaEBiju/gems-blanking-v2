@@ -113,6 +113,7 @@ function records = night6_run_recording(maskFolder, varargin)
 
     records = cell(1, numel(files));
     todo = true(1, numel(files));
+    EdNow = night6_edge_settling();   % the resume key's edge-settling hash (review 2026-10-09)
     for k = 1:numel(files)
         tag = erase(files(k).name, '_masks.mat');
         recFile = fullfile(o.OutRoot, animal, session, modelId, tag, 'night6_record.json');
@@ -124,7 +125,10 @@ function records = night6_run_recording(maskFolder, varargin)
                 night6_sha256_file(fullfile(files(k).folder, files(k).name))) ...
                 && same_recovery_start(R, o.RS, o.RecoveryTrimMode) ...
                 && isfield(R, 'slow_wave_rate') && isstruct(R.slow_wave_rate) ...
-                && strcmp(R.slow_wave_rate.name, o.SW.name);   % (c) 6: same rate
+                && strcmp(R.slow_wave_rate.name, o.SW.name) ...   % (c) 6: same rate
+                && isfield(R, 'edge_settling') && isstruct(R.edge_settling) ...
+                && isfield(R.edge_settling, 'sha256') ...
+                && strcmp(R.edge_settling.sha256, EdNow.sha256);   % same edge settlings
             if isfield(R, 'status') && strcmp(R.status, 'complete') && same
                 records{k} = R;
                 todo(k) = false;
@@ -364,7 +368,7 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
                     if drop_outputs(plan, o)   % mode (B): each variable at its own cut
                         run.recovery_trim = night6_recovery_trim_outputs(outDir, ...
                             run.outputs, r.consumers, plan.recoveryStart, ...
-                            o.RS.outputTimes, plan.fs);
+                            o.RS.outputTimes, plan.fs, 'SlowWaveRate', o.SW);
                     end
                 end
                 run.status = 'ok';

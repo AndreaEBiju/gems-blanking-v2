@@ -179,6 +179,9 @@ def test_night6_declares_exactly_the_python_edge_settlings() -> None:
     assert json.loads(f.read_text(encoding="utf-8")) == rec
     assert f.read_bytes() == (json.dumps(rec, ensure_ascii=True, sort_keys=True, indent=1,
                                          allow_nan=False) + "\n").encode("ascii")
+    # the hash a recovery-starts file records is night6_edge_settling's E.sha256 (raw bytes)
+    assert tl.edge_settling_text().encode("ascii") == f.read_bytes()
+    assert tl.edge_settling_sha256() == hashlib.sha256(f.read_bytes()).hexdigest()
     assert rec["spikes"]["edge_buffer_ms"] == 10.5
     params = (f.parent / "night6_v2_params.m").read_text(encoding="utf-8")
     assert "P.edgeBufferMs = E.spikes.edge_buffer_ms;" in params  # read, never typed

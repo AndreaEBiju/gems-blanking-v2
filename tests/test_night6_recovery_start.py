@@ -244,7 +244,12 @@ def _cases(tmp: Path) -> dict[str, Any]:
                        ("stale_source", lambda j: j["source_files"][0].update(
                            sha256="0" * 64)),
                        ("missing_source", lambda j: j["source_files"].append(
-                           {"file": "no_such_function_k2f.m", "sha256": "0" * 64}))):
+                           {"file": "no_such_function_k2f.m", "sha256": "0" * 64})),
+                       ("v3", lambda j: j.update(schema="gems-blanking-v2 recovery starts v3")),
+                       ("no_edge_hash", lambda j: j.pop("edge_settling_sha256")),
+                       ("edge_stale", lambda j: j.update(edge_settling_sha256="0" * 64)),
+                       ("edge_changed", lambda j: j["edge_settling"]["mmc"].update(
+                           pad_s=1.0))):
         j = json.loads(Path(s["boundary"]).read_text(encoding="utf-8"))
         edit(j)
         f = d / f"reader_{name}.json"
@@ -485,8 +490,15 @@ def test_night6_trims_in_mode_b_to_the_sample(  # noqa: PLR0915 - one MATLAB run
     readers = {r["name"]: r for r in res["readers"]}
     assert readers["ok"]["error"] == ""
     for name in ("schema", "twice", "fractional", "v1", "v2", "no_electrical", "no_cuts",
-                 "cut_twice", "cut_fractional", "no_map", "no_sources", "sources_as_object"):
+                 "cut_twice", "cut_fractional", "no_map", "no_sources", "sources_as_object",
+                 "v3", "no_edge_hash"):
         assert readers[name]["error"] == "night6:recoveryStartFile", (name, readers[name])
+    # review 2026-10-09: a starts file derived under other edge settlings is stale
+    for name in ("edge_stale", "edge_changed"):
+        assert readers[name]["error"] == "night6:recoveryStartEdgeSettling", (name,
+                                                                               readers[name])
+    assert "stale" in readers["edge_stale"]["message"]
+    assert "differs" in readers["edge_changed"]["message"]
     assert "has no cuts" in readers["no_cuts"]["message"]
     # the cited code is checked at run time against what MATLAB resolves (fix 2)
     first = rs.source_files_record()[0]["file"]
@@ -528,6 +540,10 @@ def test_night6_trims_in_mode_b_to_the_sample(  # noqa: PLR0915 - one MATLAB run
     assert "no default" in run["no_rate"]["message"]
     assert run["resume_same_rate"] == "complete"     # same rate: skipped
     assert run["resume_other_rate"] == "dry_run"     # made at another rate: rerun
+    # review 2026-10-09: the edge settlings' sha256 is part of the resume key
+    assert run["resume_same_settling"] == "complete"     # same edge settlings: skipped
+    assert run["resume_other_settling"] == "dry_run"     # other edge settlings: rerun
+    assert run["resume_no_settling"] == "dry_run"        # none recorded: rerun
     assert run["rate_recorded"] == "full"
     assert rec["recovery_trim_mode"] == MODE_B
     for name in ("no_mode", "bad_mode", "mode_a"):
@@ -666,6 +682,11 @@ def _check_unit(u: dict[str, Any]) -> None:  # noqa: PLR0915 - one hand-built ca
     rate_want = [np.sum(want_ev[kept, c] == 1) / max(np.sum(kept & ~np.isnan(sig[:, c])) / FS,
                                                      np.finfo(float).eps) for c in range(3)]
     assert _col(mm["firing"]["avgRate"]) == pytest.approx(rate_want, rel=1e-15)
+    # fix 8 (invariant 1): a channel with no valid second kept has NO rate - NaN, never 0
+    zr = _col(o["mmc_zero"]["mmc"]["firing"]["avgRate"])
+    assert zr[1] is None, zr                               # NaN (jsonencode: null)
+    assert zr[0] == pytest.approx(rate_want[0], rel=1e-15)
+    assert zr[2] == pytest.approx(rate_want[2], rel=1e-15)
     # rate: rows L-2 .. L+3, cut at L; fraction over her window floor((c -/+ W/2) fs)
     w = UNIT["mmc_w"] / FS
     rate0 = np.outer(np.arange(1, 7), np.ones(3))

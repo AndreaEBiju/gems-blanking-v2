@@ -144,6 +144,27 @@ function r = run_case(K)
                               'SlowWaveRate', 'full');
     r.resume_other_rate = R6{1}.status;
     r.rate_recorded = R6{1}.slow_wave_rate.name;
+    % review 2026-10-09: the edge settlings' sha256 is part of the resume key
+    Rc = jsondecode(fileread(recFile));
+    Rc.status = 'complete';
+    write(recFile, Rc);
+    R7 = night6_run_recording(K.mask_folder, 'OutRoot', K.out_b, modeArgs{:}, ...
+                              'SlowWaveRate', 'full');
+    r.resume_same_settling = R7{1}.status;
+    Rc = jsondecode(fileread(recFile));
+    Rc.status = 'complete';
+    Rc.edge_settling.sha256 = repmat('0', 1, 64);
+    write(recFile, Rc);
+    R8 = night6_run_recording(K.mask_folder, 'OutRoot', K.out_b, modeArgs{:}, ...
+                              'SlowWaveRate', 'full');
+    r.resume_other_settling = R8{1}.status;
+    Rc = jsondecode(fileread(recFile));
+    Rc.status = 'complete';
+    Rc = rmfield(Rc, 'edge_settling');
+    write(recFile, Rc);
+    R9 = night6_run_recording(K.mask_folder, 'OutRoot', K.out_b, modeArgs{:}, ...
+                              'SlowWaveRate', 'full');
+    r.resume_no_settling = R9{1}.status;
 end
 
 function s = attempt(f)
@@ -897,6 +918,15 @@ function r = unit_case(K)
     mmc.delay_t = p3(Ld) / fs - (mmc.params.W / 2 - mmc.params.S);
     mmc.delay = [1 1 1; 2 2 2; 3 3 3];
     save(fullfile(d, 'e2_mmc_in_mmc.mat'), 'mmc');
+    % fix 8: channel 2 has no valid sample at all - her signal NaN throughout, so no event
+    % and no rate either (a physically possible file, invariant 25)
+    Z = struct('mmc', mmc);
+    sigZ = sig; sigZ(:, 2) = NaN;
+    Z.mmc.signal = single(sigZ);
+    Z.mmc.firing.events(:, 2) = false;
+    Z.mmc.firing.rate(:, 2) = NaN;
+    Z.mmc.firing.peakAmp = Z.mmc.firing.rate * 10;
+    save(fullfile(d, 'e2_zero_mmc.mat'), '-struct', 'Z');
     % one kept slow-wave channel
     Lsw = L('slow_wave.sw_rate.filled_or_filtered');
     slowWaveRateTime = p3(Lsw) / fs; slowWaveRateSeries = [1; 2; 3]; avgSlowWave = 7; %#ok<NASGU>
@@ -933,11 +963,14 @@ function r = unit_case(K)
     rec = struct('epoch_start_sample0', i0, 'electrical_settle_sample0', i0 + 7, ...
                  'analyses', struct('hrv', A, 'breathing', A, 'mmc', A, 'spikes', A, ...
                                     'slow_wave', A), 'cuts', {cuts});
-    tr = @(files, cons) night6_recovery_trim_outputs(d, files, cons, rec, OT, fs);
+    [~, SWf] = night6_slow_wave_rates('full');
+    tr = @(files, cons) night6_recovery_trim_outputs(d, files, cons, rec, OT, fs, ...
+                                                     'SlowWaveRate', SWf);
     r = struct();
     r.hrv = tr({'e2_hrv_HRVMeasures.mat', 'e2_hrv_HRBR.mat', 'e2_figure.png', '.', '..'}, {'hrv'});
     r.breathing = tr({'e2_breathing_HRBR.mat'}, {'breathing'});
     r.mmc = tr({'e2_mmc_in_mmc.mat'}, {'mmc'});
+    r.mmc_zero = tr({'e2_zero_mmc.mat'}, {'mmc'});
     r.spikes = tr({'e2_spikes_v2.mat'}, {'spikes'});
     r.sw = tr({'e2_swm_ANT1_slowWaves_ANT1.mat'}, {'slow_wave'});
     % refusals, by name: trimmed twice; a cut the row lacks; no class; an unknown class; a
@@ -965,6 +998,7 @@ function r = unit_case(K)
                    'hrbr', load(fullfile(d, 'e2_hrv_HRBR.mat')), ...
                    'hrbr_b', load(fullfile(d, 'e2_breathing_HRBR.mat')), ...
                    'mmc', load(fullfile(d, 'e2_mmc_in_mmc.mat')), ...
+                   'mmc_zero', load(fullfile(d, 'e2_zero_mmc.mat')), ...
                    'spk', load(fullfile(d, 'e2_spikes_v2.mat')), ...
                    'sw', load(fullfile(d, 'e2_swm_ANT1_slowWaves_ANT1.mat')));
     r.events_class = class(r.out.mmc.mmc.firing.events);

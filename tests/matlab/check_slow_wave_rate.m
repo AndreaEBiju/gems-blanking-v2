@@ -117,8 +117,23 @@ function check_slow_wave_rate(caseFile, outFile)
     f = 'e0_slowWaves_ANT2.mat';
     B = load(fullfile(d, f));
     tr = struct('error', '');
+    % her rate must be EXACTLY the declared one (fs / 78 here): refused, before any write,
+    % with no declared rate, with 'full' declared, and with a forged factor
+    [~, SWd] = night6_slow_wave_rates('decimated78');
+    [~, SWf] = night6_slow_wave_rates('full');
+    forged = SWd; forged.factor = 39;
+    tr.no_rate = attempt(@() night6_recovery_trim_outputs(d, {f}, {'slow_wave'}, rec, ...
+                                                         RS.outputTimes, S.fs));
+    tr.full_rate = attempt(@() night6_recovery_trim_outputs(d, {f}, {'slow_wave'}, rec, ...
+                                                           RS.outputTimes, S.fs, ...
+                                                           'SlowWaveRate', SWf));
+    tr.forged_rate = attempt(@() night6_recovery_trim_outputs(d, {f}, {'slow_wave'}, rec, ...
+                                                             RS.outputTimes, S.fs, ...
+                                                             'SlowWaveRate', forged));
+    tr.untouched = isequaln(load(fullfile(d, f)), B);
     try
-        info = night6_recovery_trim_outputs(d, {f}, {'slow_wave'}, rec, RS.outputTimes, S.fs);
+        info = night6_recovery_trim_outputs(d, {f}, {'slow_wave'}, rec, RS.outputTimes, ...
+                                            S.fs, 'SlowWaveRate', SWd);
         A = load(fullfile(d, f));
         tr.n_files = numel(info.files);
         tr.rate_t = B.slowWaveRateTime(:)';

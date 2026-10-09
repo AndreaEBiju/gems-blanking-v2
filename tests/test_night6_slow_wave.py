@@ -227,6 +227,9 @@ def test_a_decimated_runs_file_is_trimmed_at_her_rate(result: dict[str, Any]) ->
     """
     tr = result["trim"]
     assert tr["error"] == "", tr["error"]
+    # review 2026-10-09: her rate is checked against the DECLARED rate, never inferred
+    assert tr["no_rate"] == tr["full_rate"] == tr["forged_rate"] == "night6:slowWaveRate"
+    assert tr["untouched"] is True    # refused before anything was written
     assert tr["n_files"] == 1 and tr["fs"] == pytest.approx(FS / R)
     fsd, n = tr["fs"], tr["n"]
     valid = np.ones(n, dtype=bool)
