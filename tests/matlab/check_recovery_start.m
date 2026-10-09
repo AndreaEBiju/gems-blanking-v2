@@ -334,8 +334,9 @@ function TB = oracle_table()
              'slow_wave.sw_trace.filled_or_filtered');
     TB = add(TB, 'slowWaves', 'slowWaveRateSeries', 'slowWaveRateTime', 'sec0', 'nan', ...
              'slow_wave', II, 'slow_wave.sw_rate.filled_or_filtered');
+    % :200 findpeaks MinPeakDistance 6 s looks back (RULING 2026-10-09 (c) 3 (d)): own cut
     TB = add(TB, 'slowWaves', 'slowWavePeakLocs', 'slowWavePeakLocs', 'row1', 'drop', ...
-             'slow_wave', II, 'slow_wave.sw_trace.filled_or_filtered');
+             'slow_wave', II, 'slow_wave.sw_peaks.filled_or_filtered');
     % --- extract_mmc (save :170; struct :151-166)
     % :104-106 filtfilt over the fill; :153 signal = single(cond): II
     TB = add(TB, 'mmc', 'mmc.signal', 'mmc.t', 'sec0', 'nan', 'mmc', II, ...
@@ -344,7 +345,8 @@ function TB = oracle_table()
         % :155-157 events = ev_bool, detected on the filtered signal: II, NaN when not computed
         TB = add(TB, 'mmc', ['mmc.' lvl{1} '.events'], 'mmc.t', 'sec0', 'nan_events', 'mmc', ...
                  II, 'mmc.mmc_events.filled_or_filtered');
-        % :284-293 rate / peak amplitude over valid samples, >= 0.5 valid (:290): I
+        % :284-293 rate / peak amplitude over valid samples, >= 0.5 valid (:290): I; its
+        % cut is its input's + the 5 s its window looks back (RULING 2026-10-09 (d) 3)
         for v = {'rate', 'peakAmp'}
             TB = add(TB, 'mmc', ['mmc.' lvl{1} '.' v{1}], 'mmc.rate_t', 'sec0', 'nan', 'mmc', ...
                      I, 'mmc.mmc_rate.valid_only');

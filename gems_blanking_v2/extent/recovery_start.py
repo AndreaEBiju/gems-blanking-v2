@@ -32,7 +32,12 @@ whose edge the start must cover). A stage's reach, by its kind:
 * ``trailing window`` - the whole window (RULING (k) 2);
 * ``fixed bin, reported at its centre`` - half the bin: a value stamped at the bin
   centre reaches back half a bin, exactly as a centred window does;
-* ``window, part before t`` - an asymmetric window: the part before ``t``.
+* ``window, part before t`` - an asymmetric window: the part before ``t``;
+* ``filter at a NaN edge, measured`` - the chain's filter zero phase over her fill, as
+  measured at a NaN edge (``tolerance.EDGE_SETTLING``, RULING 2026-10-09 (c));
+* ``look-back (peak spacing or event grouping)`` - the whole spacing or gap ((c) 3 (d));
+* ``blank around an event, extending a NaN edge`` - the whole blank: an event just past
+  the edge extends the NaN by up to the blank's full width.
 
 Whether each window is centred or trailing is read from Andrea's code and cited with
 ``file:line``. Her working tree is not a commit (``slowWaveAnalysis_new.m`` is modified
@@ -40,24 +45,26 @@ and ``HR_BR_HRVAnalysis_beats.m`` untracked at f93e250), so :data:`SOURCE_FILES`
 the SHA-256 of every cited processing_new file as read, and a test checks both the hashes
 and that every cited line still says what the table says it does.
 
-What is NOT counted, and why (each listed per analysis, never silently dropped):
-
-* **selection rules** (``findpeaks`` MinPeakDistance, event grouping, refractory
-  periods). They are neither a filter nor a window, which is what (k) 2 measures, and
-  their reach is a chain (a peak removed by a taller one removed by a taller one), so
-  it has no fixed bound. Flagged for a ruling, not counted.
-* **edge guards** (step2's 10 ms pad, HR's 0.75 s and slow wave's 15 s edge buffers).
-  They act AFTER an edge, so they do not reach back. They do NOT act at a masked start
-  in Night 6: step2's pad dilates every invalid sample, but HR's and slow wave's edge
-  masks are built from ``blankIdx`` and the array ends only
-  (``HR_BR_HRVAnalysis_beats.m:249-256``, ``slowWaveAnalysis_new.m:111-118``) and Night 6
-  passes ``blankIdx = []`` (``night6_run_recording.m`` call_one), so a NaN lead-in gets
-  no edge buffer from either. Their windows that straddle a masked start are computed
-  over her ``'nearest'`` fill of the masked span (review of be402a1, finding 1 (b), (c)).
-* **epoch-wide statistics** (session sigma, detrend, averages). They have no time to
-  trim by. Both trim modes mask the input before at least the electrical settling, which
-  keeps them free of unsettled data; under ``mask_to_electrical_drop_outputs`` they are
-  computed over [electrical settling, epoch end], and the record says so.
+What counts, and what does not (RULING 2026-10-09 (c) 3, :data:`RULING_SETTLING`)
+-------------------------------------------------------------------------------------
+* **(b)** chained stages add up only where they run on filled or filtered data. A stage
+  that skips NaN (``movmedian(..., 'omitnan')``, a window over valid samples or events
+  only) contributes NOTHING at a blanked edge: it is declared ``skips_nan`` and counted
+  as 0, its nominal reach still reported. Filters are the MEASURED zero-phase settling at
+  a NaN edge where it was measured (spikes 7.78 ms, mmc 1.16 s; ``tolerance.EDGE_SETTLING``),
+  task 13's impulse response elsewhere (slow wave's low-pass 8.17 s, the HR band).
+* **(c)** the CV2 bins and the mmc delay window are kept (counted).
+* **(d)** peak spacing and event grouping count where they look back in time (the beat
+  detector's plausibility gate, breath troughs, slow-wave peaks, mmc grouping); the
+  refractory period is negligible. RULING 2026-10-09 (d) 3: the mmc rate window looks back
+  5 s and is counted, so the mmc rate's cut is its input's settling + 5 s.
+* **edge guards** (step2's 10.5 ms pad, HR's 0.75 s and slow wave's 15 s edge buffers) act
+  AFTER an edge and do not reach back. Slow wave's acts at every masked span, the
+  electrical lead-in included, because Night 6 passes each channel's masked spans as
+  ``blankIdx`` (RULING 2026-10-09 (c) 6); HR's acts only at the array ends (``blankIdx = []``).
+* **epoch-wide statistics** (session sigma, detrend, averages) have no time to trim by;
+  the input is masked through the electrical settling, which keeps them free of unsettled
+  data, and they are computed over [electrical settling, epoch end].
 
 Trim mode (:data:`TRIM_MODES`, a REQUIRED declaration of every Night 6 batch)
 ------------------------------------------------------------------------------
@@ -124,12 +131,21 @@ from typing import Any, Final, Literal
 from gems_blanking_v2.extent.grid import seconds_to_sample
 from gems_blanking_v2.extent.tolerance import (
     CONSUMER_FILTERS,
+    EDGE_SETTLING,
+    SPIKE_WAVEFORM_BEFORE_PEAK_S,
     ConsumerFilter,
+    EdgeSettling,
+    edge_settling_record,
     expected_consumers,
     impulse_settling_s,
 )
 from gems_blanking_v2.io.store import atomic_write_text
-from gems_blanking_v2.physio.rpeaks import DECIMATE_TARGET_HZ
+from gems_blanking_v2.physio.rpeaks import (
+    DECIMATE_TARGET_HZ,
+    GLOBAL_RR_FRACTION,
+    R_MIN_S,
+    RR_PLAUSIBLE_RANGE_S,
+)
 
 __all__ = [
     "ACTIONS",
@@ -137,6 +153,8 @@ __all__ = [
     "BASIS_CUT",
     "BASIS_FIXED",
     "BASIS_MEASURED",
+    "BEAT_SPACING_S",
+    "BREATH_TROUGH_SPACING_S",
     "CONVENTIONS",
     "FIXED_START_S",
     "FIXED_START_SOURCE",
@@ -146,6 +164,7 @@ __all__ = [
     "OUTPUT_VARS",
     "RECOMPUTE_KINDS",
     "RULING",
+    "RULING_SETTLING",
     "RULING_TRIM",
     "SCHEMA",
     "SOURCE_FILES",
@@ -175,6 +194,7 @@ __all__ = [
     "read_recovery_starts",
     "recovery_starts_document",
     "source_files_record",
+    "stage_counted_s",
     "stage_settling_s",
     "table_record",
     "trim_cuts",
@@ -265,10 +285,32 @@ BASIS_FIXED: Final = "fixed_132s_settling_unknown"
 HELD_UNDETECTED: Final = "held_stim_edges_undetected"
 HELD_NO_SETTLING: Final = "held_no_electrical_settling"
 
-StageKind = Literal["filter impulse response", "centred window", "trailing window",
-                    "fixed bin, reported at its centre", "window, part before t"]
-How = Literal["impz", "impz_beat_rate", "fir_half_beat", "half", "whole", "before_t",
+StageKind = Literal["filter impulse response", "filter at a NaN edge, measured",
+                    "centred window", "trailing window", "fixed bin, reported at its centre",
+                    "window, part before t", "look-back (peak spacing or event grouping)",
+                    "blank around an event, extending a NaN edge"]
+How = Literal["impz", "impz_beat_rate", "fir_half_beat", "edge", "half", "whole", "before_t",
               "unknown"]
+
+RULING_SETTLING: Final = "RULING 2026-10-09 (c) 3"
+"""The settling rules for trim mode (B) and this table: (b) chained stages add up only where
+they run on filled or filtered data - a stage that skips NaN contributes nothing at a
+blanked edge; (c) the CV2 bins and the mmc delay window are kept; (d) peak spacing and
+event grouping count where they look back in time, the refractory period is negligible.
+RULING 2026-10-09 (d) 3: the mmc rate window looks back 5 s and is counted ((c) 3 (d))."""
+
+BEAT_SPACING_S: Final = max(R_MIN_S, GLOBAL_RR_FRACTION * RR_PLAUSIBLE_RANGE_S[1])
+"""How far the beat detector's peak spacing looks back ((c) 3 (d)): its plausibility gate
+drops a beat closer than ``GLOBAL_RR_FRACTION`` (0.75) x the whole-file RR to the previous
+kept one, the RR bounded by ``RR_PLAUSIBLE_RANGE_S`` (at most 0.5 s): 0.375 s, which holds
+the 60 ms pass-1 distance (``R_MIN_S``) inside it. A bound: the file's own RR is shorter."""
+
+BREATH_TROUGH_SPACING_S: Final = 1.0
+"""How far her breath-trough selection looks back ((c) 3 (d)): ``findpeaks`` MinPeakDistance
+``minBreathSepBeats = max(2, round((60 / maxBreathRate_bpm) fs / meanRR))`` beats
+(``HR_BR_HRVAnalysis_beats.m:384-387``, maxBreathRate_bpm 170 at :221). In time that is
+``max(2, round(0.3529 / RR)) * RR``, whose maximum over her plausible RR range [0.1, 0.5] s
+(:314-315) is 1.0 s, at RR = 0.5 s (two beats). A test recomputes it."""
 
 FIR_HALF_TAPS_PER_Q: Final = 10
 """``scipy.signal.decimate(ftype="fir")`` designs ``firwin(20 q + 1)`` (``half_len = 10 q``)
@@ -289,8 +331,13 @@ class Stage:
     settling of ``filter`` at the recording's rate), ``impz_beat_rate`` (the same
     method at the beat detector's decimated rate), ``fir_half_beat`` (the beat
     detector's decimating FIR, half-length), ``half`` / ``whole`` / ``before_t`` of
-    ``window_s``, or ``unknown`` (a figure nobody has measured: the analysis is then
-    unknown, invariant 19).
+    ``window_s``, ``edge`` (the chain's filter MEASURED at a NaN edge as v2 runs it,
+    ``EdgeSettling.filter_s``; RULING 2026-10-09 (c)), or ``unknown`` (a figure nobody has
+    measured: the analysis is then unknown, invariant 19).
+
+    ``skips_nan``: the stage computes over valid samples or events only, so it contributes
+    NOTHING at a blanked edge (:data:`RULING_SETTLING` (b)); its nominal reach is still
+    reported. ``note`` says why a stage counts or not where the rule needs saying.
     """
 
     what: str
@@ -302,6 +349,9 @@ class Stage:
     basis: Literal["measured", "code"]
     window_s: float | None = None
     filter: ConsumerFilter | None = None
+    edge: EdgeSettling | None = None
+    skips_nan: bool = False
+    note: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,6 +411,7 @@ _HR_BR = "HR_BR_HRVAnalysis_beats.m"
 _SW = "slowWaveAnalysis_new.m"
 _MMC = "extract_mmc.m"
 _RUN = "matlab/night6/night6_run_recording.m"
+_SKIPS = "skips NaN: contributes nothing at a blanked edge (RULING 2026-10-09 (c) 3 (b))"
 
 _BEAT_FIR = Stage(
     "beat fiducials: the beat detector's decimating FIR (to ~2 kHz), zero phase",
@@ -372,17 +423,37 @@ _BEAT_BAND = Stage(
     "filter impulse response", "impz_beat_rate",
     "gems_blanking_v2/physio/rpeaks.py:335-336 (butter 4, DETECT_BAND_HZ = HR_BAND)",
     'sos = butter(4, [lo / nyq, min(hi, nyq * 0.9) / nyq], btype="bandpass"', "measured",
-    filter=CONSUMER_FILTERS["hrv"])
-_BEATS = (_BEAT_FIR, _BEAT_BAND)
-"""The stored beat train (routing, frozen) is located by these two stages; hrv,
-breathing and mmc read it. Its other steps are selection rules and epoch-wide statistics
-(listed under each analysis that reads it)."""
+    filter=CONSUMER_FILTERS["hrv"], note="not measured at a NaN edge: task 13's impz stands")
+_BEAT_SPACING = Stage(
+    "beat peak spacing: the plausibility gate keeps one of two beats closer than 0.75 x the "
+    "global RR (<= 0.75 x 0.5 s; the 60 ms pass-1 distance lies inside it)",
+    "look-back (peak spacing or event grouping)", "whole",
+    "gems_blanking_v2/physio/rpeaks.py:577 (gate :353-379; GLOBAL_RR_FRACTION :117, "
+    "RR_PLAUSIBLE_RANGE_S :124, R_MIN distance :567)", "GLOBAL_RR_FRACTION * global_rr,",
+    "code", window_s=BEAT_SPACING_S,
+    note="peak spacing on filtered data counts where it looks back (RULING 2026-10-09 (c) 3 "
+         "(d)); a bound - the file's own RR is shorter")
+_BEATS = (_BEAT_FIR, _BEAT_BAND, _BEAT_SPACING)
+"""The stored beat train (routing, frozen) is located by these stages; hrv, breathing and
+mmc read it. Its other steps are selection rules and epoch-wide statistics (listed under
+each analysis that reads it)."""
 
 _SPIKE_BAND = Stage(
-    "300-3000 Hz order-4 bandpass, filtfilt over NaN filled for the filter and restored",
-    "filter impulse response", "impz",
+    "300-3000 Hz order-4 bandpass, filtfilt over NaN filled for the filter and restored: "
+    "measured at a NaN edge as v2 runs it",
+    "filter at a NaN edge, measured", "edge",
     "step1_bandpass.m:57 (filtfilt; NaN filled at :53 and restored at :58)",
-    "xf = filtfilt(b, a, xfill);", "measured", filter=CONSUMER_FILTERS["spikes"])
+    "xf = filtfilt(b, a, xfill);", "measured", edge=EDGE_SETTLING["spikes"],
+    note="7.782 ms zero phase, either side (edgepad/settling.json); task 13's one-way impz "
+         "was 5.1 ms (RULING 2026-10-09 (c) 1)")
+
+
+def _skip(what: str, kind: StageKind, source: str, anchor: str, window_s: float,
+          why: str) -> Stage:
+    """Declare a window over valid samples or events only: reach reported, nothing counted."""
+    return Stage(what, kind, "half", source, anchor, "code", window_s=window_s,
+                 skips_nan=True, note=f"{_SKIPS}: {why}")
+
 
 _SPIKES = Analysis(
     "spikes", "process_dataset_v2 (her process_dataset steps, matlab/night6)",
@@ -393,23 +464,29 @@ _SPIKES = Analysis(
             _SPIKE_BAND,
             Stage("waveform window before the aligned peak: wfPreMs 1 ms + wfAlignSearchMs "
                   "0.5 ms", "window, part before t", "before_t", "step4_waveforms.m:44-46",
-                  "npre   = round(P.wfPreMs  * 1e-3 * fs);", "code", window_s=0.0015),
+                  "npre   = round(P.wfPreMs  * 1e-3 * fs);", "code",
+                  window_s=SPIKE_WAVEFORM_BEFORE_PEAK_S,
+                  note="the recovery start is the AFTER-gap side: 1.5 ms reaches back; the "
+                       "2.5 ms after the peak reaches into a gap ahead, which the 10.5 ms "
+                       "edge pad covers"),
         ), "step4_waveforms.m", key="spike_waveforms"),
         Output("firing rate (frBinSec 1 s bins)", (
             _SPIKE_BAND,
-            Stage("firing-rate bins, frBinSec = 1 s, value at the bin centre",
-                  "fixed bin, reported at its centre", "half",
+            _skip("firing-rate bins, frBinSec = 1 s, value at the bin centre",
+                  "fixed bin, reported at its centre",
                   "step6_spike_report.m:62 (firing_rate, :140-152, t = bin centre)",
-                  "firing_rate(cen, valid, N, fs, P.frBinSec)", "code", window_s=1.0),
+                  "firing_rate(cen, valid, N, fs, P.frBinSec)", 1.0,
+                  "spikes over the bin's valid seconds (:149)"),
         ), "step6_spike_report.m:62", key="firing_rate", own_window=True),
         Output("activity envelope (envBinSec 1 s RMS bins)", (
             _SPIKE_BAND,
             Stage("artifact-excursion pad, +/- 5 ms", "centred window", "half",
                   "step3b_envelope.m:72", "artPad = round(0.005 * fs);", "code",
-                  window_s=0.010),
-            Stage("RMS bins, envBinSec = 1 s, value at the bin centre",
-                  "fixed bin, reported at its centre", "half", "step3b_envelope.m:107",
-                  "t_c(b) = ((i0 + i1) / 2 - 1) / fs;", "code", window_s=1.0),
+                  window_s=0.010, note="dilates excursions found on the filtered trace"),
+            _skip("RMS bins, envBinSec = 1 s, value at the bin centre",
+                  "fixed bin, reported at its centre", "step3b_envelope.m:107",
+                  "t_c(b) = ((i0 + i1) / 2 - 1) / fs;", 1.0,
+                  "an RMS over the bin's valid samples (:99)"),
         ), "step3b_envelope.m", key="envelope", own_window=True),
         Output("rolling CV2 (cv2WinSec 30 s bins)", (
             _SPIKE_BAND,
@@ -417,26 +494,30 @@ _SPIKES = Analysis(
                   "fixed bin, reported at its centre", "half",
                   "step6_spike_report.m:94 (rolling_cv2, :262-271, t = edges + winSec/2)",
                   "rolling_cv2(st, isims, isClean, Tend, P.cv2WinSec)", "code",
-                  window_s=30.0),
+                  window_s=30.0,
+                  note="KEPT (RULING 2026-10-09 (c) 3 (c)) although it reads gap-clean ISIs "
+                       "only"),
         ), "step6_spike_report.m:94", key="cv2", own_window=True),
         Output("noise sigma windows (sigmaWindowSec 5 s, step 2.5 s, at the window centre)", (
             _SPIKE_BAND,
-            Stage("sigma window, sigmaWindowSec = 5 s, value at its centre", "centred window",
-                  "half", "step2_noise_sigma.m:98 (window :90-91; win :42)",
-                  "cWin(w) = (i0 + i1) / 2;", "code", window_s=5.0),
+            _skip("sigma window, sigmaWindowSec = 5 s, value at its centre", "centred window",
+                  "step2_noise_sigma.m:98 (window :90-91; win :42)",
+                  "cWin(w) = (i0 + i1) / 2;", 5.0,
+                  "a MAD over the window's valid samples (:95)"),
         ), "step2_noise_sigma.m:89-99", key="sigma_windows", own_window=True),
     ),
     (
-        Excluded("step2 edge pad, edgeBufferMs 10 ms around every invalid sample", "edge guard",
-                 "step2_noise_sigma.m:41 and :75-77; pipeline_params.m:69",
+        Excluded("step2 edge pad, edgeBufferMs 10.5 ms (night6_v2_params, RULING 2026-10-09 "
+                 "(c) 1) around every invalid sample", "edge guard",
+                 "step2_noise_sigma.m:41 and :75-77; matlab/night6/night6_v2_params.m",
                  "acts after an edge (it dilates every invalid sample, so the masked start "
-                 "too) and covers the 5.1 ms ringing "
-                 "the bandpass row counts; it does not reach back"),
+                 "too) and covers the measured 10.28 ms (step1 7.78 + step4 2.5); it does not "
+                 "reach back"),
         Excluded("wrapper check: no spike within 5 ms (NanPadMs) of a NaN", "edge guard",
                  "matlab/night6/process_dataset_v2.m:143-151", "a refusal check, not a stage"),
         Excluded("refractory 1 ms (detection dead time, re-enforced after alignment)",
                  "selection rule", "step4_waveforms.m:47 and :78",
-                 "a selection chain, not a filter or window"),
+                 "negligible (RULING 2026-10-09 (c) 3 (d))"),
         Excluded("session sigma (median of 5 s window MADs)", "epoch-wide statistic",
                  "step2_noise_sigma.m:114", "untimed: masking the input keeps it settled"),
         Excluded("Fano curve, autocorrelogram, rate PSD, bursts, modality test",
@@ -445,29 +526,31 @@ _SPIKES = Analysis(
         Excluded("Vpp over time (vppBinSec 5 s)", "display only", "step6_spike_report.m:392",
                  "binstat is called by plot_report only"),
     ),
-    "The 30 s CV2 bins bind; without them the spike start would be stim-off + "
-    "electrical + 0.5 s (the 1 s rate and envelope bins).")
+    "The 30 s CV2 bins bind (kept by (c) 3 (c)); without them the spike start would be "
+    "stim-off + electrical + 12.8 ms (the envelope's band + excursion pad).")
 
 _HRV = Analysis(
     "hrv", "HR_BR_HRVAnalysis_beats (stored beats), hrv run",
     (
         Output("heart rate (hrBrWinSec 60 s, centred)", (
             *_BEATS,
-            Stage("heart-rate window, hrBrWinSec = 60 s (night6 params), centred",
-                  "centred window", "half", f"{_HR_BR}:835 (t0 = tc - halfHrBr; :816)",
-                  "t0   = tc - halfHrBr;", "code", window_s=60.0),
+            _skip("heart-rate window, hrBrWinSec = 60 s (night6 params), centred",
+                  "centred window", f"{_HR_BR}:835 (t0 = tc - halfHrBr; :816)",
+                  "t0   = tc - halfHrBr;", 60.0,
+                  "beats in the longest clean stretch, NaN at an invalid centre (:829, :844)"),
         ), f"{_HR_BR}:833-849", key="heart_rate", own_window=True),
         Output("beat count and HRV metrics (winSec 20 s, centred)", (
             *_BEATS,
-            Stage("count/HRV window, winSec = 20 s (night6 params), centred",
-                  "centred window", "half", f"{_HR_BR}:873 (t0w = tc - halfWin; :817)",
-                  "t0w   = tc - halfWin;", "code", window_s=20.0),
+            _skip("count/HRV window, winSec = 20 s (night6 params), centred",
+                  "centred window", f"{_HR_BR}:873 (t0w = tc - halfWin; :817)",
+                  "t0w   = tc - halfWin;", 20.0,
+                  "beats over the window's valid samples and valid RR intervals (:892, :998)"),
         ), f"{_HR_BR}:871-917", key="count_hrv", own_window=True),
         Output("sample entropy (fixed 60 s, centred)", (
             *_BEATS,
-            Stage("sample-entropy window, fixed 60 s, centred", "centred window", "half",
+            _skip("sample-entropy window, fixed 60 s, centred", "centred window",
                   f"{_HR_BR}:924 (t0se = tc - halfSampEn; :818-819)",
-                  "t0se  = tc - halfSampEn;", "code", window_s=60.0),
+                  "t0se  = tc - halfSampEn;", 60.0, "valid RR intervals only (:928, :998)"),
         ), f"{_HR_BR}:920-934", key="sampen", own_window=True),
         Output("beat fiducials as read (heartlocs, RR intervals)", _BEATS,
                f"{_HR_BR}:289-299, :310", key="beats"),
@@ -477,79 +560,94 @@ _HRV = Analysis(
                          "linear fill", "filter impulse response", "impz",
                          f"{_HR_BR}:282 (fill :262; butter :280)",
                          "yFilt    = filtfilt(sos, g, xFill);", "measured",
-                         filter=CONSUMER_FILTERS["hrv"]),
+                         filter=CONSUMER_FILTERS["hrv"],
+                         note="not measured at a NaN edge: task 13's one-way impz stands (the "
+                              "two measured chains settle 1.5-2.4 x their impz there)"),
                ), f"{_HR_BR}:286, :302-303", key="heart_band_trace"),
     ),
     (
         Excluded("edgeBufferSec 0.75 s (night6 params) at blank and signal edges", "edge guard",
                  f"{_HR_BR}:249-256", "acts after an edge; does not reach back. Built from "
-                 "blankIdx and the array ends only, and night6 passes blankIdx = []: no buffer at "
-                 "a masked start"),
+                 "blankIdx and the array ends only, and night6 passes blankIdx = [] to HR: no "
+                 "buffer at a masked start"),
         Excluded("global HRV, average heart rate", "epoch-wide statistic",
                  f"{_HR_BR}:436, :453-466", "untimed: masking the input keeps them settled"),
-        Excluded("beat detector: global sigma, global RR, QRS template, pass-1 distance",
-                 "selection rule", "gems_blanking_v2/physio/rpeaks.py:558-585",
-                 "upstream (routing, frozen); computed on the routed region from 132 s"),
+        Excluded("beat detector: global sigma, global RR, QRS template; the rescue search "
+                 "between two accepted beats", "selection rule",
+                 "gems_blanking_v2/physio/rpeaks.py:558-585 (rescue :480-538)",
+                 "upstream (routing, frozen); the rescue places a beat only between two kept "
+                 "beats, so it adds no look-back before the first"),
     ),
-    "Heart rate is an output of this run (one call, one input), so it shares hrv's start.")
+    "Heart rate is an output of this run (one call, one input), so it shares hrv's start. "
+    "Every window here reads valid beats only, so the beats bind (RULING 2026-10-09 (c) 3 (b)).")
+
+_TROUGH_SPACING = Stage(
+    "breath troughs: findpeaks MinPeakDistance minBreathSepBeats (>= 2 beats), at most 1.0 s "
+    "over her plausible RR range", "look-back (peak spacing or event grouping)", "whole",
+    f"{_HR_BR}:387 (minBreathSepBeats :385; maxBreathRate_bpm :221; RR range :314-315)",
+    "findpeaks(-candidateVals, 'MinPeakDistance', minBreathSepBeats)", "code",
+    window_s=BREATH_TROUGH_SPACING_S,
+    note="peak spacing counts where it looks back (RULING 2026-10-09 (c) 3 (d)); a bound")
 
 _BREATHING = Analysis(
     "breathing", "HR_BR_HRVAnalysis_beats (stored beats), breathing run",
     (
         Output("breath rate (hrBrWinSec 60 s, centred)", (
-            *_BEATS,
-            Stage("breath-rate window, hrBrWinSec = 60 s (night6 params), centred",
-                  "centred window", "half", f"{_HR_BR}:835 (t0 = tc - halfHrBr; :816)",
-                  "t0   = tc - halfHrBr;", "code", window_s=60.0),
+            *_BEATS, _TROUGH_SPACING,
+            _skip("breath-rate window, hrBrWinSec = 60 s (night6 params), centred",
+                  "centred window", f"{_HR_BR}:835 (t0 = tc - halfHrBr; :816)",
+                  "t0   = tc - halfHrBr;", 60.0,
+                  "troughs in the longest clean stretch, NaN at an invalid centre (:860)"),
         ), f"{_HR_BR}:851-868", key="breath_rate", own_window=True),
-        Output("breath troughs (br_locs_true): stored beats, read on the raw signal", _BEATS,
-               f"{_HR_BR}:378-391", key="breath_troughs"),
+        Output("breath troughs (br_locs_true): stored beats, read on the raw signal",
+               (*_BEATS, _TROUGH_SPACING), f"{_HR_BR}:378-391", key="breath_troughs"),
     ),
     (
-        Excluded("breath troughs: findpeaks MinPeakDistance (in beats)", "selection rule",
-                 f"{_HR_BR}:387", "a selection chain, not a filter or window; the troughs "
-                 "are read from the raw signal at the beats (:378), no filter"),
         Excluded("edgeBufferSec 0.75 s (night6 params)", "edge guard", f"{_HR_BR}:249-256",
                  "acts after an edge; does not reach back. Built from blankIdx and the "
-                 "array ends only, and night6 passes blankIdx = []: no buffer at a masked "
-                 "start"),
+                 "array ends only, and night6 passes blankIdx = [] to HR: no buffer at a "
+                 "masked start"),
         Excluded("average breath rate", "epoch-wide statistic", f"{_HR_BR}:437",
                  "untimed: masking the input keeps it settled"),
     ))
 
+_SW_LP = Stage("low-pass 0.15 Hz order 2 (batch_process settings, night6 params), filtfilt "
+               "over NaN filled for the filter", "filter impulse response", "impz",
+               f"{_SW}:133 (fill :126; butter :131)", "filtSignal = filtfilt(sos, g, xFill);",
+               "measured", filter=CONSUMER_FILTERS["slow_wave"],
+               note="task 13's measured 8.17 s (extent.tolerance, impz at 24414 Hz); her 15 s "
+                    "edgeBufferSec covers it at every masked span, which Night 6 now passes "
+                    "as blankIdx (RULING 2026-10-09 (c) 6)")
+_SW_SMOOTH = Stage("gaussian smoothdata, window 5 s (night6 params), centred", "centred window",
+                   "half", f"{_SW}:156", "smoothdata(filteredSignal, 1, 'gaussian', windowlen)",
+                   "code", window_s=5.0, note="runs on the filtered data")
+_SW_SPACING = Stage("findpeaks MinPeakDistance 6 s on the smoothed trace",
+                    "look-back (peak spacing or event grouping)", "whole",
+                    f"{_SW}:200 (minPeakDist_samp :165)",
+                    "'MinPeakDistance', minPeakDist_samp);", "code", window_s=6.0,
+                    note="peak spacing on filtered data counts where it looks back "
+                         "(RULING 2026-10-09 (c) 3 (d))")
+
 _SLOW_WAVE = Analysis(
     "slow_wave", "slowWaveAnalysis_new, one ANT channel at a time (each channel the same chain)",
     (
-        Output("slow-wave trace and peak times", (
-            Stage("low-pass 0.15 Hz order 2 (batch_process settings, night6 params), "
-                  "filtfilt over NaN filled for the filter", "filter impulse response",
-                  "impz", f"{_SW}:133 (fill :126; butter :131)",
-                  "filtSignal = filtfilt(sos, g, xFill);", "measured",
-                  filter=CONSUMER_FILTERS["slow_wave"]),
-            Stage("gaussian smoothdata, window 5 s (night6 params), centred",
-                  "centred window", "half", f"{_SW}:156",
-                  "smoothdata(filteredSignal, 1, 'gaussian', windowlen)", "code",
-                  window_s=5.0),
-        ), f"{_SW}:156, :200", key="sw_trace"),
+        Output("slow-wave trace", (_SW_LP, _SW_SMOOTH), f"{_SW}:156, :160", key="sw_trace"),
+        Output("slow-wave peak times", (_SW_LP, _SW_SMOOTH, _SW_SPACING), f"{_SW}:200-205",
+               key="sw_peaks"),
         Output("slow-wave rate (rateWinSec 60 s, centred)", (
-            Stage("low-pass 0.15 Hz order 2", "filter impulse response", "impz",
-                  f"{_SW}:133", "filtSignal = filtfilt(sos, g, xFill);", "measured",
-                  filter=CONSUMER_FILTERS["slow_wave"]),
-            Stage("gaussian smoothdata, 5 s, centred", "centred window", "half", f"{_SW}:156",
-                  "smoothdata(filteredSignal, 1, 'gaussian', windowlen)", "code",
-                  window_s=5.0),
-            Stage("rate window, rateWinSec = 60 s, centred", "centred window", "half",
+            _SW_LP, _SW_SMOOTH, _SW_SPACING,
+            _skip("rate window, rateWinSec = 60 s, centred", "centred window",
                   f"{_SW}:246 (winStartSamp = ctrSamp - halfWinSamp; :169, :229)",
-                  "winStartSamp = max(1, ctrSamp - halfWinSamp);", "code", window_s=60.0),
+                  "winStartSamp = max(1, ctrSamp - halfWinSamp);", 60.0,
+                  "peaks over the window's pooled clean runs only (:262-273)"),
         ), f"{_SW}:225-280", key="sw_rate", own_window=True),
     ),
     (
-        Excluded("findpeaks MinPeakDistance 6 s", "selection rule", f"{_SW}:200 (:165)",
-                 "a selection chain, not a filter or window"),
-        Excluded("edgeBufferSec 15 s at the signal edges (and blankIdx, which night6 leaves "
-                 "empty: NaN spans get no edge buffer)", "edge guard", f"{_SW}:108-118",
-                 "acts after an edge; does not reach back. Not at a masked start: "
-                 "blankIdx is empty in night6"),
+        Excluded("edgeBufferSec 15 s at every masked span (Night 6 passes each channel's "
+                 "masked spans as blankIdx, RULING 2026-10-09 (c) 6) and at the signal ends",
+                 "edge guard", f"{_SW}:108-118",
+                 "acts after an edge; does not reach back. It covers the ~8 s low-pass "
+                 "settling at a masked edge, the electrical lead-in included"),
         Excluded("detrend over the whole epoch; avgSlowWave = mean of the rate series",
                  "epoch-wide statistic", f"{_SW}:139, :283",
                  "untimed: masking the input keeps them settled"),
@@ -557,55 +655,71 @@ _SLOW_WAVE = Analysis(
     "The same chain for each ANT channel, so one start serves all three channels' masks "
     "and the shared-call shortcut ((j) 5 (a)) stays exact.")
 
-_MMC_BLANK = Stage("cardiac blank around each stored beat, cardiacBlankMs 25 ms, centred",
-                   "centred window", "half", f"{_MMC}:85 (blank :99-102)",
-                   "half = max(1, round(cardMs/1000*fs));", "code", window_s=0.050)
-_MMC_BAND = Stage("2-50 Hz order-4 bandpass, filtfilt over NaN filled for the filter",
-                  "filter impulse response", "impz", f"{_MMC}:106 (fill :104)",
-                  "y = filtfilt(sos,gd,xf);", "measured", filter=CONSUMER_FILTERS["mmc"])
+_MMC_BLANK = Stage("cardiac blank around each stored beat, cardiacBlankMs 25 ms each side: a "
+                   "beat up to 25 ms past a NaN edge extends it by up to 50 ms",
+                   "blank around an event, extending a NaN edge", "whole",
+                   f"{_MMC}:85 (blank :99-102)", "half = max(1, round(cardMs/1000*fs));", "code",
+                   window_s=0.050,
+                   note="the whole blank, not half: the band then settles from the extended "
+                        "edge (re-derived under RULING 2026-10-09 (c) 3; was 25 ms)")
+_MMC_BAND = Stage("2-50 Hz order-4 bandpass, filtfilt over NaN filled for the filter: "
+                  "measured at a NaN edge", "filter at a NaN edge, measured", "edge",
+                  f"{_MMC}:106 (fill :104)", "y = filtfilt(sos,gd,xf);", "measured",
+                  edge=EDGE_SETTLING["mmc"],
+                  note="1.1594 s zero phase (edgepad/mmc_edge_settling.json); task 13's impz "
+                       "was 0.486 s")
 _MMC_MED = Stage("moving median, sigmaWin 30 s (default), centred", "centred window", "half",
                  f"{_MMC}:231 (win :230; sigmaWin :45)",
-                 "med = movmedian(y, win, 'omitnan');", "code", window_s=30.0)
+                 "med = movmedian(y, win, 'omitnan');", "code", window_s=30.0,
+                 skips_nan=True, note=f"{_SKIPS}: 'omitnan'")
 _MMC_MAD = Stage("moving MAD of (y - moving median), 30 s, centred: nested in the median",
                  "centred window", "half", f"{_MMC}:232",
                  "sig = movmedian(abs(y-med), win, 'omitnan') / 0.6745;", "code",
-                 window_s=30.0)
-_MMC_EVENTS = (*_BEATS, _MMC_BLANK, _MMC_BAND, _MMC_MED, _MMC_MAD)
+                 window_s=30.0, skips_nan=True, note=f"{_SKIPS}: 'omitnan'")
+_MMC_GROUP = Stage("event grouping by valid-time gap: burstRefractory 0.5 s (bursts; the "
+                   "firing level's 0.05 s lies inside it - one key serves both levels)",
+                   "look-back (peak spacing or event grouping)", "whole",
+                   f"{_MMC}:245-246 (refractories :46-47)",
+                   "vgap = [Inf; (cumValid(idx(2:end)) - cumValid(idx(1:end-1)))/fs];", "code",
+                   window_s=0.5,
+                   note="grouping counts where it looks back (RULING 2026-10-09 (c) 3 (d)): "
+                        "the gap is in VALID time, so at the blanked edge nothing lies behind "
+                        "it, but from the cut it looks back over valid, unsettled samples")
+_MMC_EVENTS = (*_BEATS, _MMC_BLANK, _MMC_BAND, _MMC_MED, _MMC_MAD, _MMC_GROUP)
+_MMC_RATE_WIN = Stage("rate window W = 10 s (default), centred: looks back 5 s",
+                      "centred window", "half", f"{_MMC}:287 (centers :115)",
+                      "lo = max(1, floor((centers(w)-W/2)*fs)+1);", "code", window_s=10.0,
+                      note="COUNTED although it reads valid samples only: its rate window looks "
+                           "back 5 s (RULING 2026-10-09 (d) 3, under (c) 3 (d))")
 
 _MMC_A = Analysis(
     "mmc", "extract_mmc (ANT1-3 raw, stored beats)",
     (
         Output("firing and burst (mmc_burst) event times", _MMC_EVENTS,
                f"{_MMC}:109-111 (detect_crossings :220-235)", key="mmc_events"),
-        Output("firing and burst (mmc_burst) rate and peak amplitude (W 10 s, centred)", (
-            *_MMC_EVENTS,
-            Stage("rate window W = 10 s (default), centred", "centred window", "half",
-                  f"{_MMC}:287 (centers :115)",
-                  "lo = max(1, floor((centers(w)-W/2)*fs)+1);", "code", window_s=10.0),
-        ), f"{_MMC}:115-117 (event_rate :282-296)", key="mmc_rate", own_window=True),
+        # RULING 2026-10-09 (d) 3: the rate cut is the events' settling + 5 s, so the rate
+        # window is NOT the class (i) own window left out of the cut (own_window False)
+        Output("firing and burst (mmc_burst) rate and peak amplitude (W 10 s, centred)",
+               (*_MMC_EVENTS, _MMC_RATE_WIN), f"{_MMC}:115-117 (event_rate :282-296)",
+               key="mmc_rate"),
         Output("cross-channel delay (delayW 30 s on the firing rate, centred)", (
-            *_MMC_EVENTS,
-            Stage("rate window W = 10 s, centred", "centred window", "half", f"{_MMC}:287",
-                  "lo = max(1, floor((centers(w)-W/2)*fs)+1);", "code", window_s=10.0),
+            *_MMC_EVENTS, _MMC_RATE_WIN,
             Stage("delay window delayW = 30 s (default), labelled at its centre",
                   "centred window", "half", f"{_MMC}:265 (wlen :259)",
-                  "delay_t(s) = (lo+hi)/2 * S;", "code", window_s=30.0),
+                  "delay_t(s) = (lo+hi)/2 * S;", "code", window_s=30.0,
+                  note="runs on rate rows mean-filled where invalid (:270): filled data; "
+                       "KEPT (RULING 2026-10-09 (c) 3 (c))"),
         ), f"{_MMC}:119 (xchan_delay :255-272)", key="mmc_delay", own_window=True),
         Output("conditioned signal (mmc.signal): 2-50 Hz band over the cardiac-blanked fill",
                (*_BEATS, _MMC_BLANK, _MMC_BAND), f"{_MMC}:103-108, :153", key="mmc_signal"),
     ),
     (
-        Excluded("event grouping by valid-time gap: 0.05 s (firings), 0.5 s (bursts)",
-                 "selection rule", f"{_MMC}:245-246 (refractories :46-47)",
-                 "a grouping chain, not a filter or window"),
         Excluded("avgRate, pctBlanked, peri-R and PSD QC; the global sigma fill",
                  "epoch-wide statistic", f"{_MMC}:295, :233, :123-150",
                  "untimed: masking the input keeps them settled"),
     ),
-    "The two moving medians are NESTED (the MAD is taken around the moving median), so a "
-    "detection reaches back 15 + 15 = 30 s, not the 15 s half-window task 13 pads mmc "
-    "extents with. The 30 s delay window binds; without the delay output the mmc start "
-    "would be 15 s earlier.")
+    "The moving median and MAD skip NaN and add nothing at a blanked edge (RULING 2026-10-09 "
+    "(c) 3 (b)); task 13's 30 s and 15 s are withdrawn. The 30 s delay window binds.")
 
 ANALYSES: Final[Mapping[str, Analysis]] = {
     a.name: a for a in (_SPIKES, _HRV, _BREATHING, _SLOW_WAVE, _MMC_A)}
@@ -1078,7 +1192,7 @@ _SW_VARS = (
           "slowWaveRateSeries(ti, ci) = pooledPeaks", "slowWaveRateTime", "sec0", "nan",
           cls=_FF, reach="sw_rate", edge=_E_SW_RATE, valid=_VF_SW),
     _trim("slowWaves", "slowWavePeakLocs", f"{_SW}:205", "slowWavePeakLocs{ci} = locs;",
-          "slowWavePeakLocs", "row1", "drop", cls=_FF, reach="sw_trace"),
+          "slowWavePeakLocs", "row1", "drop", cls=_FF, reach="sw_peaks"),
 )
 
 _MMC_VARS = (
@@ -1314,12 +1428,29 @@ def stage_settling_s(stage: Stage, fs: float) -> float | None:
         return float(impulse_settling_s(stage.filter, float(rate)))
     if stage.how == "fir_half_beat":
         return FIR_HALF_TAPS_PER_Q * beat_decimation_factor(fs) / float(fs)
+    if stage.how == "edge":
+        if stage.edge is None:
+            msg = f"{stage.what}: a measured edge stage names no measurement"
+            raise ValueError(msg)
+        return float(stage.edge.filter_s)
     if stage.window_s is None or not (math.isfinite(stage.window_s) and stage.window_s > 0):
         msg = f"{stage.what}: a window stage needs a finite positive window_s"
         raise ValueError(msg)
     if stage.how == "half":
         return stage.window_s / 2.0
     return float(stage.window_s)  # "whole" and "before_t": the stated part, all of it
+
+
+def stage_counted_s(stage: Stage, fs: float) -> float | None:
+    """Return what ``stage`` adds to a cascade at a blanked edge, s; ``None`` if unknown.
+
+    :data:`RULING_SETTLING` (b): a stage that skips NaN adds nothing (0.0) - its nominal
+    reach (:func:`stage_settling_s`) is still reported, never silently dropped. Every
+    other stage adds its reach.
+    """
+    if stage.skips_nan:
+        return 0.0
+    return stage_settling_s(stage, fs)
 
 
 def analysis_settling(name: str, fs: float,
@@ -1335,7 +1466,7 @@ def analysis_settling(name: str, fs: float,
     per: dict[str, float | None] = {}
     missing: list[str] = []
     for out in a.outputs:
-        vals = [stage_settling_s(s, fs) for s in out.stages]
+        vals = [stage_counted_s(s, fs) for s in out.stages]
         gaps = [f"{name}/{out.name}: {s.what}" for s, v in zip(out.stages, vals, strict=True)
                 if v is None]
         missing += gaps
@@ -1371,7 +1502,7 @@ def output_reach_s(owner: str, key: str, trim_class: str, fs: float,
         return None, (f"{owner}: {len(hit)} outputs keyed {key!r}",)
     out = hit[0]
     stages = out.stages[:-1] if trim_class == "valid_only" and out.own_window else out.stages
-    vals = [stage_settling_s(s, fs) for s in stages]
+    vals = [stage_counted_s(s, fs) for s in stages]
     gaps = tuple(f"{owner}/{out.name}: {s.what}" for s, v in zip(stages, vals, strict=True)
                  if v is None)
     if gaps:
@@ -1511,6 +1642,16 @@ def table_record(fs: float, table: Mapping[str, Analysis] | None = None) -> list
                 v = stage_settling_s(st, fs)
                 if v is not None:
                     d["reach_s"] = v
+                c = stage_counted_s(st, fs)
+                if c is not None:
+                    d["counted_s"] = c  # (c) 3 (b): 0 where the stage skips NaN
+                d["skips_nan"] = st.skips_nan
+                if st.note:
+                    d["note"] = st.note
+                if st.edge is not None:
+                    d["measurement"] = {"ruling": st.edge.ruling,
+                                        "files": [{"file": f, "sha256": h}
+                                                  for f, h in st.edge.files]}
                 stages.append(d)
             orec: dict[str, Any] = {"output": o.name, "source": o.source, "stages": stages}
             if s.per_output_s.get(o.name) is not None:
@@ -1579,6 +1720,7 @@ def recovery_starts_document(files: Sequence[Mapping[str, Any]], *, fs: float,
         "source_files": source_files_record(), "trim_modes": list(TRIM_MODES),
         "withdrawn_trim_modes": dict(WITHDRAWN_TRIM_MODES),
         "output_times": output_times_record(), "table": table_record(fs, table),
+        "settling_rules": RULING_SETTLING, "edge_settling": edge_settling_record(),
         "files": sorted(measured, key=lambda d: str(d["session"])),
         "held": sorted(held, key=lambda d: str(d["session"])),
     }

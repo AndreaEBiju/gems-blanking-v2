@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import replace
 from pathlib import Path
@@ -186,6 +187,14 @@ VALUES = [
     ("extract_mmc.m", r"W = g\('W',10\)"),
     ("extract_mmc.m", r"dW = g\('delayW',30\)"),
     ("extract_mmc.m", r"cardMs = g\('cardiacBlankMs',25\)"),
+    ("extract_mmc.m", r"burstRefr = g\('burstRefractory', g\('refractory', 0\.5\)\)"),
+    ("extract_mmc.m", r"spikeRefr = g\('spikeRefractory', 0\.05\)"),
+    ("slowWaveAnalysis_new.m", r"minPeakDist_samp\s*=\s*round\(6 \* fs\);"),
+    ("HR_BR_HRVAnalysis_beats.m", r"maxBreathRate_bpm = 170;"),
+    ("HR_BR_HRVAnalysis_beats.m", r"minRR_sec\s*=\s*0\.1;"),
+    ("HR_BR_HRVAnalysis_beats.m", r"maxRR_sec\s*=\s*0\.5;"),
+    ("HR_BR_HRVAnalysis_beats.m",
+     r"minBreathSepBeats = max\(2, round\(minBreathSepSec \* fs / meanRR_samp\)\);"),
 ]
 """Each window length the table states, where her code sets it."""
 
@@ -206,16 +215,23 @@ def test_the_window_lengths_are_hers_and_the_wrappers() -> None:
 
 
 def test_the_numbers_are_the_sums_of_their_parts() -> None:
+    """RULING 2026-10-09 (c) 3: filled/filtered stages add, NaN-skipping ones add nothing.
+
+    Each figure from its parts: the MEASURED edge settlings (spikes 7.782 ms, mmc 1.1594 s),
+    task 13's impz where none was measured, her window constants, the look-backs of (d)
+    (beat spacing 0.375 s, breath troughs 1.0 s, slow-wave peaks 6 s, mmc grouping 0.5 s),
+    the kept CV2 bins and mmc delay window (c), and the mmc rate window ((d) 3, 5 s).
+    """
     q = rs.beat_decimation_factor(FS)
     assert q == 12
-    beats = 10 * q / FS + impulse_settling_s(CONSUMER_FILTERS["hrv"], FS / q)
+    beats = 10 * q / FS + impulse_settling_s(CONSUMER_FILTERS["hrv"], FS / q) + 0.375
+    mmc_ev = beats + 0.050 + 1.1594 + 0.5
     want = {
-        "spikes": impulse_settling_s(CONSUMER_FILTERS["spikes"], FS) + 15.0,
-        "hrv": beats + 30.0,
-        "breathing": beats + 30.0,
-        "slow_wave": impulse_settling_s(CONSUMER_FILTERS["slow_wave"], FS) + 2.5 + 30.0,
-        "mmc": beats + 0.025 + impulse_settling_s(CONSUMER_FILTERS["mmc"], FS) + 15.0 + 15.0
-        + 5.0 + 15.0,
+        "spikes": 0.007782 + 15.0,                       # CV2 kept, (c) 3 (c)
+        "hrv": beats,                                    # every window reads valid beats
+        "breathing": beats + 1.0,                        # + trough spacing
+        "slow_wave": impulse_settling_s(CONSUMER_FILTERS["slow_wave"], FS) + 2.5 + 6.0,
+        "mmc": mmc_ev + 5.0 + 15.0,                      # rate window (d) 3 + delay (c)
     }
     for name, v in want.items():
         s = rs.analysis_settling(name, FS)
@@ -223,11 +239,56 @@ def test_the_numbers_are_the_sums_of_their_parts() -> None:
         assert s.missing == ()
     assert rs.analysis_settling("spikes", FS).binding_output == "rolling CV2 (cv2WinSec 30 s bins)"
     assert rs.analysis_settling("mmc", FS).binding_output.startswith("cross-channel delay")
-    assert rs.analysis_settling("slow_wave", FS).binding_output.startswith("slow-wave rate")
-    # the values reported (2026-10-09, cohort fs), to the 10 microseconds
-    got = {k: round(rs.analysis_settling(k, FS).settling_s or -1, 5) for k in want}
-    assert got == {"spikes": 15.00512, "hrv": 30.14598, "breathing": 30.14598,
-                   "slow_wave": 40.66697, "mmc": 50.65677}
+    assert rs.analysis_settling("slow_wave", FS).binding_output.startswith("slow-wave peak")
+    # the values reported (2026-10-09, cohort fs), to the microsecond
+    got = {k: round(rs.analysis_settling(k, FS).settling_s or -1, 6) for k in want}
+    assert got == {"spikes": 15.007782, "hrv": 0.520981, "breathing": 1.520981,
+                   "slow_wave": 16.666973, "mmc": 22.230381}
+
+
+def test_a_stage_that_skips_nan_adds_nothing_and_its_reach_is_still_reported() -> None:
+    """(c) 3 (b): her 'omitnan' moving median and every valid-only window count 0."""
+    med = next(s for s in rs.ANALYSES["mmc"].outputs[0].stages if "moving median" in s.what)
+    assert med.skips_nan and rs.stage_settling_s(med, FS) == 15.0
+    assert rs.stage_counted_s(med, FS) == 0.0
+    t = {"spikes": rs.Analysis("spikes", "c", (rs.Output("o", (
+        _stage(2.0), replace(_stage(30.0), skips_nan=True)), "x"),))}
+    assert rs.analysis_settling("spikes", FS, t).settling_s == 1.0
+    rec = {r["analysis"]: r for r in rs.table_record(FS)}
+    st = [s for o in rec["mmc"]["outputs"] for s in o["stages"] if "moving median" in s["what"]]
+    assert st and all(s["reach_s"] == 15.0 and s["counted_s"] == 0.0 and s["skips_nan"]
+                      for s in st)
+    skipped = {s.what for a in rs.ANALYSES.values() for o in a.outputs for s in o.stages
+               if s.skips_nan}
+    kept = {s.what for a in rs.ANALYSES.values() for o in a.outputs for s in o.stages
+            if not s.skips_nan and any(k in s.what for k in ("CV2", "delay window",
+                                                                "rate window W"))}
+    assert len(skipped) == 10 and len(kept) == 3  # CV2 and delay (c), mmc rate (d) 3
+
+
+def test_the_measured_edges_are_the_filters_and_carry_their_files() -> None:
+    """(c) 1-2: the spike and mmc filters reach their MEASURED edge settling, not impz."""
+    rec = {r["analysis"]: r for r in rs.table_record(FS)}
+    for name, value in (("spikes", 0.007782), ("mmc", 1.1594)):
+        st = [s for o in rec[name]["outputs"] for s in o["stages"]
+              if s["kind"] == "filter at a NaN edge, measured"]
+        assert st and all(s["counted_s"] == value and s["measurement"]["files"] for s in st)
+    assert rs.BEAT_SPACING_S == 0.375
+    doc = rs.recovery_starts_document([], fs=FS)
+    assert doc["settling_rules"] == rs.RULING_SETTLING
+    assert doc["edge_settling"]["mmc"]["pad_s"] == 1.5
+
+
+def _matlab_round(x: float) -> int:
+    return int(math.floor(x + 0.5))  # MATLAB round, half away from zero (x > 0)
+
+
+def test_the_breath_trough_look_back_is_its_maximum_over_her_rr_range() -> None:
+    """Her trough spacing in beats, in time, over her plausible RR [0.1, 0.5] s: <= 1.0 s."""
+    sep = 60.0 / 170.0
+    worst = max(max(2, _matlab_round(sep / rr)) * rr
+                for rr in (0.1 + k * 1e-5 for k in range(40001)))
+    assert worst == pytest.approx(rs.BREATH_TROUGH_SPACING_S, abs=1e-9)
 
 
 def _stage(window: float | None, how: rs.How = "half") -> rs.Stage:
@@ -425,17 +486,23 @@ def test_b_is_the_one_mode_and_a_is_refused_by_name() -> None:
 
 
 def _independent_reaches() -> dict[str, float]:
-    """Each reach from the MEASURED filter settlings and her window constants (not the map)."""
+    """Each reach from the MEASURED settlings and her constants (not the map).
+
+    RULING 2026-10-09 (c) 3: NaN-skipping stages (valid-only windows, her 'omitnan' moving
+    median/MAD) add nothing; look-backs (beat spacing 0.375 s, breath troughs 1.0 s, slow-
+    wave peaks 6 s, mmc grouping 0.5 s) add; (d) 3: the mmc rate adds its 5 s look-back.
+    """
     q = 12
-    beats = 10 * q / FS + impulse_settling_s(CONSUMER_FILTERS["hrv"], FS / q)
-    band = impulse_settling_s(CONSUMER_FILTERS["spikes"], FS)
-    mmc_sig = beats + 0.050 / 2 + impulse_settling_s(CONSUMER_FILTERS["mmc"], FS)
-    mmc_ev = mmc_sig + 30.0 / 2 + 30.0 / 2       # the nested moving median and MAD
+    beats = 10 * q / FS + impulse_settling_s(CONSUMER_FILTERS["hrv"], FS / q) + 0.375
+    band = 0.007782                                   # step1 at a NaN edge (measured)
+    mmc_sig = beats + 0.050 + 1.1594                  # whole blank + band at a NaN edge
+    mmc_ev = mmc_sig + 0.0 + 0.0 + 0.5                # median, MAD skip NaN; grouping
     sw = impulse_settling_s(CONSUMER_FILTERS["slow_wave"], FS) + 5.0 / 2
     return {"band": band, "wave": band + 0.0015, "env": band + 0.010 / 2, "beats": beats,
+            "troughs": beats + 1.0,
             "trace": impulse_settling_s(CONSUMER_FILTERS["hrv"], FS), "sw": sw,
-            "sw_rate": sw + 60.0 / 2, "mmc_sig": mmc_sig, "mmc_ev": mmc_ev,
-            "mmc_delay": mmc_ev + 10.0 / 2 + 30.0 / 2}
+            "sw_peaks": sw + 6.0, "sw_rate": sw + 6.0, "mmc_sig": mmc_sig, "mmc_ev": mmc_ev,
+            "mmc_rate": mmc_ev + 10.0 / 2, "mmc_delay": mmc_ev + 10.0 / 2 + 30.0 / 2}
 
 
 _I, _II = "valid_only", "filled_or_filtered"
@@ -459,20 +526,23 @@ CLASS_TABLE: dict[tuple[str, str], tuple[str, str]] = {
     ("HRBR", "heartBeatSeries"): (_II, "trace"),
     **{("HRBR", v): (_I, "beats")
        for v in ("heartlocs", "heartRateSeries", "heartCountSeries", "heartCountValidSec",
-                 "heartCountRateSeries", "breathRateSeries", "br_locs_true")},
+                 "heartCountRateSeries")},
+    ("HRBR", "breathRateSeries"): (_I, "troughs"),
+    ("HRBR", "br_locs_true"): (_I, "troughs"),
     **{("HRVMeasures", v): (_I, "beats")
        for v in ("heartlocs", "RR_intervals", "RR_times", "hrv_series", "rmssd_series",
                  "pnn5_series", "sd1_series", "sd2_series", "sampEn_series", "nRR_used")},
     # slowWaveAnalysis_new: fillmissing before the low-pass (:126-133): all (ii)
     ("slowWaves", "slowWaveTimeSeries"): (_II, "sw"),
-    ("slowWaves", "slowWavePeakLocs"): (_II, "sw"),
+    ("slowWaves", "slowWavePeakLocs"): (_II, "sw_peaks"),
     ("slowWaves", "slowWaveRateSeries"): (_II, "sw_rate"),
     # extract_mmc: the band over the cardiac-blanked fill (:104-106), the events on it, and
     # the delay over mean-filled rate rows (:270) are (ii); the rate and peak amplitude over
     # valid samples with her 50 % rule (:284-293) are (i)
     ("mmc", "mmc.signal"): (_II, "mmc_sig"),
     **{("mmc", f"mmc.{lvl}.events"): (_II, "mmc_ev") for lvl in ("firing", "burst")},
-    **{("mmc", f"mmc.{lvl}.{v}"): (_I, "mmc_ev")
+    # RULING 2026-10-09 (d) 3: the rate (and its peakAmp) cut = its input's settling + 5 s
+    **{("mmc", f"mmc.{lvl}.{v}"): (_I, "mmc_rate")
        for lvl in ("firing", "burst") for v in ("rate", "peakAmp")},
     ("mmc", "mmc.delay"): (_II, "mmc_delay"),
 }
@@ -497,11 +567,17 @@ def test_every_trimmed_variable_is_cut_at_its_class_reach_to_the_sample() -> Non
         assert c["reach_s"] == pytest.approx(reach[r], abs=1e-12), key
         assert c["start_sample0"] == seconds_to_sample(el + c["reach_s"], FS), key
         assert c["start_sample0"] == seconds_to_sample(el + reach[r], FS), key
-    # (i) is NOT cut by half its window: heart rate keeps 30 s earlier than its analysis
+    # (i) is NOT cut by half its window: heart rate's cut is its beats' settling alone
     hr = cuts[rs.cut_id("hrv", "heart_rate", _I)]
-    hrv = rs.analysis_settling("hrv", FS).settling_s
-    assert hrv is not None and hr["reach_s"] == pytest.approx(hrv - 30.0, abs=1e-12)
+    assert hr["reach_s"] == pytest.approx(reach["beats"], abs=1e-12)
+    # RULING 2026-10-09 (d) 3: the mmc rate is cut 5 s after its input's settling, which is
+    # the band at a NaN edge with the NaN-skipping stages adding nothing (c) 3 (b)
+    rate = cuts[rs.cut_id("mmc", "mmc_rate", _I)]
+    ev = cuts[rs.cut_id("mmc", "mmc_events", _II)]
+    assert rate["reach_s"] == pytest.approx(ev["reach_s"] + 5.0, abs=1e-12)
+    assert rate["start_sample0"] == seconds_to_sample(el + reach["mmc_ev"] + 5.0, FS)
     assert {c["cut"] for c in f["cuts"]} == {rs.cut_id(*c) for c in rs.trim_cuts()}
+    assert rs.cut_id("slow_wave", "sw_peaks", _II) in cuts  # peaks: + MinPeakDistance 6 s
 
 
 @settings(max_examples=100, deadline=None)

@@ -887,6 +887,7 @@ TRIM_CUT_S = {
     "hrv.count_hrv.valid_only": 38.5,
     "hrv.sampen.valid_only": 39.0,
     "slow_wave.sw_trace.filled_or_filtered": 38.0,
+    "slow_wave.sw_peaks.filled_or_filtered": 39.0,
     "slow_wave.sw_rate.filled_or_filtered": 40.0,
     "breathing.breath_troughs.valid_only": 41.0,
     "breathing.breath_rate.valid_only": 42.0,
