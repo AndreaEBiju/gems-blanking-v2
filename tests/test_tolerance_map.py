@@ -149,7 +149,8 @@ def _build(**over: Any) -> tm.Option1Tolerances:  # noqa: ANN401 - keyword overr
                             "extent_percentile": "p90",
                             "core_blanking": {**dict.fromkeys(
                                 ("breathing", "mmc", "slow_wave", "spikes"), "always"),
-                                "hrv": "off"}}
+                                "hrv": "off"},
+                            "extent_floors": tm.EXTENT_FLOORS_PER_BAND}
     args.update(over)
     return tm.option1_tolerances(**args)
 
@@ -215,7 +216,7 @@ def test_the_percentile_is_required_and_never_defaulted(bad: object) -> None:
     args = {"tolerances": _tolerances(), "mapping": _mapping(), "scan": _scan(),
             "tolerances_sha256": TOL_SHA, "criterion_sha256": CRIT_SHA,
             "mapping_sha256": "m" * 64, "scan_sha256": "s" * 64, "generation": GEN,
-            "cross_band_scope": ALL}
+            "cross_band_scope": ALL, "extent_floors": tm.EXTENT_FLOORS_PER_BAND}
     with pytest.raises(TypeError, match="extent_percentile"):
         tm.option1_tolerances(**args)  # type: ignore[call-arg]
 
@@ -625,3 +626,109 @@ def test_own_band_extents_still_route() -> None:
     (_eid, _c, _s, ext), = _extents(5.0, cross=True)
     ok = rt.RouteDecision("e1@ANT1", "mmc", "correct", "separable", "within_z")
     assert mk.spans_from_routing([("e1@ANT1", ext)], [ok]) == []
+
+
+# ---------------------------------------------------------------------------
+# Andrea, revised 2026-10-10 (scope B): per-consumer own-signal floors
+# ---------------------------------------------------------------------------
+
+OWN_SETS = {"slow_wave": ["ANT1", "ANT2", "ANT3"], "mmc": ["ANT1", "ANT2", "ANT3"],
+            "spikes": ["L_V1", "L_V2", "L_V3", "R_V1", "R_V2", "R_V3"],
+            "breathing": ["R_V2", "R_V3"]}
+
+
+def _own_archive(level: float = 3.0) -> dict[str, Any]:
+    """Return a synthetic baseline's own-signal floors, as own_signal_floors.py archives them."""
+    z: dict[tuple[str, str], Any] = {}
+    for c, sigs in OWN_SETS.items():
+        band = tl.extent_consumers()[c].band
+        for k, s in enumerate(sigs):
+            z[(s, band)] = make_band_z(band, DUR, signal=s, bumps=(
+                (5.0 + k, 6.0 + k, level + k, s), (20.0, 20.5, 2 * level, s))).z_max
+    return {"session": "base", "per_consumer_own_signals": {
+        c: [tm.own_signal_floor_record(z, consumer=c, signals=sigs, percentile=p)
+            for p in tm.EXTENT_PERCENTILES] for c, sigs in OWN_SETS.items()}}
+
+
+def _floors(archive: dict[str, Any], pct: str = "p99") -> dict[str, Any]:
+    out = {}
+    for c, rows in archive["per_consumer_own_signals"].items():
+        r = next(x for x in rows if x["percentile"] == pct)
+        out[c] = {"value": r["value"], "percentile": pct, "source": "test",
+                  "population": {"signals": r["signals"], "band": r["band"],
+                                 "source_recording": archive["session"],
+                                 "n_frames": r["n_frames"],
+                                 "archive_file": "measurements/x/own_floors.json",
+                                 "archive_sha256": "a" * 64}}
+    return out
+
+
+def test_own_signal_floors_set_each_consumers_threshold_and_are_recorded() -> None:
+    archive = _own_archive()
+    decl = _floors(archive)
+    t = _build(extent_floors=decl)
+    for c in ("mmc", "slow_wave", "spikes"):  # the floor consumers take their OWN floor
+        assert t.table.z_tol[c] == decl[c]["value"] > tm.Z_FLOOR
+        assert "own-signal floor binds" in t.thresholds[c].setter
+    assert decl["breathing"]["value"] < 7.69 and t.table.z_tol["breathing"] == 7.69
+    assert "option-(1) threshold binds" in t.thresholds["breathing"].setter
+    high = _floors(_own_archive(level=9.0))
+    assert _build(extent_floors=high).table.z_tol["breathing"] == high["breathing"]["value"] > 7.69
+    rec = t.record()
+    assert rec["extent_floors"]["spikes"]["population"]["signals"] == OWN_SETS["spikes"]
+    assert rec["cross_band_floor"] == tm.NULL_PERCENTILE_Z["p90"]  # cross-band stays per band
+    assert _build().record()["extent_floors"] == tm.EXTENT_FLOORS_PER_BAND
+    assert _build().table.z_tol == _build(extent_floors="per_band_percentile").table.z_tol
+    assert t.sha256() != _build().sha256()
+
+
+def test_an_own_signal_floor_is_reproducible_from_its_archive() -> None:
+    archive = _own_archive()
+    decl = _floors(archive)
+    for c in OWN_SETS:
+        tm.verify_floor_archive(c, decl[c], archive)
+    with pytest.raises(ValueError, match="does not reproduce"):
+        tm.verify_floor_archive("mmc", {**decl["mmc"], "value": decl["mmc"]["value"] + 0.01},
+                                archive)
+    with pytest.raises(ValueError, match="not the declared source recording"):
+        tm.verify_floor_archive("mmc", decl["mmc"], {**archive, "session": "other"})
+    # the archive's value is the pooled percentile over exactly those signals
+    band = tl.extent_consumers()["spikes"].band
+    z = {(s, band): make_band_z(band, DUR, signal=s, bumps=((1.0, 3.0, 4.0 + i, s),)).z_max
+         for i, s in enumerate(OWN_SETS["spikes"])}
+    got = tm.own_signal_floor_record(z, consumer="spikes", signals=OWN_SETS["spikes"],
+                                     percentile="p99")
+    pooled = np.concatenate([z[(s, band)] for s in OWN_SETS["spikes"]])
+    assert got["value"] == round(float(np.percentile(pooled, 99.0)), 2)
+    assert got["n_frames"] == pooled.size
+    script = (REPO / "measurements/2026-10-10/extent_null/own_signal_floors.py").read_text(
+        encoding="utf-8")
+    assert "tm.own_signal_floor_record(" in script and "verify_floor_archive" in script
+
+
+@pytest.mark.parametrize("bad", [None, {}, "per_band", "p99"])
+def test_extent_floors_are_required_and_never_defaulted(bad: object) -> None:
+    with pytest.raises(ValueError, match="extent_floors"):
+        _build(extent_floors=bad)
+    args = {"tolerances": _tolerances(), "mapping": _mapping(), "scan": _scan(),
+            "tolerances_sha256": TOL_SHA, "criterion_sha256": CRIT_SHA,
+            "mapping_sha256": "m" * 64, "scan_sha256": "s" * 64, "generation": GEN,
+            "cross_band_scope": ALL, "extent_percentile": "p90",
+            "core_blanking": {**dict.fromkeys(("breathing", "mmc", "slow_wave", "spikes"),
+                                              "always"), "hrv": "off"}}
+    with pytest.raises(TypeError, match="extent_floors"):
+        tm.option1_tolerances(**args)  # type: ignore[call-arg]
+
+
+def test_an_own_signal_floor_on_another_consumers_signals_or_band_is_refused() -> None:
+    decl = _floors(_own_archive())
+    cases = {"not stomach signals": ("mmc", {"signals": ["L_V1"]}),
+             "not nerve signals": ("spikes", {"signals": ["ANT1"]}),
+             "own band": ("slow_wave", {"band": "2-50"}),
+             "lacks": ("breathing", {"n_frames": 0})}
+    for words, (c, over) in cases.items():
+        bad = {**decl, c: {**decl[c], "population": {**decl[c]["population"], **over}}}
+        with pytest.raises(ValueError, match=words.split()[-1]):
+            _build(extent_floors=bad)
+    with pytest.raises(ValueError, match=r">= 1.44"):
+        _build(extent_floors={**decl, "mmc": {**decl["mmc"], "value": 1.2}})

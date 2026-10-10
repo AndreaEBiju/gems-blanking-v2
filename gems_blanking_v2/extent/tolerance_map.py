@@ -64,6 +64,7 @@ from gems_blanking_v2.extent.tolerance import (
 __all__ = [
     "CORE_BLANKING",
     "CORE_PAD_RULE",
+    "EXTENT_FLOORS_PER_BAND",
     "EXTENT_PERCENTILES",
     "HRV_CORE_BLANKING",
     "NULL_PERCENTILE_SOURCE",
@@ -78,12 +79,15 @@ __all__ = [
     "assess_window",
     "check_core_blanking",
     "check_cross_band_scope",
+    "check_extent_floors",
     "check_extent_percentile",
     "kind_visible",
     "option1_threshold",
     "option1_tolerances",
+    "own_signal_floor_record",
     "residual_risk",
     "scope_residual",
+    "verify_floor_archive",
     "z_consumers",
 ]
 
@@ -196,6 +200,151 @@ def check_core_blanking(decl: object) -> dict[str, str]:
                "item 2; Andrea, revised 2026-10-10)")
         raise ValueError(msg)
     return {c: str(decl[c]) for c in want}
+
+
+EXTENT_FLOORS_PER_BAND: Final = "per_band_percentile"
+"""The ``extent_floors`` value that keeps the per-band clean-null values
+(:data:`NULL_PERCENTILE_Z` at the declared ``extent_percentile``, pooled over every detection
+signal) as the floor consumers' thresholds - chosen explicitly, never defaulted."""
+
+OWN_SIGNAL_FAMILY: Final[Mapping[str, str]] = {
+    "slow_wave": "stomach", "mmc": "stomach", "spikes": "nerve", "breathing": "nerve"}
+"""Which signals a consumer's own-signal floor may be computed on (Andrea, revised 2026-10-10;
+invariant 3): the stomach contacts for slow wave and mmc, the nerve contacts for spikes, the
+HR-source channels (nerve contacts or a pair's two) for breathing. A stomach signal carries no
+cuff prefix; a nerve signal does (``L_V2``, ``R_T``)."""
+
+FLOOR_POPULATION_KEYS: Final[tuple[str, ...]] = (
+    "signals", "band", "source_recording", "n_frames", "archive_file", "archive_sha256")
+
+
+def _cuffed(sig: str) -> bool:
+    head, _sep, tail = sig.partition("_")
+    return bool(_sep) and head in ("L", "R") and tail in ("V1", "V2", "V3", "T")
+
+
+def check_extent_floors(decl: object) -> str | dict[str, dict[str, Any]]:
+    """Return the declared extent floors, or raise ValueError naming the gap (no default).
+
+    Either :data:`EXTENT_FLOORS_PER_BAND` (the per-band values, chosen explicitly) or, per z
+    consumer, ``{value, percentile, population: {signals, band, source_recording, n_frames,
+    archive_file, archive_sha256}, source}`` (Andrea, revised 2026-10-10): the floor computed
+    on THAT consumer's own signals (invariant 3, :data:`OWN_SIGNAL_FAMILY`) in its own band,
+    at a percentile of :data:`EXTENT_PERCENTILES`, from one archived baseline. A value below
+    :data:`Z_FLOOR` (the stage-1a cache's exact floor) is refused.
+    """
+    if decl == EXTENT_FLOORS_PER_BAND:
+        return EXTENT_FLOORS_PER_BAND
+    if not isinstance(decl, Mapping):
+        msg = (f"extent_floors is REQUIRED: {EXTENT_FLOORS_PER_BAND!r} or a mapping z consumer "
+               "-> {value, percentile, population, source}; nothing is defaulted; got "
+               f"{decl!r}")
+        raise ValueError(msg)
+    missing = [c for c in z_consumers() if c not in decl]
+    extra = sorted(str(c) for c in decl if c not in z_consumers())
+    if missing or extra:
+        msg = f"extent_floors: undeclared {missing}, not z consumers {extra}"
+        raise ValueError(msg)
+    return {c: _check_floor_entry(c, decl[c]) for c in z_consumers()}
+
+
+SHA256_HEX: Final = 64
+
+
+def _check_floor_entry(c: str, e: object) -> dict[str, Any]:
+    """One consumer's own-signal floor declaration, checked (:func:`check_extent_floors`)."""
+    if not isinstance(e, Mapping):
+        msg = f"extent_floors.{c} must be {{value, percentile, population, source}}"
+        raise ValueError(msg)
+    pop = e.get("population")
+    gap = [k for k in ("value", "percentile", "population", "source") if not e.get(k)]
+    gap += ([f"population.{k}" for k in FLOOR_POPULATION_KEYS if not pop.get(k)]
+            if isinstance(pop, Mapping) else [])
+    if gap:
+        msg = f"extent_floors.{c} lacks {gap} (required, never defaulted)"
+        raise ValueError(msg)
+    assert isinstance(pop, Mapping)
+    v = float(e["value"])
+    if not (math.isfinite(v) and v >= Z_FLOOR):
+        msg = (f"extent_floors.{c}: value {e['value']!r} must be finite and >= {Z_FLOOR} "
+               "(the stage-1a cache is exact only at or above it)")
+        raise ValueError(msg)
+    if e["percentile"] not in EXTENT_PERCENTILES:
+        msg = f"extent_floors.{c}: percentile {e['percentile']!r} not in {EXTENT_PERCENTILES}"
+        raise ValueError(msg)
+    band = extent_consumers()[c].band
+    if pop["band"] != band:
+        msg = (f"extent_floors.{c}: population band {pop['band']!r} is not {c}'s own band "
+               f"{band} (invariant 3)")
+        raise ValueError(msg)
+    sigs = pop["signals"]
+    if not isinstance(sigs, Sequence) or isinstance(sigs, str) or not sigs:
+        msg = f"extent_floors.{c}: population.signals must be a non-empty list"
+        raise ValueError(msg)
+    want_nerve = OWN_SIGNAL_FAMILY[c] == "nerve"
+    wrong = [str(x) for x in sigs if _cuffed(str(x)) != want_nerve]
+    if wrong:
+        msg = (f"extent_floors.{c}: {wrong} are not {OWN_SIGNAL_FAMILY[c]} signals - a "
+               f"floor is computed on the consumer's OWN signals (invariant 3)")
+        raise ValueError(msg)
+    n = pop["n_frames"]
+    if not isinstance(n, int) or isinstance(n, bool) or n <= 0:
+        msg = f"extent_floors.{c}: population.n_frames must be an int > 0"
+        raise ValueError(msg)
+    sha = str(pop["archive_sha256"])
+    if len(sha) != SHA256_HEX or any(ch not in "0123456789abcdef" for ch in sha):
+        msg = f"extent_floors.{c}: population.archive_sha256 must be 64 lowercase hex"
+        raise ValueError(msg)
+    return dict(json.loads(json.dumps(dict(e), sort_keys=True, allow_nan=False)))
+
+
+def own_signal_floor_record(z: Mapping[tuple[str, str], npt.ArrayLike], *, consumer: str,
+                            signals: Sequence[str], percentile: str) -> dict[str, Any]:
+    """Return one own-signal floor as an archive stores it (``value`` rounded to 0.01).
+
+    The percentile of every finite frame of ``z[(signal, band)]`` pooled over ``signals`` in
+    ``consumer``'s own band - the one computation the archive script and the reproducibility
+    test share. ``z`` is detection's robust z on the log envelope of the archived baseline.
+    """
+    if percentile not in EXTENT_PERCENTILES:
+        msg = f"percentile {percentile!r} not in {EXTENT_PERCENTILES}"
+        raise ValueError(msg)
+    band = extent_consumers()[consumer].band
+    absent = [s for s in signals if (s, band) not in z]
+    if absent:
+        msg = f"{consumer}: no z for {absent} in band {band}"
+        raise KeyError(msg)
+    v = np.concatenate([np.asarray(z[(s, band)], dtype=np.float64).ravel() for s in signals])
+    v = v[np.isfinite(v)]
+    if v.size == 0:
+        msg = f"{consumer}: no finite frame on {list(signals)} in band {band}"
+        raise ValueError(msg)
+    return {"consumer": consumer, "percentile": percentile, "band": band,
+            "signals": sorted(str(s) for s in signals), "n_frames": int(v.size),
+            "value": round(float(np.percentile(v, float(percentile[1:]))), 2)}
+
+
+def verify_floor_archive(consumer: str, entry: Mapping[str, Any], archive: Mapping[str, Any]
+                         ) -> None:
+    """Refuse a declared own-signal floor its archive does not reproduce (ValueError).
+
+    ``archive`` is the hashed file the declaration names (its ``per_consumer_own_signals``
+    rows, :func:`own_signal_floor_record`); the declared value, percentile, band, signals,
+    n_frames and source recording must be one of its rows exactly.
+    """
+    pop = entry["population"]
+    want = {"consumer": consumer, "percentile": entry["percentile"], "band": pop["band"],
+            "signals": sorted(str(s) for s in pop["signals"]), "n_frames": int(pop["n_frames"]),
+            "value": round(float(entry["value"]), 2)}
+    if archive.get("session") != pop["source_recording"]:
+        msg = (f"extent_floors.{consumer}: archive is of {archive.get('session')!r}, not the "
+               f"declared source recording {pop['source_recording']!r}")
+        raise ValueError(msg)
+    rows = (archive.get("per_consumer_own_signals") or {}).get(consumer) or []
+    if want not in rows:
+        msg = (f"extent_floors.{consumer}: the archive does not reproduce {want} (rows "
+               f"{rows[:3]})")
+        raise ValueError(msg)
 
 
 def check_extent_percentile(value: object) -> str:
@@ -434,6 +583,9 @@ class Option1Tolerances:
     """Each z consumer's DECLARED core blanking (:func:`check_core_blanking`; required by the
     builder)."""
 
+    extent_floors: str | Mapping[str, Mapping[str, Any]] = EXTENT_FLOORS_PER_BAND
+    """The DECLARED extent floors (:func:`check_extent_floors`; required by the builder)."""
+
     @property
     def cross_band_floor(self) -> dict[str, float]:
         """The cross-band floor per band: the declared percentile's value in each band."""
@@ -451,6 +603,9 @@ class Option1Tolerances:
                 "core_pad_rule": CORE_PAD_RULE,
                 "core_blanking": dict(sorted(self.core_blanking.items())),
                 "extent_percentile": self.extent_percentile,
+                "extent_floors": (self.extent_floors if isinstance(self.extent_floors, str)
+                                  else {c: dict(v) for c, v in
+                                        sorted(self.extent_floors.items())}),
                 "floor_consumers": list(self.floor_consumers),
                 "cross_band_floor": self.cross_band_floor,
                 "null_percentile_source": dict(NULL_PERCENTILE_SOURCE),
@@ -470,11 +625,34 @@ class Option1Tolerances:
         return hashlib.sha256(text.encode("ascii")).hexdigest()
 
 
+def _floored(c: str, t: ConsumerThreshold, floors: str | Mapping[str, Mapping[str, Any]],
+             pct: str) -> ConsumerThreshold:
+    """Apply the declared floors to one option-(1) threshold (:func:`option1_tolerances`)."""
+    if not isinstance(floors, str):
+        f = floors[c]
+        fv = float(f["value"])
+        pop = f["population"]
+        binds = "own-signal floor" if fv >= t.z else "option-(1) threshold"
+        return dataclasses.replace(
+            t, z=max(float(t.z), fv),
+            setter=(f"{t.setter}; max with the own-signal floor {fv} ({f['percentile']} of "
+                    f"{c}'s own signals {list(pop['signals'])} in band {pop['band']}, "
+                    f"{pop['source_recording']}; Andrea, revised 2026-10-10): the {binds} "
+                    "binds"))
+    if t.setter.startswith("floor"):
+        band = extent_consumers()[c].band
+        return dataclasses.replace(t, z=float(NULL_PERCENTILE_Z[pct][band]),
+                                   setter=f"{t.setter}; extent at the clean null's {pct} of "
+                                          f"band {band} (RULING 2026-10-10 item 2)")
+    return t
+
+
 def option1_tolerances(tolerances: Mapping[str, Any], mapping: Mapping[str, Any],
                        scan: Mapping[str, Any], *, tolerances_sha256: str,
                        criterion_sha256: str, mapping_sha256: str, scan_sha256: str,
                        generation: str, cross_band_scope: object,
-                       extent_percentile: object, core_blanking: object) -> Option1Tolerances:
+                       extent_percentile: object, core_blanking: object,
+                       extent_floors: object) -> Option1Tolerances:
     """Build the option-(1) table from the declared, hashed v2 inputs, or raise ValueError.
 
     Refused by name: tolerances without the v2 harm criterion, or whose ``criterion_v2``
@@ -491,6 +669,12 @@ def option1_tolerances(tolerances: Mapping[str, Any], mapping: Mapping[str, Any]
     its threshold; a consumer with a visible kind keeps its option-(1) threshold (breathing
     7.69). Each consumer's core and padding are blanked per its declared core blanking
     (:func:`check_core_blanking`, :data:`CORE_PAD_RULE`; ``extent.stage1.core_pad_spans``).
+
+    ``extent_floors`` (Andrea, revised 2026-10-10; :func:`check_extent_floors`, required):
+    :data:`EXTENT_FLOORS_PER_BAND` keeps the rule above; per-consumer own-signal floors make
+    every z consumer's threshold max(its option-(1) threshold, its own floor) - the floor
+    consumers take their own floor, breathing keeps 7.69 while that is above its floor. The
+    cross-band floors stay per band (``extent_percentile``).
     """
     crit = tolerances.get("criterion_v2")
     if not isinstance(crit, Mapping) or crit.get("sha256") != criterion_sha256:
@@ -524,6 +708,7 @@ def option1_tolerances(tolerances: Mapping[str, Any], mapping: Mapping[str, Any]
     scopes = check_cross_band_scope(cross_band_scope)
     pct = check_extent_percentile(extent_percentile)
     cores = check_core_blanking(core_blanking)
+    floors = check_extent_floors(extent_floors)
     thresholds: dict[str, ConsumerThreshold] = {}
     residual: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for c in z_consumers():
@@ -532,12 +717,7 @@ def option1_tolerances(tolerances: Mapping[str, Any], mapping: Mapping[str, Any]
             msg = f"the tolerance mapping has no entry for {c}: its threshold is unknown"
             raise ValueError(msg)
         t = option1_threshold(c, entry.get("kinds") or {}, entry.get("kinds_not_raised") or ())
-        if t.setter.startswith("floor"):
-            band = extent_consumers()[c].band
-            t = dataclasses.replace(t, z=float(NULL_PERCENTILE_Z[pct][band]),
-                                    setter=f"{t.setter}; extent at the clean null's {pct} of "
-                                           f"band {band} (RULING 2026-10-10 item 2)")
-        thresholds[c] = t
+        thresholds[c] = t = _floored(c, t, floors, pct)
         residual[c] = residual_risk(scan, c)
         if scopes[c] != CROSS_BAND_SCOPE_ALL:
             key = ("cross_band_off" if scopes[c] == CROSS_BAND_SCOPE_OFF
@@ -552,4 +732,5 @@ def option1_tolerances(tolerances: Mapping[str, Any], mapping: Mapping[str, Any]
     inputs = {"tolerances_sha256": tolerances_sha256, "criterion_sha256": criterion_sha256,
               "mapping_sha256": mapping_sha256, "visibility_scan_sha256": scan_sha256,
               "generation": generation, "mapping_refused": dict(mapping.get("refused") or {})}
-    return Option1Tolerances(table, thresholds, residual, flags, inputs, scopes, pct, cores)
+    return Option1Tolerances(table, thresholds, residual, flags, inputs, scopes, pct, cores,
+                             floors)
