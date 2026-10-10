@@ -42,6 +42,13 @@ its spike spans are exactly the motion and distrust spans), and one that reads n
 passes ``None``. The record's provenance - the window, its file's sha256, the train - is
 copied into ``provenance_json`` (``spike_peri_r``) from the record itself.
 
+**No heartbeat reference (RULING 2026-10-09 (g) 1, replacing (b) 2).** Minutes of the
+routed train's region with no beat are KEPT for the spike consumer and flagged, per minute:
+``noheartref_json`` (always present: the rule, the flag, the minutes, or why there are none),
+``noheartref_spikes_<cuff>_T`` (their 1-based inclusive epoch rows - flags, never blank
+spans) and the provenance's ``spike_no_heartbeat_reference``. ``gate_json`` reports
+``spike_no_heartbeat_reference_s``; the gate and the hold never see them.
+
 OUTSIDE THE GENERATION HASH.
 """
 
@@ -57,11 +64,19 @@ import numpy as np
 import numpy.typing as npt
 from scipy.io import savemat
 
-from gems_blanking_v2.emit.line_distrust import LineDistrustRecord
-from gems_blanking_v2.emit.masks import ConsumerMask, MaskKey, mask_sample_spans, mmc_not_measured
+from gems_blanking_v2.emit.line_distrust import LineDistrustRecord, minute_sample_bounds
+from gems_blanking_v2.emit.masks import (
+    NO_BEAT_RULE,
+    NO_HEARTBEAT_REFERENCE,
+    ConsumerMask,
+    MaskKey,
+    NoBeatMinute,
+    mask_sample_spans,
+    mmc_not_measured,
+)
 from gems_blanking_v2.emit.peri_r import PeriRRecord
 from gems_blanking_v2.emit.provenance import MaskProvenance, ProvenanceError
-from gems_blanking_v2.emit.qc import emit_gate, line_distrust_listed, spike_time_lost
+from gems_blanking_v2.emit.qc import EmitGate, emit_gate, line_distrust_listed, spike_time_lost
 from gems_blanking_v2.extent.grid import (
     T0_TOLERANCE_S,
     n_grid_frames,
@@ -77,8 +92,8 @@ from gems_blanking_v2.extent.tolerance import (
 from gems_blanking_v2.io.nan_interop import assert_no_zero_runs
 
 __all__ = ["EPOCH_START_SAMPLE_KEY", "PAIR_LEAD_TOKEN", "RecordingHeldError",
-           "epoch_start_fields", "matlab_signal_token", "signal_from_matlab_token",
-           "write_mask_file"]
+           "epoch_start_fields", "matlab_signal_token", "no_heartbeat_reference_record",
+           "signal_from_matlab_token", "write_mask_file"]
 
 F64 = npt.NDArray[np.float64]
 Bool = npt.NDArray[np.bool_]
@@ -344,6 +359,120 @@ def _write_peri_r(doc: dict[str, Any], peri_r: PeriRRecord | None,
     return dict.fromkeys(peri_r.signals, blanked / n_samples)
 
 
+def no_heartbeat_reference_record(no_beat_minutes: Sequence[NoBeatMinute] | None,
+                                  peri_r: PeriRRecord | None, *,
+                                  signals: Mapping[str, Sequence[str]], fs: float,
+                                  n_samples: int, epoch_start_s: float) -> dict[str, Any]:
+    """Return the epoch's "no heartbeat reference" flags (RULING 2026-10-09 (g) 1).
+
+    No-beat minutes are KEPT for the spike consumer: this record flags them, per minute,
+    and never blanks them. Each flagged minute carries its recording-timeline bounds, its
+    kind, the flag :data:`~gems_blanking_v2.emit.masks.NO_HEARTBEAT_REFERENCE`, and its
+    in-epoch part as seconds and as 0-based half-open epoch samples (the line-distrust
+    minute conversion, ``line_distrust.minute_sample_bounds``). A minute with no in-epoch
+    sample is not listed.
+
+    Refuses, by name: ``None`` while the spike consumer reads a signal and the peri-R
+    record has a routed train (the caller must say which minutes - ``[]`` when none); a
+    non-empty list when the spike consumer reads nothing or the recording has no train
+    (no-beat minutes are minutes of a train's region); and a minute number given twice.
+    """
+    spike = tuple(sorted(signals.get("spikes", ())))
+    has_train = peri_r is not None and peri_r.train is not None
+    rec: dict[str, Any] = {"rule": NO_BEAT_RULE, "flag": NO_HEARTBEAT_REFERENCE,
+                           "signals": list(spike), "blanked": False,
+                           "counts_toward_retention_hold": False}
+    if not spike or not has_train:
+        if no_beat_minutes:
+            msg = ("no-beat minutes given for an epoch whose spike consumer reads nothing or "
+                   "whose recording has no routed train: they are minutes of a train's region")
+            raise ValueError(msg)
+        rec["minutes"] = []
+        rec["none_because"] = ("the spike consumer reads no signal" if not spike else
+                               "no routed train ((k) 1): no train region, no no-beat minute")
+        return rec
+    if no_beat_minutes is None:
+        msg = ("the spike consumer reads a signal and the peri-R record has a routed train: "
+               "pass the train's no-beat minutes ([] when there are none) so each is flagged "
+               "'no heartbeat reference' (RULING 2026-10-09 (g) 1)")
+        raise ValueError(msg)
+    seen = [m.minute for m in no_beat_minutes]
+    if len(set(seen)) != len(seen):
+        msg = f"no-beat minute numbers given twice: {sorted(seen)}"
+        raise ValueError(msg)
+    stop = epoch_start_s + n_samples / fs
+    rows: list[dict[str, Any]] = []
+    for m in sorted(no_beat_minutes, key=lambda x: x.start_s):
+        a, b = max(m.start_s, epoch_start_s), min(m.stop_s, stop)
+        if not b > a:
+            continue
+        k0, k1 = minute_sample_bounds(a, b, epoch_start_s=epoch_start_s, fs=fs,
+                                      n_samples=n_samples)
+        if k1 <= k0:
+            continue
+        rows.append({"minute": int(m.minute), "start_s": float(m.start_s),
+                     "stop_s": float(m.stop_s), "kind": m.kind, "flag": NO_HEARTBEAT_REFERENCE,
+                     "in_epoch_s": [float(a), float(b)], "samples": [int(k0), int(k1)]})
+    rec["minutes"] = rows
+    rec["flagged_s"] = float(sum(r["in_epoch_s"][1] - r["in_epoch_s"][0] for r in rows))
+    return rec
+
+
+def _with_no_heartbeat_reference(provenance: MaskProvenance, record: Mapping[str, Any]
+                                 ) -> MaskProvenance:
+    """Copy the flag record into the provenance; refuse one that disagrees with it."""
+    want = json.loads(json.dumps(dict(record), allow_nan=False))
+    have = provenance.spike_no_heartbeat_reference
+    if have and dict(have) != want:
+        msg = ("the provenance's spike_no_heartbeat_reference disagrees with the no-beat "
+               "minutes this file carries")
+        raise ValueError(msg)
+    return dataclasses.replace(provenance, spike_no_heartbeat_reference=want)
+
+
+def _write_no_heartbeat_reference(doc: dict[str, Any], record: Mapping[str, Any]) -> None:
+    """``noheartref_json`` (always) and ``noheartref_spikes_<cuff>_T`` per spike signal.
+
+    The spans are 1-based inclusive epoch rows of the flagged minutes - FLAGS, never part
+    of ``blank_spikes_*`` (RULING 2026-10-09 (g) 1).
+    """
+    rows = record["minutes"]
+    for sig in record["signals"]:
+        if rows:
+            out = to_matlab_inclusive([r["samples"][0] for r in rows],
+                                      [r["samples"][1] for r in rows])
+            assert_no_zero_runs(out.ravel(), what=f"no-heartbeat-reference spans {sig}")
+        else:
+            out = np.zeros((0, 2), dtype=np.float64)
+        doc[_matlab_name("noheartref", "spikes", sig)] = out
+    doc["noheartref_json"] = json.dumps(dict(record), sort_keys=True, ensure_ascii=True,
+                                        allow_nan=False)
+
+
+def _gate_record(gate: EmitGate, *, heart_fraction: Mapping[str, float] | None,
+                 heartref: Mapping[str, Any], lost: Mapping[str, Any] | None,
+                 release: str | None) -> dict[str, Any]:
+    """``gate_json``: the verdict, and beside it what the gate never reads."""
+    out: dict[str, Any] = {"held": gate.held, "reasons": list(gate.reasons),
+                           "retention_flagged": gate.retention_flagged,
+                           "blank_held": gate.blank_held,
+                           "min_retention": gate.min_retention,
+                           "medians_used": dict(gate.medians_used),
+                           "notes": list(gate.notes),
+                           "top_routes": [list(t) for t in gate.top_routes],
+                           "hum_features": dict(gate.hum_features),
+                           **({"spike_peri_r_fraction": heart_fraction}
+                              if heart_fraction is not None else {})}
+    if heartref["signals"]:  # flagged, kept: reported beside the gate, never in it
+        out["spike_no_heartbeat_reference_s"] = heartref.get("flagged_s", 0.0)
+    if lost is not None:
+        out["spike_time_lost"] = lost
+        out["line_distrust_listed"] = line_distrust_listed(lost)
+    if release:
+        out["release"] = release
+    return out
+
+
 def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
                     provenance: MaskProvenance | None, *, signals: Mapping[str, Sequence[str]],
                     fs: float, n_samples: int,
@@ -356,12 +485,22 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
                     release: str | None = None,
                     events: Sequence[Mapping[str, Any]] = (),
                     not_computed: Mapping[str, str] | None = None,
-                    epoch_start_sample: int | None = None) -> Path:
+                    epoch_start_sample: int | None = None,
+                    no_beat_minutes: Sequence[NoBeatMinute] | None = None) -> Path:
     """Write the masks as MATLAB blank spans with their provenance and QC gate.
 
     The file carries the epoch's exact first sample as :data:`EPOCH_START_SAMPLE_KEY`
     (Andrea, 2026-10-09), formed by :func:`epoch_start_fields`; ``epoch_start_sample``,
     when given, is the sample the caller sliced with and must agree with that rule.
+
+    ``no_beat_minutes`` are the routed train's minutes with no beat (RULING 2026-10-09
+    (g) 1): KEPT for the spike consumer and flagged "no heartbeat reference" per minute -
+    ``noheartref_json`` (always present), ``noheartref_spikes_<cuff>_T`` (the flagged
+    minutes' 1-based inclusive epoch rows; never part of ``blank_spikes_*``), the
+    provenance's ``spike_no_heartbeat_reference`` and ``gate_json``'s
+    ``spike_no_heartbeat_reference_s``. They are not blanked, so they never reach the
+    retention gate or the hold. Required (``[]`` when none) whenever the spike consumer
+    reads a signal and ``peri_r`` has a train; see :func:`no_heartbeat_reference_record`.
 
     ``not_computed`` maps a consumer the recording cannot run to the reason (RULING
     2026-10-08 (f) 6: no beat train passed, so no beats file - ``hrv`` and ``breathing``,
@@ -400,6 +539,10 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
                             n_samples=n_samples, epoch_start_s=epoch_start_s),
         peri_r, signals=signals, fs=fs, n_samples=n_samples, epoch_start_s=epoch_start_s,
         epoch_start_sample=start_fields[EPOCH_START_SAMPLE_KEY])
+    heartref = no_heartbeat_reference_record(no_beat_minutes, peri_r, signals=signals, fs=fs,
+                                             n_samples=n_samples, epoch_start_s=epoch_start_s)
+    if heartref["signals"]:
+        provenance = _with_no_heartbeat_reference(provenance, heartref)
     gate = emit_gate(masks, min_retention=min_retention, animal_median=animal_median,
                      decisions=decisions, hum_features=hum_features)
     if release is not None and not release.strip():
@@ -430,21 +573,9 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
             f"not-measured spans mmc/{sig}")
     lost = _write_line_distrust(doc, masks, line_distrust)
     heart_fraction = _write_peri_r(doc, peri_r, n_samples)
-    gate_doc: dict[str, Any] = {"held": gate.held, "reasons": list(gate.reasons),
-                                "retention_flagged": gate.retention_flagged,
-                                "blank_held": gate.blank_held,
-                                "min_retention": gate.min_retention,
-                                "medians_used": dict(gate.medians_used),
-                                "notes": list(gate.notes),
-                                "top_routes": [list(t) for t in gate.top_routes],
-                                "hum_features": dict(gate.hum_features),
-                                **({"spike_peri_r_fraction": heart_fraction}
-                                   if heart_fraction is not None else {})}
-    if lost is not None:
-        gate_doc["spike_time_lost"] = lost
-        gate_doc["line_distrust_listed"] = line_distrust_listed(lost)
-    if release:
-        gate_doc["release"] = release
+    _write_no_heartbeat_reference(doc, heartref)
+    gate_doc = _gate_record(gate, heart_fraction=heart_fraction, heartref=heartref, lost=lost,
+                            release=release)
     doc["provenance_json"] = provenance.to_json()
     doc["events_json"] = json.dumps(list(events), sort_keys=True, ensure_ascii=True,
                                     allow_nan=False)

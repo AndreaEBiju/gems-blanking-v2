@@ -48,6 +48,9 @@ Every :class:`Extent` carries that ``resolution_s``; nothing pretends otherwise.
 
 Tolerances are an explicit input (:class:`ToleranceTable`), never a default: they come
 from task T's measured tolerance surfaces (MATLAB, step 9), with their source recorded.
+Where a table may be used is :func:`tolerance_table_use`: the production table anywhere,
+the labelled stand-in (z 3.0 for every consumer, RULING 2026-10-09 (g) 7) only for outputs
+under the pilot folder, and a "NOT FOR PRODUCTION" table nowhere.
 
 Consumer table: built from ``constants.CONSUMERS`` with the two corrections the spec
 already ruled and ``constants.py`` does not yet carry (:data:`STRUCK_CONSUMERS`,
@@ -63,6 +66,8 @@ import functools
 import hashlib
 import json
 import math
+import os
+import stat
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -73,26 +78,36 @@ import numpy.typing as npt
 from scipy.signal import butter, sosfilt, unit_impulse
 
 from gems_blanking_v2.bands.envelope import IMPULSE_DECAY_FRACTION
-from gems_blanking_v2.constants import BANDS, CONSUMERS, GRID_S, ConsumerSpec
+from gems_blanking_v2.constants import BANDS, CONSUMERS, GRID_S, NERVE_SIGNALS, ConsumerSpec
 from gems_blanking_v2.physio.rpeaks import DECIMATE_TARGET_HZ, detect_rpeaks
 from gems_blanking_v2.types import Event
 
 __all__ = [
     "CONSUMER_FILTERS",
     "CONSUMER_SIGNAL_ERRATA",
+    "CROSS_BAND_SCOPES",
+    "CROSS_BAND_SCOPE_ALL",
+    "CROSS_BAND_SCOPE_OFF",
+    "CROSS_BAND_SCOPE_OWN",
     "DECISION_RULES",
     "EDGE_MEASUREMENTS_DIR",
     "EDGE_SETTLING",
+    "EXTENT_BASIS_DETECTED",
+    "EXTENT_BASIS_OWN_BAND",
     "HR_BAND_EDGE_S",
     "MMC_NOT_MEASURED_HALF_S",
     "OUT_OF_BUILD_CONSUMERS",
     "SPIKE_STEP1_EDGE_S",
     "SPIKE_WAVEFORM_AFTER_PEAK_S",
     "SPIKE_WAVEFORM_BEFORE_PEAK_S",
+    "STAND_IN_TOLERANCE_LABEL",
+    "STAND_IN_TOLERANCE_Z",
     "STRUCK_CONSUMERS",
+    "TOLERANCES_NOT_PRODUCTION",
     "CardiacVerdict",
     "ConsumerFilter",
     "ConsumerSettling",
+    "CrossBand",
     "DecisionRule",
     "EdgeSettling",
     "Extent",
@@ -101,11 +116,15 @@ __all__ = [
     "ToleranceTable",
     "beat_train_changed",
     "cardiac_operational_damage",
+    "channel_detection_signals",
+    "check_pilot_root",
+    "check_stand_in_outputs",
     "compute_extent",
     "confirms_motion",
     "consumer_settling",
     "consumer_signals",
     "decision_rule",
+    "detected_extent",
     "edge_settling_record",
     "edge_settling_sha256",
     "edge_settling_text",
@@ -117,8 +136,11 @@ __all__ = [
     "impulse_settling_s",
     "is_confirmed_motion",
     "mmc_not_measured_spans",
+    "own_detection_signals",
     "settling_provenance",
+    "stand_in_tolerance_doc",
     "step_settling_s",
+    "tolerance_table_use",
 ]
 
 F64 = npt.NDArray[np.float64]
@@ -576,6 +598,136 @@ class ToleranceTable:
         return cls({str(k): float(v) for k, v in doc["z_tol"].items()}, str(doc["source"]))
 
 
+STAND_IN_TOLERANCE_LABEL: Final = "STAND-IN (pilot only, RULING 2026-10-09 (g) 7)"
+"""The label a stand-in tolerance table carries, verbatim, and every mask made with it."""
+STAND_IN_TOLERANCE_Z: Final = 3.0
+"""RULING 2026-10-09 (g) 7: the pilot's stand-in threshold, z 3.0 for every consumer."""
+TOLERANCES_NOT_PRODUCTION: Final = "NOT FOR PRODUCTION"
+"""tolmap's mark on a smoke variant (``--rows any-finite``): never used for masks."""
+
+
+def stand_in_tolerance_doc() -> dict[str, Any]:
+    """Return the stand-in tolerance table (RULING 2026-10-09 (g) 7), the one form accepted.
+
+    z :data:`STAND_IN_TOLERANCE_Z` for every z-thresholded consumer (``hrv`` is operational
+    and carries none), labelled :data:`STAND_IN_TOLERANCE_LABEL`. It stands in for the
+    mapped tolerances until the tolerance-mapping ruling; blanked time and the HRV vs
+    breathing comparison made with it are recomputed then.
+    """
+    z = {c: STAND_IN_TOLERANCE_Z for c in extent_consumers() if c != "hrv"}
+    return {"label": STAND_IN_TOLERANCE_LABEL, "stand_in": True,
+            "source": (f"{STAND_IN_TOLERANCE_LABEL}: z {STAND_IN_TOLERANCE_Z:g} for every "
+                       "consumer, not a measurement; recomputed once the tolerance-mapping "
+                       "ruling is made"),
+            "z_tol": z}
+
+
+def _under(path: Path, root: Path) -> bool:
+    """Whether ``path`` resolves inside ``root`` (case-folded where the OS folds case)."""
+    p = Path(os.path.normcase(Path(path).resolve()))
+    r = Path(os.path.normcase(Path(root).resolve()))
+    return p == r or p.is_relative_to(r)
+
+
+def _is_reparse_point(path: Path) -> bool:
+    """Whether ``path`` itself (not its target) is a reparse point or a symbolic link."""
+    st = os.lstat(path)
+    attrs = getattr(st, "st_file_attributes", 0)  # Windows only; 0 elsewhere
+    return bool(attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)) or stat.S_ISLNK(
+        st.st_mode)
+
+
+def check_pilot_root(root: Path) -> Path:
+    """Return the declared pilot folder, resolved, or raise ``ValueError`` naming the reason.
+
+    Refused (review 2026-10-10 fix 2): a root that is not an existing folder, and one that
+    is, or sits under, a reparse point - a junction or a symbolic link, judged on every
+    component of the path AS GIVEN (made absolute, never resolved, since resolving follows
+    the link). Such a folder can name another folder (production) while its path still
+    reads "pilot", and :func:`_under` would then accept outputs written there. An 8.3 alias
+    is not a reparse point and is accepted (it resolves to the same folder).
+    """
+    given = Path(os.path.normpath(Path(root).absolute()))  # lexical, as Win32 normalises
+    if not given.is_dir():
+        msg = f"the declared pilot_root {root} is not an existing folder"
+        raise ValueError(msg)
+    for part in (given, *given.parents):
+        if _is_reparse_point(part):
+            msg = (f"the declared pilot_root {root} is or sits under a reparse point ({part}: a "
+                   "junction or symbolic link), which can name another folder; refused")
+            raise ValueError(msg)
+    return given.resolve()
+
+
+def check_stand_in_outputs(output_roots: Sequence[Path], pilot_root: Path | None) -> Path:
+    """Return the checked pilot folder when every output root lies under it, or raise.
+
+    The one rule for where anything made on the STAND-IN tolerance table may go (RULING
+    2026-10-09 (g) 7: "written to the pilot folder only"), shared by
+    :func:`tolerance_table_use` (the mask writer) and the readers (night4 ``verify``; Night 6
+    has its MATLAB twin, ``night6_pilot_root``). ``pilot_root`` is the folder a pilot run
+    DECLARES (``None``: no pilot run declared, so refused), checked by
+    :func:`check_pilot_root`. Raises ``ValueError`` naming the reason.
+    """
+    if not output_roots:
+        msg = "the stand-in check needs the output roots the masks are written under"
+        raise ValueError(msg)
+    if pilot_root is None:
+        msg = (f"{STAND_IN_TOLERANCE_LABEL}: refused - no pilot run is declared (pilot_run and "
+               "pilot_root). Night 5 / production refuses stand-ins")
+        raise ValueError(msg)
+    root = check_pilot_root(pilot_root)
+    outside = [str(p) for p in output_roots if not _under(Path(p), root)]
+    if outside:
+        msg = (f"{STAND_IN_TOLERANCE_LABEL}: refused for outputs outside the pilot folder "
+               f"{pilot_root}: {outside}. Night 5 / production refuses stand-ins")
+        raise ValueError(msg)
+    return root
+
+
+def tolerance_table_use(doc: Mapping[str, Any], *, output_roots: Sequence[Path],
+                        pilot_root: Path | None) -> Literal["production", "stand_in"]:
+    """Return how ``doc`` may be used for masks written under ``output_roots``, or raise.
+
+    * Anything marked :data:`TOLERANCES_NOT_PRODUCTION` is refused everywhere.
+    * A table that says it is a stand-in (``stand_in``, its label, or "STAND-IN" anywhere)
+      is accepted only when it is exactly :func:`stand_in_tolerance_doc` AND every output
+      root lies under the DECLARED ``pilot_root`` (:func:`check_stand_in_outputs`: ``None``
+      or a root that is or sits under a junction or symbolic link is refused; RULING
+      2026-10-09 (g) 7: "written to the pilot folder only. Night 5 refuses stand-ins").
+      Returns ``"stand_in"``.
+    * Otherwise it must be tolmap's production output - ``rows_rule == "gate"``, no
+      ``flags``, a non-empty ``z_tol`` - and is accepted anywhere: ``"production"``.
+
+    Raises ``ValueError`` naming the reason. ``output_roots`` must not be empty.
+    """
+    text = json.dumps(dict(doc), sort_keys=True, ensure_ascii=True, allow_nan=False)
+    if TOLERANCES_NOT_PRODUCTION in text:
+        msg = (f"the tolerance table is marked {TOLERANCES_NOT_PRODUCTION!r} (a smoke variant): "
+               "never used for masks")
+        raise ValueError(msg)
+    if not output_roots:
+        msg = "tolerance_table_use needs the output roots the masks will be written under"
+        raise ValueError(msg)
+    claims = bool(doc.get("stand_in")) or "stand-in" in text.lower() or "stand_in" in text
+    if claims:
+        if dict(doc) != stand_in_tolerance_doc():
+            msg = (f"a stand-in tolerance table must be exactly the {STAND_IN_TOLERANCE_LABEL} "
+                   f"table (z {STAND_IN_TOLERANCE_Z:g} for every consumer, "
+                   "stand_in_tolerance_doc()); this one differs")
+            raise ValueError(msg)
+        check_stand_in_outputs(output_roots, pilot_root)
+        return "stand_in"
+    if doc.get("rows_rule") != "gate" or doc.get("flags"):
+        msg = (f"rows_rule {doc.get('rows_rule')!r}, flags {doc.get('flags')!r}: only tolmap's "
+               "production gate-rows output (rows_rule 'gate', no flags) is accepted")
+        raise ValueError(msg)
+    if not isinstance(doc.get("z_tol"), Mapping) or not doc["z_tol"]:
+        msg = "the tolerance table has no z_tol table"
+        raise ValueError(msg)
+    return "production"
+
+
 # ---------------------------------------------------------------------------
 # extent
 # ---------------------------------------------------------------------------
@@ -664,12 +816,23 @@ def confirms_motion(rule: DecisionRule, *, p_calibrated: float, p_raw: float) ->
     return bool(math.isfinite(score) and score >= rule.threshold)
 
 
+EXTENT_BASIS_OWN_BAND: Final = "own_band"
+"""The consumer's own band crossed its threshold around the core (:func:`compute_extent`)."""
+EXTENT_BASIS_DETECTED: Final = "detected_cross_band"
+"""RULING 2026-10-09 (i) 1, option (1): the own band stayed under the threshold, so the
+consumer is blanked over the event's DETECTED extent (:func:`detected_extent`). Never
+routed: ``emit.masks.spans_from_routing`` refuses any decision but
+``routing.cross_band_decision`` for it."""
+
+
 @dataclass(frozen=True, slots=True)
 class Extent:
     """One event's extent for one consumer on one signal, seconds, half-open.
 
-    ``core_*`` is where the band exceeded the tolerance; ``start_s``/``stop_s`` add the
-    settling. ``resolution_s`` is the band's envelope window: nothing finer is real.
+    ``core_*`` is where the band exceeded the tolerance (for a detected extent: where the
+    detecting pairs were over the floor); ``start_s``/``stop_s`` add the settling.
+    ``resolution_s`` is the band's envelope window: nothing finer is real. ``basis`` says
+    which rule made it (:data:`EXTENT_BASIS_OWN_BAND`, :data:`EXTENT_BASIS_DETECTED`).
     """
 
     consumer: str
@@ -681,6 +844,113 @@ class Extent:
     core_stop_s: float
     settling_s: float
     resolution_s: float
+    basis: str = EXTENT_BASIS_OWN_BAND
+
+
+CROSS_BAND_SCOPE_ALL: Final = "all_detecting_pairs"
+"""RULING 2026-10-09 (i) 1 as written: every pair that detected the event sets its extent."""
+CROSS_BAND_SCOPE_OWN: Final = "own_signals_only"
+"""Only detecting pairs on the consumer's own signals or the channels they are built from
+(:func:`own_detection_signals`) set the extent."""
+CROSS_BAND_SCOPE_OFF: Final = "off"
+"""No cross-band extent: the consumer's harmful kinds invisible in its band are residual risk."""
+CROSS_BAND_SCOPES: Final[tuple[str, ...]] = (CROSS_BAND_SCOPE_ALL, CROSS_BAND_SCOPE_OWN,
+                                             CROSS_BAND_SCOPE_OFF)
+"""The cross-band scope every z consumer DECLARES (review 7 finding 2); there is no default.
+Review 7 estimated the ruling's scope on the pilot at 46-99% of epoch time blanked for
+slow_wave, so the choice goes back to Andrea and the declaration records it."""
+
+
+@dataclass(frozen=True)
+class CrossBand:
+    """Option (1)'s cross-band inputs (RULING 2026-10-09 (i) 1) for :func:`extents_for_events`.
+
+    ``pairs`` maps each event id to the (signal, band) pairs that DETECTED it (the core's
+    pairs: over z_enter somewhere in it); ``z`` is detection's z for every pair (detection
+    reads every signal, raw contacts included - invariant 6), on the same grid and timeline
+    as the consumers' z. ``floor_z`` is the clean null's p90 (1.44): a detecting pair's run
+    counts while it is above it.
+
+    ``scope`` is each consumer's DECLARED cross-band scope (:data:`CROSS_BAND_SCOPES`). Every
+    consumer that reaches :func:`detected_extent` needs one; a consumer without one is
+    refused, never defaulted. ``own_signals`` maps each ``own_signals_only`` consumer to the
+    detection signals it may take its extent from (:func:`own_detection_signals`).
+    """
+
+    pairs: Mapping[str, Sequence[tuple[str, str]]]
+    z: Mapping[tuple[str, str], npt.ArrayLike]
+    floor_z: float
+    scope: Mapping[str, str]
+    own_signals: Mapping[str, frozenset[str]]
+
+
+_CUFF_SIGNAL_SUFFIXES: Final = tuple(f"_{s}" for s in NERVE_SIGNALS)
+
+
+def _cuff_of(name: str) -> str | None:
+    """Return the cuff of a cuff-prefixed derived signal (``"L_T"`` -> ``"L"``), else None."""
+    for suf in _CUFF_SIGNAL_SUFFIXES:
+        if name.endswith(suf) and len(name) > len(suf):
+            return name[: -len(suf)]
+    return None
+
+
+def channel_detection_signals(channels: Sequence[Any]) -> dict[str, str]:
+    """Map each acquired channel's name to the detection signal that carries it.
+
+    A cuff contact (``cuff_id`` and ``contact_index`` set) is ``<cuff>_V<k>``. Any other
+    nerve channel of a cuff (the old cohort's hardware tripole) is ``<cuff>_T``. A stomach
+    channel is detection's raw stomach signal of the same name (``chain.detect_region``).
+    Other channels carry no detection signal and are left out.
+    """
+    out: dict[str, str] = {}
+    for c in channels:
+        if c.cuff_id is not None and c.contact_index is not None:
+            out[c.name] = f"{c.cuff_id}_V{int(c.contact_index)}"
+        elif c.cuff_id is not None and c.role == "nerve":
+            out[c.name] = f"{c.cuff_id}_T"
+        elif c.role == "stomach":
+            out[c.name] = c.name
+    return out
+
+
+def own_detection_signals(consumer_signals: Sequence[str], detection_signals: Sequence[str],
+                          channel_signals: Mapping[str, str]) -> frozenset[str]:
+    """Return the detection signals a consumer's ``own_signals_only`` extent may read.
+
+    Each signal the consumer reads (:func:`consumer_signals`, i.e. ``CONSUMERS``) brings a
+    family:
+
+    * a cuff signal (``"L_T"``, ``"R_V2"``) brings its cuff's nerve signals
+      (``<cuff>_V1..V3`` and ``<cuff>_T``: the channels it is built from, and the tripole
+      built from them);
+    * a stomach signal (a raw stomach channel or ``stomach_ref``) brings every stomach
+      signal detection reads (the raw stomach channels and ``stomach_ref``, their common
+      average);
+    * a cross-site lead ``"<plus>-<minus>"`` (``physio.hr_pairs``) brings both of its
+      channels' families.
+
+    Raw channel names are resolved with ``channel_signals``
+    (:func:`channel_detection_signals`). A signal that resolves to no detection signal is
+    refused (ValueError): its family is unknown, never guessed.
+    """
+    det = tuple(detection_signals)
+    stomach = frozenset(d for d in det if _cuff_of(d) is None)
+    out: set[str] = set()
+    for s in consumer_signals:
+        whole = s in det or s in channel_signals or "-" not in s
+        for part in ([s] if whole else s.split("-")):
+            d = part if part in det else channel_signals.get(part)
+            if d is None or d not in det:
+                msg = (f"consumer signal {s!r}: {part!r} is no detection signal and no channel "
+                       "that carries one; its own-signal family is unknown")
+                raise ValueError(msg)
+            cuff = _cuff_of(d)
+            if cuff is None:
+                out |= stomach
+            else:
+                out |= {x for x in det if _cuff_of(x) == cuff}
+    return frozenset(out)
 
 
 class ExtentNotAssessableError(ValueError):
@@ -756,11 +1026,99 @@ def compute_extent(event: Event, z: Mapping[tuple[str, str], npt.ArrayLike], con
                   BANDS[spec.band].window_s)
 
 
+def _scoped_pairs(cross: CrossBand, event_id: str, consumer: str
+                  ) -> tuple[tuple[str, str], ...] | None:
+    """Return the detecting pairs that ``consumer``'s declared scope admits; None for ``off``."""
+    if consumer not in cross.scope:
+        msg = (f"{consumer} declares no cross-band scope (one of {list(CROSS_BAND_SCOPES)}); "
+               "it is never defaulted (review 7 finding 2)")
+        raise KeyError(msg)
+    scope = cross.scope[consumer]
+    if scope not in CROSS_BAND_SCOPES:
+        msg = (f"{consumer}: unknown cross-band scope {scope!r}; declared scopes: "
+               f"{list(CROSS_BAND_SCOPES)}")
+        raise ValueError(msg)
+    if scope == CROSS_BAND_SCOPE_OFF:
+        return None
+    pairs = tuple(cross.pairs[event_id])
+    if scope == CROSS_BAND_SCOPE_OWN:
+        if consumer not in cross.own_signals:
+            msg = f"{consumer} is own_signals_only but its own detection signals are not given"
+            raise KeyError(msg)
+        own = cross.own_signals[consumer]
+        pairs = tuple(q for q in pairs if q[0] in own)
+    return pairs
+
+
+def detected_extent(event: Event, cross: CrossBand, event_id: str, consumer: str, *,
+                    signal: str, fs: float, z_t0_s: float,
+                    grid_s: float = GRID_S) -> Extent | None:
+    """Return the event's DETECTED extent for ``consumer`` on ``signal`` (option (1)), or None.
+
+    RULING 2026-10-09 (i) 1: "a harmful kind invisible in the consumer's band, but caught by
+    the detector in other bands or signals, blanks the consumer over the event's detected
+    extent in those bands". The extent is, over the pairs that detected the event
+    (``cross.pairs[event_id]``), the union of their runs above ``cross.floor_z`` that overlap
+    the event's span - first to last - padded each side by THIS consumer's settling and
+    clipped to the z record. ``None`` when no detecting pair is over the floor there. The
+    tolerance-evidence reading (``tolevidence/analysis.py`` ``cross_extent``), restricted to
+    the detecting pairs.
+
+    The consumer's declared scope (``cross.scope``, review 7 finding 2) picks the pairs:
+    ``all_detecting_pairs`` takes every detecting pair (the ruling as written);
+    ``own_signals_only`` only those on ``cross.own_signals[consumer]``; ``off`` none, so the
+    result is ``None`` (under tolerance; its invisible kinds are residual risk). An undeclared
+    or unknown scope is refused.
+    """
+    if consumer == "hrv":
+        msg = "hrv's extent is operational: use hrv_extent"
+        raise ValueError(msg)
+    if event_id not in cross.pairs:
+        msg = f"event {event_id} has no detecting pairs: its detected extent is unknown"
+        raise KeyError(msg)
+    pairs = _scoped_pairs(cross, event_id, consumer)
+    if pairs is None:
+        return None
+    spec = extent_consumers()[consumer]
+    c = event.candidate
+    i0 = int(math.floor((c.start_s - z_t0_s) / grid_s))
+    i1 = int(math.ceil((c.stop_s - z_t0_s) / grid_s))
+    lo_f: int | None = None
+    hi_f: int | None = None
+    n = None
+    for pair in pairs:
+        if pair not in cross.z:
+            msg = f"event {event_id}: no detection z for its detecting pair {pair}"
+            raise KeyError(msg)
+        zz = np.asarray(cross.z[pair], dtype=np.float64)
+        if n is not None and zz.size != n:
+            msg = f"detection z for {pair} has {zz.size} frames, others {n}"
+            raise ValueError(msg)
+        n = zz.size
+        over = np.isfinite(zz) & (zz > cross.floor_z)
+        for a, b in _runs(over):
+            if a < i1 and b > i0:
+                lo_f = a if lo_f is None else min(lo_f, a)
+                hi_f = b if hi_f is None else max(hi_f, b)
+    if lo_f is None or hi_f is None or n is None:
+        return None
+    settle = consumer_settling(consumer, fs)
+    if settle is None:  # pragma: no cover - every extent consumer has a chain
+        msg = f"{consumer}: settling unknown, so its extent is unknown (invariant 19)"
+        raise ValueError(msg)
+    pad = settle.total_s
+    lo, hi = z_t0_s + lo_f * grid_s, z_t0_s + hi_f * grid_s
+    return Extent(consumer, signal, spec.band, max(z_t0_s, lo - pad),
+                  min(z_t0_s + n * grid_s, hi + pad), lo, hi, pad,
+                  BANDS[spec.band].window_s, EXTENT_BASIS_DETECTED)
+
+
 def extents_for_events(
     events: Mapping[str, Event], z: Mapping[tuple[str, str], npt.ArrayLike],
     signals: Mapping[str, Sequence[str]], *, tolerances: ToleranceTable, fs: float,
     z_t0_s: float, confirmed: Callable[[Event], bool],
     hr_signal: tuple[str, npt.ArrayLike, float] | None = None,
+    cross_band: CrossBand | None = None,
 ) -> list[tuple[str, str, str, Extent | NotAssessable | None]]:
     """Every event x consumer x signal: ``(event_id, consumer, signal, result)``.
 
@@ -777,6 +1135,10 @@ def extents_for_events(
     ``hrv`` is operational and needs ``hr_signal = (name, samples, x_t0_s)`` for the
     channel ``signals["hrv"]`` names; reading hrv without it raises rather than leaving
     hrv silently unmasked.
+
+    ``cross_band`` (RULING 2026-10-09 (i) 1, option (1)): where a z consumer's own band
+    stays under its threshold around a confirmed core, the result is the event's
+    :func:`detected_extent` instead of ``None``. Without it, the own band alone decides.
     """
     if "hrv" in signals:
         need = tuple(signals["hrv"])
@@ -803,6 +1165,9 @@ def extents_for_events(
                         z_t0_s=z_t0_s)
                 except ExtentNotAssessableError as exc:
                     res = NotAssessable(consumer, sig, str(exc))
+                if res is None and cross_band is not None:  # (i) 1: own band under threshold
+                    res = detected_extent(ev, cross_band, eid, consumer, signal=sig, fs=fs,
+                                          z_t0_s=z_t0_s)
                 out.append((eid, consumer, sig, res))
     return out
 

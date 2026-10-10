@@ -7,7 +7,7 @@ function S = night6_call_slow_wave(X, fs, W, outDir, label, base, signals, keep,
 %
 %   X           N x 3 ANT input, volts, maskSignal's slow_wave mask NaN on every column
 %   fs          the epoch's rate
-%   W           the slow-wave parameters (night6_run_recording params().slow_wave)
+%   W           the slow-wave parameters (night6_slow_wave_settings, = params().slow_wave)
 %   spans       maskSignal's slow_wave spans, 1-based inclusive epoch rows - exactly the
 %               NaN of X (asserted, 'night6:blankIdx')
 %   rate        the declared slow-wave rate (night6_slow_wave_rates; REQUIRED)
@@ -29,7 +29,9 @@ function S = night6_call_slow_wave(X, fs, W, outDir, label, base, signals, keep,
 % already epoch time.
 %
 % S.slow_wave  night6_keep_slow_wave's record;  S.blank_idx  the form, count, rate and
-% rule;  S.slow_wave_rate  the declared rate, its factors and the rate she ran at.
+% rule;  S.slow_wave_rate  the declared rate, its factors and the rate she ran at;
+% S.caveats  night6_slow_wave_caveats(W, R): the (h) 1 setting, (h) 2 amplitude caveat and
+% (f) 1 known properties, the setting text built from W and R (review 2026-10-10 fix 5).
     N = size(X, 1);
     [~, R] = night6_slow_wave_rates(rate, fs);
     cover = false(N, 1);
@@ -68,4 +70,5 @@ function S = night6_call_slow_wave(X, fs, W, outDir, label, base, signals, keep,
                    'at every masked span (RULING 2026-10-09 (c) 6)']);
     S.slow_wave_rate = struct('name', R.name, 'factors', R.factors, 'factor', R.factor, ...
                               'fs_called', fsc);
+    S.caveats = night6_slow_wave_caveats(W, R);   % built from the settings used (fix 5)
 end

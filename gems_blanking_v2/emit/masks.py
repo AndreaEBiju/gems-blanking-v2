@@ -25,10 +25,12 @@ Rules applied:
 * **The routing table's ``distrusted_spans``** (ruling 2026-10-03) become part of the
   spike consumer's mask for that cuff, and a cuff distrusted outright (route
   ``distrusted``) gets a wholly invalid spike mask - for the spike consumer only.
-* **Minutes where the HR train has no beats** (RULING 2026-10-09 (b) 2) are distrusted
-  for the spike consumer, every cuff, because heartbeat leak continues there but no peri-R
-  span can be placed (:func:`no_beat_minutes`, :func:`no_beat_spike_spans`). Only a
-  recording WITH a train has them; one without keeps its spike mask unchanged ((k) 1).
+* **Minutes where the HR train has no beats are KEPT for the spike consumer and flagged**
+  "no heartbeat reference" (RULING 2026-10-09 (g) 1, which replaces (b) 2's distrust):
+  never a mask span, so they are not blanked, never count toward the 80% retention hold,
+  and hold no recording. :func:`no_beat_minutes` finds them; the handoff writes the flag
+  per minute beside the masks (``noheartref_*``) and into the provenance. Only a recording
+  WITH a train has them; one without keeps its spike mask unchanged ((k) 1).
 * **Line noise never enters a mask.** The spike consumer's per-minute distrust for
   mains-locked spikes (ruling 2026-10-07 (c) item 4, decided by the test of RULING
   2026-10-08 (d) 2) is its own record (``emit.line_distrust``), never a mask span, so the
@@ -55,8 +57,9 @@ import numpy.typing as npt
 
 from gems_blanking_v2.constants import GRID_S
 from gems_blanking_v2.extent.grid import frame_sample_bounds
-from gems_blanking_v2.extent.routing import RouteDecision
+from gems_blanking_v2.extent.routing import CROSS_BAND_REASON_CODE, RouteDecision
 from gems_blanking_v2.extent.tolerance import (
+    EXTENT_BASIS_DETECTED,
     OUT_OF_BUILD_CONSUMERS,
     Extent,
     extent_consumers,
@@ -71,6 +74,7 @@ if TYPE_CHECKING:
 __all__ = [
     "NO_BEAT_MINUTE_S",
     "NO_BEAT_RULE",
+    "NO_HEARTBEAT_REFERENCE",
     "TAPER_S",
     "ConsumerMask",
     "MaskKey",
@@ -86,7 +90,6 @@ __all__ = [
     "masked_spans_s",
     "mmc_not_measured",
     "no_beat_minutes",
-    "no_beat_spike_spans",
     "spans_from_routing",
     "velocity_mask",
 ]
@@ -153,7 +156,9 @@ def spans_from_routing(extents: Iterable[tuple[str, Extent]],
     """Mask spans: each ``(event_id, extent)`` whose route for that consumer masks.
 
     An extent without a decision raises - routing is recorded per event per consumer,
-    and a missing decision is a defect, not a "keep".
+    and a missing decision is a defect, not a "keep". A DETECTED (cross-band) extent
+    (RULING 2026-10-09 (i) 1) is always masked: any decision for it other than
+    ``routing.cross_band_decision`` raises, so routing cannot undo it.
     """
     by = {(d.event_id, d.consumer): d for d in decisions}
     out: list[MaskSpan] = []
@@ -162,6 +167,12 @@ def spans_from_routing(extents: Iterable[tuple[str, Extent]],
         if d is None:
             msg = f"no routing decision for event {event_id} on {ext.consumer}"
             raise KeyError(msg)
+        if ext.basis == EXTENT_BASIS_DETECTED and (
+                d.reason_code != CROSS_BAND_REASON_CODE or not d.masks):
+            msg = (f"event {event_id} on {ext.consumer}: a detected (cross-band) extent got "
+                   f"route {d.route!r} ({d.reason_code!r}); routing may not undo it "
+                   "(RULING 2026-10-09 (i) 1) - use routing.cross_band_decision")
+            raise ValueError(msg)
         if d.masks:
             out.append(MaskSpan(ext.consumer, ext.signal, ext.start_s, ext.stop_s,
                                 d.reason_code or d.route))
@@ -198,12 +209,16 @@ partial minute's end is the region end in two forms that differ by under one sam
 the planned 10 ms-rounded duration (600.36) - measured on the production routing, 2026-10-09.
 Far below one 10 ms mask frame."""
 NO_BEAT_RULE: Final = (
-    "RULING 2026-10-09 (b) 2: the spike consumer distrusts every minute in which the "
-    "recording's HR train has no beats - its rejected minutes (routing entry hr.blank_s) and "
-    "any other 60 s window of the train's region holding no beat - because heartbeat leak "
-    "continues there but no peri-R span can be placed. A minute is the per-minute storage "
-    "window [origin + 60 k, origin + 60 (k + 1)), the last one cut at the region's end. A "
-    "recording with no train has none (its spike mask is unchanged, (k) 1)")
+    "RULING 2026-10-09 (g) 1 (replaces (b) 2): every minute in which the recording's HR "
+    "train has no beats - its rejected minutes (routing entry hr.blank_s) and any other 60 s "
+    "window of the train's region holding no beat - is KEPT for the spike consumer and "
+    "flagged 'no heartbeat reference': not blanked, never counted toward the 80% retention "
+    "hold, no recording held for it. Heartbeat leak may continue there, but no peri-R span "
+    "can be placed. A minute is the per-minute storage window [origin + 60 k, origin + "
+    "60 (k + 1)), the last one cut at the region's end. A recording with no train has none "
+    "(its spike mask is unchanged, (k) 1)")
+NO_HEARTBEAT_REFERENCE: Final = "no heartbeat reference"
+"""The per-minute flag a no-beat minute carries (RULING 2026-10-09 (g) 1)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,13 +278,6 @@ def no_beat_minutes(*, beat_times_s: npt.ArrayLike, region_s: tuple[float, float
         elif n_in == 0:
             out.append(NoBeatMinute(k, a, b, "empty"))
     return out
-
-
-def no_beat_spike_spans(minutes: Iterable[NoBeatMinute], spike_signals: Sequence[str]
-                        ) -> list[MaskSpan]:
-    """Return the no-beat minutes as spike-consumer spans, one per minute per spike signal."""
-    return [MaskSpan("spikes", sig, m.start_s, m.stop_s, f"no_beat_minute_{m.kind}")
-            for m in minutes for sig in spike_signals]
 
 
 def build_masks(signals: Mapping[str, Sequence[str]], spans: Iterable[MaskSpan], *,

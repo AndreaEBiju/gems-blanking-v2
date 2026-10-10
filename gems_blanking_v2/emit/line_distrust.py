@@ -11,8 +11,11 @@ and ``line_dist.py``), run on the cuff's tripole **T** - never a contact
 (:func:`minute_tests` refuses any signal not named ``<cuff>_T``) - generalised by (e) to
 what the spike consumer actually sees. Per minute:
 
-1. **What is read** ((e) Q4, Q5): the minute's samples that are finite in RAW T and not
-   blanked by the spike consumer's own motion mask. Its maximal runs are the minute's
+1. **What is read** ((e) Q4, Q5; RULING 2026-10-09 (g) 5): the minute's samples that are
+   finite in RAW T and not blanked by the spike consumer's own motion mask, less
+   :data:`INVALID_PAD_S` (10.5 ms, step2's ``P.edgeBufferMs``) on both sides of every
+   motion-blanked or non-finite run - exactly the samples spike detection uses, since
+   ``step2_noise_sigma`` dilates every invalid sample by that pad. Its maximal runs are the minute's
    **stretches**; a stretch too short for ``sosfiltfilt`` (at most :data:`PADLEN`
    samples, ~1 ms) is dropped. If the stretches together hold less than
    :data:`MIN_VALID_S` (30 s) the minute is ``untested_short_valid``.
@@ -20,10 +23,8 @@ what the spike consumer actually sees. Per minute:
    ``sosfiltfilt``). One robust sigma per minute: ``1.4826 * MAD`` of all the filtered
    stretches pooled.
 3. Spikes are negative local minima below ``-4.5 sigma``, with a 1 ms refractory period
-   (greedy, earliest kept), within each stretch. A spike in a motion-blanked span is
-   never detected, because those samples are not read (Q5). The samples in the 7.5 ms
-   taper beside a blank are read at full amplitude, where the consumer sees them
-   attenuated.
+   (greedy, earliest kept), within each stretch. A spike in a motion-blanked span or its
+   10.5 ms pad is never detected, because those samples are not read (Q5, (g) 5).
 4. Fewer than :data:`MIN_SPIKES` (10) spikes in the minute: ``untested_few_spikes``.
 5. **Intervals are within a stretch only:** an interval across a gap (missing samples or
    a motion blank) is not an interval. ``m = sum_s (n_s - 1)`` over stretches with at
@@ -98,9 +99,11 @@ from gems_blanking_v2.extent.grid import (
     seconds_to_sample,
     to_matlab_inclusive,
 )
+from gems_blanking_v2.extent.tolerance import EDGE_SETTLING
 
 __all__ = [
     "ALPHA",
+    "INVALID_PAD_S",
     "LOCK_PERIODS_S",
     "LOCK_TOLERANCE_S",
     "MINUTE_S",
@@ -130,9 +133,16 @@ F64 = npt.NDArray[np.float64]
 Bool = npt.NDArray[np.bool_]
 
 RULE: Final = "RULING 2026-10-08 (d) item 2; (e) Q1-Q5"
-TEST_VERSION: Final = "mains_lock_binom_v3"
+TEST_VERSION: Final = "mains_lock_binom_v4"
 """v2 = (e): animal x cohort family, stretches, motion exclusion, boundary minute;
-v3 = the chance rate is the interval MLE ``m / sum span``."""
+v3 = the chance rate is the interval MLE ``m / sum span``;
+v4 = motion-blanked and non-finite runs are padded by :data:`INVALID_PAD_S` (RULING
+2026-10-09 (g) 5)."""
+INVALID_PAD_S: Final = EDGE_SETTLING["spikes"].pad_s
+"""Step2's pad around every invalid sample, s (``P.edgeBufferMs`` = 10.5 ms, RULING
+2026-10-09 (c) 1): the line-noise test leaves it out beside every motion blank and every
+non-finite run (RULING 2026-10-09 (g) 5), converted once by ``extent.grid.seconds_to_sample``
+as the peri-R exclusion's pad is."""
 ALPHA: Final = 0.01
 MIN_SPIKES: Final = 10
 MINUTE_S: Final = 60.0
@@ -375,6 +385,19 @@ def _motion_samples(name: str, mask: ConsumerMask, fs: float, n: int,
     return frames_to_samples(mask.invalid, fs, n, mask.grid_s)
 
 
+def _padded(bad: Bool, pad: int) -> Bool:
+    """Return ``bad`` dilated by ``pad`` samples on both sides of each run, clipped.
+
+    The same as step2's ``movmax(invalid, [pad pad])``: run ``[a, b)`` -> ``[a - pad, b + pad)``.
+    """
+    if pad <= 0 or not bad.any():
+        return bad
+    out = bad.copy()
+    for a, b in _runs(bad):
+        out[max(0, a - pad):min(bad.size, b + pad)] = True
+    return out
+
+
 def _excluded_samples(name: str, spans: Sequence[tuple[int, int]], n: int) -> Bool:
     out = np.zeros(n, dtype=bool)
     for a, b in spans:
@@ -391,6 +414,9 @@ def minute_tests(raw_t: Mapping[str, npt.ArrayLike], fs: float, *, epoch_start_s
                  exclude: Mapping[str, Sequence[tuple[int, int]]] | None = None,
                  ) -> tuple[MinuteTest, ...]:
     """Pass 1: test every cuff-minute overlapping the epoch, on RAW T less motion blanks.
+
+    Every motion-blanked or non-finite run is padded by :data:`INVALID_PAD_S` on both sides
+    (RULING 2026-10-09 (g) 5), so the test reads exactly the samples spike detection uses.
 
     ``raw_t`` maps ``<cuff>_T`` to the raw, unmasked tripole over the emitted epoch
     (microvolts; sample 0 at ``epoch_start_s``). ``motion`` maps the same names to the
@@ -418,7 +444,8 @@ def minute_tests(raw_t: Mapping[str, npt.ArrayLike], fs: float, *, epoch_start_s
         if cleaner is not None:
             x = np.asarray(cleaner(np.array(x, copy=True), fs), dtype=np.float64)
         n = int(x.size)
-        read = np.isfinite(x) & ~_motion_samples(name, motion[name], fs, n, epoch_start_s)
+        invalid = ~np.isfinite(x) | _motion_samples(name, motion[name], fs, n, epoch_start_s)
+        read = ~_padded(invalid, seconds_to_sample(INVALID_PAD_S, fs))  # (g) 5
         if name in extra:
             read &= ~_excluded_samples(name, extra[name], n)
         e0, e1 = float(epoch_start_s), float(epoch_start_s) + n / fs
@@ -612,6 +639,9 @@ def lock_test_parameters() -> dict[str, Any]:
             "lock_periods_s": list(LOCK_PERIODS_S), "lock_tolerance_s": LOCK_TOLERANCE_S,
             "intervals": "within a stretch only; none across a gap or a motion blank",
             "motion": "spikes in the spike consumer's motion-blanked spans are not read",
+            "invalid_pad_s": INVALID_PAD_S,
+            "invalid_pad": ("motion-blanked and non-finite runs padded on both sides by "
+                            "step2's P.edgeBufferMs (RULING 2026-10-09 (g) 5)"),
             "chance": ("poisson, interval MLE lam = m / sum (t_last_s - t_first_s) over "
                        "stretches with >= 2 spikes; differs from the inventory measurement's "
                        "n / (t_last - t_first) by n / (n - 1) on an unsplit minute"),

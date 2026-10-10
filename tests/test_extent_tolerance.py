@@ -459,3 +459,144 @@ def test_expected_consumers_is_the_table_without_what_is_out_of_this_build() -> 
     assert tl.expected_consumers() == ("breathing", "hrv", "mmc", "slow_wave", "spikes")
     assert "velocity" in tl.extent_consumers()
     assert set(tl.extent_consumers()) - set(tl.expected_consumers()) == {"velocity"}
+
+
+# --- RULING 2026-10-09 (g) 7: the stand-in tolerance table, pilot only -----------------------
+
+_PRODUCTION = {"rows_rule": "gate", "source": "tolmap", "z_tol": {"spikes": 4.1, "mmc": 3.2}}
+
+
+def _roots(tmp_path: Path) -> tuple[Path, Path, Path]:
+    pilot = tmp_path / "scratch" / "pilot"
+    pilot.mkdir(parents=True)
+    return pilot, pilot / "work", pilot / "masks_root"
+
+
+def test_the_stand_in_is_z_3_for_every_consumer_and_labelled() -> None:
+    doc = tl.stand_in_tolerance_doc()
+    assert doc["label"] == tl.STAND_IN_TOLERANCE_LABEL == (
+        "STAND-IN (pilot only, RULING 2026-10-09 (g) 7)")
+    assert doc["z_tol"] == {c: 3.0 for c in tl.extent_consumers() if c != "hrv"}
+    table = tl.ToleranceTable({k: float(v) for k, v in doc["z_tol"].items()}, doc["source"])
+    assert all(table.for_consumer(c) == 3.0 for c in tl.expected_consumers() if c != "hrv")
+    assert doc["source"].startswith(tl.STAND_IN_TOLERANCE_LABEL)
+
+
+def test_the_stand_in_is_accepted_only_for_outputs_under_the_pilot_folder(
+        tmp_path: Path) -> None:
+    pilot, work, masks = _roots(tmp_path)
+    doc = tl.stand_in_tolerance_doc()
+    assert tl.tolerance_table_use(doc, output_roots=[work, masks], pilot_root=pilot) == "stand_in"
+    store = tmp_path / "store" / "data"
+    night4 = tmp_path / "scratch" / "night4" / "work"
+    for roots in ([store], [night4], [work, store], [masks, night4],
+                  [tmp_path / "scratch" / "pilot_other"], [pilot / ".." / "pr"]):
+        with pytest.raises(ValueError, match=r"refused for outputs outside the pilot folder"):
+            tl.tolerance_table_use(doc, output_roots=roots, pilot_root=pilot)
+    with pytest.raises(ValueError, match="output roots"):
+        tl.tolerance_table_use(doc, output_roots=[], pilot_root=pilot)
+
+
+def test_a_table_that_claims_to_be_a_stand_in_must_be_exactly_the_ruled_one(
+        tmp_path: Path) -> None:
+    pilot, work, _masks = _roots(tmp_path)
+    good = tl.stand_in_tolerance_doc()
+    for bad in ({**good, "z_tol": {**good["z_tol"], "spikes": 2.5}},
+                {**good, "label": "STAND-IN"}, {**_PRODUCTION, "stand_in": True},
+                {**_PRODUCTION, "note": "a stand-in for now"}):
+        with pytest.raises(ValueError, match="must be exactly"):
+            tl.tolerance_table_use(bad, output_roots=[work], pilot_root=pilot)
+
+
+def test_not_for_production_and_non_gate_tables_are_refused_everywhere(tmp_path: Path) -> None:
+    pilot, work, _masks = _roots(tmp_path)
+    smoke = {**_PRODUCTION, "rows_rule": "any-finite",
+             "flags": ["NOT FOR PRODUCTION: rows that are not gate_eligible were used"]}
+    marked = {**_PRODUCTION, "source": "NOT FOR PRODUCTION: a gate-rows table marked by hand"}
+    for roots in ([work], [tmp_path / "store"]):
+        for doc in (smoke, marked):  # the mark alone refuses, whatever else the table says
+            with pytest.raises(ValueError, match=r"marked 'NOT FOR PRODUCTION' \(a smoke"):
+                tl.tolerance_table_use(doc, output_roots=roots, pilot_root=pilot)
+        with pytest.raises(ValueError, match="production gate-rows"):
+            tl.tolerance_table_use({**_PRODUCTION, "rows_rule": "x"}, output_roots=roots,
+                                   pilot_root=pilot)
+        with pytest.raises(ValueError, match="no z_tol"):
+            tl.tolerance_table_use({**_PRODUCTION, "z_tol": {}}, output_roots=roots,
+                                   pilot_root=pilot)
+        assert tl.tolerance_table_use(_PRODUCTION, output_roots=roots,
+                                      pilot_root=pilot) == "production"
+
+
+# --- review 2026-10-10 fixes 1-2: the pilot root is declared, and never a link -----------------
+
+def _junction(link: Path, target: Path) -> None:
+    """Create a directory junction ``link`` -> ``target``, or skip saying why not."""
+    import os  # noqa: PLC0415
+
+    if os.name != "nt":
+        pytest.skip("directory junctions exist on Windows only")
+    try:
+        import _winapi  # noqa: PLC0415
+
+        _winapi.CreateJunction(str(target), str(link))
+    except (ImportError, AttributeError, OSError) as ex:
+        pytest.skip(f"junction creation is not permitted here ({ex!r})")
+
+
+def test_with_no_pilot_run_declared_the_stand_in_is_refused(tmp_path: Path) -> None:
+    _pilot, work, masks = _roots(tmp_path)
+    with pytest.raises(ValueError, match="no pilot run is declared"):
+        tl.tolerance_table_use(tl.stand_in_tolerance_doc(), output_roots=[work, masks],
+                               pilot_root=None)
+    with pytest.raises(ValueError, match="no pilot run is declared"):
+        tl.check_stand_in_outputs([work], None)
+    assert tl.tolerance_table_use(_PRODUCTION, output_roots=[work], pilot_root=None) == (
+        "production")
+
+
+def test_a_pilot_root_that_is_not_an_existing_folder_is_refused(tmp_path: Path) -> None:
+    gone = tmp_path / "scratch" / "pilot"
+    with pytest.raises(ValueError, match="not an existing folder"):
+        tl.check_pilot_root(gone)
+    with pytest.raises(ValueError, match="not an existing folder"):
+        tl.tolerance_table_use(tl.stand_in_tolerance_doc(), output_roots=[gone / "work"],
+                               pilot_root=gone)
+    pilot, _work, _masks = _roots(tmp_path)
+    assert tl.check_pilot_root(pilot) == pilot.resolve()
+
+
+def test_a_junction_pilot_root_or_one_under_a_junction_is_refused(tmp_path: Path) -> None:
+    """Fix 2: a pilot root that is a junction to production read as "pilot" and passed.
+
+    Skips (saying so) where junction creation is not permitted or not a Windows concept.
+    """
+    prod = tmp_path / "prod"
+    (prod / "pilot").mkdir(parents=True)
+    link = tmp_path / "pilot_link"
+    _junction(link, prod)
+    via = tmp_path / "via"
+    _junction(via, tmp_path / "prod")
+    doc = tl.stand_in_tolerance_doc()
+    for root, outs in ((link, [prod / "masks"]), (link, [link / "masks"]),
+                       (via / "pilot", [via / "pilot" / "masks"])):
+        with pytest.raises(ValueError, match="reparse point"):
+            tl.check_pilot_root(root)
+        with pytest.raises(ValueError, match="reparse point"):
+            tl.tolerance_table_use(doc, output_roots=outs, pilot_root=root)
+    # the same folders by their real paths are accepted
+    assert tl.tolerance_table_use(doc, output_roots=[prod / "pilot" / "w"],
+                                  pilot_root=prod / "pilot") == "stand_in"
+
+
+def test_a_symlink_pilot_root_is_refused(tmp_path: Path) -> None:
+    prod = tmp_path / "prod"
+    prod.mkdir()
+    link = tmp_path / "pilot_link"
+    try:
+        link.symlink_to(prod, target_is_directory=True)
+    except (OSError, NotImplementedError) as ex:
+        pytest.skip(f"symbolic link creation is not permitted here ({ex!r})")
+    with pytest.raises(ValueError, match="reparse point"):
+        tl.check_pilot_root(link)
+    with pytest.raises(ValueError, match="reparse point"):
+        tl.check_stand_in_outputs([prod / "masks"], link)

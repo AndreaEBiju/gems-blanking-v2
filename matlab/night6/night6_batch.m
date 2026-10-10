@@ -11,6 +11,14 @@ function summary = night6_batch(listFile, nWorkers, varargin)
 %     "units": "V",                         (declared for the cohort, invariants 14/24)
 %     "out_root": "<output folder>",
 %     "processing_new": "<path>",           (optional; default ../../../processing_new)
+%     "pilot_run": true,                    (optional: declares a PILOT run, which must name
+%     "pilot_root": "<path>",                its folder; out_root must lie inside it, and it
+%                                            must not be or sit under a junction or symbolic
+%                                            link - night6_pilot_root. Only a pilot run reads
+%                                            STAND-IN tolerance masks or takes beats_root)
+%     "beats_root": "<path>",               (optional, PILOT RUNS ONLY: the beats files
+%                                            resolve here instead of gems_root -
+%                                            night6_run_recording BeatsRoot)
 %     "label": "free text",                 (optional; copied into every record)
 %     "recovery_starts": "<path>",          (RULING 2026-10-08 (k) 2; required for any
 %                                            stim_recovery recording - see RecoveryStarts)
@@ -36,7 +44,12 @@ function summary = night6_batch(listFile, nWorkers, varargin)
 % slow_wave_rate ('night6:slowWaveRate', RULING 2026-10-09 (c) 6); any listed mask folder holding a stim_recovery epoch
 % when no recovery_starts is declared ('night6:recoveryStarts' - the conditions are read
 % from the mask files' provenance only, never from the signals); and an unreadable or
-% malformed recovery_starts file (night6_recovery_start, read once here).
+% malformed recovery_starts file (night6_recovery_start, read once here); half a pilot
+% declaration ('night6:pilotRun'), a pilot_root that does not exist, is or sits under a
+% junction or symbolic link, or does not hold out_root ('night6:pilotRoot'); and a
+% beats_root in a list that declares no pilot run ('night6:beatsRoot'; review 2026-10-10
+% fix 3). pilot_root and beats_root resolve like recovery_starts (relative: POSIX, against
+% gems_root).
     ip = inputParser;
     ip.addParameter('DryRun', false);
     ip.addParameter('Figures', false);
@@ -73,11 +86,28 @@ function summary = night6_batch(listFile, nWorkers, varargin)
     end
     starts = '';
     if isfield(L, 'recovery_starts'), starts = resolve(L.gems_root, L.recovery_starts); end
+    pilotRoot = '';   % review 2026-10-10 fixes 1-3: a pilot run is declared, never assumed
+    if isfield(L, 'pilot_run') || isfield(L, 'pilot_root')
+        if ~(isfield(L, 'pilot_run') && isequal(L.pilot_run, true)) ...
+                || ~isfield(L, 'pilot_root') || isempty(L.pilot_root)
+            error('night6:pilotRun', ['a pilot run is declared by "pilot_run": true together ' ...
+                  'with "pilot_root": <folder>; this list has only part of that']);
+        end
+        pilotRoot = night6_pilot_root(resolve(L.gems_root, L.pilot_root), L.out_root);
+    end
+    broot = '';
+    if isfield(L, 'beats_root')
+        if isempty(pilotRoot)
+            error('night6:beatsRoot', ['beats_root is for pilot runs only (review 2026-10-10 ' ...
+                  'fix 3): this list declares no pilot run ("pilot_run": true, "pilot_root")']);
+        end
+        broot = resolve(L.gems_root, L.beats_root);
+    end
     preflight_recovery(folders, starts);   % (k) 2: before any recording is loaded
     args = {'GemsRoot', L.gems_root, 'Units', L.units, 'OutRoot', L.out_root, ...
             'CodeCommit', commit, 'Label', label, 'DryRun', opt.DryRun, ...
             'Figures', opt.Figures, 'Force', opt.Force, 'KeepInputs', logical(opt.KeepInputs), ...
-            'RecoveryStarts', starts, ...
+            'RecoveryStarts', starts, 'BeatsRoot', broot, 'PilotRoot', pilotRoot, ...
             'RecoveryTrimMode', mode, 'SlowWaveRate', SW.name};
     status = cell(1, n); wall = zeros(1, n);
     t0 = tic;
@@ -101,7 +131,7 @@ function summary = night6_batch(listFile, nWorkers, varargin)
     end
     summary = struct('list_file', listFile, 'n', n, 'workers', nWorkers, 'commit', commit, ...
                      'wall_s', toc(t0), 'label', label, 'recovery_trim_mode', mode, ...
-                     'slow_wave_rate', SW.name);
+                     'slow_wave_rate', SW.name, 'pilot_root', pilotRoot, 'beats_root', broot);
     summary.recordings = cellfun(@(f, s, w) struct('mask_folder', f, 'status', s, 'wall_s', w), ...
                                  folders, status, num2cell(wall), 'UniformOutput', false);
     summary.n_ok = nnz(strcmp(status, 'ok'));

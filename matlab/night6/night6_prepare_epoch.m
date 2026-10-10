@@ -29,9 +29,12 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
 % Every blank_<consumer>_<token> span is 1-based inclusive into the EPOCH (task 15), so
 % it lands on epoch rows sp(k,1):sp(k,2) unchanged.
 %
-% plan.runs lists the calls to make, in night6_calls() order. A run serves consumers
-% that share one call AND one mask; hrv and breathing get two HR runs when their masks
-% differ (invariant 2: a mask is never merged across consumers). Consumers in
+% plan.runs lists the calls to make, in night6_calls() order. A run serves ONE consumer
+% (invariant 2: a mask is never merged across consumers): hrv and breathing are ALWAYS
+% two HR_BR calls, the hrv-masked one giving HR and HRV and the breathing-masked one
+% giving breathing (RULING 2026-10-09 (i) 4, ruling 2026-10-08 (h) 8) - even when their
+% masks are identical, so which call an output came from never depends on the masks
+% (night6_hr_outputs names the outputs each run's record takes). Consumers in
 % notcomputed_json are skipped with their reason (RULING 2026-10-08 (f) 6); mmc,
 % which needs R-peaks, is skipped when the recording has no beats in the epoch - and
 % on a 'pre' recording with no beat train at all it is "not computed" (Andrea,
@@ -52,6 +55,15 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
 % train = "none: ..." with no spans when it gives none. So "no spans because no train" is
 % recorded, and a file with no perir_json was written before (k) 1 - never read as "no
 % train". plan.periR states which (train_state 'train' | 'none'); [] when no spike signal.
+%
+% NO HEARTBEAT REFERENCE (RULING 2026-10-09 (g) 1; review 2026-10-10 fix 4): when the spike
+% consumer reads any signal AND the recording has a train (peri-R train_state 'train', or a
+% beats file), the file must carry noheartref_json (rule, signals = exactly the spike
+% signals, minutes), a noheartref_spikes_<token> per spike signal and the provenance's
+% spike_no_heartbeat_reference - or the epoch is refused by name (night6:noHeartRef). A file
+% without them was written before (g) 1, when its no-beat minutes were BLANKED under (b) 2
+% rather than kept and flagged, so it is not the mask (g) 1 rules. plan.noHeartRef is the
+% record (rule, minute count); [] when the check does not apply.
 %
 % RECOVERY START (RULING 2026-10-08 (k) 2), name-value 'Recovery', struct(starts, session,
 % mode) - mode is the declared trim mode (night6_trim_modes), refused by name if unknown
@@ -124,6 +136,7 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
     end
     plan.masks = masks;
     plan.periR = check_peri_r(M, masks, plan.n);
+    plan.noHeartRef = check_no_heartref(M, masks, plan.periR, beats, plan.n);
     plan.notMeasuredMmc = struct();
     for i = 1:numel(names)
         if startsWith(names{i}, 'notmeasured_mmc_')
@@ -236,17 +249,14 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
             plan.runs = [plan.runs, slow_wave_runs(masks, gastric)]; %#ok<AGROW>
             continue
         end
-        while ~isempty(want)
-            lead = want{1};
-            same = cellfun(@(c) same_mask(masks, lead, c), want);
-            sigs = plan.consumers.(lead).signals;
+        for k = 1:numel(want)   % (i) 4: one consumer per run, always
+            sigs = plan.consumers.(want{k}).signals;
             if strcmp(C.name, 'extract_mmc')
                 sigs = gastric;          % her column order: ANT1, ANT2, ANT3
             end
-            plan.runs(end + 1) = struct('call', C.name, 'consumers', {want(same)}, ...
+            plan.runs(end + 1) = struct('call', C.name, 'consumers', {want(k)}, ...
                                         'signals', {sigs}, 'maskSignal', '', ...
                                         'keep', {sigs}); %#ok<AGROW>
-            want = want(~same);
         end
     end
 end
@@ -415,14 +425,41 @@ function P = check_peri_r(M, masks, n)
                'window_sha256', J.window.sha256, 'signals', {got});
 end
 
-function tf = same_mask(masks, a, b)
-    A = masks(strcmp({masks.consumer}, a));
-    B = masks(strcmp({masks.consumer}, b));
-    tf = numel(A) == numel(B) && isequal(sort({A.signal}), sort({B.signal}));
-    if ~tf, return, end
-    for k = 1:numel(A)
-        tf = tf && isequal(A(k).spans, B(strcmp({B.signal}, A(k).signal)).spans);
+function H = check_no_heartref(M, masks, periR, beats, n)
+% Review 2026-10-10 fix 4: no pre-(g) 1 mask file reaches the spike consumer when a train exists.
+    H = [];
+    sel = strcmp({masks.consumer}, 'spikes');
+    if ~any(sel), return, end
+    hasTrain = (~isempty(periR) && strcmp(periR.train_state, 'train')) || ~isempty(beats);
+    if ~hasTrain, return, end
+    sigs = sort({masks(sel).signal});
+    if ~isfield(M, 'noheartref_json')
+        error('night6:noHeartRef', ['the spike consumer reads [%s] and the recording has a ' ...
+              'train, but the mask file has no noheartref_json: it was written before RULING ' ...
+              '2026-10-09 (g) 1, so its no-beat minutes were blanked under (b) 2, not kept and ' ...
+              'flagged. Refused; re-emit the masks'], strjoin(sigs, ' '));
     end
+    J = jsondecode(char(M.noheartref_json));
+    if ~isstruct(J) || ~all(isfield(J, {'rule', 'signals', 'minutes'}))
+        error('night6:noHeartRef', 'noheartref_json lacks rule, signals or minutes');
+    end
+    got = sort(cellstr(J.signals));
+    if ~isequal(got(:)', sigs(:)')
+        error('night6:noHeartRef', 'noheartref_json covers [%s]; the spike consumer reads [%s]', ...
+              strjoin(got, ' '), strjoin(sigs, ' '));
+    end
+    for t = {masks(sel).token}
+        nm = ['noheartref_spikes_' t{1}];
+        if ~isfield(M, nm)
+            error('night6:noHeartRef', 'the mask file has noheartref_json but no %s', nm);
+        end
+        check_spans(M.(nm), n, nm);
+    end
+    if ~isfield(M, 'provenance_json') ...
+            || ~isfield(jsondecode(char(M.provenance_json)), 'spike_no_heartbeat_reference')
+        error('night6:noHeartRef', 'the mask provenance names no spike_no_heartbeat_reference');
+    end
+    H = struct('rule', char(J.rule), 'n_minutes', numel(J.minutes), 'signals', {got(:)'});
 end
 
 function E = slice_beats(T, plan)

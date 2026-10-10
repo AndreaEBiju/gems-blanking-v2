@@ -66,8 +66,17 @@ function check_slow_wave_rate(caseFile, outFile)
 
     % --- calls: her real function, through night6_call_slow_wave ---------------------
     S = load(C.calls.input_file);
-    W = struct('lowPassOn', true, 'lowPassCutoff', 0.15, 'lowPassOrder', 2, ...
-               'smoothWindow', 5, 'edgeBufferSec', 15);
+    W = night6_slow_wave_settings();   % the one site params().slow_wave uses (fix 5)
+    out.settings = W;
+    % review 2026-10-10 fix 5: the caveat text is built from the settings and rate it is given
+    [~, Rf] = night6_slow_wave_rates('full');
+    [~, Rd] = night6_slow_wave_rates('decimated78');
+    alt = W; alt.lowPassCutoff = 0.2; alt.lowPassOrder = 4; alt.smoothWindow = 10;
+    alt.edgeBufferSec = 3;
+    off = W; off.lowPassOn = false;
+    out.caveats_alt = struct('full', night6_slow_wave_caveats(alt, Rf), ...
+                             'decimated', night6_slow_wave_caveats(alt, Rd), ...
+                             'off', night6_slow_wave_caveats(off, Rf));
     signals = {'ANT1', 'ANT2', 'ANT3'};
     out.calls = struct();
     for rate = {'full', 'decimated78'}
@@ -87,6 +96,7 @@ function check_slow_wave_rate(caseFile, outFile)
                                           signals, keep, ms, sp, rate{1}, false);
                 rec.blank_idx = r.blank_idx;
                 rec.rate = r.slow_wave_rate;
+                rec.caveats = r.caveats;
                 rec.files = r.slow_wave.files;
                 rec.kept = struct();
                 for k = keep(:)'

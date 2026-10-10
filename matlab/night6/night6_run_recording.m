@@ -33,6 +33,24 @@ function records = night6_run_recording(maskFolder, varargin)
 % Name-value inputs (no positional options - invariant 40):
 %   GemsRoot    store root; meta.json, the recording (meta.source_path) and the beats
 %               file (mask provenance extra.beats_file.hrv_beats) resolve against it
+%   BeatsRoot   optional, PILOT RUNS ONLY (PilotRoot; else 'night6:beatsRoot', review
+%               2026-10-10 fix 3): the root the beats file resolves against INSTEAD of
+%               GemsRoot (the same relative path data/<animal>/<session>/<session>_beats.mat),
+%               for a routed train not yet published beside meta.json - e.g. the pilot's
+%               byte-identical copies from the routing workspace. The file must still
+%               hash to the mask provenance's sha256 (night6:beatsSha), and it is hashed
+%               before AND after it is loaded, so the bytes loaded are the bytes hashed
+%               (a change in between: 'night6:beatsChanged'); the root used is in every
+%               record (source.beats_root). Default '' (GemsRoot).
+%   PilotRoot   the declared pilot folder of a PILOT run (night6_pilot_root: it must exist,
+%               must not be or sit under a junction or symbolic link, and must hold
+%               OutRoot - else 'night6:pilotRoot'). Default '' (not a pilot run). Only a
+%               pilot run reads a mask made on the STAND-IN tolerance table (provenance
+%               extra.TOLERANCE_STAND_IN, RULING 2026-10-09 (g) 7); outside one such a
+%               mask folder is refused by name before the recording is loaded
+%               ('night6:toleranceStandIn', review 2026-10-10 fix 1). Every record carries
+%               stand_in (extra.STAND_IN or extra.TOLERANCE_STAND_IN), tolerance_stand_in
+%               (the label, when there is one) and pilot_root (in a pilot run).
 %   Units       'V' | 'mV' | 'uV' of the recording file. REQUIRED, no default (inv. 14)
 %   OutRoot     outputs go to OutRoot/<animal>/<session>/<model-id>/<epoch>/
 %   MetaFile    default GemsRoot/data/<animal>/<session>/meta.json
@@ -69,6 +87,8 @@ function records = night6_run_recording(maskFolder, varargin)
     ip = inputParser;
     ip.addRequired('maskFolder', @(x) ischar(x) || isstring(x));
     ip.addParameter('GemsRoot', '', @(x) ischar(x) || isstring(x));
+    ip.addParameter('BeatsRoot', '', @(x) ischar(x) || isstring(x));
+    ip.addParameter('PilotRoot', '', @(x) ischar(x) || isstring(x));
     ip.addParameter('Units', '', @(x) ischar(x) || isstring(x));
     ip.addParameter('OutRoot', '', @(x) ischar(x) || isstring(x));
     ip.addParameter('MetaFile', '', @(x) ischar(x) || isstring(x));
@@ -91,6 +111,11 @@ function records = night6_run_recording(maskFolder, varargin)
         end
     end
     o = structfun_char(o);
+    o.PilotRoot = night6_pilot_root(o.PilotRoot, o.OutRoot);   % '' unless a pilot run
+    if ~isempty(o.BeatsRoot) && isempty(o.PilotRoot)
+        error('night6:beatsRoot', ['BeatsRoot %s is for pilot runs only (review 2026-10-10 ' ...
+              'fix 3): no PilotRoot is declared'], o.BeatsRoot);
+    end
     if isempty(o.CodeCommit), [o.CodeCommit, o.CodeDirty] = code_commit(); else, o.CodeDirty = []; end
     o.fallback = night6_step1a_fallback(o.Step1aFallback);   % read before any work
     o.RecoveryTrimMode = night6_check_trim_mode(o.RecoveryTrimMode);   % (k) 2: required
@@ -106,6 +131,21 @@ function records = night6_run_recording(maskFolder, varargin)
     starts = cellfun(@(f) sscanf(f, 'e%d_masks.mat'), {files.name});
     [~, order] = sort(starts);
     files = files(order);
+    % Review 2026-10-10 fix 1: a mask made on the STAND-IN tolerance table is read only in a
+    % declared pilot run - refused by name before anything is loaded or resumed.
+    if isempty(o.PilotRoot)
+        for k = 1:numel(files)
+            Mp = load(fullfile(files(k).folder, files(k).name), 'provenance_json');
+            if ~isfield(Mp, 'provenance_json'), continue, end
+            tol = tolerance_stand_in(jsondecode(char(Mp.provenance_json)));
+            if ~isempty(tol)
+                error('night6:toleranceStandIn', ['%s was made on the stand-in tolerance ' ...
+                      'table (%s): read only in a declared pilot run (PilotRoot; RULING ' ...
+                      '2026-10-09 (g) 7, "written to the pilot folder only")'], ...
+                      fullfile(files(k).folder, files(k).name), tol);
+            end
+        end
+    end
 
     sessionDir = fileparts(fileparts(strip_sep(maskFolder)));
     [animalDir, session] = fileparts(sessionDir);
@@ -129,10 +169,15 @@ function records = night6_run_recording(maskFolder, varargin)
                 && isfield(R, 'edge_settling') && isstruct(R.edge_settling) ...
                 && isfield(R.edge_settling, 'sha256') ...
                 && strcmp(R.edge_settling.sha256, EdNow.sha256);   % same edge settlings
-            if isfield(R, 'status') && strcmp(R.status, 'complete') && same
+            % review 7 finding 5: every HR run serves one consumer, with outputs_used ((i) 4)
+            [hrOk, hrWhy] = night6_hr_runs_resumable(R);
+            if isfield(R, 'status') && strcmp(R.status, 'complete') && same && hrOk
                 records{k} = R;
                 todo(k) = false;
                 fprintf('[night6] %s %s: complete, skipped (resumable)\n', session, tag);
+            elseif isfield(R, 'status') && strcmp(R.status, 'complete') && same
+                fprintf('[night6] %s %s: complete before (i) 4 (%s), rerun\n', session, tag, ...
+                        hrWhy);
             elseif isfield(R, 'status') && strcmp(R.status, 'complete')
                 fprintf('[night6] %s %s: complete for another mask file, rerun\n', session, tag);
             end
@@ -202,7 +247,16 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
     % Kept verbatim: jsondecode mangles keys such as "ANT1|0-2" into identifiers.
     R.mask_provenance_json = char(M.provenance_json);
     R.mask_gate_json = char(M.gate_json);
-    R.stand_in = isfield(prov, 'extra') && isfield(prov.extra, 'STAND_IN');
+    tol = tolerance_stand_in(prov);   % review 2026-10-10 fix 1: either mark is a stand-in
+    R.stand_in = (isfield(prov, 'extra') && isfield(prov.extra, 'STAND_IN')) || ~isempty(tol);
+    if ~isempty(tol)
+        if isempty(o.PilotRoot)   % refused before loading; kept here for a direct caller
+            error('night6:toleranceStandIn', '%s: stand-in tolerance mask outside a pilot run', ...
+                  maskFile);
+        end
+        R.tolerance_stand_in = tol;
+    end
+    if ~isempty(o.PilotRoot), R.pilot_root = o.PilotRoot; end
     if ~strcmp(prov.recording, src.session)
         error('night6:recording', 'mask file is for %s, folder for %s', prov.recording, src.session);
     end
@@ -216,13 +270,25 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
         % train resolver) names the train's store path, its sha256, its origin as a 0-based
         % file sample and the epoch's beat count; night6_prepare_epoch slices with them.
         ref = prov.extra.beats_file;
-        R.source.beats_file = from_root(o.GemsRoot, ref.hrv_beats);
+        broot = o.GemsRoot;
+        if ~isempty(o.BeatsRoot), broot = o.BeatsRoot; end
+        R.source.beats_root = broot;
+        R.source.beats_file = from_root(broot, ref.hrv_beats);
         if ~isfile(R.source.beats_file)
             error('night6:beatsMissing', ['the mask provenance names the beat train %s, which ' ...
-                  'is not in the store (not yet published?)'], ref.hrv_beats);
+                  'is not under %s (not yet published?)'], ref.hrv_beats, broot);
         end
-        beats = struct('data', load(R.source.beats_file), 'record', ref, ...
-                       'sha256', night6_sha256_file(R.source.beats_file));
+        % Review 2026-10-10 fix 3: the bytes loaded are the bytes hashed - hashed before and
+        % after the load, refused if they differ (the sha256 is then checked against the
+        % mask provenance's in night6_prepare_epoch, night6:beatsSha).
+        h0 = night6_sha256_file(R.source.beats_file);
+        data = load(R.source.beats_file);
+        h1 = night6_sha256_file(R.source.beats_file);
+        if ~strcmp(h0, h1)
+            error('night6:beatsChanged', ['the beats file %s changed while it was loaded ' ...
+                  '(sha256 %s before, %s after)'], R.source.beats_file, h0, h1);
+        end
+        beats = struct('data', data, 'record', ref, 'sha256', h0);
     end
 
     condition = '';
@@ -241,6 +307,9 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
         R.peri_r = plan.periR;
     end
     R.not_measured_mmc = plan.notMeasuredMmc;   % R6: reported, never blanked
+    if ~isempty(plan.noHeartRef)   % review 2026-10-10 fix 4: (g) 1's flags, checked present
+        R.no_heartbeat_reference = plan.noHeartRef;
+    end
     if ~isempty(plan.beats)
         R.beats = struct('n_in_epoch', numel(plan.beats.heartlocs), ...
                          'n_whole_file', plan.beats.nWholeFile, ...
@@ -294,6 +363,9 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
     failed = false;
     for r = plan.runs
         run = struct('call', r.call, 'consumers', {r.consumers}, 'signals', {r.signals});
+        if strcmp(r.call, 'HR_BR_HRVAnalysis_beats')   % (i) 4: what this call is read for
+            run.outputs_used = night6_hr_outputs(r.consumers);
+        end
         perChannel = ~isempty(r.maskSignal);     % slow_wave, one ANT channel at a time
         if perChannel
             run.mask_signal = r.maskSignal;
@@ -450,6 +522,7 @@ function [label, extra] = call_one(r, X, plan, base, outDir, o)
             extra.slow_wave = S.slow_wave;
             extra.blank_idx = S.blank_idx;
             extra.slow_wave_rate = S.slow_wave_rate;
+            extra.slow_wave_caveats = S.caveats;   % (h) 2, (f) 1
         case 'extract_mmc'
             label = base;
             f = write_input(fullfile(outDir, [label '_mmc_in.mat']), X, fs);
@@ -475,12 +548,7 @@ function P = params()
     P.hr = struct('cutoff', 8, 'order', 4, 'edgeBufferSec', 0.75, 'winSec', 20, ...
                   'stepSec', 1, 'hrBrWinSec', 60, 'chanidx', 1, ...
                   'source', 'batch_process.m P.hr_* (= run_continuous.m, = T)');
-    P.slow_wave = struct('lowPassOn', true, 'lowPassCutoff', 0.15, 'lowPassOrder', 2, ...
-                         'smoothWindow', 5, 'edgeBufferSec', 15, ...
-                         'blankIdx', ['each run''s masked spans (night6_call_slow_wave; ' ...
-                                      'RULING 2026-10-09 (c) 6)'], ...
-                         'source', ['batch_process.m P.sw_* (= T / tolerance_sweep); NOT ' ...
-                                    'run_continuous.m (lowPassOn false, 2 Hz, order 4, window 10, buffer 3)']);
+    P.slow_wave = night6_slow_wave_settings();   % one site: the call and its caveats use it
     P.mmc = struct('gastricCols', [1 2 3], 'rpeak_source', ...
                    ['epoch beats file: rpeakVar heartlocs, rpeakUnits samples, rpeakFs fs ' ...
                     '(night6_mmc_opts, unit checked)'], 'other', 'extract_mmc defaults');
@@ -496,7 +564,9 @@ function F = function_provenance()
             'night6_recovery_lead_in', 'night6_recovery_trim_outputs', ...
             'night6_trim_modes', 'night6_check_trim_mode', 'night6_edge_settling', ...
             'night6_slow_wave_rates', 'night6_check_decimation', 'night6_decimate_masked', ...
-            'night6_call_slow_wave', 'night6_keep_slow_wave'};
+            'night6_call_slow_wave', 'night6_keep_slow_wave', 'night6_slow_wave_settings', ...
+            'night6_slow_wave_caveats', 'night6_pilot_root', 'night6_hr_outputs', ...
+            'night6_hr_runs_resumable'};
     hers = [setdiff({C.name}, ours, 'stable'), night6_v2_steps(), ...
             {'step1a_blank_cardiac', 'pipeline_params', 'bulk_load_one'}];   % step1a: (j) 1 fallback
     here = fileparts(mfilename('fullpath'));
@@ -689,6 +759,18 @@ end
 function s = strip_sep(p)
     s = char(p);
     while ~isempty(s) && any(s(end) == '/\'), s = s(1:end - 1); end
+end
+
+function tol = tolerance_stand_in(prov)
+% The STAND-IN tolerance label a mask provenance carries (extra.TOLERANCE_STAND_IN, written
+% by night4 on every mask made on that table, RULING 2026-10-09 (g) 7), or ''. A present but
+% empty mark still counts.
+    tol = '';
+    if isfield(prov, 'extra') && isstruct(prov.extra) ...
+            && isfield(prov.extra, 'TOLERANCE_STAND_IN')
+        tol = char(string(prov.extra.TOLERANCE_STAND_IN));
+        if isempty(tol), tol = 'TOLERANCE_STAND_IN (no label)'; end
+    end
 end
 
 function o = structfun_char(o)

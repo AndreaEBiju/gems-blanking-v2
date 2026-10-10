@@ -78,6 +78,7 @@ from gems_blanking_v2.extent.grid import T0_TOLERANCE_S, frame_sample_bounds, n_
 from gems_blanking_v2.extent.tolerance import ToleranceTable, extent_consumers
 
 __all__ = [
+    "CROSS_BAND_REASON_CODE",
     "EXCESS_P",
     "LINE_NOISE_ACTIONS",
     "ROUTES",
@@ -90,6 +91,7 @@ __all__ = [
     "RouteDecision",
     "band_excess",
     "clip_frames",
+    "cross_band_decision",
     "decisions_table",
     "eng_trace",
     "in_band_verdict",
@@ -410,6 +412,24 @@ class RouteDecision:
     def masks(self) -> bool:
         """Whether this decision masks the event's span for this consumer."""
         return self.route in MASKING_ROUTES
+
+
+CROSS_BAND_REASON_CODE: Final = "cross_band_detected"
+"""RULING 2026-10-09 (i) 1: the reason code of the only decision a detected extent takes."""
+
+
+def cross_band_decision(event_id: str, consumer: str) -> RouteDecision:
+    """Return the decision for a DETECTED (cross-band) extent: blanked, never routed.
+
+    RULING 2026-10-09 (i) 1, option (1): the consumer's own band stayed under its threshold,
+    so :func:`route_event`'s in-band verdict would call the event "correct" and undo the
+    blank (the tolerance v2 caveat). A detected extent is therefore never handed to
+    :func:`route_event`; ``emit.masks.spans_from_routing`` refuses any other decision for it.
+    """
+    return RouteDecision(event_id, consumer, "reject",
+                         "cross-band: the event's detected extent blanks this consumer "
+                         "(RULING 2026-10-09 (i) 1, option (1)); never routed",
+                         CROSS_BAND_REASON_CODE)
 
 
 def route_event(ev: EventEvidence, consumer: str, tolerances: ToleranceTable  # noqa: PLR0911

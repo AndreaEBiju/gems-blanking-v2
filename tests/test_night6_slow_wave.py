@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -203,6 +204,28 @@ def test_blank_idx_is_exactly_each_runs_masked_spans(result: dict[str, Any], rat
             assert "peaks_called" not in e
 
 
+@pytest.mark.parametrize("rate", ["full", "decimated"])
+def test_every_slow_wave_call_records_the_amplitude_caveat_and_known_properties(
+        result: dict[str, Any], rate: str) -> None:
+    """RULING 2026-10-09 (h) 2 and (f) 1, at both rates, in the call's provenance."""
+    for run in ("shared", "own"):
+        cav = result["calls"][f"{rate}_{run}"]["caveats"]
+        assert "(h) 2" in cav["amplitude"] and "0.15 Hz-filtered wave" in cav["amplitude"]
+        assert "whole-epoch detrend" in cav["amplitude"]
+        assert "either sampling rate" in cav["amplitude"]
+        assert "(h) 1" in cav["setting"]
+        assert ("low-pass 0.15 Hz, order 2, 5 s smoothing, 15 s edge" in cav["setting"]
+                and "0-9 cpm" in cav["setting"])
+        if rate == "full":  # review 2026-10-10 fix 5: it said "decimated x78" at full rate too
+            assert "full rate (no decimation)" in cav["setting"]
+            assert "decimated" not in cav["setting"]
+        else:
+            assert "decimated x78 (stages 13 x 6)" in cav["setting"]
+        props = cav["known_properties"]
+        assert len(props) == 2 and all("(f) 1" in p and "both rates" in p for p in props)
+        assert "findpeaks near-ties" in props[0] and "30 s clean-length gate" in props[1]
+
+
 def test_spans_that_are_not_the_inputs_nan_are_refused(result: dict[str, Any]) -> None:
     assert result["calls"]["not_the_nan"] == "night6:blankIdx"
 
@@ -252,3 +275,37 @@ def test_a_decimated_runs_file_is_trimmed_at_her_rate(result: dict[str, Any]) ->
     before = np.atleast_1d(tr["peaks_before"]).astype(np.int64)
     after = np.atleast_1d(tr["peaks_after"]).astype(np.int64)
     assert after.tolist() == [p for p in before.tolist() if p - 1 >= lp]
+
+
+def test_the_caveat_text_is_built_from_the_settings_and_rate_it_is_given(
+        result: dict[str, Any]) -> None:
+    """Review 2026-10-10 fix 5: nothing in the caveat is written out; W and R build it."""
+    w = result["settings"]
+    assert (w["lowPassOn"], w["lowPassCutoff"], w["lowPassOrder"], w["smoothWindow"],
+            w["edgeBufferSec"]) == (True, 0.15, 2, 5, 15)  # RULING 2026-10-09 (h) 1
+    alt = result["caveats_alt"]
+    for rate in ("full", "decimated"):
+        s = alt[rate]["setting"]
+        assert "low-pass 0.2 Hz, order 4, 10 s smoothing, 3 s edge" in s and "0-12 cpm" in s
+        assert "0.15" not in s and "0-9 cpm" not in s
+        assert "0.2 Hz-filtered wave" in alt[rate]["amplitude"]
+    assert "full rate (no decimation)" in alt["full"]["setting"]
+    assert "decimated x78" in alt["decimated"]["setting"]
+    off = alt["off"]
+    assert "no low-pass" in off["setting"] and "cpm" not in off["setting"]
+    assert "Hz-filtered" not in off["amplitude"]
+
+
+def test_the_slow_wave_settings_have_one_construction_site() -> None:
+    """Invariant 33: params().slow_wave, the call's W and the caveats share one struct."""
+    rec = (NIGHT6 / "night6_run_recording.m").read_text(encoding="utf-8")
+    assert "P.slow_wave = night6_slow_wave_settings();" in rec
+    assert "night6_call_slow_wave(X, fs, P.slow_wave," in rec
+    call = (NIGHT6 / "night6_call_slow_wave.m").read_text(encoding="utf-8")
+    assert "S.caveats = night6_slow_wave_caveats(W, R);" in call
+    for f in sorted(NIGHT6.glob("*.m")):
+        code = "\n".join(line.split("%", 1)[0]
+                         for line in f.read_text(encoding="utf-8").splitlines())
+        literal = re.search(r"'lowPassCutoff',\s*[\d.]", code)
+        assert (literal is not None) == (f.name == "night6_slow_wave_settings.m"), f.name
+        assert "0-9 cpm" not in code and "decimated x78" not in code, f.name

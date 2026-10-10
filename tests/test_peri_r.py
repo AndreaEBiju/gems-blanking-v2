@@ -128,8 +128,10 @@ def _bool(rows: np.ndarray, n: int) -> np.ndarray:
 
 
 def _write(tmp: Path, name: str, peri: pr.PeriRRecord | None) -> dict[str, Any]:
+    nobeat = [] if peri is not None and peri.train is not None else None  # (g) 1: none here
     path = ho.write_mask_file(tmp / name, _masks(), _prov(), signals=READS, fs=FS, n_samples=N,
-                              epoch_start_s=0.0, line_distrust=_line(), peri_r=peri, **GATE)
+                              epoch_start_s=0.0, line_distrust=_line(), peri_r=peri,
+                              no_beat_minutes=nobeat, **GATE)
     return loadmat(path)
 
 

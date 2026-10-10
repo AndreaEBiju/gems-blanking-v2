@@ -18,7 +18,12 @@ from gems_blanking_v2.emit import qc
 from gems_blanking_v2.emit.line_distrust import LineDistrustRecord
 from gems_blanking_v2.emit.provenance import MaskProvenance, ProvenanceError
 from gems_blanking_v2.extent import tolerance as tl
-from gems_blanking_v2.extent.grid import frame_sample_bounds, n_grid_frames, to_matlab_inclusive
+from gems_blanking_v2.extent.grid import (
+    frame_sample_bounds,
+    n_grid_frames,
+    seconds_to_sample,
+    to_matlab_inclusive,
+)
 from gems_blanking_v2.extent.routing import RouteDecision
 from gems_blanking_v2.io.nan_interop import assert_no_zero_runs, find_zero_runs
 from gems_blanking_v2.types import Candidate, Event
@@ -652,19 +657,77 @@ def test_a_rejected_minute_must_be_one_window_and_hold_no_beat() -> None:
         mk.no_beat_minutes(beat_times_s=b2, region_s=short, rejected_s=[[120.0, 150.55]])
 
 
-def test_no_beat_minutes_reach_the_spike_masks_only() -> None:
-    region = (0.0, 180.0)
-    beats = _beats_except(region, ((60.0, 120.0),))
-    mins = mk.no_beat_minutes(beat_times_s=beats, region_s=region, rejected_s=[[60.0, 120.0]])
-    spans = mk.no_beat_spike_spans(mins, ("L_T", "R_T"))
-    assert {(s.consumer, s.signal, s.reason) for s in spans} == {
-        ("spikes", "L_T", "no_beat_minute_rejected"), ("spikes", "R_T", "no_beat_minute_rejected")}
-    sig = {"spikes": ("L_T", "R_T"), "mmc": ("ANT1",), "slow_wave": ("ANT1",),
-           "breathing": ("RVN2",), "hrv": ("RVN2",)}
-    masks = mk.build_masks(sig, spans, n_frames=18000, t0_s=0.0)
-    for key, m in masks.items():
-        if key[0] == "spikes":
-            assert m.invalid[6000:12000].all() and not m.invalid[:6000].any()
-            assert not m.invalid[12000:].any()
-        else:
-            assert not m.invalid.any(), key  # invariant 2: no other consumer
+def _no_beat_epoch() -> tuple[list[mk.NoBeatMinute], dict[Any, Any]]:
+    """Two no-beat minutes overlapping the 60 s epoch [0, 60): [-30, 30) and [30, 90)."""
+    beats = _beats_except((-30.0, 150.0), ((-30.0, 90.0),))
+    mins = mk.no_beat_minutes(beat_times_s=beats, region_s=(-30.0, 150.0), rejected_s=[[0.0, 60.0]])
+    assert [(m.minute, m.kind) for m in mins] == [(0, "rejected"), (1, "empty")]
+    return mins, mk.build_masks(READS, [], n_frames=N_FRAMES, t0_s=0.0)
+
+
+def test_no_beat_minutes_are_kept_flagged_and_never_held(tmp_path: Path) -> None:
+    """RULING 2026-10-09 (g) 1: no-beat minutes are flagged per minute, never blanked.
+
+    The whole epoch lies in no-beat minutes. Under (b) 2 that blanked 100% of the spike
+    consumer and held the recording; now the spike blank spans are empty, retention is 1,
+    nothing is held, and each minute is flagged "no heartbeat reference" in the file and
+    the provenance.
+    """
+    mins, masks = _no_beat_epoch()
+    peri = peri_r_like(_ld(), heartlocs=[10 ** 9])  # a train, no beat inside this epoch
+    assert peri is not None and peri.train is not None and not peri.spans
+    path = ho.write_mask_file(tmp_path / "k.mat", masks, _prov(), signals=READS, fs=FS,
+                              line_distrust=_ld(), peri_r=peri, n_samples=N_SAMPLES,
+                              epoch_start_s=0.0, no_beat_minutes=mins, **GATE)
+    m = loadmat(str(path))
+    spike_line = _ld().matlab_spans("L_T")  # the only spike blank spans: line distrust
+    np.testing.assert_array_equal(m["blank_spikes_L_T"].reshape(-1, 2),
+                                  spike_line.reshape(-1, 2))
+    gate = json.loads(str(m["gate_json"][0]))
+    assert gate["held"] is False
+    assert json.loads(str(m["retention_json"][0]))["spikes|L_T|300-3000"] == 1.0
+    assert gate["spike_no_heartbeat_reference_s"] == pytest.approx(60.0)
+    half = seconds_to_sample(30.0, FS)
+    np.testing.assert_array_equal(m["noheartref_spikes_L_T"],
+                                  to_matlab_inclusive([0, half], [half, N_SAMPLES]))
+    flags = json.loads(str(m["noheartref_json"][0]))
+    assert flags["flag"] == mk.NO_HEARTBEAT_REFERENCE == "no heartbeat reference"
+    assert flags["blanked"] is False and flags["counts_toward_retention_hold"] is False
+    assert [(r["minute"], r["kind"], r["flag"], r["in_epoch_s"]) for r in flags["minutes"]] == [
+        (0, "rejected", "no heartbeat reference", [0.0, 30.0]),
+        (1, "empty", "no heartbeat reference", [30.0, N_SAMPLES / FS])]
+    prov = json.loads(str(m["provenance_json"][0]))
+    assert prov["spike_no_heartbeat_reference"] == flags
+    assert "(g) 1" in flags["rule"]
+    # no other consumer is touched (invariant 2)
+    for k in m:
+        if k.startswith("blank_") and not k.startswith("blank_spikes"):
+            assert m[k].size == 0, k
+
+
+def test_the_no_beat_flags_are_required_with_a_train_and_refused_without(
+        tmp_path: Path) -> None:
+    mins, masks = _no_beat_epoch()
+    train = peri_r_like(_ld(), heartlocs=[10 ** 9])
+    kw: dict[str, Any] = {"signals": READS, "fs": FS, "line_distrust": _ld(),
+                          "n_samples": N_SAMPLES, "epoch_start_s": 0.0, **GATE}
+    with pytest.raises(ValueError, match=r"pass the train's no-beat minutes"):
+        ho.write_mask_file(tmp_path / "a.mat", masks, _prov(), peri_r=train, **kw)
+    ok = ho.write_mask_file(tmp_path / "b.mat", masks, _prov(), peri_r=train,
+                            no_beat_minutes=[], **kw)
+    assert json.loads(str(loadmat(str(ok))["noheartref_json"][0]))["minutes"] == []
+    with pytest.raises(ValueError, match="no routed train"):
+        ho.write_mask_file(tmp_path / "c.mat", masks, _prov(), peri_r=peri_r_like(_ld()),
+                           no_beat_minutes=mins, **kw)
+    with pytest.raises(ValueError, match="given twice"):
+        ho.write_mask_file(tmp_path / "d.mat", masks, _prov(), peri_r=train,
+                           no_beat_minutes=[mins[0], mins[0]], **kw)
+    none = ho.write_mask_file(tmp_path / "e.mat", masks, _prov(), peri_r=peri_r_like(_ld()),
+                              **kw)
+    rec = json.loads(str(loadmat(str(none))["noheartref_json"][0]))
+    assert rec["minutes"] == [] and "no routed train" in rec["none_because"]
+
+
+def test_the_spike_blanking_of_no_beat_minutes_is_gone() -> None:
+    """(g) 1 removes (b) 2's spike spans: the masks module no longer makes them."""
+    assert not hasattr(mk, "no_beat_spike_spans")
