@@ -90,7 +90,8 @@ def test_the_gate_is_wired_into_the_plan_the_run_and_the_batch() -> None:
 def test_spikes_are_held_per_cuff_and_the_other_cuff_runs(results: dict) -> None:
     """Andrea, revised 2026-10-10: a held (or distrusted) cuff never holds the other cuff."""
     held = results["spike_cuff_held"]
-    assert held["status"] == "" and held["held_signals"] == "R_T"  # jsonencode of a 1x1 cell
+    hs = held["held_signals"]
+    assert held["status"] == "" and (hs if isinstance(hs, list) else [hs]) == ["R_T"]
     assert "100.0% blanked" in held["reason"] and "the others run" in held["reason"]
     assert results["spike_both_held"]["status"] == "skipped_held"
     assert results["spike_whole_held_old"]["status"] == "skipped_held"  # a pre-cuff file

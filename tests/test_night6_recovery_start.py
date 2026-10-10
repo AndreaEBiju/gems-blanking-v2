@@ -157,7 +157,7 @@ def _cuts(cut_at: Mapping[str, int] | None, default: int) -> list[dict[str, Any]
 def _file(rows: list[dict[str, Any]], ke: int = I0, session: str = SESSION,
           cut_at: Mapping[str, int] | None = None, km: int | None = None,
           fs: float = FS) -> dict[str, Any]:
-    """Build a v5 row: electrical settling at ``ke``, mechanical end at ``km`` (or ``ke``).
+    """Build a v7 row (stim_level declared): electrical settling ``ke``, mechanical end ``km``.
 
     The input mask is their maximum (RULING 2026-10-09 (i) 3 (c)). Every seconds field is
     its sample's own time at ``fs``, so each converts back (review 8 finding 4).
@@ -165,7 +165,7 @@ def _file(rows: list[dict[str, Any]], ke: int = I0, session: str = SESSION,
     km = ke if km is None else km
     k = max(ke, km)
     return {"session": session, "animal": "A", "electrical_basis": "from_electrical_end",
-            "fs": fs, "times_source": "synthetic",
+            "stim_level": "L1", "fs": fs, "times_source": "synthetic",
             "electrical_end_s": min(ke, km) / fs - 0.25, "mechanical_end_s": km / fs,
             "mechanical_end_sample0": km, "electrical_settle_s": ke / fs,
             "electrical_settle_sample0": ke, "electrical_s": 0.25,
