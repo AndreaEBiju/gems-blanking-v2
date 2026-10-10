@@ -13,6 +13,7 @@ from gems_blanking_v2.acceptance import report as ar
 from gems_blanking_v2.detect import chain
 from gems_blanking_v2.emit import line_distrust as ld
 from gems_blanking_v2.emit import masks as mk
+from gems_blanking_v2.emit import provenance as pv
 from gems_blanking_v2.emit.handoff import write_mask_file
 from gems_blanking_v2.emit.provenance import MaskProvenance
 from gems_blanking_v2.extent.grid import n_grid_frames
@@ -697,3 +698,10 @@ def test_nan_inside_a_list_makes_that_list_absent() -> None:
     doc = json.loads(ar.build_report(rows, ar.Disagreements(), code_commit="c",
                                      generation_sha="g").to_json())
     assert doc["rows"][0]["detail"] == {"kept": [1, 2.5, [3]], "inner": {"n": 4}}
+
+
+def test_the_report_carries_the_known_limitations() -> None:
+    rep = ar.build_report(_all_not_computable(), ar.Disagreements(), code_commit="c",
+                          generation_sha="g")
+    assert json.loads(rep.to_json())["known_limitations"] == pv.known_limitations_record()
+    assert "Known limitations:" in rep.to_markdown()

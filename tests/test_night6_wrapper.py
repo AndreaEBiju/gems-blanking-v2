@@ -746,6 +746,9 @@ def _check_fallback(res: dict[str, Any], out_root: Path, out_fb: Path) -> None:
     default = json.loads((out_root / "T" / SESSION_A / MODEL / "e5" / "night6_record.json")
                          .read_text(encoding="utf-8"))
     assert default["step1a_fallback"]["keys"] == []
+    kl = default["known_limitations"]  # Andrea 2026-10-10: carried from the mask provenance
+    assert [x["id"] for x in (kl if isinstance(kl, list) else [kl])] == [
+        "confirmed_cores_vs_marks"]
     assert Path(default["step1a_fallback"]["file"]).name == "step1a_fallback.json"
     assert default["runs"][0]["step1a_fallback"] == []
     listed = json.loads((out_fb / "T" / SESSION_A / MODEL / "e5" / "night6_record.json")

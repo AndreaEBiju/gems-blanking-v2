@@ -51,7 +51,11 @@ from scipy.stats import t as student_t
 
 from gems_blanking_v2.constants import ENG_BAND
 from gems_blanking_v2.emit.masks import TAPER_S, ConsumerMask, MaskKey, MaskSpan
-from gems_blanking_v2.emit.provenance import MaskProvenance, ProvenanceError
+from gems_blanking_v2.emit.provenance import (
+    MaskProvenance,
+    ProvenanceError,
+    known_limitations_record,
+)
 from gems_blanking_v2.extent.tolerance import expected_consumers
 from gems_blanking_v2.io.nan_interop import find_zero_runs
 from gems_blanking_v2.io.registry_log import RegistryEvent, replay
@@ -1094,7 +1098,8 @@ class AcceptanceReport:
                 "disagreements": [{k: v for k, v in asdict(d).items() if v}
                                   for d in self.disagreements],
                 "created_at": self.created_at, "code_commit": self.code_commit,
-                "generation_sha": self.generation_sha}
+                "generation_sha": self.generation_sha,
+                "known_limitations": known_limitations_record()}
 
     def to_json(self) -> str:
         """Canonical, ASCII-escaped JSON; no NaN."""
@@ -1110,6 +1115,9 @@ class AcceptanceReport:
         lines += ["", f"Gate passed: {self.gate_passed}", "", "Spec contradictions:"]
         lines += [f"- row {c['row']}: {c['conflict']} -> {c['implemented']}"
                   for c in SPEC_CONTRADICTIONS]
+        lines += ["", "Known limitations:"]
+        lines += [f"- {x['limitation']} ({x['evidence']}; {x['status']})"
+                  for x in known_limitations_record()]
         lines += ["", "Real data vs constants:"]
         lines += [f"- {d.constant}: spec {d.spec_value}; measured {d.measured} ({d.source}"
                   + (f", {d.date})" if d.date else ")") for d in self.disagreements]
