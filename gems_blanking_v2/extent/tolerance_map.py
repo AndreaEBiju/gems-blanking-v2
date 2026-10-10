@@ -21,9 +21,17 @@ records that verdict per kind (``mapped_z_from.above_background``) and
 Inputs are DECLARED and hashed by the caller (night4's night config ``tolerances`` entry):
 the v2 tolerances (``consumer_tolerances_v2.json``, harm criterion v2 hashed in its
 ``criterion_v2``), the tolerance mapping made FROM that file (its ``input.sha256`` must equal
-the tolerances' sha256) and the visibility scan of every harmful row. :func:`option1_tolerances`
-checks they belong together and builds the table; ``mmc_provenance_flag`` (the rpeakUnits
-defect the mmc rows were measured under) is carried into every record.
+the tolerances' sha256) and the visibility scan of every harmful row, made from the same file
+(its ``input.sha256`` too, review 7 finding 4). :func:`option1_tolerances` checks they belong
+together and builds the table; ``mmc_provenance_flag`` (the rpeakUnits defect the mmc rows
+were measured under) is carried into every record.
+
+Cross-band scope (review 7 finding 2): each z consumer DECLARES how far option (1)'s
+cross-band rule reaches - ``all_detecting_pairs`` (the ruling as written), ``own_signals_only``
+or ``off`` (``tolerance.CROSS_BAND_SCOPES``) - with no default (:func:`check_cross_band_scope`).
+The declaration is part of the table's record, so it is in every mask's provenance and in the
+hash stage 1 is fresh under; the harmful rows a scope leaves unblanked are listed as residual
+risk (:func:`scope_residual`).
 
 OUTSIDE THE GENERATION HASH.
 """
@@ -42,6 +50,10 @@ import numpy.typing as npt
 
 from gems_blanking_v2.bands.zscore import NULL_P90_Z
 from gems_blanking_v2.extent.tolerance import (
+    CROSS_BAND_SCOPE_ALL,
+    CROSS_BAND_SCOPE_OFF,
+    CROSS_BAND_SCOPE_OWN,
+    CROSS_BAND_SCOPES,
     TOLERANCES_NOT_PRODUCTION,
     ToleranceTable,
     expected_consumers,
@@ -50,15 +62,18 @@ from gems_blanking_v2.extent.tolerance import (
 __all__ = [
     "OPTION1_RULE",
     "RISE_MIN_Z",
+    "SCOPE_OWN_HOST_COLUMNS",
     "TOLERANCE_VERSION",
     "Z_FLOOR",
     "ConsumerThreshold",
     "Option1Tolerances",
     "assess_window",
+    "check_cross_band_scope",
     "kind_visible",
     "option1_threshold",
     "option1_tolerances",
     "residual_risk",
+    "scope_residual",
     "z_consumers",
 ]
 
@@ -211,6 +226,79 @@ def z_consumers() -> tuple[str, ...]:
     return tuple(c for c in expected_consumers() if c != "hrv")
 
 
+SCOPE_OWN_HOST_COLUMNS: Final[Mapping[str, tuple[str, ...]]] = {
+    "spikes": ("LVN", "RVN"),
+    "breathing": ("LVN", "RVN"),
+    "mmc": ("ANT1", "ANT2", "ANT3"),
+    "slow_wave": ("ANT1", "ANT2", "ANT3"),
+}
+"""The tolerance sweep's host columns (tolmap ``host_columns``: RVN, LVN, ANT1-3) that count as
+a consumer's OWN signals when the visibility scan is read for ``own_signals_only``: the nerve
+columns for spikes and breathing (in this cohort the HR channel breathing reads is a nerve
+signal or a cross-cuff nerve lead), the stomach columns for mmc and slow_wave. A host-level
+reading of ``tolerance.own_detection_signals``, used only to LIST residual risk."""
+
+
+def check_cross_band_scope(scopes: object) -> dict[str, str]:
+    """Return the declared cross-band scope per z consumer, or raise ValueError.
+
+    Review 7 finding 2: every z consumer (:func:`z_consumers`) declares exactly one of
+    ``tolerance.CROSS_BAND_SCOPES``. Nothing is defaulted: a missing consumer, an unknown
+    consumer (``hrv`` included - its extent is operational), or an unknown value is refused
+    by name.
+    """
+    if not isinstance(scopes, Mapping):
+        msg = (f"the cross-band scope is a mapping consumer -> one of {list(CROSS_BAND_SCOPES)}"
+               f", declared for every z consumer {list(z_consumers())}; got {scopes!r}")
+        raise ValueError(msg)
+    missing = [c for c in z_consumers() if c not in scopes]
+    extra = sorted(str(c) for c in scopes if c not in z_consumers())
+    bad = {str(c): v for c, v in scopes.items() if v not in CROSS_BAND_SCOPES}
+    if missing or extra or bad:
+        msg = (f"cross-band scope: undeclared {missing}, not z consumers {extra}, unknown "
+               f"values {bad}; each of {list(z_consumers())} declares one of "
+               f"{list(CROSS_BAND_SCOPES)}, nothing is defaulted (review 7 finding 2)")
+        raise ValueError(msg)
+    return {c: str(scopes[c]) for c in z_consumers()}
+
+
+def scope_residual(scan: Mapping[str, Any], consumer: str, scope: str,
+                   visible_kinds: Sequence[str]) -> list[dict[str, Any]]:
+    """Harmful rows the DETECTOR sees but ``scope`` leaves unblanked for ``consumer``.
+
+    Under ``all_detecting_pairs`` none. Under ``off``, every detectable row (some pair over
+    z_enter) of a kind that is not visible in the consumer's own band: cross-band would have
+    blanked it, so it becomes residual risk (review 7 finding 2). Under ``own_signals_only``,
+    those of them whose detectable pairs all lie off the consumer's own host columns
+    (:data:`SCOPE_OWN_HOST_COLUMNS`). Recorded, never blanked.
+    """
+    if scope not in CROSS_BAND_SCOPES:
+        msg = f"{consumer}: unknown cross-band scope {scope!r}"
+        raise ValueError(msg)
+    if scope == CROSS_BAND_SCOPE_ALL:
+        return []
+    own = SCOPE_OWN_HOST_COLUMNS.get(consumer, ())
+    out = []
+    for r in scan["rows"]:
+        if r["consumer"] != consumer or not r["pairs_detectable"] or r["kind"] in visible_kinds:
+            continue
+        cols = {str(q).split("|", 1)[0] for q in r["pairs_detectable"]}
+        if scope == CROSS_BAND_SCOPE_OWN and cols & set(own):
+            continue
+        out.append({"kind": r["kind"], "amplitude_sigma": float(r["tolerance_sigma"]),
+                    "row": {"host_tag": r["host_tag"], "dur_s": float(r["dur_s"]),
+                            "chan_set": r["chan_set"], "status": r["status"],
+                            "censored": bool(r["censored"])},
+                    "pairs_detectable": list(r["pairs_detectable"]),
+                    "why": ("cross-band off: detected, invisible in the band, not blanked"
+                            if scope == CROSS_BAND_SCOPE_OFF else
+                            "own_signals_only: detected only off the consumer's own signals, "
+                            "not blanked")})
+    out.sort(key=lambda x: (x["kind"], x["amplitude_sigma"], x["row"]["host_tag"],
+                            x["row"]["dur_s"], x["row"]["chan_set"]))
+    return out
+
+
 @dataclass(frozen=True)
 class Option1Tolerances:
     """The option-(1) table: thresholds, residual risk, flags and the inputs it came from."""
@@ -221,13 +309,17 @@ class Option1Tolerances:
     flags: Mapping[str, Any]
     inputs: Mapping[str, Any]
 
-    cross_band: bool = True
-    """Option (1): a core whose own band stays under the threshold blanks over its detected
-    extent (``tolerance.detected_extent``)."""
+    cross_band_scope: Mapping[str, str]
+    """Each z consumer's DECLARED cross-band scope (:func:`check_cross_band_scope`): how far a
+    core whose own band stays under the threshold blanks over its detected extent
+    (``tolerance.detected_extent``)."""
 
     def record(self) -> dict[str, Any]:
         """Everything a mask's provenance carries about its thresholds (JSON-ready)."""
-        return {"version": TOLERANCE_VERSION, "rule": OPTION1_RULE, "cross_band": True,
+        return {"version": TOLERANCE_VERSION, "rule": OPTION1_RULE,
+                "cross_band_scope": dict(sorted(self.cross_band_scope.items())),
+                "cross_band_scope_source": "declared per consumer in the night config "
+                                           "(review 7 finding 2; no default)",
                 "z_tol": dict(self.table.z_tol), "floor_z": Z_FLOOR, "rise_min_z": RISE_MIN_Z,
                 "thresholds": {c: t.record() for c, t in sorted(self.thresholds.items())},
                 "residual_risk": {c: {k: list(v) for k, v in r.items()}
@@ -244,14 +336,17 @@ class Option1Tolerances:
 def option1_tolerances(tolerances: Mapping[str, Any], mapping: Mapping[str, Any],
                        scan: Mapping[str, Any], *, tolerances_sha256: str,
                        criterion_sha256: str, mapping_sha256: str, scan_sha256: str,
-                       generation: str) -> Option1Tolerances:
+                       generation: str, cross_band_scope: object) -> Option1Tolerances:
     """Build the option-(1) table from the declared, hashed v2 inputs, or raise ValueError.
 
     Refused by name: tolerances without the v2 harm criterion, or whose ``criterion_v2``
     sha256 is not the declared one; a mapping not made from these tolerances (``input.sha256``)
     or of another chain generation, made on non-gate rows or flagged
     :data:`~gems_blanking_v2.extent.tolerance.TOLERANCES_NOT_PRODUCTION`, or missing a
-    consumer; a scan of another generation. ``mmc_provenance_flag`` is carried as a flag.
+    consumer; a scan of another generation, or one that does not record these tolerances as
+    its input (``input.sha256``, review 7 finding 4); a cross-band scope that is not declared
+    for exactly the z consumers (:func:`check_cross_band_scope`). ``mmc_provenance_flag`` is
+    carried as a flag.
     """
     crit = tolerances.get("criterion_v2")
     if not isinstance(crit, Mapping) or crit.get("sha256") != criterion_sha256:
@@ -275,6 +370,14 @@ def option1_tolerances(tolerances: Mapping[str, Any], mapping: Mapping[str, Any]
             msg = (f"the {what} is of chain generation {doc.get('generation_sha256_16')!r}, "
                    f"not {generation}")
             raise ValueError(msg)
+    raw_input = scan.get("input")
+    sinp: Mapping[str, Any] = raw_input if isinstance(raw_input, Mapping) else {}
+    if sinp.get("sha256") != tolerances_sha256:
+        msg = (f"the visibility scan records input tolerances {sinp.get('sha256')!r}, not the "
+               f"declared tolerances {tolerances_sha256} the mapping was made from (review 7 "
+               "finding 4): its residual risk would describe other tolerances")
+        raise ValueError(msg)
+    scopes = check_cross_band_scope(cross_band_scope)
     thresholds: dict[str, ConsumerThreshold] = {}
     residual: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for c in z_consumers():
@@ -285,6 +388,10 @@ def option1_tolerances(tolerances: Mapping[str, Any], mapping: Mapping[str, Any]
         thresholds[c] = option1_threshold(c, entry.get("kinds") or {},
                                           entry.get("kinds_not_raised") or ())
         residual[c] = residual_risk(scan, c)
+        if scopes[c] != CROSS_BAND_SCOPE_ALL:
+            key = ("cross_band_off" if scopes[c] == CROSS_BAND_SCOPE_OFF
+                   else "detected_only_off_own_signals")
+            residual[c][key] = scope_residual(scan, c, scopes[c], thresholds[c].visible_kinds)
     table = ToleranceTable({c: t.z for c, t in thresholds.items()},
                            f"{OPTION1_RULE}; tolerances {tolerances_sha256[:16]} (criterion v2 "
                            f"{criterion_sha256[:16]}), mapping {mapping_sha256[:16]}")
@@ -294,4 +401,4 @@ def option1_tolerances(tolerances: Mapping[str, Any], mapping: Mapping[str, Any]
     inputs = {"tolerances_sha256": tolerances_sha256, "criterion_sha256": criterion_sha256,
               "mapping_sha256": mapping_sha256, "visibility_scan_sha256": scan_sha256,
               "generation": generation, "mapping_refused": dict(mapping.get("refused") or {})}
-    return Option1Tolerances(table, thresholds, residual, flags, inputs)
+    return Option1Tolerances(table, thresholds, residual, flags, inputs, scopes)

@@ -78,13 +78,17 @@ import numpy.typing as npt
 from scipy.signal import butter, sosfilt, unit_impulse
 
 from gems_blanking_v2.bands.envelope import IMPULSE_DECAY_FRACTION
-from gems_blanking_v2.constants import BANDS, CONSUMERS, GRID_S, ConsumerSpec
+from gems_blanking_v2.constants import BANDS, CONSUMERS, GRID_S, NERVE_SIGNALS, ConsumerSpec
 from gems_blanking_v2.physio.rpeaks import DECIMATE_TARGET_HZ, detect_rpeaks
 from gems_blanking_v2.types import Event
 
 __all__ = [
     "CONSUMER_FILTERS",
     "CONSUMER_SIGNAL_ERRATA",
+    "CROSS_BAND_SCOPES",
+    "CROSS_BAND_SCOPE_ALL",
+    "CROSS_BAND_SCOPE_OFF",
+    "CROSS_BAND_SCOPE_OWN",
     "DECISION_RULES",
     "EDGE_MEASUREMENTS_DIR",
     "EDGE_SETTLING",
@@ -112,6 +116,7 @@ __all__ = [
     "ToleranceTable",
     "beat_train_changed",
     "cardiac_operational_damage",
+    "channel_detection_signals",
     "check_pilot_root",
     "check_stand_in_outputs",
     "compute_extent",
@@ -131,6 +136,7 @@ __all__ = [
     "impulse_settling_s",
     "is_confirmed_motion",
     "mmc_not_measured_spans",
+    "own_detection_signals",
     "settling_provenance",
     "stand_in_tolerance_doc",
     "step_settling_s",
@@ -841,6 +847,20 @@ class Extent:
     basis: str = EXTENT_BASIS_OWN_BAND
 
 
+CROSS_BAND_SCOPE_ALL: Final = "all_detecting_pairs"
+"""RULING 2026-10-09 (i) 1 as written: every pair that detected the event sets its extent."""
+CROSS_BAND_SCOPE_OWN: Final = "own_signals_only"
+"""Only detecting pairs on the consumer's own signals or the channels they are built from
+(:func:`own_detection_signals`) set the extent."""
+CROSS_BAND_SCOPE_OFF: Final = "off"
+"""No cross-band extent: the consumer's harmful kinds invisible in its band are residual risk."""
+CROSS_BAND_SCOPES: Final[tuple[str, ...]] = (CROSS_BAND_SCOPE_ALL, CROSS_BAND_SCOPE_OWN,
+                                             CROSS_BAND_SCOPE_OFF)
+"""The cross-band scope every z consumer DECLARES (review 7 finding 2); there is no default.
+Review 7 estimated the ruling's scope on the pilot at 46-99% of epoch time blanked for
+slow_wave, so the choice goes back to Andrea and the declaration records it."""
+
+
 @dataclass(frozen=True)
 class CrossBand:
     """Option (1)'s cross-band inputs (RULING 2026-10-09 (i) 1) for :func:`extents_for_events`.
@@ -850,11 +870,87 @@ class CrossBand:
     reads every signal, raw contacts included - invariant 6), on the same grid and timeline
     as the consumers' z. ``floor_z`` is the clean null's p90 (1.44): a detecting pair's run
     counts while it is above it.
+
+    ``scope`` is each consumer's DECLARED cross-band scope (:data:`CROSS_BAND_SCOPES`). Every
+    consumer that reaches :func:`detected_extent` needs one; a consumer without one is
+    refused, never defaulted. ``own_signals`` maps each ``own_signals_only`` consumer to the
+    detection signals it may take its extent from (:func:`own_detection_signals`).
     """
 
     pairs: Mapping[str, Sequence[tuple[str, str]]]
     z: Mapping[tuple[str, str], npt.ArrayLike]
     floor_z: float
+    scope: Mapping[str, str]
+    own_signals: Mapping[str, frozenset[str]]
+
+
+_CUFF_SIGNAL_SUFFIXES: Final = tuple(f"_{s}" for s in NERVE_SIGNALS)
+
+
+def _cuff_of(name: str) -> str | None:
+    """Return the cuff of a cuff-prefixed derived signal (``"L_T"`` -> ``"L"``), else None."""
+    for suf in _CUFF_SIGNAL_SUFFIXES:
+        if name.endswith(suf) and len(name) > len(suf):
+            return name[: -len(suf)]
+    return None
+
+
+def channel_detection_signals(channels: Sequence[Any]) -> dict[str, str]:
+    """Map each acquired channel's name to the detection signal that carries it.
+
+    A cuff contact (``cuff_id`` and ``contact_index`` set) is ``<cuff>_V<k>``. Any other
+    nerve channel of a cuff (the old cohort's hardware tripole) is ``<cuff>_T``. A stomach
+    channel is detection's raw stomach signal of the same name (``chain.detect_region``).
+    Other channels carry no detection signal and are left out.
+    """
+    out: dict[str, str] = {}
+    for c in channels:
+        if c.cuff_id is not None and c.contact_index is not None:
+            out[c.name] = f"{c.cuff_id}_V{int(c.contact_index)}"
+        elif c.cuff_id is not None and c.role == "nerve":
+            out[c.name] = f"{c.cuff_id}_T"
+        elif c.role == "stomach":
+            out[c.name] = c.name
+    return out
+
+
+def own_detection_signals(consumer_signals: Sequence[str], detection_signals: Sequence[str],
+                          channel_signals: Mapping[str, str]) -> frozenset[str]:
+    """Return the detection signals a consumer's ``own_signals_only`` extent may read.
+
+    Each signal the consumer reads (:func:`consumer_signals`, i.e. ``CONSUMERS``) brings a
+    family:
+
+    * a cuff signal (``"L_T"``, ``"R_V2"``) brings its cuff's nerve signals
+      (``<cuff>_V1..V3`` and ``<cuff>_T``: the channels it is built from, and the tripole
+      built from them);
+    * a stomach signal (a raw stomach channel or ``stomach_ref``) brings every stomach
+      signal detection reads (the raw stomach channels and ``stomach_ref``, their common
+      average);
+    * a cross-site lead ``"<plus>-<minus>"`` (``physio.hr_pairs``) brings both of its
+      channels' families.
+
+    Raw channel names are resolved with ``channel_signals``
+    (:func:`channel_detection_signals`). A signal that resolves to no detection signal is
+    refused (ValueError): its family is unknown, never guessed.
+    """
+    det = tuple(detection_signals)
+    stomach = frozenset(d for d in det if _cuff_of(d) is None)
+    out: set[str] = set()
+    for s in consumer_signals:
+        whole = s in det or s in channel_signals or "-" not in s
+        for part in ([s] if whole else s.split("-")):
+            d = part if part in det else channel_signals.get(part)
+            if d is None or d not in det:
+                msg = (f"consumer signal {s!r}: {part!r} is no detection signal and no channel "
+                       "that carries one; its own-signal family is unknown")
+                raise ValueError(msg)
+            cuff = _cuff_of(d)
+            if cuff is None:
+                out |= stomach
+            else:
+                out |= {x for x in det if _cuff_of(x) == cuff}
+    return frozenset(out)
 
 
 class ExtentNotAssessableError(ValueError):
@@ -930,6 +1026,30 @@ def compute_extent(event: Event, z: Mapping[tuple[str, str], npt.ArrayLike], con
                   BANDS[spec.band].window_s)
 
 
+def _scoped_pairs(cross: CrossBand, event_id: str, consumer: str
+                  ) -> tuple[tuple[str, str], ...] | None:
+    """Return the detecting pairs that ``consumer``'s declared scope admits; None for ``off``."""
+    if consumer not in cross.scope:
+        msg = (f"{consumer} declares no cross-band scope (one of {list(CROSS_BAND_SCOPES)}); "
+               "it is never defaulted (review 7 finding 2)")
+        raise KeyError(msg)
+    scope = cross.scope[consumer]
+    if scope not in CROSS_BAND_SCOPES:
+        msg = (f"{consumer}: unknown cross-band scope {scope!r}; declared scopes: "
+               f"{list(CROSS_BAND_SCOPES)}")
+        raise ValueError(msg)
+    if scope == CROSS_BAND_SCOPE_OFF:
+        return None
+    pairs = tuple(cross.pairs[event_id])
+    if scope == CROSS_BAND_SCOPE_OWN:
+        if consumer not in cross.own_signals:
+            msg = f"{consumer} is own_signals_only but its own detection signals are not given"
+            raise KeyError(msg)
+        own = cross.own_signals[consumer]
+        pairs = tuple(q for q in pairs if q[0] in own)
+    return pairs
+
+
 def detected_extent(event: Event, cross: CrossBand, event_id: str, consumer: str, *,
                     signal: str, fs: float, z_t0_s: float,
                     grid_s: float = GRID_S) -> Extent | None:
@@ -943,6 +1063,12 @@ def detected_extent(event: Event, cross: CrossBand, event_id: str, consumer: str
     clipped to the z record. ``None`` when no detecting pair is over the floor there. The
     tolerance-evidence reading (``tolevidence/analysis.py`` ``cross_extent``), restricted to
     the detecting pairs.
+
+    The consumer's declared scope (``cross.scope``, review 7 finding 2) picks the pairs:
+    ``all_detecting_pairs`` takes every detecting pair (the ruling as written);
+    ``own_signals_only`` only those on ``cross.own_signals[consumer]``; ``off`` none, so the
+    result is ``None`` (under tolerance; its invisible kinds are residual risk). An undeclared
+    or unknown scope is refused.
     """
     if consumer == "hrv":
         msg = "hrv's extent is operational: use hrv_extent"
@@ -950,6 +1076,9 @@ def detected_extent(event: Event, cross: CrossBand, event_id: str, consumer: str
     if event_id not in cross.pairs:
         msg = f"event {event_id} has no detecting pairs: its detected extent is unknown"
         raise KeyError(msg)
+    pairs = _scoped_pairs(cross, event_id, consumer)
+    if pairs is None:
+        return None
     spec = extent_consumers()[consumer]
     c = event.candidate
     i0 = int(math.floor((c.start_s - z_t0_s) / grid_s))
@@ -957,7 +1086,7 @@ def detected_extent(event: Event, cross: CrossBand, event_id: str, consumer: str
     lo_f: int | None = None
     hi_f: int | None = None
     n = None
-    for pair in cross.pairs[event_id]:
+    for pair in pairs:
         if pair not in cross.z:
             msg = f"event {event_id}: no detection z for its detecting pair {pair}"
             raise KeyError(msg)

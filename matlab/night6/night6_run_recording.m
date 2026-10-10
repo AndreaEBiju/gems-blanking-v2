@@ -169,10 +169,15 @@ function records = night6_run_recording(maskFolder, varargin)
                 && isfield(R, 'edge_settling') && isstruct(R.edge_settling) ...
                 && isfield(R.edge_settling, 'sha256') ...
                 && strcmp(R.edge_settling.sha256, EdNow.sha256);   % same edge settlings
-            if isfield(R, 'status') && strcmp(R.status, 'complete') && same
+            % review 7 finding 5: every HR run serves one consumer, with outputs_used ((i) 4)
+            [hrOk, hrWhy] = night6_hr_runs_resumable(R);
+            if isfield(R, 'status') && strcmp(R.status, 'complete') && same && hrOk
                 records{k} = R;
                 todo(k) = false;
                 fprintf('[night6] %s %s: complete, skipped (resumable)\n', session, tag);
+            elseif isfield(R, 'status') && strcmp(R.status, 'complete') && same
+                fprintf('[night6] %s %s: complete before (i) 4 (%s), rerun\n', session, tag, ...
+                        hrWhy);
             elseif isfield(R, 'status') && strcmp(R.status, 'complete')
                 fprintf('[night6] %s %s: complete for another mask file, rerun\n', session, tag);
             end
@@ -560,7 +565,8 @@ function F = function_provenance()
             'night6_trim_modes', 'night6_check_trim_mode', 'night6_edge_settling', ...
             'night6_slow_wave_rates', 'night6_check_decimation', 'night6_decimate_masked', ...
             'night6_call_slow_wave', 'night6_keep_slow_wave', 'night6_slow_wave_settings', ...
-            'night6_slow_wave_caveats', 'night6_pilot_root', 'night6_hr_outputs'};
+            'night6_slow_wave_caveats', 'night6_pilot_root', 'night6_hr_outputs', ...
+            'night6_hr_runs_resumable'};
     hers = [setdiff({C.name}, ours, 'stable'), night6_v2_steps(), ...
             {'step1a_blank_cardiac', 'pipeline_params', 'bulk_load_one'}];   % step1a: (j) 1 fallback
     here = fileparts(mfilename('fullpath'));
