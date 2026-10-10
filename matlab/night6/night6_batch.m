@@ -11,6 +11,8 @@ function summary = night6_batch(listFile, nWorkers, varargin)
 %     "units": "V",                         (declared for the cohort, invariants 14/24)
 %     "out_root": "<output folder>",
 %     "processing_new": "<path>",           (optional; default ../../../processing_new)
+%     "beats_root": "<path>",               (optional: the beats files resolve here instead
+%                                            of gems_root - night6_run_recording BeatsRoot)
 %     "label": "free text",                 (optional; copied into every record)
 %     "recovery_starts": "<path>",          (RULING 2026-10-08 (k) 2; required for any
 %                                            stim_recovery recording - see RecoveryStarts)
@@ -73,11 +75,13 @@ function summary = night6_batch(listFile, nWorkers, varargin)
     end
     starts = '';
     if isfield(L, 'recovery_starts'), starts = resolve(L.gems_root, L.recovery_starts); end
+    broot = '';
+    if isfield(L, 'beats_root'), broot = L.beats_root; end
     preflight_recovery(folders, starts);   % (k) 2: before any recording is loaded
     args = {'GemsRoot', L.gems_root, 'Units', L.units, 'OutRoot', L.out_root, ...
             'CodeCommit', commit, 'Label', label, 'DryRun', opt.DryRun, ...
             'Figures', opt.Figures, 'Force', opt.Force, 'KeepInputs', logical(opt.KeepInputs), ...
-            'RecoveryStarts', starts, ...
+            'RecoveryStarts', starts, 'BeatsRoot', broot, ...
             'RecoveryTrimMode', mode, 'SlowWaveRate', SW.name};
     status = cell(1, n); wall = zeros(1, n);
     t0 = tic;

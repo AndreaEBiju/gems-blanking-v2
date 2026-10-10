@@ -33,6 +33,12 @@ function records = night6_run_recording(maskFolder, varargin)
 % Name-value inputs (no positional options - invariant 40):
 %   GemsRoot    store root; meta.json, the recording (meta.source_path) and the beats
 %               file (mask provenance extra.beats_file.hrv_beats) resolve against it
+%   BeatsRoot   optional root the beats file resolves against INSTEAD of GemsRoot (the
+%               same relative path data/<animal>/<session>/<session>_beats.mat), for a
+%               routed train not yet published beside meta.json - e.g. the pilot's
+%               byte-identical copies from the routing workspace. The file must still
+%               hash to the mask provenance's sha256 (night6:beatsSha); the root used is
+%               in every record (source.beats_root). Default '' (GemsRoot).
 %   Units       'V' | 'mV' | 'uV' of the recording file. REQUIRED, no default (inv. 14)
 %   OutRoot     outputs go to OutRoot/<animal>/<session>/<model-id>/<epoch>/
 %   MetaFile    default GemsRoot/data/<animal>/<session>/meta.json
@@ -69,6 +75,7 @@ function records = night6_run_recording(maskFolder, varargin)
     ip = inputParser;
     ip.addRequired('maskFolder', @(x) ischar(x) || isstring(x));
     ip.addParameter('GemsRoot', '', @(x) ischar(x) || isstring(x));
+    ip.addParameter('BeatsRoot', '', @(x) ischar(x) || isstring(x));
     ip.addParameter('Units', '', @(x) ischar(x) || isstring(x));
     ip.addParameter('OutRoot', '', @(x) ischar(x) || isstring(x));
     ip.addParameter('MetaFile', '', @(x) ischar(x) || isstring(x));
@@ -216,10 +223,13 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
         % train resolver) names the train's store path, its sha256, its origin as a 0-based
         % file sample and the epoch's beat count; night6_prepare_epoch slices with them.
         ref = prov.extra.beats_file;
-        R.source.beats_file = from_root(o.GemsRoot, ref.hrv_beats);
+        broot = o.GemsRoot;
+        if ~isempty(o.BeatsRoot), broot = o.BeatsRoot; end
+        R.source.beats_root = broot;
+        R.source.beats_file = from_root(broot, ref.hrv_beats);
         if ~isfile(R.source.beats_file)
             error('night6:beatsMissing', ['the mask provenance names the beat train %s, which ' ...
-                  'is not in the store (not yet published?)'], ref.hrv_beats);
+                  'is not under %s (not yet published?)'], ref.hrv_beats, broot);
         end
         beats = struct('data', load(R.source.beats_file), 'record', ref, ...
                        'sha256', night6_sha256_file(R.source.beats_file));

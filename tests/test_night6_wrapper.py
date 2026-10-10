@@ -637,7 +637,8 @@ def test_night6_wrapper_slices_masks_and_skips(tmp_path: Path) -> None:
                        "keep_tag": "e0", "stale_tag": "e5"},
             "mmc_units": mmc_units, "slow_wave": sw["case"], "v2": v2["case"],
             "slow_wave2": sw2, "fallback_hash": [p.as_posix() for p in fb_hash],
-            "fallback": _fallback_case(tmp_path, root)}
+            "fallback": _fallback_case(tmp_path, root),
+            "beats_root": _beats_root_case(tmp_path, root)}
     case_file, res_file = tmp_path / "case.json", tmp_path / "result.json"
     case_file.write_text(json.dumps(case, ensure_ascii=True), encoding="utf-8", newline="\n")
     cmd = (f"addpath('{pnew.as_posix()}'); addpath('{NIGHT6.as_posix()}'); "
@@ -667,6 +668,46 @@ def test_night6_wrapper_slices_masks_and_skips(tmp_path: Path) -> None:
     _check_fallback_hash(fb_hash, res["fallback_sha"])
     _check_joint_mask(res["joint"])
     _check_spike_params(out_root / "T" / SESSION_A / MODEL / "e5")
+    _check_beats_root(res["beats_root"], tmp_path, root)
+
+
+def _beats_root_case(tmp: Path, root: Path) -> dict[str, Any]:
+    """Return the BeatsRoot case: SESSION_A's beats file under other roots.
+
+    ok: a byte copy; missing: absent; changed: one beat moved (another sha256); none: ''
+    (GemsRoot), whose copy the harness moves away for these runs, so it fails as not found.
+    """
+    rel = Path("data") / "T" / SESSION_A / f"{SESSION_A}_beats.mat"
+    src = root / rel
+    assert src.is_file()
+    out: dict[str, Any] = {"store_beats": src.as_posix(),
+                           "mask_folder": (root / "data" / "T" / SESSION_A / "masks" / MODEL)
+                           .as_posix()}
+    for name in ("ok", "missing", "changed", "none"):
+        r = tmp / f"beats_{name}"
+        if name in ("ok", "changed"):
+            (r / rel).parent.mkdir(parents=True)
+            (r / rel).write_bytes(src.read_bytes())
+        if name == "changed":
+            m = {k: v for k, v in loadmat(r / rel).items() if not k.startswith("__")}
+            m["heartlocs"] = np.asarray(m["heartlocs"], dtype=np.float64) + 1.0
+            savemat(r / rel, m)
+        out[name] = {"root": "" if name == "none" else r.as_posix(),
+                     "out_root": (tmp / f"out_beats_{name}").as_posix()}
+    return out
+
+
+def _check_beats_root(res: dict[str, str], tmp: Path, root: Path) -> None:
+    """Check the beats file resolves under BeatsRoot, hash-checked, named in the record."""
+    assert res["ok"] == "", res["ok"]
+    rec = json.loads(next((tmp / "out_beats_ok").glob("T/*/*/e0/night6_record.json"))
+                     .read_text(encoding="utf-8"))
+    assert Path(rec["source"]["beats_root"]) == tmp / "beats_ok"
+    assert Path(rec["source"]["beats_file"]).is_relative_to(tmp / "beats_ok")
+    assert res["missing"].startswith("night6:beatsMissing") and "beats_missing" in res["missing"]
+    assert res["changed"].startswith("night6:beatsSha"), res["changed"]
+    assert res["none"].startswith("night6:beatsMissing")  # '' is GemsRoot, whose copy moved
+    assert (root / "data" / "T" / SESSION_A / f"{SESSION_A}_beats.mat").is_file()  # restored
 
 
 FALLBACK_OK = {"schema": 1, "ruling": "test", "entries": [
@@ -1132,3 +1173,10 @@ def _check_beats(whole_file: Path, epoch_file: Path, i0: int, n: int) -> None:
     assert got["blankSpans"].reshape(-1, 2).tolist() == bs.tolist()
     assert len(bs) == 1  # the rejected span crosses both epochs' edges
     assert float(got["fs"].squeeze()) == FS
+
+
+def test_night6_batch_hands_the_lists_beats_root_to_each_recording() -> None:
+    """The batch list's optional ``beats_root`` reaches night6_run_recording as BeatsRoot."""
+    src = (NIGHT6 / "night6_batch.m").read_text(encoding="utf-8")
+    assert "if isfield(L, 'beats_root'), broot = L.beats_root; end" in src
+    assert re.search(r"args = \{[^}]*'BeatsRoot', broot", src, flags=re.S)
