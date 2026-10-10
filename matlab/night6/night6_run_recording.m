@@ -255,16 +255,6 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
     prov = jsondecode(char(M.provenance_json));
     % Kept verbatim: jsondecode mangles keys such as "ANT1|0-2" into identifiers.
     R.mask_provenance_json = char(M.provenance_json);
-    % Andrea 2026-10-10: the known limitations travel from the mask provenance (the ONE
-    % construction site is Python emit.provenance.KNOWN_LIMITATIONS); a mask written before
-    % they existed says so rather than carrying none silently
-    provKL = jsondecode(char(M.provenance_json));
-    if isfield(provKL, 'known_limitations')
-        R.known_limitations = provKL.known_limitations;
-    else
-        R.known_limitations = ['absent from the mask provenance (written before ' ...
-                               '2026-10-10): see emit.provenance.KNOWN_LIMITATIONS'];
-    end
     R.mask_gate_json = char(M.gate_json);
     tol = tolerance_stand_in(prov);   % review 2026-10-10 fix 1: either mark is a stand-in
     R.stand_in = (isfield(prov, 'extra') && isfield(prov.extra, 'STAND_IN')) || ~isempty(tol);

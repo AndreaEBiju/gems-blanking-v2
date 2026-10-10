@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import functools
 import json
 from datetime import UTC, datetime
@@ -15,7 +14,6 @@ import pytest
 from gems_blanking_v2.detect import chain
 from gems_blanking_v2.emit import handoff as ho
 from gems_blanking_v2.emit import masks as mk
-from gems_blanking_v2.emit import provenance as pv
 from gems_blanking_v2.emit import qc
 from gems_blanking_v2.emit.line_distrust import LineDistrustRecord
 from gems_blanking_v2.emit.provenance import MaskProvenance, ProvenanceError
@@ -803,31 +801,6 @@ def test_a_file_may_not_carry_masks_for_a_consumer_it_leaves_elsewhere(tmp_path:
     with pytest.raises(ValueError, match="unexpected"):
         _write(tmp_path, _masked(0.01), line_distrust=None, peri_r=None,
                elsewhere=SPIKES_ELSEWHERE)
-
-
-
-
-def test_every_mask_provenance_carries_the_known_limitations() -> None:
-    """Andrea 2026-10-10: one construction site, carried by every record.
-
-    A record without it is refused at construction; an old record reads back with it.
-    """
-    p = MaskProvenance(model={"model_id": "m" * 32, "mode": "pooled", "version": "v",
-                              "corpus_hash": "c" * 32, "calibrator": "cal.json"},
-                       thresholds={"z": 1}, reference_values={"R_T|300-3000": {"median": 1}},
-                       code_commit="c" * 40, generation_sha="g" * 16, routing_hash="r" * 16,
-                       created_at="2026-10-10T00:00:00+00:00", recording="s")
-    rec = json.loads(p.to_json())
-    assert rec["known_limitations"] == pv.known_limitations_record()
-    assert "marks_vs_model.html" in rec["known_limitations"][0]["evidence"]
-    assert "after task 19" in rec["known_limitations"][0]["status"]
-    assert MaskProvenance.from_json(p.to_json()) == p
-    old = {k: v for k, v in rec.items() if k != "known_limitations"}
-    assert MaskProvenance.from_json(json.dumps(old)).known_limitations == rec[
-        "known_limitations"]
-    with pytest.raises(ProvenanceError, match="known limitation"):
-        dataclasses.replace(p, known_limitations=[])
-
 
 
 def test_spikes_are_held_per_cuff_never_both_for_one() -> None:

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import PurePosixPath, PureWindowsPath
@@ -125,26 +125,6 @@ def model_spec_record(spec: object) -> dict[str, Any]:
     return rec
 
 
-KNOWN_LIMITATIONS: Final[tuple[Mapping[str, str], ...]] = (
-    {"id": "confirmed_cores_vs_marks",
-     "limitation": "the model's confirmed motion cores agree poorly with Andrea's own marks of "
-                   "motion: the masks blank where the model confirms motion, which is not "
-                   "everywhere she marked it, nor only there",
-     "evidence": "marks_vs_model (G:\\My Drive\\gems_figures\\2026-10-10_extent_table\\"
-                 "marks_vs_model.html), 2026-10-10",
-     "status": "deferred to after task 19 (Andrea, 2026-10-10)"},
-)
-"""Known limitations every mask provenance, Night 6 record and acceptance report carries
-(Andrea, 2026-10-10). THE construction site: read it through :func:`known_limitations_record`;
-MATLAB copies it from the mask file's provenance, never from a second copy of the text."""
-
-
-def known_limitations_record() -> list[dict[str, str]]:
-    """Return :data:`KNOWN_LIMITATIONS` as JSON (a fresh list of fresh dicts)."""
-    return [dict(x) for x in KNOWN_LIMITATIONS]
-
-
-
 @dataclass(frozen=True)
 class MaskProvenance:
     """Everything that made one recording's masks.
@@ -179,9 +159,6 @@ class MaskProvenance:
     spike_line_distrust: Mapping[str, Any] = field(default_factory=dict)
     spike_peri_r: Mapping[str, Any] = field(default_factory=dict)
     spike_no_heartbeat_reference: Mapping[str, Any] = field(default_factory=dict)
-    known_limitations: Sequence[Mapping[str, str]] = field(
-        default_factory=known_limitations_record)
-    """:data:`KNOWN_LIMITATIONS` (Andrea, 2026-10-10); written into every record."""
 
     def __post_init__(self) -> None:
         """Normalise to the JSON form and validate."""
@@ -192,8 +169,6 @@ class MaskProvenance:
                      "spike_line_distrust", "spike_peri_r", "spike_no_heartbeat_reference"):
             value = _clean(dict(getattr(self, name)))
             object.__setattr__(self, name, json.loads(json.dumps(value, allow_nan=False)))
-        object.__setattr__(self, "known_limitations",
-                           [dict(x) for x in self.known_limitations])
         self.validate()
 
     def validate(self) -> None:
@@ -208,11 +183,6 @@ class MaskProvenance:
             if not getattr(self, name):
                 msg = f"mask provenance lacks {name}"
                 raise ProvenanceError(msg)
-        ids = {x.get("id") for x in self.known_limitations}
-        missing = [x["id"] for x in KNOWN_LIMITATIONS if x["id"] not in ids]
-        if missing:
-            msg = f"mask provenance lacks the known limitation(s) {missing}"
-            raise ProvenanceError(msg)
         try:
             when = datetime.fromisoformat(self.created_at)
         except ValueError as exc:
@@ -231,7 +201,6 @@ class MaskProvenance:
             "code_commit": self.code_commit, "generation_sha": self.generation_sha,
             "routing_hash": self.routing_hash, "created_at": self.created_at,
             "recording": self.recording, "settling_s": _clean(dict(self.settling_s)),
-            "known_limitations": [dict(x) for x in self.known_limitations],
         }
         if self.extra:
             rec["extra"] = _clean(dict(self.extra))
@@ -265,5 +234,4 @@ class MaskProvenance:
                    settling_s=doc.get("settling_s") or {}, extra=doc.get("extra") or {},
                    spike_line_distrust=doc.get("spike_line_distrust") or {},
                    spike_peri_r=doc.get("spike_peri_r") or {},
-                   spike_no_heartbeat_reference=doc.get("spike_no_heartbeat_reference") or {},
-                   known_limitations=doc.get("known_limitations") or known_limitations_record())
+                   spike_no_heartbeat_reference=doc.get("spike_no_heartbeat_reference") or {})
