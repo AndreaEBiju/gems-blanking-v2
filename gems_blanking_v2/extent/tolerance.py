@@ -123,6 +123,7 @@ __all__ = [
     "confirms_motion",
     "consumer_settling",
     "consumer_signals",
+    "core_own_signals",
     "decision_rule",
     "detected_extent",
     "edge_settling_record",
@@ -131,6 +132,7 @@ __all__ = [
     "expected_consumers",
     "extent_consumers",
     "extents_for_events",
+    "hr_source_signals",
     "hrv_extent",
     "hrv_fiducial_tolerance_s",
     "impulse_settling_s",
@@ -957,6 +959,45 @@ def own_detection_signals(consumer_signals: Sequence[str], detection_signals: Se
             else:
                 out |= {x for x in det if _cuff_of(x) == cuff}
     return frozenset(out)
+
+
+def hr_source_signals(hr_signal: str, detection_signals: Sequence[str],
+                      channel_signals: Mapping[str, str]) -> frozenset[str]:
+    """Return the HR-source channels of the routed HR channel, as detection signals.
+
+    Andrea's extent configuration (2026-10-10, RULING 2026-10-10 item 2 follow-up): a core is
+    on HRV's and breathing's OWN signals when it was detected on the HR-source channels - the
+    routing entry's HR channel itself, or both channels of its cross-site pair - and nothing
+    else of their cuffs (unlike :func:`own_detection_signals`, which takes the whole family).
+    ``hr_signal`` is the routed name: a detection signal (``"R_T"``), a raw channel
+    (``"RVN2"`` -> ``R_V2`` through ``channel_signals``), or a pairs lead ``"<plus>-<minus>"``
+    (``physio.hr_pairs``; each part resolved the same way). A name or part that resolves to no
+    detection signal is refused (ValueError): never guessed.
+    """
+    det = tuple(detection_signals)
+    whole = hr_signal in det or hr_signal in channel_signals or "-" not in hr_signal
+    out: set[str] = set()
+    for part in ([hr_signal] if whole else hr_signal.split("-")):
+        d = part if part in det else channel_signals.get(part)
+        if d is None or d not in det:
+            msg = (f"HR channel {hr_signal!r}: {part!r} is no detection signal and no channel "
+                   "that carries one; its HR-source channels are unknown")
+            raise ValueError(msg)
+        out.add(d)
+    return frozenset(out)
+
+
+def core_own_signals(consumer: str, signal: str, detection_signals: Sequence[str],
+                     channel_signals: Mapping[str, str]) -> frozenset[str]:
+    """Return the detection signals a core must be detected on to be on ``consumer``'s own signals.
+
+    Andrea's extent configuration (2026-10-10): the stomach channels (ANT1-3, stomach_ref) for
+    slow wave and mmc; that cuff's contacts (V1-V3, T) for that cuff's spikes (per signal, not
+    both cuffs); the HR-source channels (:func:`hr_source_signals`) for hrv and breathing.
+    """
+    if consumer in ("hrv", "breathing"):
+        return hr_source_signals(signal, detection_signals, channel_signals)
+    return own_detection_signals([signal], detection_signals, channel_signals)
 
 
 class ExtentNotAssessableError(ValueError):

@@ -236,7 +236,7 @@ def test_both_core_blanking_settings_are_recorded_and_hashed() -> None:
     assert vis.record()["core_blanking"] == dict.fromkeys(zc, "when_visible")
     assert mixed.core_blanking["breathing"] == "always"
     assert len({_build().sha256(), vis.sha256(), mixed.sha256()}) == 3
-    assert tm.CORE_BLANKING == ("always", "when_visible")
+    assert tm.CORE_BLANKING == ("always", "when_visible", "own_signals_or_visible")
 
 
 def test_a_cross_band_pair_counts_while_above_its_own_bands_floor() -> None:

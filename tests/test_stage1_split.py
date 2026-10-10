@@ -56,7 +56,9 @@ def _full(seed: int) -> st1.EpochCache:
     return st1.EpochCache(events=syn.events, detecting=syn.detecting,  # type: ignore[arg-type]
                           cached_events=frozenset(syn.events), z=z, zdet=syn.zdet, eng=eng,
                           hrv=syn.hrv, signals=syn.signals, own_signals=own,  # type: ignore[arg-type]
-                          fs=syn.fs, z_t0_s=syn.t0_s, n_frames=syn.n_frames)
+                          fs=syn.fs, z_t0_s=syn.t0_s, n_frames=syn.n_frames,
+                          core_own={(c, s): tl.core_own_signals(c, s, STAGE1_SIGNALS, {})
+                                    for c, v in syn.signals.items() if c != "hrv" for s in v})
 
 
 def _sparse(seed: int, cached: frozenset[str]) -> st1.EpochCache:
@@ -81,7 +83,7 @@ def _sparse(seed: int, cached: frozenset[str]) -> st1.EpochCache:
                           z=full.z, zdet=zdet, eng=eng,
                           hrv={k: full.hrv[k] for k in cached}, signals=full.signals,
                           own_signals=full.own_signals, fs=full.fs, z_t0_s=full.z_t0_s,
-                          n_frames=full.n_frames)
+                          n_frames=full.n_frames, core_own=full.core_own)
 
 
 def _table(thr: dict[str, float]) -> tl.ToleranceTable:
@@ -114,7 +116,8 @@ def test_the_cache_answers_every_threshold_set_and_scope_as_the_full_arrays(
     by_band = data.draw(hs.one_of(hs.none(), hs.fixed_dictionaries(
         {b: hs.floats(st1.CACHE_FLOOR_Z, 8.0) for b in BANDS})), label="floor_by_band")
     cores = data.draw(hs.one_of(hs.none(), hs.fixed_dictionaries(
-        {c: hs.sampled_from(["always", "when_visible"]) for c in Z_CONSUMERS})), label="cores")
+        {c: hs.sampled_from(["always", "when_visible", "own_signals_or_visible"])
+         for c in Z_CONSUMERS})), label="cores")
     kw = {"tolerances": _table(thr), "scopes": scopes, "floor_z": floor,
           "floor_by_band": by_band, "core_blanking": cores}
     want = st1.extents_routing_masks(full, confirmed, **kw)  # type: ignore[arg-type]
@@ -364,3 +367,90 @@ def test_line_noise_pass1_reads_the_spike_motion_mask() -> None:
     assert a.n_samples == b.n_samples == n
     assert a.tests[1].valid_s > b.tests[1].valid_s + 24.0
     assert a.tests[0] == b.tests[0]
+
+
+# ---------------------------------------------------------------------------
+# Andrea's extent configuration (2026-10-10): core blanking own_signals_or_visible
+# ---------------------------------------------------------------------------
+
+OWN = "own_signals_or_visible"
+
+
+def _own_cache(seed: int, *, empty: bool = False) -> st1.EpochCache:
+    full = _full(seed)
+    own = {(c, s): (frozenset() if empty else
+                    tl.core_own_signals(c, s, STAGE1_SIGNALS, {}))
+           for c, v in full.signals.items() if c != "hrv" for s in v}
+    return st1.EpochCache(**{**full.__dict__, "core_own": own})
+
+
+def _spans(cache: st1.EpochCache, thr: float) -> set[tuple[str, str, str]]:
+    ids = sorted(cache.events)
+    got = st1.core_pad_spans(cache, ids, core_blanking=dict.fromkeys(Z_CONSUMERS, OWN),
+                             tolerances=_table(dict.fromkeys(Z_CONSUMERS, thr)))
+    out = set()
+    for sp in got:
+        eid = next(e for e in ids if _bounds(cache, e, sp.consumer) == (sp.start_s, sp.stop_s))
+        out.add((sp.consumer, sp.signal, eid))
+    return out
+
+
+def _bounds(cache: st1.EpochCache, eid: str, consumer: str) -> tuple[float, float]:
+    c = cache.events[eid].candidate
+    pad = tl.consumer_settling(consumer, cache.fs).total_s  # type: ignore[union-attr]
+    end = cache.z_t0_s + cache.n_frames * GRID_S
+    return (max(cache.z_t0_s, c.start_s - pad), min(end, c.stop_s + pad))
+
+
+def test_a_core_detected_on_the_consumers_own_signals_blanks_it() -> None:
+    cache = _own_cache(1)
+    got = _spans(cache, 99.0)  # nothing is visible at z 99: only own-signal detection blanks
+    want = {(c, s, e) for c, v in cache.signals.items() if c != "hrv" for s in v
+            for e in cache.events
+            if {q[0] for q in cache.detecting[e]} & cache.core_own[(c, s)]}  # type: ignore[index]
+    assert got == want and want
+    # that cuff's contacts only: a core seen only on R never blanks L_T's spikes
+    only_r = [e for e in cache.events
+              if {q[0] for q in cache.detecting[e]} <= {"R_V1", "R_V2", "R_V3", "R_T"}]
+    assert only_r and not [e for e in only_r if ("spikes", "L_T", e) in got]
+
+
+def test_a_core_visible_in_the_own_band_blanks_it() -> None:
+    cache = _own_cache(2, empty=True)  # no core counts as detected on own signals
+    vis = st1.core_pad_spans(cache, sorted(cache.events),
+                             core_blanking=dict.fromkeys(Z_CONSUMERS, "when_visible"),
+                             tolerances=_table(dict.fromkeys(Z_CONSUMERS, 4.0)))
+    got = _spans(cache, 4.0)
+    assert got and len(got) == len(vis)
+
+
+def test_a_core_neither_own_nor_visible_does_not_blank() -> None:
+    assert _spans(_own_cache(3, empty=True), 99.0) == set()
+
+
+def test_the_core_and_its_padding_are_blanked_together_whenever_it_blanks() -> None:
+    cache = _own_cache(1)
+    ids = sorted(cache.events)
+    for sp in st1.core_pad_spans(cache, ids, core_blanking=dict.fromkeys(Z_CONSUMERS, OWN),
+                                 tolerances=_table(dict.fromkeys(Z_CONSUMERS, 99.0))):
+        assert any(_bounds(cache, e, sp.consumer) == (sp.start_s, sp.stop_s) for e in ids)
+        assert sp.reason == st1.CORE_PAD_REASON
+    no_own = st1.EpochCache(**{**cache.__dict__, "core_own": None})
+    with pytest.raises(ValueError, match="needs its own signals"):
+        st1.core_pad_spans(no_own, ids, core_blanking=dict.fromkeys(Z_CONSUMERS, OWN),
+                           tolerances=_table(dict.fromkeys(Z_CONSUMERS, 4.0)))
+
+
+def test_the_hr_source_channels_are_the_routed_hr_channel_or_pair_only() -> None:
+    det = STAGE1_SIGNALS
+    chmap = {"RVN2": "R_V2", "LVN3": "L_V3", "ANT1": "ANT1"}
+    assert tl.hr_source_signals("RVN2-LVN3", det, chmap) == {"R_V2", "L_V3"}
+    assert tl.hr_source_signals("RVN2", det, chmap) == {"R_V2"}
+    assert tl.hr_source_signals("R_T", det, chmap) == {"R_T"}
+    assert tl.core_own_signals("breathing", "RVN2", det, chmap) == {"R_V2"}  # not the cuff
+    assert tl.core_own_signals("spikes", "R_T", det, chmap) == {"R_V1", "R_V2", "R_V3", "R_T"}
+    assert tl.core_own_signals("mmc", "ANT1", det, chmap) == {"ANT1", "ANT2", "ANT3",
+                                                              "stomach_ref"}
+    for bad in ("RVN9", "RVN2-XYZ"):
+        with pytest.raises(ValueError, match="HR-source channels are unknown"):
+            tl.hr_source_signals(bad, det, chmap)

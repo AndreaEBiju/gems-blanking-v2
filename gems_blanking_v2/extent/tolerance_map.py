@@ -136,18 +136,21 @@ NULL_PERCENTILE_SOURCE: Final[Mapping[str, Any]] = {
 """Where :data:`NULL_PERCENTILE_Z` comes from; ``tests/test_tolerance_map.py`` holds the two to
 each other through the archived file."""
 
-CORE_BLANKING: Final[tuple[str, ...]] = ("always", "when_visible")
+CORE_BLANKING: Final[tuple[str, ...]] = ("always", "when_visible", "own_signals_or_visible")
 """The core-blanking declaration every z consumer makes, with no default (coordinator, after
 the decision table showed the clause decides the holds by itself: slow wave held 10/10 at p99
 with it, 1/10 without): ``always`` - the ruling as written, the core plus padding always
 blanked; ``when_visible`` - only where the consumer's own band is above its threshold over the
-core (``extent.stage1.core_pad_spans``)."""
+core; ``own_signals_or_visible`` (Andrea, 2026-10-10) - when the core was detected on the
+consumer's OWN signals (``tolerance.core_own_signals``) or its own band is above its threshold
+over the core (``extent.stage1.core_pad_spans``)."""
 
 CORE_PAD_RULE: Final = (
     "RULING 2026-10-10 item 2: the motion core and the consumer's padding (its measured "
     "settling) are blanked per each z consumer's DECLARED core blanking - 'always' (the ruling "
-    "as written) or 'when_visible' (only where its own band is above its threshold over the "
-    "core); beyond the core the extent grows only "
+    "as written), 'when_visible' (only where its own band is above its threshold over the "
+    "core) or 'own_signals_or_visible' (Andrea 2026-10-10: also when the core was detected on "
+    "the consumer's own signals); beyond the core the extent grows only "
     "while the consumer's own band is above its threshold (the declared clean-null percentile "
     "for the consumers on the floor, the visible-kind threshold otherwise - breathing 7.69), "
     "and a cross-band extent counts a detecting pair while it is above the declared percentile "

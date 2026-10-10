@@ -372,6 +372,10 @@ class EpochCache:
     n_frames: int
     extra_spans: tuple[mk.MaskSpan, ...] = ()
     cache_floor_z: float = CACHE_FLOOR_Z
+    core_own: Mapping[tuple[str, str], frozenset[str]] | None = None
+    """``(consumer, signal)`` -> the detection signals a core must be detected on to be on that
+    consumer's own signals (``tolerance.core_own_signals``); needed by
+    ``own_signals_or_visible`` only."""
 
 
 CORE_PAD_REASON: Final = "core_pad"
@@ -390,7 +394,10 @@ def core_pad_spans(cache: EpochCache, confirmed: Iterable[str], *,
       padding, on every signal the consumer reads;
     * ``when_visible`` - only where the consumer's own band is above its threshold over the
       core (some finite frame of the core window, as ``compute_extent`` takes it, above
-      ``tolerances.for_consumer``), per signal.
+      ``tolerances.for_consumer``), per signal;
+    * ``own_signals_or_visible`` (Andrea, 2026-10-10) - where ``when_visible`` blanks, or where
+      the core was detected on the consumer's own signals: some detecting pair's signal in
+      ``cache.core_own[(consumer, signal)]`` (``tolerance.core_own_signals``).
 
     The padding is the consumer's measured settling (``tolerance.consumer_settling``), the
     span is clipped to the epoch's z record and never routed. hrv keeps its operational
@@ -402,12 +409,18 @@ def core_pad_spans(cache: EpochCache, confirmed: Iterable[str], *,
         if consumer == "hrv" or not sigs:
             continue
         mode = core_blanking.get(consumer)
-        if mode not in ("always", "when_visible"):
+        if mode not in ("always", "when_visible", "own_signals_or_visible"):
             msg = (f"{consumer}: core blanking {mode!r} is not declared as always | "
-                   "when_visible (RULING 2026-10-10 item 2; nothing is defaulted)")
+                   "when_visible | own_signals_or_visible (RULING 2026-10-10 item 2; nothing "
+                   "is defaulted)")
             raise ValueError(msg)
-        if mode == "when_visible" and tolerances is None:
-            msg = f"{consumer}: when_visible needs the consumer's threshold"
+        if mode == "own_signals_or_visible" and (
+                cache.core_own is None
+                or any((consumer, sig) not in cache.core_own for sig in sigs)):
+            msg = f"{consumer}: own_signals_or_visible needs its own signals (cache.core_own)"
+            raise ValueError(msg)
+        if mode != "always" and tolerances is None:
+            msg = f"{consumer}: {mode} needs the consumer's threshold"
             raise ValueError(msg)
         band = tl.extent_consumers()[consumer].band
         settle = tl.consumer_settling(consumer, cache.fs)
@@ -420,17 +433,28 @@ def core_pad_spans(cache: EpochCache, confirmed: Iterable[str], *,
             a, b = max(cache.z_t0_s, c.start_s - pad), min(end, c.stop_s + pad)
             if b <= a:
                 continue
-            for sig in sigs:
-                if mode == "when_visible":
-                    assert tolerances is not None
-                    zz = np.asarray(cache.z[(sig, band)], dtype=np.float64)
-                    i0, i1 = core_frames(c.start_s, c.stop_s, cache.z_t0_s)
-                    w = zz[max(0, i0):max(0, min(zz.size, i1))]
-                    w = w[np.isfinite(w)]
-                    if not (w.size and float(w.max()) > tolerances.for_consumer(consumer)):
-                        continue
-                out.append(mk.MaskSpan(consumer, sig, a, b, CORE_PAD_REASON))
+            out += [mk.MaskSpan(consumer, sig, a, b, CORE_PAD_REASON) for sig in sigs
+                    if _core_blanks(cache, eid, consumer, sig, mode, band, tolerances)]
     return out
+
+
+def _core_blanks(cache: EpochCache, eid: str, consumer: str, sig: str, mode: str, band: str,
+                 tolerances: tl.ToleranceTable | None) -> bool:
+    """Whether event ``eid``'s core blanks ``consumer`` on ``sig`` under ``mode``."""
+    if mode == "always":
+        return True
+    if mode == "own_signals_or_visible":
+        assert cache.core_own is not None
+        own = cache.core_own[(consumer, sig)]
+        if any(q[0] in own for q in cache.detecting[eid]):
+            return True
+    assert tolerances is not None
+    c = cache.events[eid].candidate
+    zz = np.asarray(cache.z[(sig, band)], dtype=np.float64)
+    i0, i1 = core_frames(c.start_s, c.stop_s, cache.z_t0_s)
+    w = zz[max(0, i0):max(0, min(zz.size, i1))]
+    w = w[np.isfinite(w)]
+    return bool(w.size and float(w.max()) > tolerances.for_consumer(consumer))
 
 
 def _refuse_inexact(cache: EpochCache, ids: Sequence[str], tolerances: tl.ToleranceTable,
