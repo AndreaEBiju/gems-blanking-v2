@@ -12,13 +12,13 @@ function [lead, rec] = night6_recovery_lead_in(RS, session, condition, i0, n, fs
 %   mode       the declared trim mode (night6_trim_modes; refused by name otherwise)
 %
 % RULING 2026-10-08 (k) 2 and RULING 2026-10-09 item 6 (mode (B)): Night 6 runs every
-% stim_rec recovery epoch from its own start (132 s). The file's INPUT MASK point ke =
+% stim_rec recovery epoch from its own start (132 s). The file's INPUT MASK point kMask =
 % max(electrical end + electrical settling, mechanical end) (RULING 2026-10-09 (i) 3 (c),
 % input_mask_sample0), each analysis's own start k0 and each CUT's point kc
 % (owner.output.class) are exact 0-based FILE samples. Rows are 1-based into the epoch, so row r is file sample
 % i0 + r - 1 (0-based) and the rows before file sample k are 1 .. k - i0.
 %
-%   EVERY consumer's input rows 1 .. ke - i0 are NaN (one point for all, so her
+%   EVERY consumer's input rows 1 .. kMask - i0 are NaN (one point for all, so her
 %   epoch-wide statistics see no unsettled data); each output variable stamped before
 %   row kc - i0 + 1 of its cut is dropped or flagged after the call
 %   (night6_recovery_trim_outputs, by the output time map's class and cut).
@@ -83,13 +83,13 @@ function [lead, rec] = night6_recovery_lead_in(RS, session, condition, i0, n, fs
              'electrical_s', 'input_mask_s', 'input_mask_sample0', 'input_mask_binding'}
         if isfield(F, f{1}), rec.(f{1}) = F.(f{1}); end
     end
-    ke = double(F.input_mask_sample0);   % max(electrical settling, mechanical end)
-    rows = min(n, max(0, ke - i0));
+    kMask = double(F.input_mask_sample0);   % max(electrical settling, mechanical end)
+    rows = min(n, max(0, kMask - i0));
     rec.rule = sprintf(['input of every analysis masked on epoch rows 1..%d (before the ' ...
                         'input mask point = max(electrical end + electrical settling, ' ...
                         'mechanical end), file sample %d 0-based); each output variable ' ...
                         'stamped before its own cut dropped or flagged (RULING 2026-10-09 ' ...
-                        'item 6)'], rows, ke);
+                        'item 6)'], rows, kMask);
     rec.epoch_scalars = ['computed over [input mask point, epoch end]: they have no ' ...
                          'time to trim by (whole-epoch averages of trimmed series are ' ...
                          'recomputed from the kept values)'];
@@ -127,17 +127,17 @@ function [lead, rec] = night6_recovery_lead_in(RS, session, condition, i0, n, fs
         for g = {'own_settling_s', 'binding_output', 'missing_settling'}
             if isfield(r, g{1}), e.(g{1}) = r.(g{1}); end
         end
-        if ke > i0
+        if kMask > i0
             e.status = 'trimmed';
             e.rule = sprintf('input masked on epoch rows 1..%d (file samples %d..%d, 0-based)', ...
                              rows, i0, i0 + rows - 1);
-        elseif ke == i0
+        elseif kMask == i0
             e.status = 'at_epoch_start';
         else
             e.status = 'early part deferred to add-on';
             e.rule = sprintf(['input mask end %d samples before the epoch start: runs from ' ...
                               'the epoch start; the early recovery is appended by the add-on'], ...
-                             i0 - ke);
+                             i0 - kMask);
         end
         mine = cellfun(@(x) strcmp(x.owner, c{1}), rec.cuts);
         if any(cellfun(@(x) x.start_sample0 > i0, rec.cuts(mine)))

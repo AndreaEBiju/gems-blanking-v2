@@ -25,9 +25,11 @@ function RS = night6_recovery_start(file)
 % a session listed twice (case-insensitively, as the store matches names), a file both
 % measured and held, an analysis or a cut listed twice for one file, a file with no
 % cuts, a start_sample0, electrical_settle_sample0, mechanical_end_sample0 or
-% input_mask_sample0 that is not one integer >= 0, a file without both stim times, an
-% input_mask_sample0 that is not max(electrical_settle_sample0, mechanical_end_sample0),
-% a measured start or cut before the input mask point, and
+% input_mask_sample0 that is not one integer >= 0, a file without both stim times or a
+% positive fs, an input_mask_sample0 that is not max(electrical_settle_sample0,
+% mechanical_end_sample0), any of those three samples that is not the first sample at or
+% after its seconds field (night6_first_sample), an electrical_settle_s before the
+% electrical_end_s, a measured start or cut before the input mask point, and
 % a missing output map or source list. Refused as 'night6:recoveryStartSource', naming
 % the file: a cited processing_new file (source_files, Python SOURCE_FILES) that is not on the path, or
 % whose SHA-256 is not the one the starts file was computed from. Refused as
@@ -120,11 +122,32 @@ function check_times(F, file)
                   'required, RULING 2026-10-09 (i) 3 (c))'], file, F.session, g{1});
         end
     end
+    if ~isfield(F, 'fs') || ~isnumeric(F.fs) || ~isscalar(F.fs) || ~isfinite(F.fs) ...
+            || F.fs <= 0
+        error('night6:recoveryStartFile', '%s: %s has no positive finite fs', file, F.session);
+    end
     k = double(F.input_mask_sample0);
     if k ~= max(double(F.electrical_settle_sample0), double(F.mechanical_end_sample0))
         error('night6:recoveryStartFile', ['%s: %s input_mask_sample0 %d is not ' ...
               'max(electrical_settle_sample0 %d, mechanical_end_sample0 %d)'], file, ...
               F.session, k, F.electrical_settle_sample0, F.mechanical_end_sample0);
+    end
+    % each sample is the first sample at or after its seconds field (review 8 finding 4;
+    % night6_first_sample = Python extent.grid.first_sample_at_or_after, the one conversion)
+    for g = {'electrical_settle_sample0', 'electrical_settle_s'; ...
+             'mechanical_end_sample0', 'mechanical_end_s'; ...
+             'input_mask_sample0', 'input_mask_s'}'
+        want = night6_first_sample(F.(g{2}), F.fs);
+        if double(F.(g{1})) ~= want
+            error('night6:recoveryStartFile', ['%s: %s %s %d is not the first sample at ' ...
+                  'or after %s %.17g s at fs %.17g (%d; night6_first_sample)'], file, ...
+                  F.session, g{1}, F.(g{1}), g{2}, F.(g{2}), F.fs, want);
+        end
+    end
+    if F.electrical_settle_s < F.electrical_end_s
+        error('night6:recoveryStartFile', ['%s: %s electrical_settle_s %.17g precedes ' ...
+              'electrical_end_s %.17g: the settling is measured from the electrical end'], ...
+              file, F.session, F.electrical_settle_s, F.electrical_end_s);
     end
     rows = as_cells(F.analyses);
     if isfield(F, 'cuts'), rows = [rows, as_cells(F.cuts)]; end

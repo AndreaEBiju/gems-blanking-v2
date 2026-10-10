@@ -21,6 +21,8 @@ function check_recovery_start(caseFile, outFile)
 %            L-1/L/L+1 of its own cut, exact valid fractions, averages, NaN events, refusals.
 %   sources  the reader against a changed copy of a cited function on the path.
 %   batch    night6_batch's refusals at batch start.
+%   first_sample  night6_first_sample(t, fs) for each case, to compare with Python's
+%            extent.grid.first_sample_at_or_after.
     C = jsondecode(fileread(caseFile));
     out = struct();
     out.plans = cellfun(@plan_case, as_cells(C.plans), 'UniformOutput', false);
@@ -30,6 +32,10 @@ function check_recovery_start(caseFile, outFile)
     if isfield(C, 'batch'), out.batch = batch_case(C.batch); end
     if isfield(C, 'trim'), out.trim = trim_case(C.trim); end
     if isfield(C, 'sources'), out.sources = sources_case(C.sources); end
+    if isfield(C, 'first_sample')   % night6_first_sample against Python's (invariant 22)
+        out.first_sample = cellfun(@(c) night6_first_sample(c.t, c.fs), ...
+                                   as_cells(C.first_sample));
+    end
     fid = fopen(outFile, 'w', 'n', 'UTF-8');
     fwrite(fid, jsonencode(out), 'char');
     fclose(fid);

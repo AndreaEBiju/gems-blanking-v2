@@ -20,11 +20,19 @@ import numpy.typing as npt
 
 from gems_blanking_v2.constants import GRID_S
 
-__all__ = ["T0_TOLERANCE_S", "frame_sample_bounds", "n_grid_frames", "seconds_to_sample",
-           "to_matlab_inclusive"]
+__all__ = ["SAMPLE_TOLERANCE", "T0_TOLERANCE_S", "first_sample_at_or_after",
+           "frame_sample_bounds", "n_grid_frames", "seconds_to_sample", "to_matlab_inclusive"]
 
 T0_TOLERANCE_S: Final = 1e-9
 """Two time origins closer than this are the same origin (float noise only)."""
+
+SAMPLE_TOLERANCE: Final = 1e-6
+"""A product ``t fs`` within this many samples of an integer IS that integer.
+
+Float noise only: a time written as ``k / fs`` and multiplied back is off by ~1e-9 samples
+at 10^7 samples, so ``ceil`` alone would move an exact sample one later. The MATLAB twin
+(``night6_first_sample.m``) uses the same tolerance.
+"""
 
 
 def seconds_to_sample(t_s: float, fs: float) -> int:
@@ -34,6 +42,22 @@ def seconds_to_sample(t_s: float, fs: float) -> int:
     line-distrust minute bounds (``emit.line_distrust``) both go through it.
     """
     return int(round(t_s * fs))
+
+
+def first_sample_at_or_after(t_s: float, fs: float) -> int:
+    """Return the first 0-based sample at or after ``t_s`` seconds: ``ceil(t fs)``.
+
+    The one conversion of an EVENT time (a stim end, a settling point) to the first sample
+    it no longer covers - the rule's ``k = ceil(t fs)`` (``round`` is for window bounds,
+    :func:`seconds_to_sample`). A product within :data:`SAMPLE_TOLERANCE` of an integer is
+    that integer, so ``first_sample_at_or_after(k / fs, fs) == k``. Monotone in ``t_s``.
+    MATLAB: ``night6_first_sample`` (invariant 22: one canonical form on both sides).
+    """
+    x = float(t_s) * float(fs)
+    k = round(x)
+    if abs(x - k) <= SAMPLE_TOLERANCE:
+        return int(k)
+    return int(math.ceil(x))
 
 
 def frame_sample_bounds(i0: int, i1: int, fs: float, grid_s: float = GRID_S) -> tuple[int, int]:

@@ -7,10 +7,10 @@ real ``emit.handoff.write_mask_file`` for an epoch starting at 2.0 s) is planned
 ``night6_prepare_epoch`` with and without its recovery starts, in ONE MATLAB process
 (``tests/matlab/check_recovery_start.m``). Checks:
 
-* mode (B) masks EVERY consumer's input on exactly rows 1 .. ke - i0 (ke = stim-off +
-  electrical settling, one point for all analyses), the 1-sample boundary on both sides,
-  and nothing else changes; a start or electrical settling before the epoch masks nothing
-  and is recorded "early part deferred to add-on";
+* mode (B) masks EVERY consumer's input on exactly rows 1 .. k - i0 (k = the input mask
+  point, max(electrical end + settling, mechanical end); one point for all analyses), the
+  1-sample boundary on both sides, and nothing else changes; a start or electrical
+  settling before the epoch masks nothing and is recorded "early part deferred to add-on";
 * mode (A), ``mask_to_own_start``, is refused by name with RULING 2026-10-09 item 6 - by
   the planner, the entry point and the batch - and so are a missing and an unknown mode;
   a complete record made under (A) reruns;
@@ -70,7 +70,7 @@ import numpy as np
 import pytest
 from gems_blanking_v2.emit.hr_beats import beats_file_record, write_hr_beats
 from gems_blanking_v2.extent import recovery_start as rs
-from gems_blanking_v2.extent.grid import seconds_to_sample
+from gems_blanking_v2.extent.grid import first_sample_at_or_after, seconds_to_sample
 from scipy.io import loadmat, savemat
 
 from tests.test_matlab_acceptance import _matlab, _processing_new
@@ -152,18 +152,20 @@ def _cuts(cut_at: Mapping[str, int] | None, default: int) -> list[dict[str, Any]
 
 
 def _file(rows: list[dict[str, Any]], ke: int = I0, session: str = SESSION,
-          cut_at: Mapping[str, int] | None = None, km: int | None = None) -> dict[str, Any]:
+          cut_at: Mapping[str, int] | None = None, km: int | None = None,
+          fs: float = FS) -> dict[str, Any]:
     """Build a v5 row: electrical settling at ``ke``, mechanical end at ``km`` (or ``ke``).
 
-    The input mask is their maximum (RULING 2026-10-09 (i) 3 (c)).
+    The input mask is their maximum (RULING 2026-10-09 (i) 3 (c)). Every seconds field is
+    its sample's own time at ``fs``, so each converts back (review 8 finding 4).
     """
     km = ke if km is None else km
     k = max(ke, km)
-    return {"session": session, "fs": FS, "times_source": "synthetic",
-            "electrical_end_s": min(ke, km) / FS - 0.25, "mechanical_end_s": km / FS,
-            "mechanical_end_sample0": km, "electrical_settle_s": ke / FS,
+    return {"session": session, "fs": fs, "times_source": "synthetic",
+            "electrical_end_s": min(ke, km) / fs - 0.25, "mechanical_end_s": km / fs,
+            "mechanical_end_sample0": km, "electrical_settle_s": ke / fs,
             "electrical_settle_sample0": ke, "electrical_s": 0.25,
-            "input_mask_s": k / FS, "input_mask_sample0": k,
+            "input_mask_s": k / fs, "input_mask_sample0": k,
             "input_mask_binding": "both" if ke == km else (
                 "electrical" if ke > km else "mechanical"),
             "analyses": rows, "cuts": _cuts(cut_at, k)}
@@ -237,11 +239,12 @@ def _cases(tmp: Path) -> dict[str, Any]:
          "held": _starts(d / "held.json", [held]),
          "other": _starts(d / "other.json", [other]),
          "no_spikes": _starts(d / "nos.json", [no_spikes]),
-         "fs": _starts(d / "fs.json", [{**file_b, "fs": FS + 1.0}], fs=FS + 1.0),
+         "fs": _starts(d / "fs.json", [_file([_row(c, I0 + 1) for c in CONSUMERS],
+                                             fs=FS + 1.0)], fs=FS + 1.0),
          "mech": _starts(d / "mech.json", [mech]),
          **{f"elec{k}": _starts(d / f"elec{k}.json", [v]) for k, v in elec.items()}}
     readers = []
-    for name, edit in (("schema", lambda j: j.update(schema="v0")),
+    for name, edit, *base in (("schema", lambda j: j.update(schema="v0")),
                        ("twice", lambda j: j["held"].append({"session": SESSION.upper(),
                                                              "basis": "x"})),
                        ("fractional", lambda j: j["files"][0]["analyses"][0].update(
@@ -273,12 +276,39 @@ def _cases(tmp: Path) -> dict[str, Any]:
                        ("no_mechanical_time", lambda j: j["files"][0].pop("mechanical_end_s")),
                        ("no_electrical_time", lambda j: j["files"][0].pop("electrical_end_s")),
                        ("no_input_mask", lambda j: j["files"][0].pop("input_mask_sample0")),
+                       # review 8 finding 1: the mechanical end binds and the input mask
+                       # is LOWERED to the electrical settling, sample and seconds - only
+                       # the max check can refuse it (a +1 edit is caught by others too)
                        ("mask_not_max", lambda j: j["files"][0].update(
-                           input_mask_sample0=j["files"][0]["input_mask_sample0"] + 1)),
+                           input_mask_sample0=j["files"][0]["electrical_settle_sample0"],
+                           input_mask_s=j["files"][0]["electrical_settle_s"]), "mech"),
+                       # review 8 finding 4: each sample is its seconds field's first
+                       # sample at or after; the settling is not before the electrical end
+                       ("mech_s_not_sample", lambda j: j["files"][0].update(
+                           mechanical_end_s=j["files"][0]["mechanical_end_s"] + 3.0 / FS),
+                        "mech"),
+                       ("settle_s_not_sample", lambda j: j["files"][0].update(
+                           electrical_settle_s=j["files"][0]["electrical_settle_s"]
+                           - 3.0 / FS)),
+                       ("mask_s_not_sample", lambda j: j["files"][0].update(
+                           input_mask_s=j["files"][0]["input_mask_s"] + 3.0 / FS), "mech"),
+                       ("settle_before_end", lambda j: j["files"][0].update(
+                           electrical_end_s=j["files"][0]["electrical_settle_s"] + 0.01)),
+                       # review 8 finding 5: the first sample at or after is ceil - a
+                       # mechanical end 0.4 sample past km is km + 1 (round: km) ...
+                       ("mech_rounded", lambda j: j["files"][0].update(
+                           mechanical_end_s=(j["files"][0]["mechanical_end_sample0"] + 0.4)
+                           / FS, input_mask_s=(j["files"][0]["input_mask_sample0"] + 0.4)
+                           / FS), "mech"),
+                       # ... and one 0.4 sample before km is km (round: km - 1): accepted
+                       ("mech_ceil_ok", lambda j: j["files"][0].update(
+                           mechanical_end_s=(j["files"][0]["mechanical_end_sample0"] - 0.4)
+                           / FS, input_mask_s=(j["files"][0]["input_mask_sample0"] - 0.4)
+                           / FS), "mech"),
                        ("start_before_mask", lambda j: j["files"][0]["analyses"][0].update(
                            start_sample0=j["files"][0]["input_mask_sample0"] - 1,
                            basis=rs.BASIS_MEASURED))):
-        j = json.loads(Path(s["boundary"]).read_text(encoding="utf-8"))
+        j = json.loads(Path(s[base[0] if base else "boundary"]).read_text(encoding="utf-8"))
         edit(j)
         f = d / f"reader_{name}.json"
         f.write_text(json.dumps(j), encoding="utf-8", newline="\n")
@@ -307,7 +337,15 @@ def _cases(tmp: Path) -> dict[str, Any]:
     shadow.mkdir()
     sources = {"dir": shadow.as_posix(), "starts": s["boundary"], "name": SHADOWED}
     return {"plans": plans, "readers": readers, "run": run, "py": py, "own": own,
-            "unit": unit, "batch": batch, "sources": sources}
+            "unit": unit, "batch": batch, "sources": sources, "first_sample": FIRST_SAMPLE}
+
+
+FIRST_SAMPLE = [{"t": t, "fs": fs} for fs in (FS, 24414.0, 1000.0) for t in (
+    0.0, 1.0 / fs, 120.73, 2_946_000 / fs, (2_946_000 - 0.4) / fs, (2_946_000 + 0.4) / fs,
+    (2_946_000 - 0.5) / fs, (2_946_000 + 0.5) / fs, (2_946_000 - 1e-7) / fs,
+    (2_946_000 + 1e-7) / fs, (2_946_000 + 1e-5) / fs, 599.999_999, 7_000_001 / fs)]
+"""Times the MATLAB twin of ``first_sample_at_or_after`` must convert to the same sample
+(invariant 22): on, just off, half and 0.4 samples off a sample, and float-noise-close."""
 
 
 SHADOWED = "step3_detect.m"
@@ -437,12 +475,54 @@ def _need_matlab() -> None:
         pytest.skip("processing_new is not on this machine (set GEMS_PROCESSING_NEW)")
 
 
+READER_WORDS = {
+    "v4": "'gems-blanking-v2 recovery starts v5'",
+    "no_mechanical": "mechanical_end_sample0 must be one integer >= 0",
+    "no_input_mask": "input_mask_sample0 must be one integer >= 0",
+    "no_electrical": "electrical_settle_sample0 must be one integer >= 0",
+    "no_mechanical_time": "has no mechanical_end_s (both stim times are required",
+    "no_electrical_time": "has no electrical_end_s (both stim times are required",
+    "mask_not_max": "is not max(electrical_settle_sample0",
+    "start_before_mask": "before its input mask sample",
+    "mech_s_not_sample": "mechanical_end_sample0 {km} is not the first sample at or after "
+                         "mechanical_end_s",
+    "settle_s_not_sample": "electrical_settle_sample0 {ke} is not the first sample at or after "
+                           "electrical_settle_s",
+    "mask_s_not_sample": "input_mask_sample0 {km} is not the first sample at or after "
+                         "input_mask_s",
+    "settle_before_end": "precedes electrical_end_s",
+    "mech_rounded": "mechanical_end_sample0 {km} is not the first sample at or after "
+                    "mechanical_end_s",
+}
+"""The words each refusal must carry: the error id alone is shared by every case, so a
+case caught by a DIFFERENT check would pass on the id (review 8 finding 1)."""
+
+
+def _check_reader_words(readers: Mapping[str, Any]) -> None:
+    """Every new refusal names its own check; the ceil-converted mechanical end is accepted."""
+    for name, words in READER_WORDS.items():
+        w = words.format(km=I0 + 2, ke=I0)
+        assert w in readers[name]["message"], (name, readers[name]["message"])
+    assert readers["mech_ceil_ok"]["error"] == "", readers["mech_ceil_ok"]
+
+
+def _check_first_sample(got: object) -> None:
+    """MATLAB's night6_first_sample is Python's first_sample_at_or_after (invariant 22)."""
+    ks = [int(k) for k in (got if isinstance(got, list) else [got])]
+    want = [first_sample_at_or_after(c["t"], c["fs"]) for c in FIRST_SAMPLE]
+    assert ks == want
+    assert want[FIRST_SAMPLE.index({"t": (2_946_000 - 0.4) / FS, "fs": FS})] == 2_946_000
+    assert want[FIRST_SAMPLE.index({"t": (2_946_000 + 1e-7) / FS, "fs": FS})] == 2_946_000
+    assert want[FIRST_SAMPLE.index({"t": (2_946_000 + 1e-5) / FS, "fs": FS})] == 2_946_001
+
+
 def test_night6_trims_in_mode_b_to_the_sample(  # noqa: PLR0915 - one MATLAB run
         tmp_path: Path) -> None:
     _need_matlab()
     case = _cases(tmp_path)
     res = _run_harness(tmp_path, {k: case[k] for k in ("plans", "readers", "run", "unit",
-                                                       "batch", "sources")}, 1200)
+                                                       "batch", "sources", "first_sample")},
+                       1200)
     got = {p["name"]: p for p in res["plans"]}
 
     # (A) is withdrawn: refused by name, with the ruling
@@ -531,8 +611,12 @@ def test_night6_trims_in_mode_b_to_the_sample(  # noqa: PLR0915 - one MATLAB run
     for name in ("schema", "twice", "fractional", "v1", "v2", "no_electrical", "no_cuts",
                  "cut_twice", "cut_fractional", "no_map", "no_sources", "sources_as_object",
                  "v3", "no_edge_hash", "v4", "no_mechanical", "no_mechanical_time",
-                 "no_electrical_time", "no_input_mask", "mask_not_max", "start_before_mask"):
+                 "no_electrical_time", "no_input_mask", "mask_not_max", "start_before_mask",
+                 "mech_s_not_sample", "settle_s_not_sample", "mask_s_not_sample",
+                 "settle_before_end", "mech_rounded"):
         assert readers[name]["error"] == "night6:recoveryStartFile", (name, readers[name])
+    _check_reader_words(readers)
+    _check_first_sample(res["first_sample"])
     # review 2026-10-09: a starts file derived under other edge settlings is stale
     for name in ("edge_stale", "edge_changed"):
         assert readers[name]["error"] == "night6:recoveryStartEdgeSettling", (name,

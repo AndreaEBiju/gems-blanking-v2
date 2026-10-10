@@ -141,7 +141,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Literal
 
-from gems_blanking_v2.extent.grid import seconds_to_sample
+from gems_blanking_v2.extent.grid import first_sample_at_or_after, seconds_to_sample
 from gems_blanking_v2.extent.tolerance import (
     CONSUMER_FILTERS,
     EDGE_SETTLING,
@@ -225,7 +225,9 @@ SCHEMA: Final = "gems-blanking-v2 recovery starts v5"
 electrical settling, and ``input_mask_s`` / ``input_mask_sample0`` = their maximum, with
 ``input_mask_binding``; ``stim_off_s`` is gone (one word, one meaning). Every start and cut
 is the input mask point plus a reach. A v4 file (one stim time) is refused here and by
-``night6_recovery_start``.
+``night6_recovery_start``. The three samples are each the first sample at or after their
+seconds field (``extent.grid.first_sample_at_or_after``; review 8 finding 5 - a v5 file
+written with the mechanical end ROUNDED fails that check and is refused as stale).
 v4: ``edge_settling_sha256`` (``tolerance.edge_settling_sha256``) beside
 ``edge_settling``; a file whose edge settlings are not this build's is stale and refused
 here and by ``night6_recovery_start`` (review 2026-10-09). v3: per-file ``cuts`` (one cut
@@ -559,7 +561,7 @@ _SPIKES = Analysis(
                  "binstat is called by plot_report only"),
     ),
     "The 30 s CV2 bins bind (kept by (c) 3 (c)); without them the spike start would be "
-    "stim-off + electrical + 12.8 ms (the envelope's band + excursion pad).")
+    "the input mask point + 12.8 ms (the envelope's band + excursion pad).")
 
 _HRV = Analysis(
     "hrv", "HR_BR_HRVAnalysis_beats (stored beats), hrv run",
@@ -1562,15 +1564,19 @@ def input_mask(*, fs: float, electrical_settle_s: float,
                mechanical_end_s: float) -> dict[str, Any]:
     """Return the file's input mask point: max(electrical end + settling, mechanical end).
 
-    The ONE place it is derived (invariant 33). Returned in seconds and as the exact 0-based
-    FILE sample (``seconds_to_sample`` is monotone, so the sample of the maximum is the
-    maximum of the two samples - both are written, and the document asserts the identity),
-    with which time binds: ``electrical``, ``mechanical``, or ``both`` on the same sample.
+    The ONE place it is derived (invariant 33). Returned in seconds and as exact 0-based
+    FILE samples, each the FIRST SAMPLE AT OR AFTER its time (``ceil(t fs)``, the rule's
+    convention for an event time: :func:`~gems_blanking_v2.extent.grid.first_sample_at_or_after`,
+    the one conversion - review 8 finding 5; ``round`` could put the mechanical end half a
+    sample before the gate closed). The conversion is monotone, so the sample of the
+    maximum is the maximum of the two samples - all three are written, and the document
+    asserts the identity and each conversion - with which time binds: ``electrical``,
+    ``mechanical``, or ``both`` on the same sample.
     """
-    ke = seconds_to_sample(float(electrical_settle_s), fs)
-    km = seconds_to_sample(float(mechanical_end_s), fs)
+    ke = first_sample_at_or_after(float(electrical_settle_s), fs)
+    km = first_sample_at_or_after(float(mechanical_end_s), fs)
     t = max(float(electrical_settle_s), float(mechanical_end_s))
-    k = seconds_to_sample(t, fs)
+    k = first_sample_at_or_after(t, fs)
     if k != max(ke, km):
         msg = f"input mask sample {k} is not max({ke}, {km})"
         raise AssertionError(msg)
@@ -1780,23 +1786,45 @@ def _check_times(sess: str, f: Mapping[str, Any]) -> None:
     """Both stim times and the input mask point, consistent to the sample (RULING (i) 3 (c)).
 
     ``input_mask_sample0`` must equal max(``electrical_settle_sample0``,
-    ``mechanical_end_sample0``), and no measured start or cut may precede it: a file that
-    disagrees with itself is refused at write time and at read time (invariant 27).
+    ``mechanical_end_sample0``); each of the three samples must be the first sample at or
+    after its seconds field at the file's ``fs`` (``first_sample_at_or_after``, the one
+    conversion); the electrical settling may not precede the electrical end; and no
+    measured start or cut may precede the input mask point: a file that disagrees with
+    itself is refused at write time and at read time (invariant 27).
     """
     for key in ("electrical_settle_sample0", "mechanical_end_sample0", "input_mask_sample0"):
         if not _is_sample(f.get(key)):
             msg = f"{sess}: {key} must be an int >= 0 (mode (B), {RULING_TIMES})"
             raise TypeError(msg)
-    for key in ("electrical_end_s", "mechanical_end_s", "electrical_settle_s", "input_mask_s"):
+    for key in ("fs", "electrical_end_s", "mechanical_end_s", "electrical_settle_s",
+                "input_mask_s"):
         v = f.get(key)
         if not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v):
             msg = f"{sess}: {key} is absent or not a finite number ({RULING_TIMES})"
             raise TypeError(msg)
+    fs = float(f["fs"])
+    if fs <= 0:
+        msg = f"{sess}: fs must be positive, got {fs}"
+        raise ValueError(msg)
     ke, km, k = (int(f[x]) for x in ("electrical_settle_sample0", "mechanical_end_sample0",
                                      "input_mask_sample0"))
     if k != max(ke, km):
         msg = (f"{sess}: input_mask_sample0 {k} is not max(electrical_settle_sample0 {ke}, "
                f"mechanical_end_sample0 {km}) ({RULING_TIMES})")
+        raise ValueError(msg)
+    for ks, ts in (("electrical_settle_sample0", "electrical_settle_s"),
+                   ("mechanical_end_sample0", "mechanical_end_s"),
+                   ("input_mask_sample0", "input_mask_s")):
+        want = first_sample_at_or_after(float(f[ts]), fs)
+        if int(f[ks]) != want:
+            msg = (f"{sess}: {ks} {f[ks]} is not the first sample at or after {ts} "
+                   f"{f[ts]!r} s at fs {fs!r} ({want}; extent.grid.first_sample_at_or_after, "
+                   f"{RULING_TIMES})")
+            raise ValueError(msg)
+    if float(f["electrical_settle_s"]) < float(f["electrical_end_s"]):
+        msg = (f"{sess}: electrical_settle_s {f['electrical_settle_s']!r} precedes "
+               f"electrical_end_s {f['electrical_end_s']!r}: the settling is measured from the "
+               f"electrical end ({RULING_TIMES})")
         raise ValueError(msg)
     late = [str(r.get("analysis", r.get("cut"))) for r in (*f["analyses"], *f.get("cuts", []))
             if r.get("basis") in (BASIS_MEASURED, BASIS_CUT) and int(r["start_sample0"]) < k]

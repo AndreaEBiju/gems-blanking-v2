@@ -48,7 +48,7 @@ from typing import Any
 import pytest
 from gems_blanking_v2.extent import recovery_start as rs
 from gems_blanking_v2.extent import tolerance as tl
-from gems_blanking_v2.extent.grid import seconds_to_sample
+from gems_blanking_v2.extent.grid import first_sample_at_or_after, seconds_to_sample
 from gems_blanking_v2.extent.tolerance import (
     CONSUMER_FILTERS,
     expected_consumers,
@@ -414,7 +414,7 @@ def test_every_start_is_its_electrical_time_plus_its_own_settling(off: float, el
     f = rs.file_starts(session="x", fs=fs, electrical_end_s=off, mechanical_end_s=off,
                        electrical_settle_s=off + el,
                        times_source="a", electrical_source="b")
-    assert f["electrical_settle_sample0"] == seconds_to_sample(off + el, fs)
+    assert f["electrical_settle_sample0"] == first_sample_at_or_after(off + el, fs)
     for r in f["analyses"]:
         own = rs.analysis_settling(r["analysis"], fs).settling_s
         assert own is not None
@@ -474,7 +474,7 @@ def test_the_file_round_trips_exactly_as_canonical_ascii(tmp_path: Path) -> None
     assert {r["file"]: r["sha256"] for r in back["source_files"]} == dict(rs.SOURCE_FILES)
     assert [r["file"] for r in back["source_files"]] == sorted(rs.SOURCE_FILES)
     assert back["output_times"] == rs.output_times_record()
-    assert back["files"][0]["electrical_settle_sample0"] == seconds_to_sample(124.2, FS)
+    assert back["files"][0]["electrical_settle_sample0"] == first_sample_at_or_after(124.2, FS)
     assert [f["session"] for f in back["files"]] == ["b_sr"]
     assert [f["session"] for f in back["held"]] == ["a_sr", "c_sr"]
     assert rs.write_recovery_starts(tmp_path / "again.json", back) == text
@@ -878,7 +878,7 @@ def test_the_later_of_the_two_stim_times_sets_every_start_and_cut() -> None:
     b = _two(118.69, 119.10, 120.73)
     for f, t, bind in ((a, 121.40, "electrical"), (b, 120.73, "mechanical")):
         assert f["input_mask_s"] == t and f["input_mask_binding"] == bind
-        assert f["input_mask_sample0"] == seconds_to_sample(t, FS)
+        assert f["input_mask_sample0"] == first_sample_at_or_after(t, FS)
         assert f["input_mask_sample0"] == max(f["electrical_settle_sample0"],
                                               f["mechanical_end_sample0"])
         assert f["electrical_end_s"] == 118.69 and f["mechanical_end_s"] == 120.73
@@ -906,8 +906,9 @@ def test_every_start_and_cut_is_the_max_of_both_times_plus_its_reach(
     f = _two(e_end, e_end + el, e_end + dm, fs)
     t = max(e_end + el, e_end + dm)
     assert f["input_mask_s"] == t
-    assert f["input_mask_sample0"] == max(seconds_to_sample(e_end + el, fs),
-                                          seconds_to_sample(e_end + dm, fs))
+    assert f["input_mask_sample0"] == max(first_sample_at_or_after(e_end + el, fs),
+                                          first_sample_at_or_after(e_end + dm, fs))
+    assert f["mechanical_end_sample0"] == first_sample_at_or_after(e_end + dm, fs)
     for r in f["analyses"]:
         own = rs.analysis_settling(r["analysis"], fs).settling_s
         assert own is not None
@@ -937,8 +938,27 @@ def test_the_document_refuses_a_file_that_disagrees_with_its_two_times() -> None
             (lambda f: f.pop("mechanical_end_s"), TypeError, "mechanical_end_s"),
             (lambda f: f.pop("electrical_end_s"), TypeError, "electrical_end_s"),
             (lambda f: f.pop("input_mask_sample0"), TypeError, "input_mask_sample0"),
-            (lambda f: f.update(input_mask_sample0=f["electrical_settle_sample0"]), ValueError,
+            # LOWERED to the electrical settling, seconds and sample, on a file where the
+            # mechanical end binds: only the max check can see it (review 8 finding 1)
+            (lambda f: f.update(input_mask_sample0=f["electrical_settle_sample0"],
+                                input_mask_s=f["electrical_settle_s"]), ValueError,
              "is not max"),
+            # review 8 finding 4: every sample is its seconds field's first sample at or after
+            (lambda f: f.update(mechanical_end_s=f["mechanical_end_s"] + 3.0 / FS), ValueError,
+             "mechanical_end_sample0 .* is not the first sample at or after mechanical_end_s"),
+            (lambda f: f.update(electrical_settle_s=f["electrical_settle_s"] - 3.0 / FS),
+             ValueError,
+             "electrical_settle_sample0 .* is not the first sample at or after "
+             "electrical_settle_s"),
+            (lambda f: f.update(input_mask_s=f["input_mask_s"] + 3.0 / FS), ValueError,
+             "input_mask_sample0 .* is not the first sample at or after input_mask_s"),
+            (lambda f: f.update(mechanical_end_sample0=seconds_to_sample(
+                f["mechanical_end_s"], FS) - 1, input_mask_sample0=seconds_to_sample(
+                f["mechanical_end_s"], FS) - 1), ValueError,
+             "mechanical_end_sample0 .* is not the first sample at or after"),
+            (lambda f: f.update(electrical_end_s=f["electrical_settle_s"] + 0.01), ValueError,
+             "electrical_settle_s .* precedes electrical_end_s"),
+            (lambda f: f.update(fs=FS + 1.0), ValueError, "is not the first sample at or after"),
             (lambda f: f["analyses"][0].update(start_sample0=f["input_mask_sample0"] - 1),
              ValueError, "precede the input mask"),
             (lambda f: f["cuts"][0].update(start_sample0=f["input_mask_sample0"] - 1),
@@ -950,11 +970,77 @@ def test_the_document_refuses_a_file_that_disagrees_with_its_two_times() -> None
     _doc(a)
 
 
+def _v4_file(f: dict[str, Any]) -> dict[str, Any]:
+    """Return a v4 row (one stim time, ``stim_off_s``), as the v4 writer (d34339d) built it."""
+    v4 = {k: f[k] for k in ("session", "fs", "electrical_settle_s",
+                            "electrical_settle_sample0", "electrical_s")}
+    v4["stim_off_s"] = f["electrical_end_s"]
+    v4["analyses"] = [{**r, "basis": "stim_off_plus_electrical_plus_own_settling"}
+                      for r in f["analyses"]]
+    v4["cuts"] = [{**c, "basis": "stim_off_plus_electrical_plus_class_reach"}
+                  for c in f["cuts"]]
+    return v4
+
+
 def test_a_v4_starts_file_with_one_stim_time_is_refused(tmp_path: Path) -> None:
+    """A genuine v4 file - each row ONE stim time - is refused by its schema.
+
+    Relabelled v5 it is still refused, naming the stim time it lacks (review 8 finding 6).
+    """
     doc = rs.recovery_starts_document([_two(118.69, 121.4, 120.73)], fs=FS)
     j = json.loads(json.dumps(doc))
     j["schema"] = "gems-blanking-v2 recovery starts v4"
+    j["files"] = [_v4_file(f) for f in j["files"]]
+    row = j["files"][0]
+    assert "stim_off_s" in row
+    assert not {"electrical_end_s", "mechanical_end_s", "mechanical_end_sample0",
+                "input_mask_s", "input_mask_sample0", "input_mask_binding"} & set(row)
     f = tmp_path / "v4.json"
     f.write_text(json.dumps(j), encoding="utf-8", newline="\n")
     with pytest.raises(ValueError, match="expected 'gems-blanking-v2 recovery starts v5'"):
         rs.read_recovery_starts(f)
+    j["schema"] = rs.SCHEMA
+    f.write_text(json.dumps(j), encoding="utf-8", newline="\n")
+    with pytest.raises(TypeError, match="mechanical_end_sample0 must be an int"):
+        rs.read_recovery_starts(f)
+
+
+# ---------------------------------------------------------------------------
+# review 8 finding 5: an event time's sample is the first sample at or after it
+# ---------------------------------------------------------------------------
+
+
+def test_the_mechanical_end_is_the_first_sample_at_or_after_the_gate() -> None:
+    """ceil, not round: 0.4 sample before an integer is that integer, never the one before."""
+    k = 2_946_000
+    for frac in (0.4, 0.6, 0.75, 0.999):
+        m_end = (k - frac) / FS
+        if frac > 0.5:
+            assert seconds_to_sample(m_end, FS) == k - 1  # round: before the gate closed
+        f = _two(m_end - 3.0, m_end - 1.0, m_end)  # the mechanical end binds
+        assert f["mechanical_end_sample0"] == k, frac
+        assert f["input_mask_sample0"] == k and f["input_mask_binding"] == "mechanical"
+        assert f["mechanical_end_sample0"] / FS >= m_end
+        assert (f["mechanical_end_sample0"] - 1) / FS < m_end
+    on = _two(117.0, 119.0, k / FS)  # exactly on a sample: that sample, not the next
+    assert on["mechanical_end_sample0"] == k
+    # the electrical settling (a sample the rule found) maps back to itself
+    e = _two(100.0, 3_000_123 / FS, 101.0)
+    assert e["electrical_settle_sample0"] == 3_000_123
+
+
+@settings(max_examples=500, deadline=None)
+@given(t=st.floats(0.0, 700.0), fs=st.sampled_from([FS, 24414.0, 1000.0, 48828.125]))
+def test_first_sample_at_or_after_is_the_ceiling_up_to_float_noise(t: float, fs: float) -> None:
+    k = first_sample_at_or_after(t, fs)
+    x = t * fs
+    assert k >= x - 1e-6 and k - 1 < x  # at or after t (to float noise); the first such
+    assert k == math.ceil(x) or abs(x - k) <= 1e-6
+    assert first_sample_at_or_after(k / fs, fs) == k  # a sample's own time is that sample
+    assert first_sample_at_or_after(t + 1.0 / fs, fs) >= k  # monotone
+
+
+@settings(max_examples=300, deadline=None)
+@given(k=st.integers(0, 10**8), fs=st.sampled_from([FS, 24414.0, 1000.0, 48828.125]))
+def test_a_sample_written_as_seconds_converts_back_to_itself(k: int, fs: float) -> None:
+    assert first_sample_at_or_after(k / fs, fs) == k
