@@ -139,6 +139,7 @@ __all__ = [
     "is_confirmed_motion",
     "mmc_not_measured_spans",
     "own_detection_signals",
+    "own_signals_by_signal",
     "settling_provenance",
     "stand_in_tolerance_doc",
     "step_settling_s",
@@ -852,8 +853,8 @@ class Extent:
 CROSS_BAND_SCOPE_ALL: Final = "all_detecting_pairs"
 """RULING 2026-10-09 (i) 1 as written: every pair that detected the event sets its extent."""
 CROSS_BAND_SCOPE_OWN: Final = "own_signals_only"
-"""Only detecting pairs on the consumer's own signals or the channels they are built from
-(:func:`own_detection_signals`) set the extent."""
+"""Only detecting pairs on the OWN signals of the (consumer, signal) whose extent is being
+built (:func:`own_signals_by_signal`, the one definition the core rule uses too) set it."""
 CROSS_BAND_SCOPE_OFF: Final = "off"
 """No cross-band extent: the consumer's harmful kinds invisible in its band are residual risk."""
 CROSS_BAND_SCOPES: Final[tuple[str, ...]] = (CROSS_BAND_SCOPE_ALL, CROSS_BAND_SCOPE_OWN,
@@ -875,8 +876,11 @@ class CrossBand:
 
     ``scope`` is each consumer's DECLARED cross-band scope (:data:`CROSS_BAND_SCOPES`). Every
     consumer that reaches :func:`detected_extent` needs one; a consumer without one is
-    refused, never defaulted. ``own_signals`` maps each ``own_signals_only`` consumer to the
-    detection signals it may take its extent from (:func:`own_detection_signals`).
+    refused, never defaulted. ``own_signals`` maps each ``(consumer, signal)`` to the
+    detection signals its ``own_signals_only`` extent may be taken from, built by
+    :func:`own_signals_by_signal` and nowhere else (invariant 33): per SIGNAL, so a core seen
+    only on ``R_V2`` never sets an extent on ``L_T``'s spikes, and one seen only on ``L_T``
+    never sets one on breathing routed off the L cuff.
 
     ``floor_by_band`` (RULING 2026-10-10 item 2), when given, replaces ``floor_z`` per
     detecting pair: a pair's run counts while its z is above the declared clean-null
@@ -888,7 +892,7 @@ class CrossBand:
     z: Mapping[tuple[str, str], npt.ArrayLike]
     floor_z: float
     scope: Mapping[str, str]
-    own_signals: Mapping[str, frozenset[str]]
+    own_signals: Mapping[tuple[str, str], frozenset[str]]
     floor_by_band: Mapping[str, float] | None = None
 
 
@@ -924,10 +928,11 @@ def channel_detection_signals(channels: Sequence[Any]) -> dict[str, str]:
 
 def own_detection_signals(consumer_signals: Sequence[str], detection_signals: Sequence[str],
                           channel_signals: Mapping[str, str]) -> frozenset[str]:
-    """Return the detection signals a consumer's ``own_signals_only`` extent may read.
+    """Return the union of the detection-signal families of ``consumer_signals``.
 
-    Each signal the consumer reads (:func:`consumer_signals`, i.e. ``CONSUMERS``) brings a
-    family:
+    A building block of :func:`core_own_signals`, which calls it with ONE signal: a
+    consumer's own signals are defined per signal (:func:`own_signals_by_signal`), never as
+    the union over every signal the consumer reads. Each signal brings a family:
 
     * a cuff signal (``"L_T"``, ``"R_V2"``) brings its cuff's nerve signals
       (``<cuff>_V1..V3`` and ``<cuff>_T``: the channels it is built from, and the tripole
@@ -998,6 +1003,26 @@ def core_own_signals(consumer: str, signal: str, detection_signals: Sequence[str
     if consumer in ("hrv", "breathing"):
         return hr_source_signals(signal, detection_signals, channel_signals)
     return own_detection_signals([signal], detection_signals, channel_signals)
+
+
+def own_signals_by_signal(signals: Mapping[str, Sequence[str]], detection_signals: Sequence[str],
+                          channel_signals: Mapping[str, str]
+                          ) -> dict[tuple[str, str], frozenset[str]]:
+    """Return ``(consumer, signal)`` -> that signal's own detection signals, for every z consumer.
+
+    THE construction site of "own signals" (invariant 33): the cross-band ``own_signals_only``
+    scope (:class:`CrossBand`) and the core rule ``own_signals_or_visible``
+    (``stage1.core_pad_spans``) both read this mapping. Andrea's definition (2026-10-10), per
+    signal (:func:`core_own_signals`): the stomach channels for slow wave and mmc; that cuff's
+    contacts and tripole for that cuff's spikes; the routed HR channel, or both channels of its
+    pair, for breathing. ``signals`` is what each consumer reads (a stage-1a record's
+    ``signals``), ``detection_signals`` what detection read (its ``detection_signals``) and
+    ``channel_signals`` :func:`channel_detection_signals` of the recording's channels. hrv is
+    left out (its extent is operational). A signal whose family cannot be resolved is refused
+    (ValueError, naming it): never guessed, never skipped.
+    """
+    return {(c, s): core_own_signals(c, s, detection_signals, channel_signals)
+            for c, sigs in signals.items() if c != "hrv" for s in sigs}
 
 
 class ExtentNotAssessableError(ValueError):
@@ -1073,9 +1098,9 @@ def compute_extent(event: Event, z: Mapping[tuple[str, str], npt.ArrayLike], con
                   BANDS[spec.band].window_s)
 
 
-def _scoped_pairs(cross: CrossBand, event_id: str, consumer: str
+def _scoped_pairs(cross: CrossBand, event_id: str, consumer: str, signal: str
                   ) -> tuple[tuple[str, str], ...] | None:
-    """Return the detecting pairs that ``consumer``'s declared scope admits; None for ``off``."""
+    """Return the detecting pairs ``consumer``'s declared scope admits on ``signal``; None: off."""
     if consumer not in cross.scope:
         msg = (f"{consumer} declares no cross-band scope (one of {list(CROSS_BAND_SCOPES)}); "
                "it is never defaulted (review 7 finding 2)")
@@ -1089,10 +1114,11 @@ def _scoped_pairs(cross: CrossBand, event_id: str, consumer: str
         return None
     pairs = tuple(cross.pairs[event_id])
     if scope == CROSS_BAND_SCOPE_OWN:
-        if consumer not in cross.own_signals:
-            msg = f"{consumer} is own_signals_only but its own detection signals are not given"
+        if (consumer, signal) not in cross.own_signals:
+            msg = (f"{consumer} is own_signals_only but the own detection signals of "
+                   f"{(consumer, signal)} are not given (tolerance.own_signals_by_signal)")
             raise KeyError(msg)
-        own = cross.own_signals[consumer]
+        own = cross.own_signals[(consumer, signal)]
         pairs = tuple(q for q in pairs if q[0] in own)
     return pairs
 
@@ -1123,9 +1149,9 @@ def detected_extent(event: Event, cross: CrossBand, event_id: str, consumer: str
 
     The consumer's declared scope (``cross.scope``, review 7 finding 2) picks the pairs:
     ``all_detecting_pairs`` takes every detecting pair (the ruling as written);
-    ``own_signals_only`` only those on ``cross.own_signals[consumer]``; ``off`` none, so the
-    result is ``None`` (under tolerance; its invisible kinds are residual risk). An undeclared
-    or unknown scope is refused.
+    ``own_signals_only`` only those on ``cross.own_signals[(consumer, signal)]``; ``off`` none,
+    so the result is ``None`` (under tolerance; its invisible kinds are residual risk). An
+    undeclared or unknown scope is refused.
     """
     if consumer == "hrv":
         msg = "hrv's extent is operational: use hrv_extent"
@@ -1133,7 +1159,7 @@ def detected_extent(event: Event, cross: CrossBand, event_id: str, consumer: str
     if event_id not in cross.pairs:
         msg = f"event {event_id} has no detecting pairs: its detected extent is unknown"
         raise KeyError(msg)
-    pairs = _scoped_pairs(cross, event_id, consumer)
+    pairs = _scoped_pairs(cross, event_id, consumer, signal)
     if pairs is None:
         return None
     spec = extent_consumers()[consumer]

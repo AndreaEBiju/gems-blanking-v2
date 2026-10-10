@@ -51,14 +51,11 @@ def _full(seed: int) -> st1.EpochCache:
          for c, v in syn.signals.items() if c != "hrv" for s in v}
     eng = {s: rt.eng_trace(s, syn.eng_raw[s], syn.fs, x_t0_s=syn.t0_s)
            for s in syn.signals["spikes"]}
-    own = {c: tl.own_detection_signals(v, STAGE1_SIGNALS, {})
-           for c, v in syn.signals.items() if c != "hrv" and v}
+    own = tl.own_signals_by_signal(syn.signals, STAGE1_SIGNALS, {})
     return st1.EpochCache(events=syn.events, detecting=syn.detecting,  # type: ignore[arg-type]
                           cached_events=frozenset(syn.events), z=z, zdet=syn.zdet, eng=eng,
                           hrv=syn.hrv, signals=syn.signals, own_signals=own,  # type: ignore[arg-type]
-                          fs=syn.fs, z_t0_s=syn.t0_s, n_frames=syn.n_frames,
-                          core_own={(c, s): tl.core_own_signals(c, s, STAGE1_SIGNALS, {})
-                                    for c, v in syn.signals.items() if c != "hrv" for s in v})
+                          fs=syn.fs, z_t0_s=syn.t0_s, n_frames=syn.n_frames)
 
 
 def _sparse(seed: int, cached: frozenset[str]) -> st1.EpochCache:
@@ -83,7 +80,7 @@ def _sparse(seed: int, cached: frozenset[str]) -> st1.EpochCache:
                           z=full.z, zdet=zdet, eng=eng,
                           hrv={k: full.hrv[k] for k in cached}, signals=full.signals,
                           own_signals=full.own_signals, fs=full.fs, z_t0_s=full.z_t0_s,
-                          n_frames=full.n_frames, core_own=full.core_own)
+                          n_frames=full.n_frames)
 
 
 def _table(thr: dict[str, float]) -> tl.ToleranceTable:
@@ -381,7 +378,7 @@ def _own_cache(seed: int, *, empty: bool = False) -> st1.EpochCache:
     own = {(c, s): (frozenset() if empty else
                     tl.core_own_signals(c, s, STAGE1_SIGNALS, {}))
            for c, v in full.signals.items() if c != "hrv" for s in v}
-    return st1.EpochCache(**{**full.__dict__, "core_own": own})
+    return st1.EpochCache(**{**full.__dict__, "own_signals": own})
 
 
 def _spans(cache: st1.EpochCache, thr: float) -> set[tuple[str, str, str]]:
@@ -407,7 +404,7 @@ def test_a_core_detected_on_the_consumers_own_signals_blanks_it() -> None:
     got = _spans(cache, 99.0)  # nothing is visible at z 99: only own-signal detection blanks
     want = {(c, s, e) for c, v in cache.signals.items() if c != "hrv" for s in v
             for e in cache.events
-            if {q[0] for q in cache.detecting[e]} & cache.core_own[(c, s)]}  # type: ignore[index]
+            if {q[0] for q in cache.detecting[e]} & cache.own_signals[(c, s)]}
     assert got == want and want
     # that cuff's contacts only: a core seen only on R never blanks L_T's spikes
     only_r = [e for e in cache.events
@@ -435,7 +432,7 @@ def test_the_core_and_its_padding_are_blanked_together_whenever_it_blanks() -> N
                                  tolerances=_table(dict.fromkeys(Z_CONSUMERS, 99.0))):
         assert any(_bounds(cache, e, sp.consumer) == (sp.start_s, sp.stop_s) for e in ids)
         assert sp.reason == st1.CORE_PAD_REASON
-    no_own = st1.EpochCache(**{**cache.__dict__, "core_own": None})
+    no_own = st1.EpochCache(**{**cache.__dict__, "own_signals": {}})
     with pytest.raises(ValueError, match="needs its own signals"):
         st1.core_pad_spans(no_own, ids, core_blanking=dict.fromkeys(Z_CONSUMERS, OWN),
                            tolerances=_table(dict.fromkeys(Z_CONSUMERS, 4.0)))
@@ -454,3 +451,44 @@ def test_the_hr_source_channels_are_the_routed_hr_channel_or_pair_only() -> None
     for bad in ("RVN9", "RVN2-XYZ"):
         with pytest.raises(ValueError, match="HR-source channels are unknown"):
             tl.hr_source_signals(bad, det, chmap)
+
+
+# ---------------------------------------------------------------------------
+# review of r1010, fix 3: stage-1a code provenance
+# ---------------------------------------------------------------------------
+
+COMMIT, DRIVER = "4fe230e" + "0" * 33, "51f7f514" + "a" * 56
+
+
+def _code_keys() -> dict:
+    return st1.stage1a_keys(
+        generation="g", feature_version="f", choice_file_sha256="c" * 64, model_id="m" * 32,
+        evaluation_model_id=None, decision_rule={"name": "r"}, p_threshold=0.5,
+        sensitivity_p=[0.3], hrv_window_s=10.0, wave_id="w1b", production_routing_sha256="p",
+        routing_entry_hash="e", routing_table="t", peri_r_window_sha256="w")
+
+
+def test_the_code_that_made_a_record_is_recorded_but_never_a_freshness_key() -> None:
+    rec = {**_code_keys(), **st1.stage1a_code_keys(commit=COMMIT, package_dirty=False,
+                                              driver_sha256=DRIVER)}
+    st1.check_stage1a_fresh(rec, _code_keys(), what="x")  # stage 1b runs other code by design
+    got = st1.stage1a_code(rec, None, wave_id="w1b", what="x")
+    assert got["text"] == f"stage 1a: {COMMIT} + driver {DRIVER}"
+    assert got["source"] == "the stage-1a record's keys"
+    with pytest.raises(st1.Stage1aMismatchError, match="model_id"):
+        st1.check_stage1a_fresh({**rec, "model_id": "n" * 32}, _code_keys(), what="x")
+
+
+def test_a_record_without_code_keys_takes_its_waves_launch_declaration_or_is_refused() -> None:
+    launch = {"commit": COMMIT, "driver_sha256": DRIVER, "source": "night_1009.log"}
+    got = st1.stage1a_code(_code_keys(), launch, wave_id="w1b", what="x")
+    assert got["text"] == f"stage 1a: {COMMIT} + driver {DRIVER}"
+    assert "wave w1b stage1a_launch declaration" in got["source"]
+    with pytest.raises(st1.Stage1aMismatchError, match="declares no stage1a_launch"):
+        st1.stage1a_code(_code_keys(), None, wave_id="w1b", what="x")
+    with pytest.raises(st1.Stage1aMismatchError, match="not all of"):
+        st1.stage1a_code({**_code_keys(), "code_commit": COMMIT}, launch, wave_id="w1b", what="x")
+    for bad in ({**launch, "commit": "4fe230e"}, {**launch, "source": ""},
+                {**launch, "driver_sha256": DRIVER.upper()}):
+        with pytest.raises(ValueError, match="stage1a_launch"):
+            st1.stage1a_code(_code_keys(), bad, wave_id="w1b", what="x")

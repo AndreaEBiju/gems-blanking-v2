@@ -399,7 +399,7 @@ def _cross(z: dict[tuple[str, str], Any], scope: str = tl.CROSS_BAND_SCOPE_ALL,
            pairs: tuple[tuple[str, str], ...] = (("L_V1", "0-2"),)) -> tl.CrossBand:
     own = frozenset({"ANT1", "ANT2", "ANT3", "stomach_ref"})
     return tl.CrossBand(pairs={"e1": pairs}, z=z, floor_z=tm.Z_FLOOR, scope={"mmc": scope},
-                        own_signals={"mmc": own})
+                        own_signals={("mmc", "ANT1"): own})
 
 
 def _extents(own_level: float, *, cross: bool) -> list[Any]:
@@ -483,7 +483,7 @@ def test_an_undeclared_or_unknown_scope_is_refused() -> None:
                            z_t0_s=0.0)
     no_own = tl.CrossBand(pairs={"e1": (("L_V1", "0-2"),)}, z=z, floor_z=tm.Z_FLOOR,
                           scope={"mmc": tl.CROSS_BAND_SCOPE_OWN}, own_signals={})
-    with pytest.raises(KeyError, match="own detection signals are not given"):
+    with pytest.raises(KeyError, match="own detection signals of"):
         tl.detected_extent(_event(), no_own, "e1", "mmc", signal="ANT1", fs=FS, z_t0_s=0.0)
 
 
@@ -498,7 +498,7 @@ STOMACH = {"ANT1", "ANT2", "ANT3", "stomach_ref"}
 
 @pytest.mark.parametrize(("signals", "want"), [
     (("ANT1", "ANT2", "ANT3"), STOMACH),          # slow_wave, mmc: the stomach channels
-    (("L_T", "R_T"), NERVE_L | NERVE_R),          # spikes: both cuffs
+    (("L_T", "R_T"), NERVE_L | NERVE_R),          # the union (never a consumer's own set)
     (("R_T",), NERVE_R),                          # breathing on one cuff's tripole
     (("LVN2-RVN1",), NERVE_L | NERVE_R),          # breathing on a cross-cuff lead
     (("RVN3",), NERVE_R),                         # a raw contact
@@ -506,6 +506,66 @@ STOMACH = {"ANT1", "ANT2", "ANT3", "stomach_ref"}
 def test_own_detection_signals_are_the_consumers_signals_and_their_channels(
         signals: tuple[str, ...], want: set[str]) -> None:
     assert tl.own_detection_signals(signals, DET, CH) == want
+
+
+SC_SIGNALS = {"spikes": ("L_T", "R_T"), "breathing": ("LVN2-RVN1",), "mmc": ("ANT1",)}
+
+
+def _scoped_run(det_sig: str, signals: dict[str, tuple[str, ...]] | None = None,
+                own: Any = None) -> dict[tuple[str, str], Any]:  # noqa: ANN401
+    """Every own band flat under 9; one core detected on ``det_sig`` only; own_signals_only."""
+    sigs = SC_SIGNALS if signals is None else signals
+    bands = {c: tl.extent_consumers()[c].band for c in sigs}
+    z: dict[tuple[str, str], Any] = {(s, bands[c]): make_band_z(bands[c], DUR, signal=s).z_max
+                                     for c, v in sigs.items() for s in v}
+    det = make_band_z("0-2", DUR, bumps=((29.8, 31.2, 2.0, det_sig), (30.1, 30.3, 6.0, det_sig)),
+                      signal=det_sig).z_max
+    cross = tl.CrossBand(pairs={"e1": ((det_sig, "0-2"),)}, z={(det_sig, "0-2"): det},
+                         floor_z=tm.Z_FLOOR, scope=dict.fromkeys(sigs, tl.CROSS_BAND_SCOPE_OWN),
+                         own_signals=(tl.own_signals_by_signal(sigs, DET, CH) if own is None
+                                      else own))
+    out = tl.extents_for_events({"e1": _event()}, z, sigs,
+                                tolerances=tl.ToleranceTable(dict.fromkeys(sigs, 9.0), "test"),
+                                fs=FS, z_t0_s=0.0, confirmed=lambda e: True, cross_band=cross)
+    return {(c, s): r for _e, c, s, r in out}
+
+
+def _detected(r: object) -> bool:
+    return isinstance(r, tl.Extent) and r.basis == tl.EXTENT_BASIS_DETECTED
+
+
+def test_own_signals_only_is_per_signal_never_per_consumer() -> None:
+    """Review of r1010, fix 1: own signals are per signal, never per consumer.
+
+    A core seen only on R_V2 never blanks L_T's spikes; one seen only on L_T never blanks
+    breathing routed on the cross-cuff lead LVN2-RVN1 (HR source: L_V2 and R_V1) or on R_T.
+    The consumer-level family (both cuffs for spikes; every nerve signal for a cross-cuff
+    lead) blanked both.
+    """
+    r = _scoped_run("R_V2")
+    assert _detected(r[("spikes", "R_T")]) and r[("spikes", "L_T")] is None
+    assert r[("breathing", "LVN2-RVN1")] is None and r[("mmc", "ANT1")] is None
+    r = _scoped_run("L_T")
+    assert _detected(r[("spikes", "L_T")]) and r[("spikes", "R_T")] is None
+    assert r[("breathing", "LVN2-RVN1")] is None
+    on_rt = _scoped_run("L_T", {"breathing": ("R_T",)})
+    assert on_rt[("breathing", "R_T")] is None
+    r = _scoped_run("R_V1")  # one of the HR pair's two channels
+    assert _detected(r[("breathing", "LVN2-RVN1")]) and _detected(r[("spikes", "R_T")])
+    assert r[("spikes", "L_T")] is None
+    assert _detected(_scoped_run("stomach_ref")[("mmc", "ANT1")])
+
+
+def test_own_signals_by_signal_is_the_one_mapping_for_both_rules() -> None:
+    own = tl.own_signals_by_signal({**SC_SIGNALS, "hrv": ("LVN2-RVN1",)}, DET, CH)
+    assert own == {("spikes", "L_T"): NERVE_L, ("spikes", "R_T"): NERVE_R,
+                   ("breathing", "LVN2-RVN1"): {"L_V2", "R_V1"}, ("mmc", "ANT1"): STOMACH}
+    assert all(own[k] == tl.core_own_signals(*k, DET, CH) for k in own)
+    with pytest.raises(ValueError, match="HR-source channels are unknown"):
+        tl.own_signals_by_signal({"breathing": ("ECG",)}, DET, CH)
+    # a consumer-keyed mapping (the old shape) is refused by name, never read as "no own"
+    with pytest.raises(KeyError, match="own detection signals of"):
+        _scoped_run("R_V2", own={"spikes": NERVE_L | NERVE_R})
 
 
 def test_an_own_signal_with_no_detection_signal_is_refused() -> None:

@@ -73,11 +73,13 @@ __all__ = [
     "EXTENT_DEPENDENT",
     "INFERENCE_CONFIG_KEYS",
     "STAGE1A_KEYS",
+    "STAGE1A_PROVENANCE_KEYS",
     "STAGE1A_SCHEMA",
     "EpochCache",
     "Stage1aMismatchError",
     "blank_seconds",
     "check_stage1a_fresh",
+    "check_stage1a_launch",
     "content_sha256",
     "core_frames",
     "core_pad_spans",
@@ -90,6 +92,8 @@ __all__ = [
     "hull_frames",
     "inference_config",
     "sparse_detection_z",
+    "stage1a_code",
+    "stage1a_code_keys",
     "stage1a_keys",
 ]
 
@@ -113,6 +117,14 @@ STAGE1A_KEYS: Final[tuple[str, ...]] = (
 """Stage 1a's freshness keys: inference inputs only (RULING 2026-10-10 item 4). No extent
 threshold, cross-band scope or hold is among them, so changing any of those never re-runs
 inference."""
+
+STAGE1A_PROVENANCE_KEYS: Final[tuple[str, ...]] = ("code_commit", "package_dirty", "driver_sha256")
+"""What made a stage-1a record (invariant 11; review of r1010, fix 3): the package commit, whether
+the package tree was dirty, and the sha256 of the driver script. Stage 1a records them in the
+record's ``keys``; they are NEVER compared for freshness (:func:`check_stage1a_fresh`), because
+the code moves between stage 1a and stage 1b by design - stage 1b reads only what 1a cached - and
+the record says which code made it. A record without them takes them from its wave's launch
+declaration (:func:`stage1a_code`)."""
 
 INFERENCE_CONFIG_KEYS: Final[tuple[str, ...]] = (
     "decision_rules", "p_threshold", "sensitivity_p", "hrv_window_s", "wave", "stand_in",
@@ -198,7 +210,7 @@ def check_stage1a_fresh(have: Mapping[str, Any], want: Mapping[str, Any], *,
         msg = (f"{what}: stage-1a schema {have.get('schema')!r}, this build reads "
                f"{STAGE1A_SCHEMA!r}: rerun stage 1a")
         raise Stage1aMismatchError(msg)
-    keys = sorted(set(STAGE1A_KEYS) | set(have) | set(want))
+    keys = sorted((set(STAGE1A_KEYS) | set(have) | set(want)) - set(STAGE1A_PROVENANCE_KEYS))
     diff = [k for k in keys if _canon(have.get(k)) != _canon(want.get(k))]
     if diff:
         shown = "; ".join(f"{k}: record {str(have.get(k))[:40]!r}, run {str(want.get(k))[:40]!r}"
@@ -206,6 +218,72 @@ def check_stage1a_fresh(have: Mapping[str, Any], want: Mapping[str, Any], *,
         msg = (f"{what}: stage 1a ran under other inference inputs ({shown}) - another wave, "
                "model, rule or window: rerun stage 1a for this run")
         raise Stage1aMismatchError(msg)
+
+
+def _hex(value: object, n: int, what: str) -> str:
+    s = str(value)
+    if len(s) != n or any(ch not in "0123456789abcdef" for ch in s):
+        msg = f"{what} must be {n} lowercase hex characters; got {value!r}"
+        raise ValueError(msg)
+    return s
+
+
+def stage1a_code_keys(*, commit: str, package_dirty: bool, driver_sha256: str) -> dict[str, Any]:
+    """Return the :data:`STAGE1A_PROVENANCE_KEYS` a stage-1a run adds to its record's keys."""
+    return {"code_commit": _hex(commit, 40, "code_commit"), "package_dirty": bool(package_dirty),
+            "driver_sha256": _hex(driver_sha256, 64, "driver_sha256")}
+
+
+def check_stage1a_launch(decl: object) -> dict[str, Any]:
+    """Return a wave's ``stage1a_launch`` declaration, checked; raise ValueError naming the gap.
+
+    ``{"commit": 40 hex, "driver_sha256": 64 hex, "source": <where it was read>}`` - what a
+    wave's stage-1a pass was LAUNCHED from, declared for records that predate
+    :data:`STAGE1A_PROVENANCE_KEYS`. Other fields are kept as they are.
+    """
+    if not isinstance(decl, Mapping):
+        msg = f"stage1a_launch must be {{commit, driver_sha256, source}}; got {decl!r}"
+        raise ValueError(msg)
+    if not decl.get("source"):
+        msg = "stage1a_launch must say where the commit and driver sha256 were read (source)"
+        raise ValueError(msg)
+    return {**dict(decl), "commit": _hex(decl.get("commit"), 40, "stage1a_launch.commit"),
+            "driver_sha256": _hex(decl.get("driver_sha256"), 64, "stage1a_launch.driver_sha256")}
+
+
+def stage1a_code(keys: Mapping[str, Any], launch: Mapping[str, Any] | None, *, wave_id: str,
+                 what: str) -> dict[str, Any]:
+    """Return what made a stage-1a record: commit, driver sha256, where that was read, and text.
+
+    The record's own :data:`STAGE1A_PROVENANCE_KEYS` when it has them (the record is
+    authoritative for itself); otherwise the wave's ``stage1a_launch`` declaration
+    (:func:`check_stage1a_launch`). A record with only some of the keys, or with none and a
+    wave that declares no launch, is refused (:class:`Stage1aMismatchError`): its masks'
+    provenance would not name the code that made them (invariant 11). ``text`` is
+    ``"stage 1a: <commit> + driver <sha256>"``.
+    """
+    have = [k for k in STAGE1A_PROVENANCE_KEYS if k in keys]
+    if have and len(have) != len(STAGE1A_PROVENANCE_KEYS):
+        msg = (f"{what}: the stage-1a record's keys carry {have} but not all of "
+               f"{list(STAGE1A_PROVENANCE_KEYS)}")
+        raise Stage1aMismatchError(msg)
+    if have:
+        got = stage1a_code_keys(commit=keys["code_commit"], package_dirty=keys["package_dirty"],
+                                driver_sha256=keys["driver_sha256"])
+        out: dict[str, Any] = {"commit": got["code_commit"], "package_dirty": got["package_dirty"],
+                               "driver_sha256": got["driver_sha256"],
+                               "source": "the stage-1a record's keys"}
+    elif launch is not None:
+        decl = check_stage1a_launch(launch)
+        out = {"commit": decl["commit"], "driver_sha256": decl["driver_sha256"],
+               "source": f"wave {wave_id} stage1a_launch declaration ({decl['source']})"}
+    else:
+        msg = (f"{what}: the stage-1a record carries no code commit or driver sha256 and its wave "
+               f"{wave_id!r} declares no stage1a_launch {{commit, driver_sha256, source}}: its "
+               "masks could not name the code that made them (invariant 11)")
+        raise Stage1aMismatchError(msg)
+    out["text"] = f"stage 1a: {out['commit']} + driver {out['driver_sha256']}"
+    return out
 
 
 def content_sha256(content: Mapping[str, Any], arrays: Mapping[str, npt.ArrayLike]) -> str:
@@ -353,9 +431,11 @@ class EpochCache:
     confirmed under any declared variant). ``z`` is the consumers' z (whole), ``zdet`` the
     detection z (:func:`sparse_detection_z`), ``eng`` the spike consumer's ENG traces,
     ``hrv`` each cached event's operational HRV extent (``None``: beat train unchanged),
-    ``signals`` what each consumer reads here, ``own_signals`` the ``own_signals_only``
-    families, ``extra_spans`` the routing entry's spike distrust. Times on the recording's
-    timeline; ``z_t0_s`` is the epoch start.
+    ``signals`` what each consumer reads here, ``own_signals`` each ``(consumer, signal)``'s
+    own detection signals (``tolerance.own_signals_by_signal``, the one definition both the
+    cross-band ``own_signals_only`` scope and the core rule ``own_signals_or_visible`` read),
+    ``extra_spans`` the routing entry's spike distrust. Times on the recording's timeline;
+    ``z_t0_s`` is the epoch start.
     """
 
     events: Mapping[str, Event]
@@ -366,16 +446,12 @@ class EpochCache:
     eng: Mapping[str, rt.EngTrace | rt.CachedEngTrace]
     hrv: Mapping[str, tl.Extent | None]
     signals: Mapping[str, tuple[str, ...]]
-    own_signals: Mapping[str, frozenset[str]]
+    own_signals: Mapping[tuple[str, str], frozenset[str]]
     fs: float
     z_t0_s: float
     n_frames: int
     extra_spans: tuple[mk.MaskSpan, ...] = ()
     cache_floor_z: float = CACHE_FLOOR_Z
-    core_own: Mapping[tuple[str, str], frozenset[str]] | None = None
-    """``(consumer, signal)`` -> the detection signals a core must be detected on to be on that
-    consumer's own signals (``tolerance.core_own_signals``); needed by
-    ``own_signals_or_visible`` only."""
 
 
 CORE_PAD_REASON: Final = "core_pad"
@@ -397,7 +473,7 @@ def core_pad_spans(cache: EpochCache, confirmed: Iterable[str], *,
       ``tolerances.for_consumer``), per signal;
     * ``own_signals_or_visible`` (Andrea, 2026-10-10) - where ``when_visible`` blanks, or where
       the core was detected on the consumer's own signals: some detecting pair's signal in
-      ``cache.core_own[(consumer, signal)]`` (``tolerance.core_own_signals``).
+      ``cache.own_signals[(consumer, signal)]`` (``tolerance.own_signals_by_signal``).
 
     The padding is the consumer's measured settling (``tolerance.consumer_settling``), the
     span is clipped to the epoch's z record and never routed. hrv keeps its operational
@@ -414,10 +490,9 @@ def core_pad_spans(cache: EpochCache, confirmed: Iterable[str], *,
                    "when_visible | own_signals_or_visible (RULING 2026-10-10 item 2; nothing "
                    "is defaulted)")
             raise ValueError(msg)
-        if mode == "own_signals_or_visible" and (
-                cache.core_own is None
-                or any((consumer, sig) not in cache.core_own for sig in sigs)):
-            msg = f"{consumer}: own_signals_or_visible needs its own signals (cache.core_own)"
+        if mode == "own_signals_or_visible" and any(
+                (consumer, sig) not in cache.own_signals for sig in sigs):
+            msg = f"{consumer}: own_signals_or_visible needs its own signals (cache.own_signals)"
             raise ValueError(msg)
         if mode != "always" and tolerances is None:
             msg = f"{consumer}: {mode} needs the consumer's threshold"
@@ -444,8 +519,7 @@ def _core_blanks(cache: EpochCache, eid: str, consumer: str, sig: str, mode: str
     if mode == "always":
         return True
     if mode == "own_signals_or_visible":
-        assert cache.core_own is not None
-        own = cache.core_own[(consumer, sig)]
+        own = cache.own_signals[(consumer, sig)]
         if any(q[0] in own for q in cache.detecting[eid]):
             return True
     assert tolerances is not None
