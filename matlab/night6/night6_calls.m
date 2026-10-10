@@ -4,8 +4,9 @@ function C = night6_calls()
 % Invariant 32: the gate (run a call iff it produces a consumer that is wanted) and
 % the recording (attribute exactly the wanted consumers to the run) are both derived
 % from this table, never from hand-written flags. hrv and breathing are the two
-% outputs of ONE HR_BR call - the pair that silently computed nothing for 105 points
-% in T when it was gated on hrv alone (invariant 28).
+% outputs of the HR_BR function - the pair that silently computed nothing for 105 points
+% in T when it was gated on hrv alone (invariant 28). Each is still its OWN call, on its
+% own mask, always (RULING 2026-10-09 (i) 4; night6_prepare_epoch, night6_hr_outputs).
 %
 % spikes: process_dataset_v2 (this folder), which calls Andrea's process_dataset steps
 % unchanged (Andrea, 2026-10-09; it replaced detectSortNerveSpikesECAP). Every other

@@ -203,8 +203,11 @@ VALUES = [
 def test_the_window_lengths_are_hers_and_the_wrappers() -> None:
     run = (REPO / "matlab" / "night6" / "night6_run_recording.m").read_text(encoding="utf-8")
     assert re.search(r"'winSec', 20,\s*\.\.\.\s*'stepSec', 1, 'hrBrWinSec', 60", run)
-    assert re.search(r"'smoothWindow', 5, 'edgeBufferSec', 15", run)
-    assert "'lowPassCutoff', 0.15, 'lowPassOrder', 2" in run
+    # the slow-wave settings have one construction site (review 2026-10-10 fix 5, inv. 33)
+    assert "P.slow_wave = night6_slow_wave_settings();" in run
+    sw = (REPO / "matlab" / "night6" / "night6_slow_wave_settings.m").read_text(encoding="utf-8")
+    assert re.search(r"'smoothWindow', 5, 'edgeBufferSec', 15", sw)
+    assert "'lowPassCutoff', 0.15, 'lowPassOrder', 2" in sw
     mmc = (REPO / "matlab" / "night6" / "night6_mmc_opts.m").read_text(encoding="utf-8")
     for k in ("sigmaWin", "'W'", "delayW", "cardiacBlankMs"):  # extract_mmc defaults apply
         assert k not in mmc
