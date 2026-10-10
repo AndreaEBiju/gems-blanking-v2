@@ -6164,6 +6164,44 @@ The rulings headed **2026-10-08**, **(b)** and **(c)** were written on **2026-10
    - specified with Andrea before it is built.
 4. **The scoring is a lesson for any future filter choice:** score against setting-independent spectral agreement and Andrea's own cycle marks on masked data, never against membership of the normal band.
 
+### RULING 2026-10-09 (i) — tolerance mapping; Night 5 in waves; recovery start; pilot items; J cuff trust
+
+*Ruled on the night of 2026-10-09 (US Eastern), from the tolerance v2 evidence, the recovery start v2 measurements and the pilot report.*
+
+**Andrea:**
+
+1. **Tolerance → threshold mapping: option (1), cross-band.**
+   - **Threshold:** each consumer's extent threshold is the smallest harmful kind that is visible in its own band, never below the clean null's 90th percentile (z 1.44). Where no harmful kind is visible in the band, the threshold is 1.44.
+   - **Use:** the threshold is applied only around cores the motion model decides are motion. The consumer is blanked until its band returns below the threshold, plus its measured padding.
+   - **Cross-band:** a harmful kind invisible in the consumer's band, but caught by the detector in other bands or signals, blanks the consumer over the event's detected extent in those bands.
+   - **Residual risk** (harmful kinds no band and no detector sees, at about 0.088–0.18 σ, with near-noise-level harm) is recorded in provenance per consumer. It is not blanked.
+   - **Harm criterion (v2, hashed 21:32):** exact reruns are deterministic, so the null is the 0.088 σ injection's spread. Tolerances are recorded as v2.
+   - **Night 5 reports measured blanked time per consumer from wave 1 onward.** If slow wave's real cost is large (the v2 figure rests on one old-cohort core), it comes back to Andrea.
+2. **Night 5 runs in waves on recordings already routed,** starting as soon as this ruling is merged ("run when ready").
+   - The constant peri-R window file and the production routing table hash are re-measured for each wave and recorded per wave.
+   - The final wave runs when routing completes.
+3. **Recovery start:**
+   - **(a) The electrical-only rule replaces (j) 6 (i).** Settling ends when the 0–2 Hz offset decay is back inside its late-recovery range on every channel with a stim-induced offset. There is no broadband requirement. The rule was hashed before it was run.
+   - **(b) Files whose slow decay is still running inside the 140–200 s reference (22)** are re-measured against a later reference stretch, the latest clean 60 s available up to 600 s. The rule and window are written and hashed before running.
+   - **(c) Stim-off is two times:**
+     - electrical settling is measured from the **electrical** stim end (the stimulator's `AmA` record);
+     - recovery never starts before the **mechanical** stim end (the gate/MotorOn offset).
+     - Each analysis starts at max(electrical end + electrical settling + its own settling, mechanical end + its own settling). Motion from the mechanical stim is the motion masks' job.
+   - **(d)** No stim_rec file is held under the new rule. Any file still unmeasurable is listed and held, never assumed (invariant 41).
+   - Fix the session/animal inconsistency (gems_b_t01_2_1_sr_233056).
+4. **Pilot items:**
+   - **The pilot-only QC release on the stand-in is accepted, for the pilot only.** Wave 1 shows whether the real thresholds cause QC holds.
+   - **The v2 spike pad check is the reviewer's three-part check:**
+     - (a) no step3 detection inside the NaN pad, with no tolerance;
+     - (b) every step4 re-centred peak within 12 samples (0.5 ms) of its detection;
+     - (c) each waveform window at least 7.8 ms from any NaN.
+   - **HRV and breathing run as two calls** (ruling 2026-10-08 (h) item 8): HRV and HR from the HRV-masked call, breathing from the breathing-masked call. Measured in the pilot: the masks differ on a median of 20% of frames, almost all HRV-only.
+5. **Cuff trust (replaces ruling 2026-10-08 (b) 5's "cuffs without one keep their current distrust" for the spike consumer).**
+   - A cuff distrusted only because no count-gated beat train passed is kept for the spike consumer and flagged per minute "no heartbeat reference", as for no-beat minutes in (g) 1. The leak recovery of (g) 2 then applies to it.
+   - Distrust for any other reason stays.
+   - This is applied at mask emission; routing tables are unchanged.
+   - Report per cuff which recordings this releases (J's two cuffs in the pilot).
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
