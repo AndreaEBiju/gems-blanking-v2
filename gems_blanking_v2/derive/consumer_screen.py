@@ -63,6 +63,14 @@ DISTRUSTED_CUFFS: Final[Mapping[tuple[str, str], str]] = {
         "ruling 2026-09-30: L2 and L3 lack the ground signal (R2 0.04, 0.01) and agree "
         "with each other (r 0.90) at ~5x the other contacts' sigma - a short or a local "
         "source; the whole cuff is distrusted for every consumer until explained"),
+    # Confirmed on this recording before the ruling was applied (ground_r2's metric, region
+    # 132-1321 s): L1 0.976, L2 0.021, L3 0.000 (R 0.56-0.62); L2-L3 r 0.92.
+    ("gems_b_t02_1_3_sr_211210_20260910T011214Z", "L"): (
+        "ruling 2026-09-30: L2 and L3 lack the ground signal (R2 0.04, 0.01) and agree "
+        "with each other (r 0.90) at ~5x the other contacts' sigma - a short or a local "
+        "source; the whole cuff is distrusted for every consumer until explained; same "
+        "implant, stim/recovery recording ~10 min after the baseline; RULING (Andrea, "
+        "2026-10-10, b142)"),
 }
 """(recording id, cuff) -> why. Every consumer; lifted only by a ruling."""
 

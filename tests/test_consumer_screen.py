@@ -14,7 +14,7 @@ from gems_blanking_v2.derive.consumer_screen import (
 )
 from gems_blanking_v2.detect import chain
 
-from tests.conftest import make_shared_ground
+from tests.conftest import SharedGroundSynth, make_shared_ground
 
 FS = 24414.0625
 
@@ -55,11 +55,45 @@ def test_a_low_gain_contact_is_flagged_although_it_still_correlates(world) -> No
 
 
 def test_a_distrusted_cuff_is_unreadable_for_every_contact(world) -> None:  # noqa: ANN001
-    ((rid, cuff), _why), = DISTRUSTED_CUFFS.items()
-    out = raw_readable(rid, ground_r2(world.rec), {})
-    assert all("distrusted_cuff" in out[f"{cuff}{i}"] for i in (1, 2, 3))
-    other = "R" if cuff == "L" else "L"
-    assert all(out[f"{other}{i}"] == () for i in (1, 2, 3))
+    r2 = ground_r2(world.rec)
+    for rid, cuff in DISTRUSTED_CUFFS:
+        out = raw_readable(rid, r2, {})
+        assert all("distrusted_cuff" in out[f"{cuff}{i}"] for i in (1, 2, 3))
+        other = "R" if cuff == "L" else "L"
+        if (rid, other) not in DISTRUSTED_CUFFS:
+            assert all(out[f"{other}{i}"] == () for i in (1, 2, 3))
+
+
+B_T02_1_3_BL = "gems_b_t02_1_3_bl_210203_20260910T010207Z"
+B_T02_1_3_SR = "gems_b_t02_1_3_sr_211210_20260910T011214Z"
+
+
+def test_b_t02_1_3_left_cuff_is_distrusted_in_the_sr_recording_too(
+        world: SharedGroundSynth) -> None:
+    """RULING (Andrea, 2026-10-10, b142): the same implant ~10 min later, same signature.
+
+    Keyed on the exact recording id, so the build's validate_entry gets a reason for
+    the spike route; the right cuff of that recording stays readable.
+    """
+    from gems_blanking_v2.derive.spike_veto import spike_trusted  # noqa: PLC0415
+
+    why = DISTRUSTED_CUFFS[(B_T02_1_3_SR, "L")]
+    assert why.startswith(DISTRUSTED_CUFFS[(B_T02_1_3_BL, "L")])
+    assert "RULING (Andrea, 2026-10-10, b142)" in why
+    assert (B_T02_1_3_SR, "R") not in DISTRUSTED_CUFFS
+
+    out = raw_readable(B_T02_1_3_SR, ground_r2(world.rec), {})
+    assert all("distrusted_cuff" in out[f"L{i}"] for i in (1, 2, 3))
+    assert all(out[f"R{i}"] == () for i in (1, 2, 3))
+    assert spike_trusted(B_T02_1_3_SR, "L") == (False, why)
+    assert spike_trusted(B_T02_1_3_SR, "R") == (True, "")
+
+
+def test_the_distrust_is_by_exact_recording_id_not_by_session_prefix(
+        world: SharedGroundSynth) -> None:
+    """Another recording of the session is not distrusted unless a ruling names it."""
+    out = raw_readable("gems_b_t02_1_3_sr_999999_20260910T999999Z", ground_r2(world.rec), {})
+    assert all(out[f"L{i}"] == () for i in (1, 2, 3))
 
 
 def test_a_hum_flagged_stomach_contact_is_read_by_no_consumer(world) -> None:  # noqa: ANN001
