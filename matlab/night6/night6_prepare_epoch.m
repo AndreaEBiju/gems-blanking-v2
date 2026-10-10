@@ -71,7 +71,9 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
 % that carries masks for it is refused (night6:elsewhereReads); a consumer outside the batch's
 % subset ('Consumers', name-value; default {} = all) is 'skipped_not_in_batch'; a consumer QC
 % holds (heldconsumers_json, RULING 2026-10-10 item 1: per consumer, never per recording) and
-% nobody released is 'skipped_held' with its reasons. A file without heldconsumers_json /
+% nobody released is 'skipped_held' with its reasons. Spikes are held per cuff (night6_hold_unit,
+% Andrea revised 2026-10-10): a held cuff's signals are dropped from the consumer's signals
+% (held_signals, held_reason) and the other cuff runs. A file without heldconsumers_json /
 % elsewhere_json was written before 2026-10-10: a held recording was then never published,
 % and every file finished every consumer, so both read as empty (plan.gateNotes says so).
 %
@@ -199,7 +201,13 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
             error('night6:notComputedReads', ...
                   '%s is marked not computed but the file carries masks for it', cn);
         end
-        [gs, gr] = night6_consumer_gate(cn, plan.held, plan.elsewhere, subset);
+        [gs, gr, gh] = night6_consumer_gate(cn, plan.held, plan.elsewhere, subset, ...
+                                            {masks(sel).signal});
+        if isempty(gs) && ~isempty(gh)   % a held spike cuff: the other cuff still runs
+            st.signals = setdiff(st.signals, gh, 'stable');
+            st.held_signals = gh;
+            st.held_reason = gr;
+        end
         if strcmp(gs, 'skipped_elsewhere') && any(sel)
             error('night6:elsewhereReads', ['%s is finished in another mask file (%s) but this ' ...
                   'file carries masks for it'], cn, gr);

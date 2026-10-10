@@ -315,24 +315,24 @@ def test_a_held_consumer_is_flagged_and_runs_only_with_a_release(tmp_path: Path)
     med = {"spikes|L_T|300-3000": 0.1}
     gate = qc.emit_gate(over, min_retention=0.5, animal_median=med)
     assert gate.held and gate.retention_flagged and gate.blank_held
-    assert list(gate.held_consumers) == ["spikes"]
+    assert list(gate.held_consumers) == ["spikes_L"]  # spikes per cuff
     path = _write(tmp_path, over, animal_median=med)
     held = _held(path)
-    assert list(held) == ["spikes"] and "released" not in held["spikes"]
-    assert any("retention" in r for r in held["spikes"]["reasons"])
+    assert list(held) == ["spikes_L"] and "released" not in held["spikes_L"]
+    assert any("retention" in r for r in held["spikes_L"]["reasons"])
     assert "blank_spikes_L_T" in loadmat(path)  # flagged, not withheld
-    for bad in ("   ", {"spikes": ""}):
+    for bad in ("   ", {"spikes_L": ""}):
         with pytest.raises(ValueError, match="blank"):
             _write(tmp_path, over, animal_median=med, release=bad)
     with pytest.raises(ValueError, match="slow_wave, which QC does not hold"):
         _write(tmp_path, over, animal_median=med, release={"slow_wave": "Andrea: keep"})
     path = _write(tmp_path, over, animal_median=med,
-                  release={"spikes": "Andrea 2026-10-08: anaesthesia lightened, keep"})
+                  release={"spikes_L": "Andrea 2026-10-08: anaesthesia lightened, keep"})
     g = json.loads(str(loadmat(path)["gate_json"][0]))
     assert g["min_retention"] == 0.5 and g["medians_used"] == med
     assert g["held"] and g["reasons"] and g["hold_scope"].startswith("per consumer")
-    assert g["held_consumers"]["spikes"]["released"].startswith("Andrea")
-    assert _held(path)["spikes"]["released"].startswith("Andrea")
+    assert g["held_consumers"]["spikes_L"]["released"].startswith("Andrea")
+    assert _held(path)["spikes_L"]["released"].startswith("Andrea")
 
 
 def test_the_hold_is_per_consumer_never_per_recording(tmp_path: Path) -> None:
@@ -423,7 +423,7 @@ def test_the_writer_computes_the_gate_from_the_masks(tmp_path: Path) -> None:
     """No caller-built gate: an over-masked consumer is held whatever the caller wants."""
     over = _masked(0.7)
     held = _held(_write(tmp_path, over, animal_median={"spikes|L_T|300-3000": 0.9}))
-    assert any("retention" in r for r in held["spikes"]["reasons"])
+    assert any("retention" in r for r in held["spikes_L"]["reasons"])
     path = ho.write_mask_file(tmp_path / "ok.mat", _masked(0.01), _prov(),
                               signals=READS, fs=FS,
                               line_distrust=_ld(), peri_r=peri_r_like(_ld()),
@@ -438,10 +438,10 @@ def test_the_retention_gate_alone_holds_the_recording(tmp_path: Path) -> None:
     m = _masked(0.15)
     gate = qc.emit_gate(m, min_retention=0.9, animal_median={"spikes|L_T|300-3000": 0.1})
     assert gate.held and gate.retention_flagged and not gate.blank_held
-    assert gate.held_consumers == {"spikes": ("spikes|L_T|300-3000: retention 0.850 < 0.9",)}
+    assert gate.held_consumers == {"spikes_L": ("spikes|L_T|300-3000: retention 0.850 < 0.9",)}
     held = _held(_write(tmp_path, m, min_retention=0.9,
                         animal_median={"spikes|L_T|300-3000": 0.1}))
-    assert held == {"spikes": {"reasons": ["spikes|L_T|300-3000: retention 0.850 < 0.9"]}}
+    assert held == {"spikes_L": {"reasons": ["spikes|L_T|300-3000: retention 0.850 < 0.9"]}}
 
 
 def test_the_writer_refuses_masks_that_leave_a_consumer_out(tmp_path: Path) -> None:
@@ -827,3 +827,27 @@ def test_every_mask_provenance_carries_the_known_limitations() -> None:
         "known_limitations"]
     with pytest.raises(ProvenanceError, match="known limitation"):
         dataclasses.replace(p, known_limitations=[])
+
+
+
+def test_spikes_are_held_per_cuff_never_both_for_one() -> None:
+    """Andrea, revised 2026-10-10: the hold unit is the consumer, and for spikes the cuff."""
+    n = 1000
+    bad = np.zeros(n, dtype=bool)
+    bad[:600] = True  # 60% blanked: held
+    ok = np.zeros(n, dtype=bool)
+    masks = {("spikes", "R_T", "300-3000"): mk.ConsumerMask("spikes", "R_T", "300-3000", bad,
+                                                           0.01, 0.0),
+             ("spikes", "L_T", "300-3000"): mk.ConsumerMask("spikes", "L_T", "300-3000", ok,
+                                                           0.01, 0.0),
+             ("mmc", "ANT1", "2-50"): mk.ConsumerMask("mmc", "ANT1", "2-50", ok, 0.01, 0.0)}
+    gate = qc.emit_gate(masks, min_retention=0.8, animal_median={})
+    assert set(gate.held_consumers) == {"spikes_R"}
+    assert qc.hold_unit("spikes", "L_V2") == "spikes_L" and qc.hold_unit("mmc", "ANT1") == "mmc"
+    with pytest.raises(ValueError, match="names no cuff"):
+        qc.hold_unit("spikes", "ECG")
+    rec = ho.held_consumers_record(gate, {"spikes_R": "Andrea: keep R"})
+    assert rec == {"spikes_R": {"reasons": list(gate.held_consumers["spikes_R"]),
+                                "released": "Andrea: keep R"}}
+    with pytest.raises(ValueError, match="does not hold"):
+        ho.held_consumers_record(gate, {"spikes": "a whole-consumer release names no unit"})

@@ -519,11 +519,13 @@ def _write_no_heartbeat_reference(doc: dict[str, Any], record: Mapping[str, Any]
 
 def held_consumers_record(gate: EmitGate, release: str | Mapping[str, str] | None
                           ) -> dict[str, dict[str, Any]]:
-    """``heldconsumers_json``: each held consumer's reasons, and its release if it has one.
+    """``heldconsumers_json``: each held unit's reasons, and its release if it has one.
 
-    ``release`` is one text for every held consumer, or ``{consumer: text}``. Refused: a
-    blank release, and a release naming a consumer that is not held (it would read as a
-    decision nobody needed to make).
+    Keys are hold units (``qc.hold_unit``: the consumer; spikes per cuff, ``spikes_L`` /
+    ``spikes_R`` - Andrea, revised 2026-10-10: a held cuff never holds the other).
+    ``release`` is one text for every held unit, or ``{unit: text}``. Refused: a blank
+    release, and a release naming a unit that is not held (it would read as a decision nobody
+    needed to make) - ``spikes`` alone names no unit.
     """
     held = dict(gate.held_consumers)
     if isinstance(release, str) and not release.strip():
@@ -551,7 +553,8 @@ def _gate_record(gate: EmitGate, *, heart_fraction: Mapping[str, float] | None,
     """``gate_json``: the verdict per consumer, and beside it what the gate never reads."""
     out: dict[str, Any] = {"held": gate.held, "reasons": list(gate.reasons),
                            "held_consumers": {c: dict(v) for c, v in held.items()},
-                           "hold_scope": "per consumer (RULING 2026-10-10 item 1)",
+                           "hold_scope": "per consumer, spikes per cuff (RULING 2026-10-10 "
+                                         "item 1; Andrea, revised 2026-10-10)",
                            "retention_flagged": gate.retention_flagged,
                            "blank_held": gate.blank_held,
                            "min_retention": gate.min_retention,

@@ -19,6 +19,18 @@ function check_consumer_gate(outFile)
     R.in_batch_but_held = gate('slow_wave', held, none, {'slow_wave'});
     R.in_batch = gate('slow_wave', none, none, {'slow_wave'});
     R.empty_records = gate('breathing', none, none, {});
+    % Andrea, revised 2026-10-10: spikes held per cuff - the other cuff runs
+    cuffs = jsondecode(['{"spikes_R": {"reasons": ["spikes|R_T|300-3000: 100.0% blanked > 20%"]},' ...
+                        ' "spikes_L": {"reasons": ["spikes|L_T|300-3000: 30.0% blanked > 20%"],' ...
+                        ' "released": "Andrea: keep L"}}']);
+    R.spike_cuff_held = gate('spikes', cuffs, none, {}, {'L_T', 'R_T'});
+    R.spike_both_held = gate('spikes', rmfield(cuffs, 'spikes_L'), none, {}, {'R_T'});
+    R.spike_whole_held_old = gate('spikes', jsondecode('{"spikes": {"reasons": ["old"]}}'), ...
+                                  none, {}, {'L_T', 'R_T'});
+    R.unit_L = night6_hold_unit('spikes', 'L_T');
+    R.unit_RV2 = night6_hold_unit('spikes', 'R_V2');
+    R.unit_hrv = night6_hold_unit('hrv', 'LVN2_minus_RVN1');
+    R.unit_bad = err(@() night6_hold_unit('spikes', 'ECG'));
     known = {'spikes', 'slow_wave', 'mmc', 'hrv', 'breathing', 'velocity'};
     [s, t] = night6_consumer_subset({'slow_wave', 'hrv', 'mmc', 'breathing'}, known);
     R.subset_nonspike = struct('subset', strjoin(s, ','), 'tag', t);
@@ -33,9 +45,10 @@ function check_consumer_gate(outFile)
     fclose(fid);
 end
 
-function g = gate(c, held, away, subset)
-    [st, why] = night6_consumer_gate(c, held, away, subset);
-    g = struct('status', st, 'reason', why);
+function g = gate(c, held, away, subset, signals)
+    if nargin < 5, signals = {'X'}; end
+    [st, why, hs] = night6_consumer_gate(c, held, away, subset, signals);
+    g = struct('status', st, 'reason', why, 'held_signals', {hs});
 end
 
 function e = err(f)

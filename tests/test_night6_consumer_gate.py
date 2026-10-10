@@ -73,7 +73,8 @@ def test_a_subset_is_checked_and_tags_its_epoch_folder(results: dict) -> None:
 
 def test_the_gate_is_wired_into_the_plan_the_run_and_the_batch() -> None:
     prep = (NIGHT6 / "night6_prepare_epoch.m").read_text(encoding="utf-8")
-    assert "night6_consumer_gate(cn, plan.held, plan.elsewhere, subset)" in prep
+    assert "night6_consumer_gate(cn, plan.held, plan.elsewhere, subset, ..." in prep
+    assert "st.signals = setdiff(st.signals, gh, 'stable');" in prep
     assert re.search(r"elseif ~isempty\(gs\)\s*st\.status = gs;", prep)
     assert prep.index("elseif ~isempty(gs)") < prep.index("elseif ~any(sel)")
     assert "night6:elsewhereReads" in prep
@@ -83,3 +84,16 @@ def test_the_gate_is_wired_into_the_plan_the_run_and_the_batch() -> None:
     assert "'Consumers', o.Consumers);" in run
     batch = (NIGHT6 / "night6_batch.m").read_text(encoding="utf-8")
     assert batch.count("[args, {'Consumers', subsets{i}}]") == 2
+
+
+
+def test_spikes_are_held_per_cuff_and_the_other_cuff_runs(results: dict) -> None:
+    """Andrea, revised 2026-10-10: a held (or distrusted) cuff never holds the other cuff."""
+    held = results["spike_cuff_held"]
+    assert held["status"] == "" and held["held_signals"] == "R_T"  # jsonencode of a 1x1 cell
+    assert "100.0% blanked" in held["reason"] and "the others run" in held["reason"]
+    assert results["spike_both_held"]["status"] == "skipped_held"
+    assert results["spike_whole_held_old"]["status"] == "skipped_held"  # a pre-cuff file
+    assert results["unit_L"] == "spikes_L" and results["unit_RV2"] == "spikes_R"
+    assert results["unit_hrv"] == "hrv"
+    assert results["unit_bad"]["id"] == "night6:holdUnit"

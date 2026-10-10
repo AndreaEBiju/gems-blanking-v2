@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
@@ -65,6 +66,7 @@ __all__ = [
     "HOLD_BLANK_FRACTION",
     "HOLD_MEDIAN_FLOOR",
     "HOLD_MEDIAN_RATIO",
+    "SPIKE_UNIT_RE",
     "BlankHold",
     "EmitGate",
     "LongitudinalRow",
@@ -75,12 +77,14 @@ __all__ = [
     "blank_fraction_hold",
     "consumer_of",
     "emit_gate",
+    "hold_unit",
     "line_distrust_listed",
     "median_key",
     "retention_by_key",
     "retention_gate",
     "spike_time_lost",
     "spike_time_lost_by_animal",
+    "unit_of_key",
 ]
 
 HOLD_BLANK_FRACTION: Final = 0.20
@@ -99,6 +103,34 @@ LIST_DISTRUST_FRACTION: Final = 0.5
 def consumer_of(key: str) -> str:
     """Return the consumer of a ``consumer|signal|band`` (or ``consumer|band``) key."""
     return key.split("|", 1)[0]
+
+
+SPIKE_UNIT_RE: Final = re.compile(r"([A-Za-z0-9]+)_(?:V\d+|T)")
+"""A spike signal's cuff: ``<cuff>_T`` or ``<cuff>_V<k>`` (the MATLAB token is the same)."""
+
+
+def hold_unit(consumer: str, signal: str) -> str:
+    """Return the unit a mask is HELD in: its consumer, and for spikes its cuff.
+
+    Andrea, revised 2026-10-10: holds are per consumer, and for spikes per cuff - a distrusted
+    or held cuff never holds the other cuff - so the spike consumer's units are
+    ``spikes_<cuff>`` (``spikes_L``, ``spikes_R``); masks are never merged across cuffs. THE
+    construction site; the MATLAB twin is ``matlab/night6/night6_hold_unit.m``. A spike
+    signal with no cuff is refused (ValueError): its unit is unknown, never guessed.
+    """
+    if consumer != "spikes":
+        return consumer
+    m = SPIKE_UNIT_RE.fullmatch(signal)
+    if m is None:
+        msg = f"spike signal {signal!r} names no cuff: its hold unit is unknown"
+        raise ValueError(msg)
+    return f"spikes_{m.group(1)}"
+
+
+def unit_of_key(key: str) -> str:
+    """Return the hold unit of a ``consumer|signal|band`` key (:func:`hold_unit`)."""
+    consumer, signal, *_rest = key.split("|")
+    return hold_unit(consumer, signal)
 
 
 def median_key(consumer: str, signal: str, band: str) -> str:
@@ -147,7 +179,8 @@ class BlankHold:
     hum_features: Mapping[str, float] = field(default_factory=dict)
     notes: tuple[str, ...] = ()
     held_consumers: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
-    """Consumer -> its reasons, for every consumer held (RULING 2026-10-10 item 1)."""
+    """Hold unit (:func:`hold_unit`: the consumer, spikes per cuff) -> its reasons, for every
+    unit held (RULING 2026-10-10 item 1; Andrea, revised 2026-10-10)."""
 
 
 def blank_fraction_hold(
@@ -177,8 +210,9 @@ def blank_fraction_hold(
     for (consumer, signal, band), m in sorted(masks.items()):
         f = 1.0 - m.retention
         k = _key((consumer, signal, band))
+        unit = hold_unit(consumer, signal)
         if f > HOLD_BLANK_FRACTION:
-            by.setdefault(consumer, []).append(
+            by.setdefault(unit, []).append(
                 f"{k}: {100 * f:.1f}% blanked > {100 * HOLD_BLANK_FRACTION:.0f}%")
         mk = median_key(consumer, signal, band)
         med = animal_median.get(mk)
@@ -187,7 +221,7 @@ def blank_fraction_hold(
             continue
         floor = max(float(med), HOLD_MEDIAN_FLOOR)
         if f > HOLD_MEDIAN_RATIO * floor:
-            by.setdefault(consumer, []).append(
+            by.setdefault(unit, []).append(
                 f"{k}: {100 * f:.1f}% blanked > {HOLD_MEDIAN_RATIO:g} x the animal median "
                 f"{100 * floor:.1f}%")
     reasons = [x for c in sorted(by) for x in by[c]]
@@ -203,8 +237,9 @@ def blank_fraction_hold(
 class EmitGate:
     """QC's verdict for one recording, as ``emit.handoff.write_mask_file`` computes it.
 
-    ``held_consumers`` maps every held consumer to its reasons (RULING 2026-10-10 item 1: the
-    hold is per consumer); ``held`` says whether ANY consumer is held - never that the
+    ``held_consumers`` maps every held hold unit (:func:`hold_unit`) to its reasons (RULING
+    2026-10-10 item 1: the hold is per consumer; Andrea, revised 2026-10-10: spikes per cuff,
+    ``spikes_L`` / ``spikes_R``); ``held`` says whether ANY unit is held - never that the
     recording is.
     """
 
@@ -230,7 +265,7 @@ def emit_gate(masks: Mapping[MaskKey, ConsumerMask], *, min_retention: float,
     retention = retention_gate(masks, min_retention=min_retention)
     by = {c: list(v) for c, v in hold.held_consumers.items()}
     for k, r in sorted(retention.below.items()):
-        by.setdefault(consumer_of(k), []).append(
+        by.setdefault(unit_of_key(k), []).append(
             f"{k}: retention {r:.3f} < {retention.min_retention:g}")
     reasons = [x for c in sorted(by) for x in by[c]]
     used = {k: float(v) for k, v in animal_median.items() if v is not None}
