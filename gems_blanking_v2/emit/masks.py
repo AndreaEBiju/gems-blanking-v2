@@ -57,8 +57,9 @@ import numpy.typing as npt
 
 from gems_blanking_v2.constants import GRID_S
 from gems_blanking_v2.extent.grid import frame_sample_bounds
-from gems_blanking_v2.extent.routing import RouteDecision
+from gems_blanking_v2.extent.routing import CROSS_BAND_REASON_CODE, RouteDecision
 from gems_blanking_v2.extent.tolerance import (
+    EXTENT_BASIS_DETECTED,
     OUT_OF_BUILD_CONSUMERS,
     Extent,
     extent_consumers,
@@ -155,7 +156,9 @@ def spans_from_routing(extents: Iterable[tuple[str, Extent]],
     """Mask spans: each ``(event_id, extent)`` whose route for that consumer masks.
 
     An extent without a decision raises - routing is recorded per event per consumer,
-    and a missing decision is a defect, not a "keep".
+    and a missing decision is a defect, not a "keep". A DETECTED (cross-band) extent
+    (RULING 2026-10-09 (i) 1) is always masked: any decision for it other than
+    ``routing.cross_band_decision`` raises, so routing cannot undo it.
     """
     by = {(d.event_id, d.consumer): d for d in decisions}
     out: list[MaskSpan] = []
@@ -164,6 +167,12 @@ def spans_from_routing(extents: Iterable[tuple[str, Extent]],
         if d is None:
             msg = f"no routing decision for event {event_id} on {ext.consumer}"
             raise KeyError(msg)
+        if ext.basis == EXTENT_BASIS_DETECTED and (
+                d.reason_code != CROSS_BAND_REASON_CODE or not d.masks):
+            msg = (f"event {event_id} on {ext.consumer}: a detected (cross-band) extent got "
+                   f"route {d.route!r} ({d.reason_code!r}); routing may not undo it "
+                   "(RULING 2026-10-09 (i) 1) - use routing.cross_band_decision")
+            raise ValueError(msg)
         if d.masks:
             out.append(MaskSpan(ext.consumer, ext.signal, ext.start_s, ext.stop_s,
                                 d.reason_code or d.route))

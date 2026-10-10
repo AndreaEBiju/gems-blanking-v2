@@ -29,9 +29,12 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
 % Every blank_<consumer>_<token> span is 1-based inclusive into the EPOCH (task 15), so
 % it lands on epoch rows sp(k,1):sp(k,2) unchanged.
 %
-% plan.runs lists the calls to make, in night6_calls() order. A run serves consumers
-% that share one call AND one mask; hrv and breathing get two HR runs when their masks
-% differ (invariant 2: a mask is never merged across consumers). Consumers in
+% plan.runs lists the calls to make, in night6_calls() order. A run serves ONE consumer
+% (invariant 2: a mask is never merged across consumers): hrv and breathing are ALWAYS
+% two HR_BR calls, the hrv-masked one giving HR and HRV and the breathing-masked one
+% giving breathing (RULING 2026-10-09 (i) 4, ruling 2026-10-08 (h) 8) - even when their
+% masks are identical, so which call an output came from never depends on the masks
+% (night6_hr_outputs names the outputs each run's record takes). Consumers in
 % notcomputed_json are skipped with their reason (RULING 2026-10-08 (f) 6); mmc,
 % which needs R-peaks, is skipped when the recording has no beats in the epoch - and
 % on a 'pre' recording with no beat train at all it is "not computed" (Andrea,
@@ -246,17 +249,14 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
             plan.runs = [plan.runs, slow_wave_runs(masks, gastric)]; %#ok<AGROW>
             continue
         end
-        while ~isempty(want)
-            lead = want{1};
-            same = cellfun(@(c) same_mask(masks, lead, c), want);
-            sigs = plan.consumers.(lead).signals;
+        for k = 1:numel(want)   % (i) 4: one consumer per run, always
+            sigs = plan.consumers.(want{k}).signals;
             if strcmp(C.name, 'extract_mmc')
                 sigs = gastric;          % her column order: ANT1, ANT2, ANT3
             end
-            plan.runs(end + 1) = struct('call', C.name, 'consumers', {want(same)}, ...
+            plan.runs(end + 1) = struct('call', C.name, 'consumers', {want(k)}, ...
                                         'signals', {sigs}, 'maskSignal', '', ...
                                         'keep', {sigs}); %#ok<AGROW>
-            want = want(~same);
         end
     end
 end
@@ -460,16 +460,6 @@ function H = check_no_heartref(M, masks, periR, beats, n)
         error('night6:noHeartRef', 'the mask provenance names no spike_no_heartbeat_reference');
     end
     H = struct('rule', char(J.rule), 'n_minutes', numel(J.minutes), 'signals', {got(:)'});
-end
-
-function tf = same_mask(masks, a, b)
-    A = masks(strcmp({masks.consumer}, a));
-    B = masks(strcmp({masks.consumer}, b));
-    tf = numel(A) == numel(B) && isequal(sort({A.signal}), sort({B.signal}));
-    if ~tf, return, end
-    for k = 1:numel(A)
-        tf = tf && isequal(A(k).spans, B(strcmp({B.signal}, A(k).signal)).spans);
-    end
 end
 
 function E = slice_beats(T, plan)

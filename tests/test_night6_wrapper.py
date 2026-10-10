@@ -1221,6 +1221,23 @@ def _stand_in_folder(root: Path) -> Path:
     return dst
 
 
+MODEL_HB = "4b0e0123456789abcdef0123456789ab"
+"""SESSION_A's masks with breathing's spans set to hrv's: identical masks, still two calls."""
+
+
+def _same_hr_folder(root: Path) -> Path:
+    src = root / "data" / "T" / SESSION_A / "masks" / MODEL
+    dst = src.parent / MODEL_HB
+    dst.mkdir()
+    for f in sorted(src.glob("e*_masks.mat")):
+        m = {k: v for k, v in loadmat(f).items() if not k.startswith("__")}
+        tok = matlab_signal_token(HR)
+        assert not np.array_equal(m[f"blank_hrv_{tok}"], m[f"blank_breathing_{tok}"])
+        m[f"blank_breathing_{tok}"] = m[f"blank_hrv_{tok}"]
+        savemat(dst / f.name, m, do_compression=True)
+    return dst
+
+
 def _gate_run(name: str, folder: Path, out: Path, pilot_root: Path | None = None,
               beats: Path | None = None, *, move: bool = False) -> dict[str, Any]:
     return {"name": name, "mask_folder": folder.as_posix(), "out_root": out.as_posix(),
@@ -1265,7 +1282,8 @@ def gates(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             g("beats_changed", folder_a, pilot / "out_bc", pilot, tmp / "beats_changed",
               move=True),
             g("beats_none", folder_a, pilot / "out_bn", pilot, None, move=True),
-            g("beats_no_pilot", folder_a, tmp / "out_bnp", None, tmp / "beats_ok")]
+            g("beats_no_pilot", folder_a, tmp / "out_bnp", None, tmp / "beats_ok"),
+            g("hr_same_masks", _same_hr_folder(root), tmp / "out_hb")]
     junctions = (_junction(tmp / "pilot_link", tmp / "prodj")
                  and _junction(tmp / "via", tmp / "prodv"))
     if junctions:
@@ -1389,3 +1407,24 @@ def test_a_pilot_root_that_is_or_sits_under_a_junction_is_refused(gates: dict[st
     for name in ("junction_root", "under_junction"):
         assert r[name].startswith("night6:pilotRoot"), r[name]
         assert "reparse point" in r[name], r[name]
+
+
+def test_hrv_and_breathing_are_always_two_calls(gates: dict[str, Any]) -> None:
+    """RULING 2026-10-09 (i) 4: HRV and breathing are always two HR calls.
+
+    HRV and HR come from the hrv-masked call, breathing from the breathing-masked call, even
+    when the two masks are identical.
+    """
+    assert gates["res"]["run"]["hr_same_masks"] == "", gates["res"]["run"]["hr_same_masks"]
+    for tag in ("e0", "e5"):
+        rec = json.loads(next((gates["tmp"] / "out_hb").glob(f"T/*/{MODEL_HB}/{tag}/"
+                                                            "night6_record.json"))
+                         .read_text(encoding="utf-8"))
+        hr = [r for r in rec["runs"] if r["call"] == "HR_BR_HRVAnalysis_beats"]
+        assert [np.atleast_1d(r["consumers"]).tolist() for r in hr] == [["hrv"], ["breathing"]]
+        assert [r["outputs_used"]["consumer"] for r in hr] == ["hrv", "breathing"]
+        assert "HRVMeasures" in " ".join(hr[0]["outputs_used"]["read"])
+        assert "heartRateSeries" in " ".join(hr[0]["outputs_used"]["read"])
+        assert "breathRateSeries" in " ".join(hr[1]["outputs_used"]["read"])
+        assert "breathRateSeries" in " ".join(hr[0]["outputs_used"]["byproduct_not_read"])
+        assert hr[0]["inputs"] == hr[1]["inputs"]  # the same masked input, two calls

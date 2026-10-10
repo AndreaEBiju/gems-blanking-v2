@@ -88,6 +88,8 @@ __all__ = [
     "DECISION_RULES",
     "EDGE_MEASUREMENTS_DIR",
     "EDGE_SETTLING",
+    "EXTENT_BASIS_DETECTED",
+    "EXTENT_BASIS_OWN_BAND",
     "HR_BAND_EDGE_S",
     "MMC_NOT_MEASURED_HALF_S",
     "OUT_OF_BUILD_CONSUMERS",
@@ -101,6 +103,7 @@ __all__ = [
     "CardiacVerdict",
     "ConsumerFilter",
     "ConsumerSettling",
+    "CrossBand",
     "DecisionRule",
     "EdgeSettling",
     "Extent",
@@ -116,6 +119,7 @@ __all__ = [
     "consumer_settling",
     "consumer_signals",
     "decision_rule",
+    "detected_extent",
     "edge_settling_record",
     "edge_settling_sha256",
     "edge_settling_text",
@@ -806,12 +810,23 @@ def confirms_motion(rule: DecisionRule, *, p_calibrated: float, p_raw: float) ->
     return bool(math.isfinite(score) and score >= rule.threshold)
 
 
+EXTENT_BASIS_OWN_BAND: Final = "own_band"
+"""The consumer's own band crossed its threshold around the core (:func:`compute_extent`)."""
+EXTENT_BASIS_DETECTED: Final = "detected_cross_band"
+"""RULING 2026-10-09 (i) 1, option (1): the own band stayed under the threshold, so the
+consumer is blanked over the event's DETECTED extent (:func:`detected_extent`). Never
+routed: ``emit.masks.spans_from_routing`` refuses any decision but
+``routing.cross_band_decision`` for it."""
+
+
 @dataclass(frozen=True, slots=True)
 class Extent:
     """One event's extent for one consumer on one signal, seconds, half-open.
 
-    ``core_*`` is where the band exceeded the tolerance; ``start_s``/``stop_s`` add the
-    settling. ``resolution_s`` is the band's envelope window: nothing finer is real.
+    ``core_*`` is where the band exceeded the tolerance (for a detected extent: where the
+    detecting pairs were over the floor); ``start_s``/``stop_s`` add the settling.
+    ``resolution_s`` is the band's envelope window: nothing finer is real. ``basis`` says
+    which rule made it (:data:`EXTENT_BASIS_OWN_BAND`, :data:`EXTENT_BASIS_DETECTED`).
     """
 
     consumer: str
@@ -823,6 +838,23 @@ class Extent:
     core_stop_s: float
     settling_s: float
     resolution_s: float
+    basis: str = EXTENT_BASIS_OWN_BAND
+
+
+@dataclass(frozen=True)
+class CrossBand:
+    """Option (1)'s cross-band inputs (RULING 2026-10-09 (i) 1) for :func:`extents_for_events`.
+
+    ``pairs`` maps each event id to the (signal, band) pairs that DETECTED it (the core's
+    pairs: over z_enter somewhere in it); ``z`` is detection's z for every pair (detection
+    reads every signal, raw contacts included - invariant 6), on the same grid and timeline
+    as the consumers' z. ``floor_z`` is the clean null's p90 (1.44): a detecting pair's run
+    counts while it is above it.
+    """
+
+    pairs: Mapping[str, Sequence[tuple[str, str]]]
+    z: Mapping[tuple[str, str], npt.ArrayLike]
+    floor_z: float
 
 
 class ExtentNotAssessableError(ValueError):
@@ -898,11 +930,66 @@ def compute_extent(event: Event, z: Mapping[tuple[str, str], npt.ArrayLike], con
                   BANDS[spec.band].window_s)
 
 
+def detected_extent(event: Event, cross: CrossBand, event_id: str, consumer: str, *,
+                    signal: str, fs: float, z_t0_s: float,
+                    grid_s: float = GRID_S) -> Extent | None:
+    """Return the event's DETECTED extent for ``consumer`` on ``signal`` (option (1)), or None.
+
+    RULING 2026-10-09 (i) 1: "a harmful kind invisible in the consumer's band, but caught by
+    the detector in other bands or signals, blanks the consumer over the event's detected
+    extent in those bands". The extent is, over the pairs that detected the event
+    (``cross.pairs[event_id]``), the union of their runs above ``cross.floor_z`` that overlap
+    the event's span - first to last - padded each side by THIS consumer's settling and
+    clipped to the z record. ``None`` when no detecting pair is over the floor there. The
+    tolerance-evidence reading (``tolevidence/analysis.py`` ``cross_extent``), restricted to
+    the detecting pairs.
+    """
+    if consumer == "hrv":
+        msg = "hrv's extent is operational: use hrv_extent"
+        raise ValueError(msg)
+    if event_id not in cross.pairs:
+        msg = f"event {event_id} has no detecting pairs: its detected extent is unknown"
+        raise KeyError(msg)
+    spec = extent_consumers()[consumer]
+    c = event.candidate
+    i0 = int(math.floor((c.start_s - z_t0_s) / grid_s))
+    i1 = int(math.ceil((c.stop_s - z_t0_s) / grid_s))
+    lo_f: int | None = None
+    hi_f: int | None = None
+    n = None
+    for pair in cross.pairs[event_id]:
+        if pair not in cross.z:
+            msg = f"event {event_id}: no detection z for its detecting pair {pair}"
+            raise KeyError(msg)
+        zz = np.asarray(cross.z[pair], dtype=np.float64)
+        if n is not None and zz.size != n:
+            msg = f"detection z for {pair} has {zz.size} frames, others {n}"
+            raise ValueError(msg)
+        n = zz.size
+        over = np.isfinite(zz) & (zz > cross.floor_z)
+        for a, b in _runs(over):
+            if a < i1 and b > i0:
+                lo_f = a if lo_f is None else min(lo_f, a)
+                hi_f = b if hi_f is None else max(hi_f, b)
+    if lo_f is None or hi_f is None or n is None:
+        return None
+    settle = consumer_settling(consumer, fs)
+    if settle is None:  # pragma: no cover - every extent consumer has a chain
+        msg = f"{consumer}: settling unknown, so its extent is unknown (invariant 19)"
+        raise ValueError(msg)
+    pad = settle.total_s
+    lo, hi = z_t0_s + lo_f * grid_s, z_t0_s + hi_f * grid_s
+    return Extent(consumer, signal, spec.band, max(z_t0_s, lo - pad),
+                  min(z_t0_s + n * grid_s, hi + pad), lo, hi, pad,
+                  BANDS[spec.band].window_s, EXTENT_BASIS_DETECTED)
+
+
 def extents_for_events(
     events: Mapping[str, Event], z: Mapping[tuple[str, str], npt.ArrayLike],
     signals: Mapping[str, Sequence[str]], *, tolerances: ToleranceTable, fs: float,
     z_t0_s: float, confirmed: Callable[[Event], bool],
     hr_signal: tuple[str, npt.ArrayLike, float] | None = None,
+    cross_band: CrossBand | None = None,
 ) -> list[tuple[str, str, str, Extent | NotAssessable | None]]:
     """Every event x consumer x signal: ``(event_id, consumer, signal, result)``.
 
@@ -919,6 +1006,10 @@ def extents_for_events(
     ``hrv`` is operational and needs ``hr_signal = (name, samples, x_t0_s)`` for the
     channel ``signals["hrv"]`` names; reading hrv without it raises rather than leaving
     hrv silently unmasked.
+
+    ``cross_band`` (RULING 2026-10-09 (i) 1, option (1)): where a z consumer's own band
+    stays under its threshold around a confirmed core, the result is the event's
+    :func:`detected_extent` instead of ``None``. Without it, the own band alone decides.
     """
     if "hrv" in signals:
         need = tuple(signals["hrv"])
@@ -945,6 +1036,9 @@ def extents_for_events(
                         z_t0_s=z_t0_s)
                 except ExtentNotAssessableError as exc:
                     res = NotAssessable(consumer, sig, str(exc))
+                if res is None and cross_band is not None:  # (i) 1: own band under threshold
+                    res = detected_extent(ev, cross_band, eid, consumer, signal=sig, fs=fs,
+                                          z_t0_s=z_t0_s)
                 out.append((eid, consumer, sig, res))
     return out
 

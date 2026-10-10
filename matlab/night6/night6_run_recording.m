@@ -358,6 +358,9 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
     failed = false;
     for r = plan.runs
         run = struct('call', r.call, 'consumers', {r.consumers}, 'signals', {r.signals});
+        if strcmp(r.call, 'HR_BR_HRVAnalysis_beats')   % (i) 4: what this call is read for
+            run.outputs_used = night6_hr_outputs(r.consumers);
+        end
         perChannel = ~isempty(r.maskSignal);     % slow_wave, one ANT channel at a time
         if perChannel
             run.mask_signal = r.maskSignal;
@@ -557,7 +560,7 @@ function F = function_provenance()
             'night6_trim_modes', 'night6_check_trim_mode', 'night6_edge_settling', ...
             'night6_slow_wave_rates', 'night6_check_decimation', 'night6_decimate_masked', ...
             'night6_call_slow_wave', 'night6_keep_slow_wave', 'night6_slow_wave_settings', ...
-            'night6_slow_wave_caveats', 'night6_pilot_root'};
+            'night6_slow_wave_caveats', 'night6_pilot_root', 'night6_hr_outputs'};
     hers = [setdiff({C.name}, ours, 'stable'), night6_v2_steps(), ...
             {'step1a_blank_cardiac', 'pipeline_params', 'bulk_load_one'}];   % step1a: (j) 1 fallback
     here = fileparts(mfilename('fullpath'));
