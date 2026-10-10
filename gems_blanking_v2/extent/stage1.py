@@ -468,41 +468,33 @@ def core_pad_spans(cache: EpochCache, confirmed: Iterable[str], *,
 
     * ``always`` - the ruling as written: every confirmed core, widened by the consumer's
       padding, on every signal the consumer reads;
-    * ``when_visible`` (Andrea's rule (ii)) - only where the consumer's own band is above its
-      threshold in ANY finite frame of the core window (:func:`core_frames`, as
-      ``compute_extent`` takes it; ``tolerances.for_consumer``), per signal - then the whole
-      core plus the padding;
-    * ``own_signals`` (rule (i)) - only where the core was detected on the consumer's own
-      signals: some detecting pair's signal in ``cache.own_signals[(consumer, signal)]``
-      (``tolerance.own_signals_by_signal``);
-    * ``own_signals_or_visible`` (Andrea, 2026-10-10) - where either blanks.
+    * ``when_visible`` - only where the consumer's own band is above its threshold over the
+      core (some finite frame of the core window, as ``compute_extent`` takes it, above
+      ``tolerances.for_consumer``), per signal;
+    * ``own_signals_or_visible`` (Andrea, 2026-10-10) - where ``when_visible`` blanks, or where
+      the core was detected on the consumer's own signals: some detecting pair's signal in
+      ``cache.own_signals[(consumer, signal)]`` (``tolerance.own_signals_by_signal``).
 
-    hrv (Andrea, revised 2026-10-10) declares ``own_signals`` (its HR-source channels; a
-    beat-train change is not "visible") or ``off``; its beat-train extent is unchanged and
-    added elsewhere. The padding is the consumer's measured settling
-    (``tolerance.consumer_settling``), the span is clipped to the epoch's z record and never
-    routed. A consumer without a declaration, or with another value, is refused.
+    The padding is the consumer's measured settling (``tolerance.consumer_settling``), the
+    span is clipped to the epoch's z record and never routed. hrv keeps its operational
+    extent. A z consumer without a declaration, or with another value, is refused.
     """
     out: list[mk.MaskSpan] = []
     end = cache.z_t0_s + cache.n_frames * GRID_S
     for consumer, sigs in cache.signals.items():
-        if not sigs:
+        if consumer == "hrv" or not sigs:
             continue
         mode = core_blanking.get(consumer)
-        allowed = (("own_signals", "off") if consumer == "hrv" else
-                   ("always", "when_visible", "own_signals_or_visible", "own_signals"))
-        if mode not in allowed:
-            msg = (f"{consumer}: core blanking {mode!r} is not declared as one of "
-                   f"{' | '.join(allowed)} (RULING 2026-10-10 item 2; Andrea, revised "
-                   "2026-10-10; nothing is defaulted)")
+        if mode not in ("always", "when_visible", "own_signals_or_visible"):
+            msg = (f"{consumer}: core blanking {mode!r} is not declared as always | "
+                   "when_visible | own_signals_or_visible (RULING 2026-10-10 item 2; nothing "
+                   "is defaulted)")
             raise ValueError(msg)
-        if mode is None or mode == "off":
-            continue
-        if mode in ("own_signals_or_visible", "own_signals") and any(
+        if mode == "own_signals_or_visible" and any(
                 (consumer, sig) not in cache.own_signals for sig in sigs):
-            msg = f"{consumer}: {mode} needs its own signals (cache.own_signals)"
+            msg = f"{consumer}: own_signals_or_visible needs its own signals (cache.own_signals)"
             raise ValueError(msg)
-        if mode in ("when_visible", "own_signals_or_visible") and tolerances is None:
+        if mode != "always" and tolerances is None:
             msg = f"{consumer}: {mode} needs the consumer's threshold"
             raise ValueError(msg)
         band = tl.extent_consumers()[consumer].band
@@ -526,12 +518,10 @@ def _core_blanks(cache: EpochCache, eid: str, consumer: str, sig: str, mode: str
     """Whether event ``eid``'s core blanks ``consumer`` on ``sig`` under ``mode``."""
     if mode == "always":
         return True
-    if mode in ("own_signals_or_visible", "own_signals"):
+    if mode == "own_signals_or_visible":
         own = cache.own_signals[(consumer, sig)]
         if any(q[0] in own for q in cache.detecting[eid]):
             return True
-        if mode == "own_signals":
-            return False
     assert tolerances is not None
     c = cache.events[eid].candidate
     zz = np.asarray(cache.z[(sig, band)], dtype=np.float64)
