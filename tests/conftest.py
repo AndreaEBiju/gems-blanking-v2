@@ -2226,3 +2226,94 @@ def make_signal_set(n_nerve: int, fs: float, dur_s: float, *, n_events: int = 20
         slow = 40.0 * np.sin(2 * np.pi * 0.05 * t + srng.uniform(0, 2 * np.pi))
         signals[f"ANT{j + 1}"] = slow + srng.normal(0.0, 8.0, t.size)
     return SignalSet(signals, events, quiet)
+
+
+# ---------------------------------------------------------------------------
+# Night 5 stage 1 split (RULING 2026-10-10 item 4): one epoch's stage-1a inputs
+# ---------------------------------------------------------------------------
+
+STAGE1_SIGNALS: Final = ("L_V1", "L_V2", "L_V3", "L_T", "R_V1", "R_V2", "R_V3", "R_T",
+                         "ANT1", "ANT2", "ANT3", "stomach_ref")
+"""Detection's signals in :func:`make_stage1_epoch` (two cuffs, three stomach channels)."""
+
+
+class Stage1Synth(NamedTuple):
+    """Return of :func:`make_stage1_epoch`."""
+
+    events: dict[str, object]
+    """Event id -> ``types.Event`` (model-scored, calibrated P in ``p_motion``)."""
+    detecting: dict[str, tuple[tuple[str, str], ...]]
+    """Event id -> the (signal, band) pairs that detected it."""
+    zdet: dict[tuple[str, str], F64]
+    """Every detection pair's z on the 10 ms grid, whole epoch."""
+    eng_raw: dict[str, F64]
+    """``L_T`` and ``R_T`` raw, microvolts at ``fs``."""
+    hrv: dict[str, object]
+    """Event id -> ``tolerance.Extent`` or None (beat train unchanged)."""
+    signals: dict[str, tuple[str, ...]]
+    """Consumer -> the signals it reads."""
+    fs: float
+    t0_s: float
+    n_frames: int
+
+
+def make_stage1_epoch(*, seed: int, dur_s: float = 60.0, n_events: int = 24,
+                      t0_s: float = 132.0, fs: float = FS_NOMINAL_HZ) -> Stage1Synth:
+    """One epoch of stage-1 inputs with runs that thresholds split in every way.
+
+    Each event (a core of 0.05-3 s) lifts 1-6 random pairs over ``[start - a, stop + b]``
+    (a, b up to 2 s) at a level of 1.5-15 z, in two steps so a threshold between them
+    shortens the run; unrelated bumps and NaN gaps are scattered over every pair; the base
+    is the log-z null (normal, sigma 1.12: p90 near 1.44). ``L_T`` / ``R_T`` are
+    :func:`make_eng` hosts, half the events adding a large transient (routing then both
+    keeps and rejects). Events on even indices change the beat train (an HRV extent).
+    """
+    from gems_blanking_v2.constants import BANDS  # noqa: PLC0415
+    from gems_blanking_v2.extent import tolerance as tl  # noqa: PLC0415
+    from gems_blanking_v2.types import Candidate, Event  # noqa: PLC0415
+
+    rng = np.random.default_rng([seed, 1010])
+    n = int(math.floor(dur_s / GRID_S))
+    pairs = [(s, b) for s in STAGE1_SIGNALS for b in BANDS]
+    zdet = {q: rng.normal(0.0, 1.12, n) for q in pairs}
+    for q in pairs:
+        z = zdet[q]
+        for _ in range(int(rng.integers(0, 6))):  # unrelated bumps
+            i = int(rng.integers(0, n - 50))
+            z[i:i + int(rng.integers(2, 300))] += rng.uniform(1.0, 9.0)
+        if rng.random() < 0.3:  # a NaN gap
+            i = int(rng.integers(0, n - 100))
+            z[i:i + int(rng.integers(1, 200))] = np.nan
+    eng_raw = {s: make_eng(fs, dur_s, rate_hz=15.0, seed=seed * 7 + k).signal
+               for k, s in enumerate(("L_T", "R_T"))}
+    events: dict[str, object] = {}
+    detecting: dict[str, tuple[tuple[str, str], ...]] = {}
+    hrv: dict[str, object] = {}
+    hrv_pad = 0.14016512
+    for k in range(n_events):
+        a = float(rng.uniform(1.0, dur_s - 4.0))
+        d = float(rng.uniform(0.05, 3.0))
+        start, stop = t0_s + a, t0_s + min(a + d, dur_s - 0.5)
+        chosen = [pairs[i] for i in rng.choice(len(pairs), int(rng.integers(1, 7)),
+                                                replace=False)]
+        for q in chosen:
+            lo = max(0, int(math.floor((start - t0_s - rng.uniform(0, 2.0)) / GRID_S)))
+            hi = min(n, int(math.ceil((stop - t0_s + rng.uniform(0, 2.0)) / GRID_S)))
+            mid = (lo + hi) // 2
+            zdet[q][lo:hi] = np.maximum(zdet[q][lo:hi], rng.uniform(1.5, 6.0))
+            zdet[q][lo + (mid - lo) // 2:mid] = rng.uniform(6.0, 15.0)
+        for s in ("L_T", "R_T"):
+            if rng.random() < 0.5:
+                i = int((start - t0_s) * fs)
+                eng_raw[s][i:i + int(0.002 * fs)] += rng.uniform(300.0, 2000.0)
+        cand = Candidate(start, stop, tuple(sorted({s for s, _b in chosen})),
+                         tuple(sorted({b for _s, b in chosen})), 9.0, "electrical")
+        eid = f"e{int(round(t0_s))}_{k:05d}"
+        events[eid] = Event(cand, "unjudged", float(rng.uniform(0.0, 1.0)), "model")
+        detecting[eid] = tuple(chosen)
+        hrv[eid] = (tl.Extent("hrv", "R_T", "10-150", start - hrv_pad, stop + hrv_pad,
+                              start, stop, hrv_pad, BANDS["10-150"].window_s)
+                    if k % 2 == 0 else None)
+    signals = {"spikes": ("L_T", "R_T"), "mmc": ("ANT1", "ANT2", "ANT3"),
+               "slow_wave": ("ANT1", "ANT2", "ANT3"), "breathing": ("R_T",), "hrv": ("R_T",)}
+    return Stage1Synth(events, detecting, zdet, eng_raw, hrv, signals, fs, t0_s, n)
