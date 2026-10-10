@@ -144,7 +144,9 @@ Version 6 (RULING 2026-10-10 item 7)
   latest start among ALL the animal's stim_recovery files, measured from each file's
   mechanical end. Night 6 reports both and writes a common-start version of the outputs;
   :func:`dose_response_disagreement` is the definition of "the two versions disagree",
-  fixed before any result.
+  fixed before any result; :data:`PER_LEVEL_SUMMARY_RULE` (:func:`per_level_summaries`) the
+  per-stim-level summary it compares, and :func:`dose_response_from_night6` reads both
+  versions' per-file values from Night 6's outputs (the trim marker's recomputed values).
 
 Electrical settling only: no term here, and nothing that feeds one, uses heart rate,
 firing rate or slow-wave rate (RULING (j) 6).
@@ -160,6 +162,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Literal
+
+import numpy as np
 
 from gems_blanking_v2.extent.grid import first_sample_at_or_after, seconds_to_sample
 from gems_blanking_v2.extent.tolerance import (
@@ -201,6 +205,7 @@ __all__ = [
     "MOTOR_PAST_ELECTRICAL_S",
     "OUTPUT_FILES",
     "OUTPUT_VARS",
+    "PER_LEVEL_SUMMARY_RULE",
     "RECOMPUTE_KINDS",
     "REFERENCE_SENSITIVE",
     "RULING",
@@ -231,10 +236,14 @@ __all__ = [
     "beat_decimation_factor",
     "cut_id",
     "dose_response_disagreement",
+    "dose_response_from_night6",
     "file_starts",
     "input_mask",
+    "load_trim_marker",
+    "night6_file_values",
     "output_reach_s",
     "output_times_record",
+    "per_level_summaries",
     "read_recovery_starts",
     "recovery_starts_document",
     "source_files_record",
@@ -282,6 +291,20 @@ DISAGREEMENT_RULE: Final = (
     "value by more than 10% of the common-start values' range across levels (with one level, "
     "or a zero range, 10% of that level's common-start magnitude). A level missing or "
     "non-finite in either version makes the comparison 'not_comparable', never 'agree'")
+PER_LEVEL_SUMMARY_RULE: Final = (
+    "PROPOSED 2026-10-10 (review of r1010, fix 5) before any Night 6 result; Andrea may "
+    "override it until results exist: for one animal x analysis x output variable, a stim "
+    "level's summary is the MEDIAN, over that level's stim_recovery files, of each file's "
+    "own per-file value - the whole-epoch scalar Night 6 already reports for that output "
+    "(the trim marker's recomputed value: her own expression over the values kept from the "
+    "file's start of that analysis), taken in each version from that version's outputs "
+    "(own start: the epoch folder; common start: its common_start folder). The median is "
+    "PAIRED: a file enters a level only where its value is finite in both versions, so both "
+    "versions summarise the same files; a file finite in one version only is listed as "
+    "unpaired and left out of both. A level with no paired file is missing, which makes the "
+    "comparison not_comparable. A vector output (one value per channel or column) is one "
+    "output variable per element, named <leaf>[k] with k 1-based as MATLAB indexes it")
+"""The per-stim-level summary :data:`DISAGREEMENT_RULE` compares (:func:`per_level_summaries`)."""
 """v5 (RULING 2026-10-09 (i) 3 (c)): stim-off is two times. Every measured file carries
 ``electrical_end_s``, ``mechanical_end_s`` and ``mechanical_end_sample0`` beside the
 electrical settling, and ``input_mask_s`` / ``input_mask_sample0`` = their maximum, with
@@ -2048,6 +2071,198 @@ def dose_response_disagreement(own: Mapping[str, float], common: Mapping[str, fl
     return {**out, "verdict": "disagree" if (changed or moved) else "agree",
             "rank_changed": changed, "rank_own": rank_o, "rank_common": rank_c,
             "levels_moved": moved, "tolerance": tol}
+
+
+def _h5_value(f: Any, obj: Any) -> Any:  # noqa: ANN401 - a decoded MATLAB value
+    """Decode one MATLAB v7.3 (HDF5) object: a scalar struct, a cell, a char or a numeric."""
+    import h5py  # noqa: PLC0415 - only a v7.3 reader needs it
+
+    cls = obj.attrs.get("MATLAB_class", b"")
+    cls = cls.decode() if isinstance(cls, bytes) else str(cls)
+    if isinstance(obj, h5py.Group):
+        return {k: _h5_value(f, obj[k]) for k in obj if not k.startswith("#")}
+    if "MATLAB_empty" in obj.attrs and bool(np.asarray(obj.attrs["MATLAB_empty"]).ravel()[0]):
+        return "" if cls == "char" else []
+    data = np.asarray(obj[()])
+    if cls == "cell":
+        return [_h5_value(f, f[r]) for r in data.T.ravel()]
+    if cls == "char":
+        return "".join(chr(int(c)) for c in data.T.ravel())
+    return data.T
+
+
+def load_trim_marker(path: Path) -> dict[str, Any]:
+    """Return the :data:`TRIM_MARKER` variable of one Night 6 output file, as plain Python.
+
+    MAT v5 (``scipy.io.loadmat``) and v7.3 (HDF5, her ``-v7.3`` spike file) are both read;
+    only the marker is loaded. A file without the marker is refused by name (ValueError).
+    """
+    import h5py  # noqa: PLC0415
+    from scipy.io import loadmat, whosmat  # noqa: PLC0415
+
+    path = Path(path)
+    if h5py.is_hdf5(path):
+        with h5py.File(path, "r") as f:
+            if TRIM_MARKER not in f:
+                msg = f"{path.name}: no {TRIM_MARKER} (not trimmed by Night 6)"
+                raise ValueError(msg)
+            return dict(_h5_value(f, f[TRIM_MARKER]))
+    if TRIM_MARKER not in {name for name, _s, _c in whosmat(path)}:
+        msg = f"{path.name}: no {TRIM_MARKER} (not trimmed by Night 6)"
+        raise ValueError(msg)
+    m = loadmat(path, variable_names=[TRIM_MARKER], simplify_cells=True)
+    return dict(m[TRIM_MARKER])
+
+
+def _as_list(x: object) -> list[Any]:
+    """Return a MATLAB cell or struct array as loaded (a list, a lone element, or empty)."""
+    if isinstance(x, list | tuple):
+        return list(x)
+    if isinstance(x, np.ndarray) and x.dtype == object:
+        return list(x.ravel())
+    if isinstance(x, np.ndarray) and x.size == 0:
+        return []
+    return [x]
+
+
+def _marker_values(marker: Mapping[str, Any]) -> dict[str, tuple[str, float]]:
+    """``leaf[k]`` -> (path, value) for every recomputed value of one marker (non-finite: NaN)."""
+    out: dict[str, tuple[str, float]] = {}
+    for e in _as_list(marker.get("recomputed", [])):
+        for leaf in _as_list(e["leaves"]):
+            v = np.asarray(leaf["recomputed"], dtype=np.float64).ravel()
+            names = ([str(leaf["leaf"])] if v.size == 1 else
+                     [f"{leaf['leaf']}[{k}]" for k in range(1, v.size + 1)])
+            for name, x in zip(names, v.tolist(), strict=True):
+                if name in out:
+                    msg = f"recomputed leaf {name!r} appears twice in one marker"
+                    raise ValueError(msg)
+                out[name] = (str(e["path"]), float(x))
+    return out
+
+
+def night6_file_values(epoch_dir: Path, *, animal: str, session: str) -> list[dict[str, Any]]:
+    """Each output variable's per-file value in both versions, from one stim_recovery epoch.
+
+    ``epoch_dir`` is Night 6's epoch folder (own-start outputs) holding ``common_start/`` (the
+    common-start version, RULING 2026-10-10 item 7). Every output file matching
+    :data:`OUTPUT_FILES` is read through its trim marker (:func:`load_trim_marker`); each
+    recomputed value whose owner (:data:`OUTPUT_VARS`) is one of the marker's
+    ``run_consumers`` is that analysis's value (a byproduct of another consumer's run is not
+    its owner's value). The output variable is ``<file>:<leaf>`` with the file named without
+    its epoch tag (``slowWaves_ANT1``). Rows: animal, session, analysis, output, and ``own``
+    / ``common`` - absent when not finite (never NaN in a record). A file without its
+    common-start copy, or an (analysis, output) given twice, is refused (ValueError).
+    """
+    import re  # noqa: PLC0415
+
+    epoch_dir = Path(epoch_dir)
+    owner = {(v.file, v.path): _owner(v) for v in OUTPUT_VARS}
+    rows: dict[tuple[str, str], dict[str, Any]] = {}
+    for p in sorted(epoch_dir.glob("*.mat")):
+        kinds = [k for k, f in OUTPUT_FILES.items() if re.search(f.pattern, p.name)]
+        if len(kinds) != 1:
+            continue  # an input copy or a figure: not an output of the map
+        cp = epoch_dir / "common_start" / p.name
+        if not cp.is_file():
+            msg = f"{session}: {p.name} has no common-start copy ({cp})"
+            raise ValueError(msg)
+        own_m, com_m = load_trim_marker(p), load_trim_marker(cp)
+        runs = {str(c) for c in _as_list(own_m.get("run_consumers", []))}
+        own_v, com_v = _marker_values(own_m), _marker_values(com_m)
+        if set(own_v) != set(com_v):
+            msg = f"{session}: {p.name} recomputes {sorted(own_v)} own, {sorted(com_v)} common"
+            raise ValueError(msg)
+        inst = p.stem.split("_", 1)[1] if "_" in p.stem else p.stem
+        for leaf, (path, x) in own_v.items():
+            analysis = owner.get((kinds[0], path))
+            if analysis is None or analysis not in runs:
+                continue
+            key = (analysis, f"{inst}:{leaf}")
+            if key in rows:
+                msg = f"{session}: {key} is given by two output files"
+                raise ValueError(msg)
+            row: dict[str, Any] = {"animal": animal, "session": session, "analysis": analysis,
+                                   "output": key[1]}
+            for name, val in (("own", x), ("common", com_v[leaf][1])):
+                if math.isfinite(val):
+                    row[name] = val
+            rows[key] = row
+    return [rows[k] for k in sorted(rows)]
+
+
+def per_level_summaries(rows: Sequence[Mapping[str, Any]], levels: Mapping[str, str]
+                        ) -> dict[str, dict[str, Any]]:
+    """Return each ``animal|analysis|output``'s per-level summary (PER_LEVEL_SUMMARY_RULE).
+
+    ``rows`` are per-file values (:func:`night6_file_values`); ``levels`` maps each session to
+    its stim level, DECLARED by the caller (never parsed from a name here). A session with no
+    declared level is refused, as is one session giving one output twice. Per key: ``own`` /
+    ``common`` (level -> paired median), ``files`` (level -> the paired sessions) and
+    ``unpaired`` (sessions finite in one version only), and the rule.
+    """
+    by: dict[str, dict[str, dict[str, tuple[float, float]]]] = {}
+    unpaired: dict[str, list[str]] = {}
+    for r in rows:
+        s = str(r["session"])
+        if s not in levels:
+            msg = f"{s}: no stim level declared for it (levels are declared, never inferred)"
+            raise ValueError(msg)
+        key = f"{r['animal']}|{r['analysis']}|{r['output']}"
+        lv = str(levels[s])
+        o, c = r.get("own"), r.get("common")
+        ok = (o is not None and c is not None and math.isfinite(float(o))
+              and math.isfinite(float(c)))
+        if not ok:
+            unpaired.setdefault(key, []).append(s)
+            by.setdefault(key, {})
+            continue
+        per = by.setdefault(key, {}).setdefault(lv, {})
+        if s in per:
+            msg = f"{s} gives {key} twice"
+            raise ValueError(msg)
+        per[s] = (float(o), float(c))  # type: ignore[arg-type]
+    out: dict[str, dict[str, Any]] = {}
+    for key in sorted(by):
+        lv_files = by[key]
+        out[key] = {
+            "rule": PER_LEVEL_SUMMARY_RULE,
+            "own": {lv: float(np.median([v[0] for v in f.values()])) for lv, f in lv_files.items()},
+            "common": {lv: float(np.median([v[1] for v in f.values()]))
+                       for lv, f in lv_files.items()},
+            "files": {lv: sorted(f) for lv, f in lv_files.items()},
+            "unpaired": sorted(unpaired.get(key, []))}
+    return out
+
+
+def dose_response_from_night6(epochs: Mapping[str, tuple[str, Path]], levels: Mapping[str, str]
+                              ) -> dict[str, dict[str, Any]]:
+    """Return the disagreement verdict per ``animal|analysis|output`` from Night 6's outputs.
+
+    ``epochs`` maps each stim_recovery session to (animal, its Night 6 epoch folder);
+    ``levels`` each session to its declared stim level. Every level named for an animal is
+    compared for every output of that animal (a level whose files give no paired value is
+    missing there: ``not_comparable``). Returns, per key, :func:`dose_response_disagreement`
+    on :func:`per_level_summaries`, with the summary beside it.
+    """
+    rows: list[dict[str, Any]] = []
+    for s, (animal, d) in sorted(epochs.items()):
+        rows += night6_file_values(Path(d), animal=animal, session=s)
+    summ = per_level_summaries(rows, levels)
+    animal_levels: dict[str, set[str]] = {}
+    for s, (animal, _d) in epochs.items():
+        if s not in levels:
+            msg = f"{s}: no stim level declared for it (levels are declared, never inferred)"
+            raise ValueError(msg)
+        animal_levels.setdefault(animal, set()).add(str(levels[s]))
+    out: dict[str, dict[str, Any]] = {}
+    for key, sm in summ.items():
+        want = animal_levels[key.split("|", 1)[0]]
+        own = {lv: sm["own"].get(lv, math.nan) for lv in want}
+        common = {lv: sm["common"].get(lv, math.nan) for lv in want}
+        res = dose_response_disagreement(own, common)
+        out[key] = {**res, "summary": sm}
+    return out
 
 
 def recovery_starts_document(files: Sequence[Mapping[str, Any]], *, fs: float,

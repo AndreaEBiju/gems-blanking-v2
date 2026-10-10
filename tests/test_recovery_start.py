@@ -57,6 +57,7 @@ from gems_blanking_v2.extent.tolerance import (
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from tests.conftest import make_night6_stim_outputs
 from tests.test_matlab_acceptance import _processing_new
 
 V6 = {"animal": "A", "electrical_basis": "from_electrical_end"}
@@ -1170,3 +1171,86 @@ def test_the_disagreement_rule_is_fixed_before_any_result(own: dict[str, float],
     got = rs.dose_response_disagreement(own, common)
     assert got["verdict"] == verdict, got
     assert got["rule"] == rs.DISAGREEMENT_RULE and rs.DISAGREE_FRACTION == 0.10
+
+
+# ---------------------------------------------------------------------------
+# review of r1010, fix 5: the per-stim-level summary, from Night 6's outputs
+# ---------------------------------------------------------------------------
+
+
+def _n6(tmp_path: Path, own: dict[str, float], common: dict[str, float] | None = None,
+        **kw: Any) -> dict[str, tuple[str, Path]]:  # noqa: ANN401
+    """One slow-wave output per session: avgSlowWave own / common."""
+    common = own if common is None else common
+    out = {}
+    for s, v in own.items():
+        make_night6_stim_outputs(tmp_path / s, tag="e132",
+                                 own={"slowWaves_ANT1": {"avgSlowWave": v}},
+                                 common={"slowWaves_ANT1": {"avgSlowWave": common[s]}}, **kw)
+        out[s] = ("A", tmp_path / s)
+    return out
+
+
+LEVELS = {"s1": "100uA", "s2": "100uA", "s3": "100uA", "s4": "300uA", "s5": "300uA"}
+SW_KEY = "A|slow_wave|slowWaves_ANT1:avgSlowWave"
+
+
+def test_the_per_level_summary_is_the_median_of_each_files_own_value(tmp_path: Path) -> None:
+    """PER_LEVEL_SUMMARY_RULE: the median over the level's files (not the mean), per version."""
+    own = {"s1": 1.0, "s2": 2.0, "s3": 10.0, "s4": 5.0, "s5": 7.0}
+    common = {"s1": 1.1, "s2": 2.1, "s3": 9.0, "s4": 5.0, "s5": 7.0}
+    got = rs.dose_response_from_night6(_n6(tmp_path, own, common), LEVELS)[SW_KEY]
+    sm = got["summary"]
+    assert sm["own"] == {"100uA": 2.0, "300uA": 6.0}  # the mean would be 4.33
+    assert sm["common"] == {"100uA": pytest.approx(2.1), "300uA": 6.0}
+    assert sm["files"] == {"100uA": ["s1", "s2", "s3"], "300uA": ["s4", "s5"]}
+    assert sm["rule"] == rs.PER_LEVEL_SUMMARY_RULE and "MEDIAN" in rs.PER_LEVEL_SUMMARY_RULE
+    assert got["verdict"] == "agree" and got["rule"] == rs.DISAGREEMENT_RULE
+
+
+def test_the_median_is_paired_so_both_versions_summarise_the_same_files(tmp_path: Path) -> None:
+    own = {"s1": 1.0, "s2": 2.0, "s3": 10.0, "s4": 5.0, "s5": 7.0}
+    common = {**own, "s3": math.nan}  # s3 not computed in the common version
+    sm = rs.dose_response_from_night6(_n6(tmp_path, own, common), LEVELS)[SW_KEY]["summary"]
+    assert sm["own"]["100uA"] == 1.5 and sm["common"]["100uA"] == 1.5
+    assert sm["unpaired"] == ["s3"] and sm["files"]["100uA"] == ["s1", "s2"]
+
+
+def test_a_rank_change_between_versions_disagrees(tmp_path: Path) -> None:
+    own = {"s1": 1.0, "s2": 2.0, "s3": 3.0, "s4": 5.0, "s5": 7.0}
+    common = {"s1": 8.0, "s2": 9.0, "s3": 9.5, "s4": 5.0, "s5": 7.0}
+    got = rs.dose_response_from_night6(_n6(tmp_path, own, common), LEVELS)[SW_KEY]
+    assert got["verdict"] == "disagree" and got["rank_changed"]
+
+
+def test_a_level_with_no_paired_file_is_not_comparable(tmp_path: Path) -> None:
+    own = {"s1": 1.0, "s2": 2.0, "s3": 3.0, "s4": 5.0, "s5": 7.0}
+    common = {**own, "s4": math.nan, "s5": math.nan}
+    got = rs.dose_response_from_night6(_n6(tmp_path, own, common), LEVELS)[SW_KEY]
+    assert got["verdict"] == "not_comparable" and got["missing_or_nonfinite"] == ["300uA"]
+
+
+def test_stim_levels_are_declared_never_inferred(tmp_path: Path) -> None:
+    epochs = _n6(tmp_path, {"s1": 1.0, "s4": 2.0})
+    with pytest.raises(ValueError, match="no stim level declared"):
+        rs.dose_response_from_night6(epochs, {"s1": "100uA"})
+
+
+def test_night6_file_values_reads_both_versions_and_skips_byproducts(tmp_path: Path) -> None:
+    d = make_night6_stim_outputs(
+        tmp_path / "s1", tag="e132",
+        own={"hrv_HRBR": {"avgHeartRate": 390.0, "avgBreathRate": 88.0},
+             "mmc_in_mmc": {"mmc.firing.avgRate": [1.0, 2.0, 3.0]}},
+        run_consumers={"hrv_HRBR": "hrv"})
+    rows = rs.night6_file_values(d, animal="A", session="s1")
+    got = {(r["analysis"], r["output"]): (r["own"], r["common"]) for r in rows}
+    assert got == {("hrv", "hrv_HRBR:avgHeartRate"): (390.0, 390.0),
+                   ("mmc", "mmc_in_mmc:mmc.firing.avgRate[1]"): (1.0, 1.0),
+                   ("mmc", "mmc_in_mmc:mmc.firing.avgRate[2]"): (2.0, 2.0),
+                   ("mmc", "mmc_in_mmc:mmc.firing.avgRate[3]"): (3.0, 3.0)}
+    # avgBreathRate is breathing's, a byproduct of the hrv run: not breathing's value
+    bad = make_night6_stim_outputs(tmp_path / "s2", tag="e132",
+                                   own={"slowWaves_ANT1": {"avgSlowWave": 1.0}},
+                                   skip_common=("slowWaves_ANT1",))
+    with pytest.raises(ValueError, match="no common-start copy"):
+        rs.night6_file_values(bad, animal="A", session="s2")

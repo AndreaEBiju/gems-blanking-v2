@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict
@@ -2317,3 +2318,50 @@ def make_stage1_epoch(*, seed: int, dur_s: float = 60.0, n_events: int = 24,
     signals = {"spikes": ("L_T", "R_T"), "mmc": ("ANT1", "ANT2", "ANT3"),
                "slow_wave": ("ANT1", "ANT2", "ANT3"), "breathing": ("R_T",), "hrv": ("R_T",)}
     return Stage1Synth(events, detecting, zdet, eng_raw, hrv, signals, fs, t0_s, n)
+
+
+# ---------------------------------------------------------------------------
+# Night 6 outputs with a trim marker (review of r1010, fix 5: the per-level summary)
+# ---------------------------------------------------------------------------
+
+
+def make_night6_stim_outputs(epoch_dir: Path, *, tag: str,
+                             own: dict[str, dict[str, object]],
+                             common: dict[str, dict[str, object]] | None = None,
+                             run_consumers: dict[str, str] | None = None,
+                             skip_common: tuple[str, ...] = ()) -> Path:
+    """Write one stim_recovery epoch's Night 6 outputs (MAT v5) with their trim markers.
+
+    ``own[file][path]`` is a recomputed value (a float or a list: one per channel) of output
+    file ``<tag>_<file>.mat`` in the own-start version; ``common`` the same in
+    ``common_start/`` (default: ``own``). The marker holds ``run_consumers`` (per file; default
+    the file's owner in ``recovery_start.OUTPUT_FILES``) and one ``recomputed`` entry per path
+    with one leaf named after the path, as night6_recovery_trim_outputs writes it.
+    ``skip_common`` files get no common-start copy.
+    """
+    from gems_blanking_v2.extent import recovery_start as rs  # noqa: PLC0415
+    from scipy.io import savemat  # noqa: PLC0415
+
+    common = own if common is None else common
+    (epoch_dir / "common_start").mkdir(parents=True, exist_ok=True)
+
+    def marker(file: str, vals: dict[str, object]) -> dict[str, object]:
+        kind = next(k for k, f in rs.OUTPUT_FILES.items()
+                    if re.search(f.pattern, f"{tag}_{file}.mat"))
+        rec = np.empty(len(vals), dtype=object)
+        for i, (path, v) in enumerate(vals.items()):
+            leaf = {"leaf": path, "original": np.asarray(v, dtype=np.float64),
+                    "recomputed": np.asarray(v, dtype=np.float64)}
+            leaves = np.empty(1, dtype=object)
+            leaves[0] = leaf
+            rec[i] = {"path": path, "kind": "mean_omitnan", "of": path, "leaves": leaves}
+        runs = (run_consumers or {}).get(file, rs.OUTPUT_FILES[kind].owner)
+        return {"schema": "gems-blanking-v2 night6 recovery trim v2", "run_consumers": runs,
+                "recomputed": rec}
+    for file, vals in own.items():
+        savemat(str(epoch_dir / f"{tag}_{file}.mat"),
+                {"x": 1.0, rs.TRIM_MARKER: marker(file, vals)})
+        if file not in skip_common:
+            savemat(str(epoch_dir / "common_start" / f"{tag}_{file}.mat"),
+                    {"x": 1.0, rs.TRIM_MARKER: marker(file, common[file])})
+    return epoch_dir
