@@ -62,6 +62,7 @@ from gems_blanking_v2.extent.tolerance import (
 )
 
 __all__ = [
+    "CORE_BLANKING",
     "CORE_PAD_RULE",
     "EXTENT_PERCENTILES",
     "NULL_PERCENTILE_SOURCE",
@@ -74,6 +75,7 @@ __all__ = [
     "ConsumerThreshold",
     "Option1Tolerances",
     "assess_window",
+    "check_core_blanking",
     "check_cross_band_scope",
     "check_extent_percentile",
     "kind_visible",
@@ -134,15 +136,41 @@ NULL_PERCENTILE_SOURCE: Final[Mapping[str, Any]] = {
 """Where :data:`NULL_PERCENTILE_Z` comes from; ``tests/test_tolerance_map.py`` holds the two to
 each other through the archived file."""
 
+CORE_BLANKING: Final[tuple[str, ...]] = ("always", "when_visible")
+"""The core-blanking declaration every z consumer makes, with no default (coordinator, after
+the decision table showed the clause decides the holds by itself: slow wave held 10/10 at p99
+with it, 1/10 without): ``always`` - the ruling as written, the core plus padding always
+blanked; ``when_visible`` - only where the consumer's own band is above its threshold over the
+core (``extent.stage1.core_pad_spans``)."""
+
 CORE_PAD_RULE: Final = (
     "RULING 2026-10-10 item 2: the motion core and the consumer's padding (its measured "
-    "settling) are ALWAYS blanked for every z consumer; beyond the core the extent grows only "
+    "settling) are blanked per each z consumer's DECLARED core blanking - 'always' (the ruling "
+    "as written) or 'when_visible' (only where its own band is above its threshold over the "
+    "core); beyond the core the extent grows only "
     "while the consumer's own band is above its threshold (the declared clean-null percentile "
     "for the consumers on the floor, the visible-kind threshold otherwise - breathing 7.69), "
     "and a cross-band extent counts a detecting pair while it is above the declared percentile "
     "of its own band")
 
 F64 = npt.NDArray[np.float64]
+
+
+def check_core_blanking(decl: object) -> dict[str, str]:
+    """Return each z consumer's declared core blanking, or raise ValueError (no default)."""
+    if not isinstance(decl, Mapping):
+        msg = (f"core blanking is a mapping z consumer -> one of {list(CORE_BLANKING)}, declared "
+               f"for every z consumer {list(z_consumers())}; got {decl!r}")
+        raise ValueError(msg)
+    missing = [c for c in z_consumers() if c not in decl]
+    extra = sorted(str(c) for c in decl if c not in z_consumers())
+    bad = {str(c): v for c, v in decl.items() if v not in CORE_BLANKING}
+    if missing or extra or bad:
+        msg = (f"core blanking: undeclared {missing}, not z consumers {extra}, unknown values "
+               f"{bad}; each of {list(z_consumers())} declares one of {list(CORE_BLANKING)}, "
+               "nothing is defaulted (RULING 2026-10-10 item 2)")
+        raise ValueError(msg)
+    return {c: str(decl[c]) for c in z_consumers()}
 
 
 def check_extent_percentile(value: object) -> str:
@@ -377,6 +405,10 @@ class Option1Tolerances:
     """The DECLARED clean-null percentile (:func:`check_extent_percentile`; the builder
     requires it, this default only keeps the dataclass constructible field by field)."""
 
+    core_blanking: Mapping[str, str] = dataclasses.field(default_factory=dict)
+    """Each z consumer's DECLARED core blanking (:func:`check_core_blanking`; required by the
+    builder)."""
+
     @property
     def cross_band_floor(self) -> dict[str, float]:
         """The cross-band floor per band: the declared percentile's value in each band."""
@@ -391,7 +423,8 @@ class Option1Tolerances:
     def record(self) -> dict[str, Any]:
         """Everything a mask's provenance carries about its thresholds (JSON-ready)."""
         return {"version": TOLERANCE_VERSION, "rule": OPTION1_RULE,
-                "core_pad_rule": CORE_PAD_RULE, "core_pad_always_blanked": True,
+                "core_pad_rule": CORE_PAD_RULE,
+                "core_blanking": dict(sorted(self.core_blanking.items())),
                 "extent_percentile": self.extent_percentile,
                 "floor_consumers": list(self.floor_consumers),
                 "cross_band_floor": self.cross_band_floor,
@@ -416,7 +449,7 @@ def option1_tolerances(tolerances: Mapping[str, Any], mapping: Mapping[str, Any]
                        scan: Mapping[str, Any], *, tolerances_sha256: str,
                        criterion_sha256: str, mapping_sha256: str, scan_sha256: str,
                        generation: str, cross_band_scope: object,
-                       extent_percentile: object) -> Option1Tolerances:
+                       extent_percentile: object, core_blanking: object) -> Option1Tolerances:
     """Build the option-(1) table from the declared, hashed v2 inputs, or raise ValueError.
 
     Refused by name: tolerances without the v2 harm criterion, or whose ``criterion_v2``
@@ -431,8 +464,8 @@ def option1_tolerances(tolerances: Mapping[str, Any], mapping: Mapping[str, Any]
     RULING 2026-10-10 item 2: a consumer on the floor (no harmful kind visible in its band)
     takes the declared clean-null percentile of its own band (:data:`NULL_PERCENTILE_Z`) as
     its threshold; a consumer with a visible kind keeps its option-(1) threshold (breathing
-    7.69). Every consumer's core and padding are always blanked (:data:`CORE_PAD_RULE`;
-    ``extent.stage1.extents_routing_masks``).
+    7.69). Each consumer's core and padding are blanked per its declared core blanking
+    (:func:`check_core_blanking`, :data:`CORE_PAD_RULE`; ``extent.stage1.core_pad_spans``).
     """
     crit = tolerances.get("criterion_v2")
     if not isinstance(crit, Mapping) or crit.get("sha256") != criterion_sha256:
@@ -465,6 +498,7 @@ def option1_tolerances(tolerances: Mapping[str, Any], mapping: Mapping[str, Any]
         raise ValueError(msg)
     scopes = check_cross_band_scope(cross_band_scope)
     pct = check_extent_percentile(extent_percentile)
+    cores = check_core_blanking(core_blanking)
     thresholds: dict[str, ConsumerThreshold] = {}
     residual: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for c in z_consumers():
@@ -493,4 +527,4 @@ def option1_tolerances(tolerances: Mapping[str, Any], mapping: Mapping[str, Any]
     inputs = {"tolerances_sha256": tolerances_sha256, "criterion_sha256": criterion_sha256,
               "mapping_sha256": mapping_sha256, "visibility_scan_sha256": scan_sha256,
               "generation": generation, "mapping_refused": dict(mapping.get("refused") or {})}
-    return Option1Tolerances(table, thresholds, residual, flags, inputs, scopes, pct)
+    return Option1Tolerances(table, thresholds, residual, flags, inputs, scopes, pct, cores)

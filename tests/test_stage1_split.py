@@ -113,9 +113,10 @@ def test_the_cache_answers_every_threshold_set_and_scope_as_the_full_arrays(
     floor = data.draw(hs.floats(st1.CACHE_FLOOR_Z, 5.0), label="floor")
     by_band = data.draw(hs.one_of(hs.none(), hs.fixed_dictionaries(
         {b: hs.floats(st1.CACHE_FLOOR_Z, 8.0) for b in BANDS})), label="floor_by_band")
-    core_pad = data.draw(hs.booleans(), label="core_pad")
+    cores = data.draw(hs.one_of(hs.none(), hs.fixed_dictionaries(
+        {c: hs.sampled_from(["always", "when_visible"]) for c in Z_CONSUMERS})), label="cores")
     kw = {"tolerances": _table(thr), "scopes": scopes, "floor_z": floor,
-          "floor_by_band": by_band, "core_pad": core_pad}
+          "floor_by_band": by_band, "core_blanking": cores}
     want = st1.extents_routing_masks(full, confirmed, **kw)  # type: ignore[arg-type]
     got = st1.extents_routing_masks(_sparse(seed, cached), confirmed, **kw)  # type: ignore[arg-type]
     _same(want, got)
@@ -145,8 +146,9 @@ def test_the_core_and_padding_are_always_blanked_for_every_z_consumer() -> None:
     off = dict.fromkeys(Z_CONSUMERS, tl.CROSS_BAND_SCOPE_OFF)
     _c, _e, _d, without = st1.extents_routing_masks(full, ids, tolerances=_table(thr),
                                                     scopes=off)
+    always = dict.fromkeys(Z_CONSUMERS, "always")
     _c, _e, dec, masks = st1.extents_routing_masks(full, ids, tolerances=_table(thr),
-                                                   scopes=off, core_pad=True)
+                                                   scopes=off, core_blanking=always)
     assert all(d.consumer == "hrv" for d in dec)  # nothing is routed but hrv
     for (c, s, _b), m in masks.items():
         if c == "hrv":
@@ -162,9 +164,44 @@ def test_the_core_and_padding_are_always_blanked_for_every_z_consumer() -> None:
         want |= without[(c, s, _b)].invalid  # R's routing-entry distrust is none here
         assert np.array_equal(m.invalid, want), (c, s)
         assert m.invalid.sum() > without[(c, s, _b)].invalid.sum()
-    spans = st1.core_pad_spans(full, ids)
+    spans = st1.core_pad_spans(full, ids, core_blanking=always)
     assert {sp.reason for sp in spans} == {st1.CORE_PAD_REASON}
     assert {sp.consumer for sp in spans} == set(Z_CONSUMERS)
+
+
+def test_when_visible_blanks_the_core_only_where_its_own_band_crosses_over_the_core() -> None:
+    """The coordinator's second setting: core + pad only where the band is visible there."""
+    full = _full(3)
+    ids = sorted(full.events)
+    vis = dict.fromkeys(Z_CONSUMERS, "when_visible")
+    high = st1.core_pad_spans(full, ids, core_blanking=vis,
+                              tolerances=_table(dict.fromkeys(Z_CONSUMERS, 99.0)))
+    assert high == []  # nothing visible at z 99: nothing blanked beyond the extents
+    thr = dict.fromkeys(Z_CONSUMERS, 4.0)
+    got = {(sp.consumer, sp.signal, sp.start_s)
+           for sp in st1.core_pad_spans(full, ids, core_blanking=vis, tolerances=_table(thr))}
+    every = st1.core_pad_spans(full, ids, core_blanking=dict.fromkeys(Z_CONSUMERS, "always"))
+    specs = tl.extent_consumers()
+    want = set()
+    for sp in every:
+        for eid in ids:
+            c = full.events[eid].candidate
+            pad = tl.consumer_settling(sp.consumer, full.fs).total_s  # type: ignore[union-attr]
+            if abs(max(full.z_t0_s, c.start_s - pad) - sp.start_s) > 1e-12:
+                continue
+            zz = np.asarray(full.z[(sp.signal, specs[sp.consumer].band)])
+            i0, i1 = st1.core_frames(c.start_s, c.stop_s, full.z_t0_s)
+            w = zz[max(0, i0):i1]
+            if np.isfinite(w).any() and np.nanmax(w) > 4.0:
+                want.add((sp.consumer, sp.signal, sp.start_s))
+    assert got == want and 0 < len(got) < len(every)
+    mixed = {**vis, "slow_wave": "always"}
+    m = st1.core_pad_spans(full, ids, core_blanking=mixed, tolerances=_table(thr))
+    assert sum(sp.consumer == "slow_wave" for sp in m) == sum(sp.consumer == "slow_wave"
+                                                              for sp in every)
+    for bad in ({**vis, "mmc": "sometimes"}, {c: v for c, v in vis.items() if c != "spikes"}):
+        with pytest.raises(ValueError, match="not declared as always"):
+            st1.core_pad_spans(full, ids, core_blanking=bad, tolerances=_table(thr))
 
 
 def test_a_cache_built_with_core_frames_only_is_caught() -> None:

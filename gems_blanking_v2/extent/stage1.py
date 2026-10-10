@@ -374,24 +374,42 @@ class EpochCache:
     cache_floor_z: float = CACHE_FLOOR_Z
 
 
-CORE_PAD_REASON: Final = "core_pad_always"
-"""The mask reason of RULING 2026-10-10 item 2's always-blanked core + padding (never routed)."""
+CORE_PAD_REASON: Final = "core_pad"
+"""The mask reason of RULING 2026-10-10 item 2's core + padding span (never routed)."""
 
 
-def core_pad_spans(cache: EpochCache, confirmed: Iterable[str]) -> list[mk.MaskSpan]:
-    """Return the always-blanked spans: each confirmed core widened by the consumer's padding.
+def core_pad_spans(cache: EpochCache, confirmed: Iterable[str], *,
+                   core_blanking: Mapping[str, str],
+                   tolerances: tl.ToleranceTable | None = None) -> list[mk.MaskSpan]:
+    """Return the core + padding spans each z consumer's DECLARED core blanking gives.
 
-    RULING 2026-10-10 item 2: "the motion core itself and the consumer's padding are always
-    blanked", for every z consumer and every signal it reads - the padding is the consumer's
-    measured settling (``tolerance.consumer_settling(...).total_s``), the span is clipped to
-    the epoch's z record, and it is never routed (whatever the own band shows). hrv keeps
-    its operational extent.
+    RULING 2026-10-10 item 2 ("the motion core itself and the consumer's padding are always
+    blanked"), declared per consumer with no default (``tolerance_map.CORE_BLANKING``):
+
+    * ``always`` - the ruling as written: every confirmed core, widened by the consumer's
+      padding, on every signal the consumer reads;
+    * ``when_visible`` - only where the consumer's own band is above its threshold over the
+      core (some finite frame of the core window, as ``compute_extent`` takes it, above
+      ``tolerances.for_consumer``), per signal.
+
+    The padding is the consumer's measured settling (``tolerance.consumer_settling``), the
+    span is clipped to the epoch's z record and never routed. hrv keeps its operational
+    extent. A z consumer without a declaration, or with another value, is refused.
     """
     out: list[mk.MaskSpan] = []
     end = cache.z_t0_s + cache.n_frames * GRID_S
     for consumer, sigs in cache.signals.items():
         if consumer == "hrv" or not sigs:
             continue
+        mode = core_blanking.get(consumer)
+        if mode not in ("always", "when_visible"):
+            msg = (f"{consumer}: core blanking {mode!r} is not declared as always | "
+                   "when_visible (RULING 2026-10-10 item 2; nothing is defaulted)")
+            raise ValueError(msg)
+        if mode == "when_visible" and tolerances is None:
+            msg = f"{consumer}: when_visible needs the consumer's threshold"
+            raise ValueError(msg)
+        band = tl.extent_consumers()[consumer].band
         settle = tl.consumer_settling(consumer, cache.fs)
         if settle is None:  # pragma: no cover - every extent consumer has a chain
             msg = f"{consumer}: settling unknown, so its padding is unknown (invariant 19)"
@@ -400,7 +418,18 @@ def core_pad_spans(cache: EpochCache, confirmed: Iterable[str]) -> list[mk.MaskS
         for eid in confirmed:
             c = cache.events[eid].candidate
             a, b = max(cache.z_t0_s, c.start_s - pad), min(end, c.stop_s + pad)
-            out += [mk.MaskSpan(consumer, sig, a, b, CORE_PAD_REASON) for sig in sigs if b > a]
+            if b <= a:
+                continue
+            for sig in sigs:
+                if mode == "when_visible":
+                    assert tolerances is not None
+                    zz = np.asarray(cache.z[(sig, band)], dtype=np.float64)
+                    i0, i1 = core_frames(c.start_s, c.stop_s, cache.z_t0_s)
+                    w = zz[max(0, i0):max(0, min(zz.size, i1))]
+                    w = w[np.isfinite(w)]
+                    if not (w.size and float(w.max()) > tolerances.for_consumer(consumer)):
+                        continue
+                out.append(mk.MaskSpan(consumer, sig, a, b, CORE_PAD_REASON))
     return out
 
 
@@ -429,7 +458,8 @@ def _refuse_inexact(cache: EpochCache, ids: Sequence[str], tolerances: tl.Tolera
 def extents_routing_masks(
     cache: EpochCache, confirmed: Iterable[str], *, tolerances: tl.ToleranceTable,
     scopes: Mapping[str, str] | None, floor_z: float = CACHE_FLOOR_Z,
-    floor_by_band: Mapping[str, float] | None = None, core_pad: bool = False,
+    floor_by_band: Mapping[str, float] | None = None,
+    core_blanking: Mapping[str, str] | None = None,
     route: Callable[[rt.EventEvidence, str, tl.ToleranceTable], rt.RouteDecision] | None = None,
 ) -> tuple[dict[str, Event], list[tuple[str, str, str, tl.Extent | tl.NotAssessable | None]],
            list[rt.RouteDecision], dict[mk.MaskKey, mk.ConsumerMask]]:
@@ -439,9 +469,10 @@ def extents_routing_masks(
     the same answer. ``confirmed`` are event ids (stage 1a decided them); ``scopes`` each
     consumer's cross-band scope (None: no cross-band rule); ``floor_z`` the detected extent's
     floor, or ``floor_by_band`` one per detecting pair's band (RULING 2026-10-10 item 2: the
-    declared clean-null percentile); ``core_pad`` adds :func:`core_pad_spans` (RULING
-    2026-10-10 item 2). Refused: a confirmed event the cache was not built for, and a floor
-    or threshold below the cache's (:class:`ValueError`, naming them).
+    declared clean-null percentile); ``core_blanking`` (each z consumer's declaration, None:
+    no core rule) adds :func:`core_pad_spans` (RULING 2026-10-10 item 2). Refused: a confirmed
+    event the cache was not built for, and a floor or threshold below the cache's
+    (:class:`ValueError`, naming them).
     """
     route = rt.route_event if route is None else route
     ids = list(confirmed)
@@ -490,8 +521,8 @@ def extents_routing_masks(
         decisions.append(dec)
         pairs.append((key, res))
     spans = mk.spans_from_routing(pairs, decisions) + list(cache.extra_spans)
-    if core_pad:
-        spans += core_pad_spans(cache, ids)
+    if core_blanking is not None:
+        spans += core_pad_spans(cache, ids, core_blanking=core_blanking, tolerances=tolerances)
     return conf, ext, decisions, mk.build_masks(cache.signals, spans, n_frames=cache.n_frames,
                                                 t0_s=lo)
 

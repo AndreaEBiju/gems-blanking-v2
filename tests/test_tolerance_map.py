@@ -146,7 +146,9 @@ def _build(**over: Any) -> tm.Option1Tolerances:  # noqa: ANN401 - keyword overr
                             "tolerances_sha256": TOL_SHA, "criterion_sha256": CRIT_SHA,
                             "mapping_sha256": "m" * 64, "scan_sha256": "s" * 64,
                             "generation": GEN, "cross_band_scope": ALL,
-                            "extent_percentile": "p90"}
+                            "extent_percentile": "p90",
+                            "core_blanking": dict.fromkeys(
+                                ("breathing", "mmc", "slow_wave", "spikes"), "always")}
     args.update(over)
     return tm.option1_tolerances(**args)
 
@@ -196,7 +198,9 @@ def test_the_floor_consumers_take_the_declared_percentile_of_their_band(pct: str
     assert t.floor_consumers == ("mmc", "slow_wave", "spikes")
     rec = t.record()
     assert rec["extent_percentile"] == pct and rec["cross_band_floor"] == dict(want)
-    assert rec["core_pad_always_blanked"] is True and "ALWAYS blanked" in rec["core_pad_rule"]
+    assert rec["core_blanking"] == dict.fromkeys(("breathing", "mmc", "slow_wave", "spikes"),
+                                                 "always")
+    assert "DECLARED core blanking" in rec["core_pad_rule"]
     assert rec["null_percentile_source"]["sha256"] == tm.NULL_PERCENTILE_SOURCE["sha256"]
     assert f"clean null's {pct}" in rec["thresholds"]["mmc"]["setter"]
     assert rec["thresholds"]["breathing"]["setter"] == "drift"
@@ -213,6 +217,26 @@ def test_the_percentile_is_required_and_never_defaulted(bad: object) -> None:
             "cross_band_scope": ALL}
     with pytest.raises(TypeError, match="extent_percentile"):
         tm.option1_tolerances(**args)  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("bad", [None, {}, {"breathing": "always"},
+                                 dict.fromkeys(("breathing", "mmc", "slow_wave", "spikes"),
+                                               "sometimes"),
+                                 {**dict.fromkeys(("breathing", "mmc", "slow_wave", "spikes"),
+                                                  "always"), "hrv": "always"}])
+def test_core_blanking_is_declared_per_consumer_and_never_defaulted(bad: object) -> None:
+    with pytest.raises(ValueError, match="core blanking"):
+        _build(core_blanking=bad)
+
+
+def test_both_core_blanking_settings_are_recorded_and_hashed() -> None:
+    zc = ("breathing", "mmc", "slow_wave", "spikes")
+    vis = _build(core_blanking=dict.fromkeys(zc, "when_visible"))
+    mixed = _build(core_blanking={**dict.fromkeys(zc, "when_visible"), "breathing": "always"})
+    assert vis.record()["core_blanking"] == dict.fromkeys(zc, "when_visible")
+    assert mixed.core_blanking["breathing"] == "always"
+    assert len({_build().sha256(), vis.sha256(), mixed.sha256()}) == 3
+    assert tm.CORE_BLANKING == ("always", "when_visible")
 
 
 def test_a_cross_band_pair_counts_while_above_its_own_bands_floor() -> None:
