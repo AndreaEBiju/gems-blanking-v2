@@ -91,7 +91,7 @@ from tests.test_night6_wrapper import (
     _write_epoch,
 )
 
-V6 = {"animal": "A", "electrical_basis": "from_electrical_end"}
+V6 = {"animal": "A", "electrical_basis": "from_electrical_end", "stim_level": "L1"}
 """The v6 fields of a file_starts call (RULING 2026-10-10 item 7) for the older cases."""
 
 SESSION = "syn_s_t01_ms1_sr_100000_20260101T150000Z"
@@ -279,6 +279,7 @@ def _cases(tmp: Path) -> dict[str, Any]:
                        ("v4", lambda j: j.update(schema="gems-blanking-v2 recovery starts v4")),
                        ("no_mechanical", lambda j: j["files"][0].pop("mechanical_end_sample0")),
                        ("no_mechanical_time", lambda j: j["files"][0].pop("mechanical_end_s")),
+                       ("no_stim_level", lambda j: j["files"][0].pop("stim_level")),
                        ("no_electrical_time", lambda j: j["files"][0].pop("electrical_end_s")),
                        ("no_input_mask", lambda j: j["files"][0].pop("input_mask_sample0")),
                        # review 8 finding 1: the mechanical end binds and the input mask
@@ -481,11 +482,12 @@ def _need_matlab() -> None:
 
 
 READER_WORDS = {
-    "v4": "'gems-blanking-v2 recovery starts v6'",
+    "v4": "'gems-blanking-v2 recovery starts v7'",
     "no_mechanical": "mechanical_end_sample0 must be one integer >= 0",
     "no_input_mask": "input_mask_sample0 must be one integer >= 0",
     "no_electrical": "electrical_settle_sample0 must be one integer >= 0",
     "no_mechanical_time": "has no mechanical_end_s (both stim times are required",
+    "no_stim_level": "declares no stim_level (schema v7",
     "no_electrical_time": "has no electrical_end_s (both stim times are required",
     "mask_not_max": "is not max(electrical_settle_sample0",
     "start_before_mask": "before its input mask sample",
@@ -616,6 +618,7 @@ def test_night6_trims_in_mode_b_to_the_sample(  # noqa: PLR0915 - one MATLAB run
     for name in ("schema", "twice", "fractional", "v1", "v2", "no_electrical", "no_cuts",
                  "cut_twice", "cut_fractional", "no_map", "no_sources", "sources_as_object",
                  "v3", "no_edge_hash", "v4", "no_mechanical", "no_mechanical_time",
+                 "no_stim_level",
                  "no_electrical_time", "no_input_mask", "mask_not_max", "start_before_mask",
                  "mech_s_not_sample", "settle_s_not_sample", "mask_s_not_sample",
                  "settle_before_end", "mech_rounded"):

@@ -4,7 +4,7 @@ function RS = night6_recovery_start(file)
 %   RS = night6_recovery_start(file)
 %
 % The file is written by gems_blanking_v2.extent.recovery_start.write_recovery_starts
-% (schema 'gems-blanking-v2 recovery starts v6'; RULING 2026-10-10 item 7 adds per file its
+% (schema 'gems-blanking-v2 recovery starts v7'; RULING 2026-10-10 item 7 adds per file its
 % animal, its electrical_basis - from_electrical_end, mechanical_only_zero (settling 0) or
 % from_mechanical_end (the search started at the mechanical end) - a reference_sensitive
 % record on the late files with each analysis's reference_sensitive_until_sample0, and per
@@ -52,7 +52,7 @@ function RS = night6_recovery_start(file)
         error('night6:recoveryStartFile', 'the recovery-starts file %s does not exist', file);
     end
     D = jsondecode(fileread(file));
-    want = 'gems-blanking-v2 recovery starts v6';
+    want = 'gems-blanking-v2 recovery starts v7';
     if ~isstruct(D) || ~isfield(D, 'schema') || ~strcmp(D.schema, want)
         error('night6:recoveryStartFile', '%s is not a ''%s'' file', file, want);
     end
@@ -178,6 +178,12 @@ function check_v6(F, file)
             || ~isfield(F, 'electrical_basis') || ~any(strcmp(F.electrical_basis, bases))
         error('night6:recoveryStartFile', ['%s: %s has no animal or no known electrical_basis ' ...
               '(schema v6, RULING 2026-10-10 item 7)'], file, F.session);
+    end
+    % v7 (Andrea, revised 2026-10-10): the common start is the latest per-stim-level median
+    % start, so every measured file declares its stim level
+    if ~isfield(F, 'stim_level') || ~ischar(F.stim_level) || isempty(F.stim_level)
+        error('night6:recoveryStartFile', ['%s: %s declares no stim_level (schema v7: the ' ...
+              'common start is the latest per-level median start)'], file, F.session);
     end
     sens = isfield(F, 'reference_sensitive');
     rows = [as_cells(F.analyses), as_cells(F.cuts)];

@@ -213,6 +213,7 @@ __all__ = [
     "RULING_TIMES",
     "RULING_TRIM",
     "RULING_V6",
+    "RULING_V7",
     "SCHEMA",
     "SOURCE_FILES",
     "SOURCE_LABEL",
@@ -256,8 +257,9 @@ __all__ = [
 
 RULING: Final = "RULING 2026-10-08 (k) 2"
 RULING_TRIM: Final = "RULING 2026-10-09 item 6"
-SCHEMA: Final = "gems-blanking-v2 recovery starts v6"
+SCHEMA: Final = "gems-blanking-v2 recovery starts v7"
 RULING_V6: Final = "RULING 2026-10-10 item 7"
+RULING_V7: Final = "Andrea, revised 2026-10-10 (dose-response safeguard, scope D)"
 ELECTRICAL_BASES: Final[Mapping[str, str]] = {
     "from_electrical_end": "the electrical-only rule, measured from the electrical end "
                            "(RULING 2026-10-09 (i) 3 (a)-(c))",
@@ -276,12 +278,15 @@ rule's 1 s hold - and 2.03-2.04 s on 63), and only the second puts motor activit
 window the electrical rule reads."""
 REFERENCE_SENSITIVE: Final = "reference-sensitive"
 COMMON_START_RULE: Final = (
-    "RULING 2026-10-10 item 7, dose-response safeguard: for comparisons between stim levels, "
-    "every stim_recovery file of an animal starts each analysis - and cuts each output - at "
-    "the LATEST start among all the animal's files, measured from each file's mechanical end "
-    "(recovery never starts before it): common start = mechanical end + max over the "
-    "animal's files of (start - mechanical end). The common-start version re-uses each "
-    "file's outputs and only cuts them later; the own-start version is kept beside it")
+    "RULING 2026-10-10 item 7, dose-response safeguard, as revised by Andrea 2026-10-10: for "
+    "comparisons between stim levels, every stim_recovery file of an animal starts each "
+    "analysis - and cuts each output - at the LATEST of the per-stim-level MEDIAN starts, "
+    "measured from each file's mechanical end (recovery never starts before it): per level, "
+    "the median over that level's files of (start - mechanical end), reference-sensitive "
+    "files EXCLUDED; common start = mechanical end + the largest of those medians, never "
+    "before the file's own start. Each file's own start stays PRIMARY; the common-start "
+    "version re-uses each file's outputs and only cuts them later, beside it. Stim levels "
+    "are declared per file (stim_level), never parsed from a name")
 DISAGREE_FRACTION: Final = 0.10
 DISAGREEMENT_RULE: Final = (
     "RULING 2026-10-10 item 7, fixed 2026-10-10 before any Night 6 result: for one animal x "
@@ -1744,7 +1749,7 @@ def _held_record(*, session: str, fs: float | None, electrical_end_s: float | No
 def file_starts(*, session: str, fs: float | None, electrical_end_s: float | None,
                 mechanical_end_s: float | None, electrical_settle_s: float | None,
                 times_source: str, electrical_source: str, animal: str,
-                electrical_basis: str,
+                electrical_basis: str, stim_level: str | None,
                 reference_sensitive: Mapping[str, Any] | None = None,
                 analyses: Sequence[str] | None = None,
                 table: Mapping[str, Analysis] | None = None,
@@ -1769,19 +1774,29 @@ def file_starts(*, session: str, fs: float | None, electrical_end_s: float | Non
     ``reference_sensitive`` (a late file: ``window_s``, ``anchor_s``, ``after_anchor_s``
     {chosen, clean_min, clean_max}, ``n_clean``, ``n_candidates``) flags it and gives every
     analysis its ``reference_sensitive_until``.
+
+    v7 (Andrea, revised 2026-10-10): ``stim_level`` - the file's stim level as DECLARED by the
+    caller (never parsed from the name) - is required for a measured file: the common start is
+    the latest of the per-level median starts (:data:`COMMON_START_RULE`). A held file may
+    pass None.
     """
     if not animal:
         msg = f"{session}: v6 needs the file's animal (the common start is per animal)"
         raise ValueError(msg)
+    level = {"stim_level": str(stim_level)} if stim_level else {}
     names = list(ANALYSES if analyses is None else analyses)
     held = _held_record(session=session, fs=fs, electrical_end_s=electrical_end_s,
                         mechanical_end_s=mechanical_end_s,
                         electrical_settle_s=electrical_settle_s, times_source=times_source)
     if held is not None:
-        return {**held, "animal": animal}
+        return {**held, "animal": animal, **level}
     if fs is None or electrical_end_s is None or mechanical_end_s is None \
             or electrical_settle_s is None:  # for the type checker: _held_record covers these
         msg = f"{session}: a measured file needs its fs"
+        raise ValueError(msg)
+    if not level:
+        msg = (f"{session}: v7 needs the file's declared stim level (the common start is the "
+               f"latest per-level median start; {RULING_V7})")
         raise ValueError(msg)
     if electrical_settle_s < electrical_end_s:
         msg = (f"{session}: electrical settling {electrical_settle_s} s precedes the "
@@ -1838,7 +1853,7 @@ def file_starts(*, session: str, fs: float | None, electrical_end_s: float | Non
             "mechanical_end_s": float(mechanical_end_s),
             "electrical_settle_s": float(electrical_settle_s),
             "electrical_s": float(electrical_settle_s) - float(electrical_end_s),
-            **im, "analyses": rows, "cuts": cuts,
+            **im, "analyses": rows, "cuts": cuts, **level,
             **({"reference_sensitive": rsens} if rsens is not None else {})}
 
 
@@ -1998,6 +2013,9 @@ def _check_v6(sess: str, f: Mapping[str, Any]) -> None:
     _check_basis(sess, str(f["electrical_basis"]), electrical_end_s=float(f["electrical_end_s"]),
                  mechanical_end_s=float(f["mechanical_end_s"]),
                  electrical_settle_s=float(f["electrical_settle_s"]))
+    if not f.get("stim_level"):
+        msg = f"{sess}: v7 needs the file's declared stim_level ({RULING_V7})"
+        raise ValueError(msg)
     for r in f["analyses"]:
         u = r.get("reference_sensitive_until_sample0")
         if (u is None) != ("reference_sensitive" not in f) or (
@@ -2010,39 +2028,64 @@ def _check_v6(sess: str, f: Mapping[str, Any]) -> None:
 def _common_starts(measured: list[dict[str, Any]]) -> dict[str, Any]:
     """Give every analysis and cut its common start (:data:`COMMON_START_RULE`); the record.
 
-    Per animal and per analysis (and per cut id): offset = max over the animal's measured
-    files of (start - mechanical end); each row's ``common_start_s`` = its file's mechanical
-    end + that offset, ``common_start_sample0`` its sample (as starts are converted), and
-    ``common_start_set_by`` the file that set it. Never before the row's own start.
+    Per animal and per analysis (and per cut id): over the animal's measured files that are
+    NOT reference-sensitive, each stim level's median of (start - mechanical end); the offset
+    is the largest of those medians (ties: the larger level name). Each row's
+    ``common_start_s`` = its file's mechanical end + that offset - never before the row's own
+    start - ``common_start_sample0`` its sample (as starts are converted), and
+    ``common_start_set_by`` the level that set it. A reference-sensitive file gets a common
+    start but never sets one. An analysis whose every file is reference-sensitive has no
+    common start and is refused (ValueError, naming it): never fabricated.
     """
     by: dict[str, list[dict[str, Any]]] = {}
     for f in measured:
         by.setdefault(str(f["animal"]), []).append(f)
     record: dict[str, Any] = {}
     for animal, files in sorted(by.items()):
-        rec: dict[str, Any] = {"files": sorted(str(f["session"]) for f in files),
-                               "analyses": {}, "cuts": {}}
+        used = [f for f in files if "reference_sensitive" not in f]
+        levels: dict[str, list[str]] = {}
+        for f in used:
+            levels.setdefault(str(f["stim_level"]), []).append(str(f["session"]))
+        rec: dict[str, Any] = {
+            "files": sorted(str(f["session"]) for f in files),
+            "excluded_reference_sensitive": sorted(str(f["session"]) for f in files
+                                                   if "reference_sensitive" in f),
+            "levels": {lv: sorted(v) for lv, v in sorted(levels.items())},
+            "analyses": {}, "cuts": {}}
         for kind, key in (("analyses", "analysis"), ("cuts", "cut")):
-            best: dict[str, tuple[float, str]] = {}
-            for f in files:
+            offs: dict[str, dict[str, list[tuple[float, str]]]] = {}
+            for f in used:
                 m = float(f["mechanical_end_s"])
                 for r in f[kind]:
-                    off = float(r["start_s"]) - m
-                    name = str(r[key])
-                    if name not in best or off > best[name][0]:
-                        best[name] = (off, str(f["session"]))
+                    offs.setdefault(str(r[key]), {}).setdefault(str(f["stim_level"]), []).append(
+                        (float(r["start_s"]) - m, str(f["session"])))
+            names = sorted({str(r[key]) for f in files for r in f[kind]})
+            best: dict[str, tuple[float, str]] = {}
+            for name in names:
+                if name not in offs:
+                    msg = (f"animal {animal}: {key} {name}: every file is reference-sensitive, so "
+                           "no common start can be computed (COMMON_START_RULE excludes them)")
+                    raise ValueError(msg)
+                med = {lv: float(np.median([o for o, _s in v])) for lv, v in offs[name].items()}
+                top = max(med, key=lambda lv: (med[lv], lv))
+                best[name] = (med[top], top)
+                rec[kind][name] = {
+                    "offset_after_mechanical_end_s": med[top], "set_by_level": top,
+                    "level_medians": {lv: {"median_offset_s": med[lv],
+                                           "files": sorted(s_ for _o, s_ in offs[name][lv])}
+                                      for lv in sorted(med)}}
             for f in files:
                 m, fs = float(f["mechanical_end_s"]), float(f["fs"])
                 for r in f[kind]:
-                    off, who = best[str(r[key])]
+                    off, lv = best[str(r[key])]
                     t = m + off
                     k = max(seconds_to_sample(t, fs), int(r["start_sample0"]))
                     r.update(common_start_s=max(t, float(r["start_s"])),
-                             common_start_sample0=k, common_start_set_by=who)
-            rec[kind] = {n: {"offset_after_mechanical_end_s": o, "set_by": w}
-                         for n, (o, w) in sorted(best.items())}
+                             common_start_sample0=k, common_start_set_by=f"stim level {lv}")
         record[animal] = rec
-    return {"rule": COMMON_START_RULE, "anchor": "mechanical_end", "by_animal": record}
+    return {"rule": COMMON_START_RULE, "ruling": RULING_V7, "anchor": "mechanical_end",
+            "summary": "latest per-stim-level median start, reference-sensitive files excluded",
+            "by_animal": record}
 
 
 def dose_response_disagreement(own: Mapping[str, float], common: Mapping[str, float]

@@ -40,7 +40,7 @@ from scipy.io import savemat
 
 from tests.test_matlab_acceptance import _matlab, _processing_new
 
-V6 = {"animal": "A", "electrical_basis": "from_electrical_end"}
+V6 = {"animal": "A", "electrical_basis": "from_electrical_end", "stim_level": "L1"}
 """The v6 fields of a file_starts call (RULING 2026-10-10 item 7) for the older cases."""
 
 FS = 24414.0625

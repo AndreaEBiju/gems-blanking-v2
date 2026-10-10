@@ -29,11 +29,11 @@ REF = {"window_s": [540.0, 600.0], "anchor_s": 120.0, "n_clean": 79, "n_candidat
 
 
 def _file(session: str, e: float, settle: float, m: float,
-          ref: dict[str, Any] | None = None) -> dict[str, Any]:
+          ref: dict[str, Any] | None = None, level: str = "L1") -> dict[str, Any]:
     return rs.file_starts(session=session, animal="A", electrical_basis="from_electrical_end",
                           fs=FS, electrical_end_s=e, mechanical_end_s=m,
                           electrical_settle_s=settle, times_source="tsq",
-                          electrical_source="test", reference_sensitive=ref)
+                          electrical_source="test", reference_sensitive=ref, stim_level=level)
 
 
 @pytest.fixture(scope="module")
@@ -43,8 +43,10 @@ def got(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
         pytest.skip("MATLAB or processing_new is not on this machine")
     tmp = tmp_path_factory.mktemp("common")
     starts = tmp / "starts.json"
-    doc = rs.recovery_starts_document([_file("a_es1", 120.0, 124.0, 120.0),
-                                       _file("a_es3", 120.0, 190.79, 120.0, REF)], fs=FS)
+    doc = rs.recovery_starts_document([_file("a_es1", 120.0, 124.0, 120.0, level="es1"),
+                                       _file("a_es3", 120.0, 140.0, 120.0, level="es3"),
+                                       _file("a_late", 120.0, 190.79, 120.0, REF,
+                                             level="es5")], fs=FS)
     rs.write_recovery_starts(starts, doc)
     out = tmp / "out.json"
     cmd = (f"addpath('{Path(pnew).as_posix()}'); addpath('{NIGHT6.as_posix()}'); "
@@ -66,7 +68,7 @@ def test_each_analysis_reports_its_own_and_the_common_start(got: dict[str, Any])
         c = rec["consumers"][r["analysis"]]
         assert c["start_sample0"] == r["start_sample0"]
         assert c["common_start_sample0"] == r["common_start_sample0"] > r["start_sample0"]
-        assert c["common_start_set_by"] == "a_es3"
+        assert c["common_start_set_by"] == "stim level es3"  # a_late is excluded
 
 
 def test_the_common_version_cuts_every_output_at_its_common_start(got: dict[str, Any]) -> None:
@@ -84,7 +86,7 @@ def test_the_common_version_cuts_every_output_at_its_common_start(got: dict[str,
 
 def test_a_v5_starts_file_is_refused_by_night6() -> None:
     src = (NIGHT6 / "night6_recovery_start.m").read_text(encoding="utf-8")
-    assert "want = 'gems-blanking-v2 recovery starts v6';" in src
+    assert "want = 'gems-blanking-v2 recovery starts v7';" in src
     assert "check_v6(F, file);" in src
 
 

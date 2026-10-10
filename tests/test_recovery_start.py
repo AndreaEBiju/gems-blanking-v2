@@ -60,7 +60,7 @@ from hypothesis import strategies as st
 from tests.conftest import make_night6_stim_outputs
 from tests.test_matlab_acceptance import _processing_new
 
-V6 = {"animal": "A", "electrical_basis": "from_electrical_end"}
+V6 = {"animal": "A", "electrical_basis": "from_electrical_end", "stim_level": "L1"}
 """The v6 fields of a file_starts call (RULING 2026-10-10 item 7) for the older cases."""
 
 FS = 24414.0625
@@ -502,7 +502,7 @@ def test_a_starts_file_from_other_edge_settlings_is_refused(tmp_path: Path) -> N
                             electrical_settle_s=124.2,
                             times_source="03B", electrical_source="(j) 6 (i)")]
     doc = rs.recovery_starts_document(files, fs=FS)
-    assert rs.SCHEMA == "gems-blanking-v2 recovery starts v6"
+    assert rs.SCHEMA == "gems-blanking-v2 recovery starts v7"
     assert doc["edge_settling_sha256"] == tl.edge_settling_sha256()
     assert doc["edge_settling"] == tl.edge_settling_record()
     good = tmp_path / "good.json"
@@ -527,7 +527,7 @@ def test_a_starts_file_from_other_edge_settlings_is_refused(tmp_path: Path) -> N
         rs.read_recovery_starts(f)
     j["schema"] = "gems-blanking-v2 recovery starts v3"
     f.write_text(json.dumps(j), encoding="utf-8", newline="\n")
-    with pytest.raises(ValueError, match="expected 'gems-blanking-v2 recovery starts v6'"):
+    with pytest.raises(ValueError, match="expected 'gems-blanking-v2 recovery starts v7'"):
         rs.read_recovery_starts(f)
 
 
@@ -1005,7 +1005,7 @@ def test_a_v4_starts_file_with_one_stim_time_is_refused(tmp_path: Path) -> None:
                 "input_mask_s", "input_mask_sample0", "input_mask_binding"} & set(row)
     f = tmp_path / "v4.json"
     f.write_text(json.dumps(j), encoding="utf-8", newline="\n")
-    with pytest.raises(ValueError, match="expected 'gems-blanking-v2 recovery starts v6'"):
+    with pytest.raises(ValueError, match="expected 'gems-blanking-v2 recovery starts v7'"):
         rs.read_recovery_starts(f)
     j["schema"] = rs.SCHEMA
     f.write_text(json.dumps(j), encoding="utf-8", newline="\n")
@@ -1060,11 +1060,13 @@ def test_a_sample_written_as_seconds_converts_back_to_itself(k: int, fs: float) 
 
 
 def _v6(session: str, e_end: float, settle: float, m_end: float, *, basis: str,
-        animal: str = "A", ref: dict[str, Any] | None = None) -> dict[str, Any]:
+        animal: str = "A", ref: dict[str, Any] | None = None,
+        level: str = "L1") -> dict[str, Any]:
     return rs.file_starts(session=session, animal=animal, electrical_basis=basis, fs=FS,
                           electrical_end_s=e_end, mechanical_end_s=m_end,
                           electrical_settle_s=settle, times_source="tsq",
-                          electrical_source="electrical-only rule", reference_sensitive=ref)
+                          electrical_source="electrical-only rule", reference_sensitive=ref,
+                          stim_level=level)
 
 
 def test_a_mechanical_only_file_starts_at_the_mechanical_end_plus_own_settling() -> None:
@@ -1105,42 +1107,77 @@ def test_a_late_file_is_reference_sensitive_until_its_latest_clean_settling() ->
         assert own is not None
         assert r["reference_sensitive_until_s"] == pytest.approx(120.0 + 79.528 + own)
         assert r["reference_sensitive_until_sample0"] >= r["start_sample0"]
-    doc = rs.recovery_starts_document([f], fs=FS)
-    assert doc["files"][0]["reference_sensitive"]["n_clean"] == 79
     plain = _v6("p", 120.0, 124.0, 120.0, basis="from_electrical_end")
+    doc = rs.recovery_starts_document([f, plain], fs=FS)  # a common start needs a plain file
+    assert doc["files"][0]["reference_sensitive"]["n_clean"] == 79
     assert all("reference_sensitive_until_s" not in r for r in plain["analyses"])
     bad = json.loads(json.dumps(f))
     del bad["analyses"][0]["reference_sensitive_until_sample0"]
     with pytest.raises(ValueError, match="reference_sensitive_until must be present"):
-        rs.recovery_starts_document([bad], fs=FS)
+        rs.recovery_starts_document([bad, plain], fs=FS)
     with pytest.raises(ValueError, match="outside the clean spread"):
         _v6("late", 120.0, 190.79, 120.0, basis="from_electrical_end",
             ref={**REF, "after_anchor_s": {"chosen": 90.0, "clean_min": 29.9, "clean_max": 79.5}})
 
 
-def test_every_stim_level_of_an_animal_shares_the_latest_start_from_its_mechanical_end() -> None:
-    a1 = _v6("a_es1", 120.0, 124.0, 120.0, basis="from_electrical_end")   # 4 s settling
-    a2 = _v6("a_es3", 119.0, 131.0, 121.0, basis="from_electrical_end")   # 10 s after M
-    b1 = _v6("b_es1", 120.0, 122.0, 120.0, basis="from_electrical_end", animal="B")
-    doc = rs.recovery_starts_document([a1, a2, b1], fs=FS)
-    by = {f["session"]: f for f in doc["files"]}
+def _row(doc: dict[str, Any], session: str, name: str) -> dict[str, Any]:
+    f = next(f for f in doc["files"] if f["session"] == session)
+    return next(r for r in f["analyses"] if r["analysis"] == name)
+
+
+def test_the_common_start_is_the_latest_per_level_median_start() -> None:
+    """Andrea, revised 2026-10-10: the latest per-level MEDIAN start.
+
+    Per level the median of (start - mechanical end) over its files, reference-sensitive files
+    excluded; the common offset is the largest median; each file's own start stays primary
+    (the common start is never before it).
+    """
+    # level L1: settling 4, 6, 30 s after M (median 6); level L3: 10, 12 (median 11)
+    files = [_v6("a1a", 120.0, 124.0, 120.0, basis="from_electrical_end", level="L1"),
+             _v6("a1b", 120.0, 126.0, 120.0, basis="from_electrical_end", level="L1"),
+             _v6("a1c", 120.0, 150.0, 120.0, basis="from_electrical_end", level="L1"),
+             _v6("a3a", 119.0, 131.0, 121.0, basis="from_electrical_end", level="L3"),
+             _v6("a3b", 119.0, 133.0, 121.0, basis="from_electrical_end", level="L3"),
+             _v6("late", 120.0, 190.79, 120.0, basis="from_electrical_end", ref=REF,
+                 level="L9"),
+             _v6("b1", 120.0, 122.0, 120.0, basis="from_electrical_end", animal="B")]
+    doc = rs.recovery_starts_document(files, fs=FS)
     for name in rs.ANALYSES:
-        r1 = next(r for r in by["a_es1"]["analyses"] if r["analysis"] == name)
-        r2 = next(r for r in by["a_es3"]["analyses"] if r["analysis"] == name)
-        rb = next(r for r in by["b_es1"]["analyses"] if r["analysis"] == name)
-        off = max(r1["start_s"] - 120.0, r2["start_s"] - 121.0)
-        assert r1["common_start_s"] == pytest.approx(120.0 + off)
-        assert r2["common_start_s"] == pytest.approx(121.0 + off)
-        assert r1["common_start_set_by"] == r2["common_start_set_by"] == "a_es3"
-        assert r1["common_start_sample0"] >= r1["start_sample0"]
-        assert rb["common_start_s"] == rb["start_s"]  # B is its own animal
-    cuts1 = {c["cut"]: c for c in by["a_es1"]["cuts"]}
-    for c in by["a_es3"]["cuts"]:
-        assert cuts1[c["cut"]]["common_start_set_by"] == "a_es3"
-        assert cuts1[c["cut"]]["common_start_sample0"] >= cuts1[c["cut"]]["start_sample0"]
-    rec = doc["common_start"]
-    assert rec["anchor"] == "mechanical_end" and "LATEST start" in rec["rule"]
-    assert rec["by_animal"]["A"]["files"] == ["a_es1", "a_es3"]
+        own = rs.analysis_settling(name, FS).settling_s
+        assert own is not None
+        med = {"L1": 6.0 + own, "L3": 11.0 + own}  # the max over files would be 30 s (a1c)
+        rec = doc["common_start"]["by_animal"]["A"]["analyses"][name]
+        assert rec["set_by_level"] == "L3"
+        assert rec["offset_after_mechanical_end_s"] == pytest.approx(med["L3"])
+        assert rec["level_medians"]["L1"]["median_offset_s"] == pytest.approx(med["L1"])
+        assert rec["level_medians"]["L1"]["files"] == ["a1a", "a1b", "a1c"]
+        for s, m in (("a1a", 120.0), ("a3a", 121.0), ("late", 120.0)):
+            r = _row(doc, s, name)
+            assert r["common_start_s"] == pytest.approx(max(m + med["L3"], r["start_s"]))
+            assert r["common_start_set_by"] == "stim level L3"
+            assert r["common_start_sample0"] >= r["start_sample0"]
+        a1c = _row(doc, "a1c", name)  # its own start is later: it stays primary
+        assert a1c["common_start_s"] == a1c["start_s"]
+        assert _row(doc, "b1", name)["common_start_s"] == _row(doc, "b1", name)["start_s"]
+    a = doc["common_start"]["by_animal"]["A"]
+    assert a["excluded_reference_sensitive"] == ["late"]
+    assert "L9" not in a["levels"] and a["levels"]["L3"] == ["a3a", "a3b"]
+    assert "MEDIAN" in doc["common_start"]["rule"] and "EXCLUDED" in doc["common_start"]["rule"]
+
+
+def test_a_common_start_from_reference_sensitive_files_only_is_refused() -> None:
+    late = _v6("late", 120.0, 190.79, 120.0, basis="from_electrical_end", ref=REF)
+    with pytest.raises(ValueError, match="every file is reference-sensitive"):
+        rs.recovery_starts_document([late], fs=FS)
+
+
+def test_the_stim_level_is_declared_never_parsed() -> None:
+    with pytest.raises(ValueError, match="declared stim level"):
+        _v6("gems_a_t02_1_1_sr", 120.0, 124.0, 120.0, basis="from_electrical_end", level="")
+    f = _v6("x", 120.0, 124.0, 120.0, basis="from_electrical_end")
+    bad = {k: v for k, v in f.items() if k != "stim_level"}
+    with pytest.raises(ValueError, match="declared stim_level"):
+        rs.recovery_starts_document([bad], fs=FS)
 
 
 def test_a_v6_file_without_its_animal_or_basis_is_refused() -> None:
@@ -1152,7 +1189,8 @@ def test_a_v6_file_without_its_animal_or_basis_is_refused() -> None:
     with pytest.raises(ValueError, match="needs the file's animal"):
         rs.file_starts(session="x", animal="", electrical_basis="from_electrical_end", fs=FS,
                        electrical_end_s=120.0, mechanical_end_s=120.0,
-                       electrical_settle_s=124.0, times_source="t", electrical_source="e")
+                       electrical_settle_s=124.0, times_source="t", electrical_source="e",
+                       stim_level="L1")
 
 
 @pytest.mark.parametrize(("own", "common", "verdict"), [
