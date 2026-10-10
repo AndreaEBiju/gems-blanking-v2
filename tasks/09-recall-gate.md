@@ -2554,6 +2554,48 @@ The rulings headed **2026-10-08**, **(b)** and **(c)** were written on **2026-10
    - This is applied at mask emission; routing tables are unchanged.
    - Report per cuff which recordings this releases (J's two cuffs in the pilot).
 
+### RULING 2026-10-10 — blanking extent and the hold; cuff trust; recovery-start details; finishing by Sunday
+
+**Measured (wave-1 prep, pilot recordings):** under ruling 2026-10-09 (i) 1 as written, slow wave is blanked a median of 92% and mmc 60%.
+- Even with cross-band off, slow wave (24%) and mmc (25%) breach the 20% hold, because their threshold is the 1.44 floor (the clean 90th percentile) and the model confirms 52–741 cores per epoch.
+- The QC gate holds a whole recording when any consumer breaches.
+
+**Andrea, 2026-10-10:**
+
+1. **The hold is per consumer, not per recording.** A consumer that breaches its hold is held and flagged for that recording only; the other consumers' masks are emitted. This amends ruling 2026-10-08 (f) item 3 and the QC gate.
+2. **Extent thresholds.**
+   - **For consumers on the floor** (no harmful kind visible in their band: spikes, mmc and slow wave today), the extent grows beyond the core only while the band is clearly abnormal.
+   - The candidates are the clean null's 90th, 95th and 99th percentiles. The motion core itself and the consumer's padding are always blanked.
+   - Breathing keeps its visible-kind threshold (7.69).
+3. **Cross-band scope:**
+   - `off` for slow wave and mmc;
+   - as ruled (`all_detecting_pairs`) for spikes and breathing;
+   - invisible kinds recorded as residual risk.
+4. **Decision table first (about 30 min, on the pilot recordings, read only).** For every percentile × scope combination, report per consumer:
+   - blanked time, median and range;
+   - consumer holds;
+   - blanked time broken down by condition (bl, sr, pre) and by stim level;
+   - confirmed cores per epoch, by animal.
+
+   Andrea picks the percentile from this table. Model inference for wave 1 starts now, if it does not depend on this choice.
+5. **Night 5 and Night 6 in waves:**
+   - Masks for slow wave, HRV, breathing and mmc are finished per recording, because they do not depend on the animal-level line-noise correction.
+   - Night 6 runs those consumers as soon as their masks exist.
+   - Spike masks are finished per animal once that animal's routing completes.
+6. **Cuff trust** (replaces the open reading question from (i) 5):
+   - **Release** (keep for spikes, flagged per minute) every cuff whose distrust comes only from having no count-gated beat train or no detectable heartbeat leak. These are readings 2, 3 and 4, including J's cuffs.
+   - **Keep distrusting reading 1** (a visible QRS hump but no count-gated train), because the leak is known to be present. Those cuffs are released once the leak recovery of (g) 2 places their peri-R spans.
+   - **Check:** the peri-R spike test runs on every released cuff, and a cuff that fails it is reported to Andrea.
+7. **Recovery start:**
+   - **Mechanical-only files:** electrical settling = 0, and the start is the mechanical end plus each analysis's own settling.
+   - **Files whose motor runs past the electrical end:** the electrical-settling search starts at the mechanical end, so motor activity is never measured as electrical.
+   - **The 22 late files:** keep the latest clean reference window, and flag their early-recovery outputs as "reference-sensitive", with the window spread recorded.
+   - **Dose-response safeguard:**
+     - report every analysis's start per file beside the results;
+     - for comparisons between stim levels, also produce a common-start version, in which all stim levels of an animal start at the latest start among them.
+     - If the two versions disagree, it is reported.
+8. **mmc value choice:** on Sunday, after routing, as planned.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
