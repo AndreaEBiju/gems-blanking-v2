@@ -294,30 +294,59 @@ def test_the_retention_gate_fires_on_an_over_masked_recording() -> None:
         qc.retention_gate(over, min_retention=0.0)
 
 
-def test_a_held_recording_is_written_only_with_a_release(tmp_path: Path) -> None:
+def _write(tmp_path: Path, masks: dict[Any, Any], name: str = "x.mat", **kw: object) -> Path:
+    args: dict[str, Any] = {"signals": READS, "fs": FS, "n_samples": N_SAMPLES,
+                            "line_distrust": _ld(), "peri_r": peri_r_like(_ld()),
+                            "epoch_start_s": 0.0, "min_retention": 0.5, "animal_median": {}}
+    args.update(kw)
+    return ho.write_mask_file(tmp_path / name, masks, _prov(), **args)
+
+
+def _held(path: Path) -> dict[str, Any]:
+    out: dict[str, Any] = json.loads(str(loadmat(path)["heldconsumers_json"][0]))
+    return out
+
+
+def test_a_held_consumer_is_flagged_and_runs_only_with_a_release(tmp_path: Path) -> None:
+    """RULING 2026-10-10 item 1: the file is written; the held consumer is flagged in it."""
     over = _masked(0.7)
     med = {"spikes|L_T|300-3000": 0.1}
     gate = qc.emit_gate(over, min_retention=0.5, animal_median=med)
     assert gate.held and gate.retention_flagged and gate.blank_held
-    with pytest.raises(ho.RecordingHeldError, match="release"):
-        ho.write_mask_file(tmp_path / "x.mat", over, _prov(),
-                           signals=READS, fs=FS, n_samples=N_SAMPLES,
-                           line_distrust=_ld(), peri_r=peri_r_like(_ld()),
-                           epoch_start_s=0.0, min_retention=0.5, animal_median=med)
-    with pytest.raises(ValueError, match="blank string"):
-        ho.write_mask_file(tmp_path / "x.mat", over, _prov(),
-                           signals=READS, fs=FS, n_samples=N_SAMPLES,
-                           line_distrust=_ld(), peri_r=peri_r_like(_ld()),
-                           epoch_start_s=0.0, min_retention=0.5, animal_median=med,
-                           release="   ")
-    path = ho.write_mask_file(tmp_path / "x.mat", over, _prov(),
-                              signals=READS, fs=FS, n_samples=N_SAMPLES,
-                              line_distrust=_ld(), peri_r=peri_r_like(_ld()),
-                              epoch_start_s=0.0, min_retention=0.5, animal_median=med,
-                              release="Andrea 2026-10-08: anaesthesia lightened, keep")
+    assert list(gate.held_consumers) == ["spikes"]
+    path = _write(tmp_path, over, animal_median=med)
+    held = _held(path)
+    assert list(held) == ["spikes"] and "released" not in held["spikes"]
+    assert any("retention" in r for r in held["spikes"]["reasons"])
+    assert "blank_spikes_L_T" in loadmat(path)  # flagged, not withheld
+    for bad in ("   ", {"spikes": ""}):
+        with pytest.raises(ValueError, match="blank"):
+            _write(tmp_path, over, animal_median=med, release=bad)
+    with pytest.raises(ValueError, match="slow_wave, which QC does not hold"):
+        _write(tmp_path, over, animal_median=med, release={"slow_wave": "Andrea: keep"})
+    path = _write(tmp_path, over, animal_median=med,
+                  release={"spikes": "Andrea 2026-10-08: anaesthesia lightened, keep"})
     g = json.loads(str(loadmat(path)["gate_json"][0]))
     assert g["min_retention"] == 0.5 and g["medians_used"] == med
-    assert g["held"] and g["release"].startswith("Andrea") and g["reasons"]
+    assert g["held"] and g["reasons"] and g["hold_scope"].startswith("per consumer")
+    assert g["held_consumers"]["spikes"]["released"].startswith("Andrea")
+    assert _held(path)["spikes"]["released"].startswith("Andrea")
+
+
+def test_the_hold_is_per_consumer_never_per_recording(tmp_path: Path) -> None:
+    """slow_wave breaches its hold; spikes and every other consumer stay runnable."""
+    masks = {**_masked(0.01), **_masked(0.4, "slow_wave", "ANT1")}
+    gate = qc.emit_gate(masks, min_retention=0.8, animal_median={})
+    assert list(gate.held_consumers) == ["slow_wave"]
+    assert all(r.startswith("slow_wave|") for r in gate.held_consumers["slow_wave"])
+    path = _write(tmp_path, masks, min_retention=0.8)
+    assert list(_held(path)) == ["slow_wave"]
+    m = loadmat(path)
+    assert "blank_spikes_L_T" in m and "blank_slow_wave_ANT1" in m
+    g = json.loads(str(m["gate_json"][0]))
+    assert list(g["held_consumers"]) == ["slow_wave"]
+    clean = _write(tmp_path, _masked(0.01), name="clean.mat")
+    assert _held(clean) == {}
 
 
 def test_a_blank_over_20_percent_is_held() -> None:
@@ -389,14 +418,10 @@ def test_the_longitudinal_table_is_one_animal_append_only(tmp_path: Path) -> Non
 
 
 def test_the_writer_computes_the_gate_from_the_masks(tmp_path: Path) -> None:
-    """No caller-built gate: an over-masked recording is held whatever the caller wants."""
+    """No caller-built gate: an over-masked consumer is held whatever the caller wants."""
     over = _masked(0.7)
-    with pytest.raises(ho.RecordingHeldError, match="retention"):
-        ho.write_mask_file(tmp_path / "x.mat", over, _prov(),
-                           signals=READS, fs=FS, n_samples=N_SAMPLES,
-                           line_distrust=_ld(), peri_r=peri_r_like(_ld()),
-                           epoch_start_s=0.0, min_retention=0.5,
-                           animal_median={"spikes|L_T|300-3000": 0.9})
+    held = _held(_write(tmp_path, over, animal_median={"spikes|L_T|300-3000": 0.9}))
+    assert any("retention" in r for r in held["spikes"]["reasons"])
     path = ho.write_mask_file(tmp_path / "ok.mat", _masked(0.01), _prov(),
                               signals=READS, fs=FS,
                               line_distrust=_ld(), peri_r=peri_r_like(_ld()),
@@ -411,12 +436,10 @@ def test_the_retention_gate_alone_holds_the_recording(tmp_path: Path) -> None:
     m = _masked(0.15)
     gate = qc.emit_gate(m, min_retention=0.9, animal_median={"spikes|L_T|300-3000": 0.1})
     assert gate.held and gate.retention_flagged and not gate.blank_held
-    with pytest.raises(ho.RecordingHeldError, match="retention"):
-        ho.write_mask_file(tmp_path / "x.mat", m, _prov(),
-                           signals=_reads(spikes=('L_T',)), fs=FS, n_samples=N_SAMPLES,
-                           line_distrust=_ld(), peri_r=peri_r_like(_ld()),
-                           epoch_start_s=0.0, min_retention=0.9,
-                           animal_median={"spikes|L_T|300-3000": 0.1})
+    assert gate.held_consumers == {"spikes": ("spikes|L_T|300-3000: retention 0.850 < 0.9",)}
+    held = _held(_write(tmp_path, m, min_retention=0.9,
+                        animal_median={"spikes|L_T|300-3000": 0.1}))
+    assert held == {"spikes": {"reasons": ["spikes|L_T|300-3000: retention 0.850 < 0.9"]}}
 
 
 def test_the_writer_refuses_masks_that_leave_a_consumer_out(tmp_path: Path) -> None:
@@ -430,11 +453,7 @@ def test_the_writer_refuses_masks_that_leave_a_consumer_out(tmp_path: Path) -> N
                                line_distrust=_ld(), peri_r=peri_r_like(_ld()),
                                n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
                                animal_median={})
-    with pytest.raises(ho.RecordingHeldError):
-        ho.write_mask_file(tmp_path / "x.mat", masks, _prov(), signals=reads, fs=FS,
-                           line_distrust=_ld(), peri_r=peri_r_like(_ld()),
-                           n_samples=N_SAMPLES, epoch_start_s=0.0, min_retention=0.5,
-                           animal_median={})
+    assert list(_held(_write(tmp_path, masks))) == ["slow_wave"]
 
 
 @pytest.mark.parametrize("bad", [float("nan"), float("inf"), -0.1, 1.5])
@@ -731,3 +750,54 @@ def test_the_no_beat_flags_are_required_with_a_train_and_refused_without(
 def test_the_spike_blanking_of_no_beat_minutes_is_gone() -> None:
     """(g) 1 removes (b) 2's spike spans: the masks module no longer makes them."""
     assert not hasattr(mk, "no_beat_spike_spans")
+
+
+# ---------------------------------------------------------------------------
+# RULING 2026-10-10 item 5: a file finishes a subset of the consumers
+# ---------------------------------------------------------------------------
+
+SPIKES_ELSEWHERE = {"spikes": "finished per animal in masks/m_spikes (RULING 2026-10-10 item 5)"}
+
+
+def test_a_per_recording_file_leaves_the_spike_consumer_to_its_animal_file(
+        tmp_path: Path) -> None:
+    masks = {k: v for k, v in _masked(0.4, "slow_wave", "ANT1").items() if k[0] != "spikes"}
+    path = _write(tmp_path, masks, line_distrust=None, peri_r=None, min_retention=0.8,
+                  elsewhere=SPIKES_ELSEWHERE)
+    m = loadmat(path)
+    assert json.loads(str(m["elsewhere_json"][0])) == SPIKES_ELSEWHERE
+    assert not [k for k in m if k.startswith(("blank_spikes", "perir_", "distrust_"))]
+    assert list(_held(path)) == ["slow_wave"]  # the gate reads this file's consumers only
+    assert json.loads(str(m["noheartref_json"][0]))["signals"] == []
+
+
+def test_an_animal_spike_file_carries_only_the_spike_consumer(tmp_path: Path) -> None:
+    masks = {k: v for k, v in _masked(0.01).items() if k[0] == "spikes"}
+    away = dict.fromkeys(("breathing", "hrv", "mmc", "slow_wave"),
+                         "finished per recording in masks/m")
+    m = loadmat(_write(tmp_path, masks, elsewhere=away))
+    assert sorted(k for k in m if k.startswith("blank_")) == ["blank_spikes_L_T"]
+    assert json.loads(str(m["elsewhere_json"][0])) == away
+    with pytest.raises(ValueError, match="line-distrust record"):
+        _write(tmp_path, masks, elsewhere=away, line_distrust=None)
+    assert json.loads(str(loadmat(_write(tmp_path, _masked(0.01), name="all.mat"))
+                          ["elsewhere_json"][0])) == {}
+
+
+@pytest.mark.parametrize(("elsewhere", "words"), [
+    ({"velocity_x": "x"}, "unknown consumers"),
+    ({"hrv": "x"}, "also not computed"),
+    ({"spikes": "  "}, "no reason given"),
+])
+def test_elsewhere_names_an_expected_consumer_with_a_reason(tmp_path: Path, elsewhere: dict,
+                                                            words: str) -> None:
+    masks = {k: v for k, v in _masked(0.01).items() if k[0] not in ("spikes", "hrv")}
+    with pytest.raises(ValueError, match=words):
+        _write(tmp_path, masks, line_distrust=None, peri_r=None, elsewhere=elsewhere,
+               not_computed={"hrv": "no beat train"}, signals=_reads(hrv=()))
+
+
+def test_a_file_may_not_carry_masks_for_a_consumer_it_leaves_elsewhere(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="unexpected"):
+        _write(tmp_path, _masked(0.01), line_distrust=None, peri_r=None,
+               elsewhere=SPIKES_ELSEWHERE)

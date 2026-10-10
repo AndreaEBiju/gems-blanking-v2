@@ -19,13 +19,20 @@
   ``all_detecting_pairs`` (the ruling), ``own_signals_only`` (detecting pairs on the
   consumer's own signals or their channels), ``off`` (none; its detected-but-invisible rows
   listed as residual risk) - and recorded in the table's record;
-* review 7 finding 4: the visibility scan must record the declared tolerances as its input.
+* review 7 finding 4: the visibility scan must record the declared tolerances as its input;
+* RULING 2026-10-10 item 2: the consumers on the floor take the DECLARED clean-null percentile
+  of their own band (required, no default); breathing keeps its visible-kind threshold; the
+  percentiles are the archived clean null's; a cross-band pair counts while above its own
+  band's percentile.
 """
 
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import math
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -138,7 +145,8 @@ def _build(**over: Any) -> tm.Option1Tolerances:  # noqa: ANN401 - keyword overr
     args: dict[str, Any] = {"tolerances": _tolerances(), "mapping": _mapping(), "scan": _scan(),
                             "tolerances_sha256": TOL_SHA, "criterion_sha256": CRIT_SHA,
                             "mapping_sha256": "m" * 64, "scan_sha256": "s" * 64,
-                            "generation": GEN, "cross_band_scope": ALL}
+                            "generation": GEN, "cross_band_scope": ALL,
+                            "extent_percentile": "p90"}
     args.update(over)
     return tm.option1_tolerances(**args)
 
@@ -153,6 +161,88 @@ def test_the_option1_table_from_the_declared_inputs() -> None:
     assert "rpeakUnits" in rec["flags"]["mmc_provenance_flag"]["flag"]
     assert rec["inputs"]["mapping_refused"] == {"spikes": "mapped z -0.92"}
     assert len(t.sha256()) == 64 and t.sha256() == _build().sha256()
+
+
+REPO = Path(__file__).resolve().parents[1]
+
+
+def test_the_null_percentiles_are_the_archived_clean_nulls() -> None:
+    """p90 is the ruled 1.44 everywhere; p95 / p99 are each band's, rounded to 0.01."""
+    src = tm.NULL_PERCENTILE_SOURCE
+    raw = (REPO / src["file"]).read_bytes().replace(b"\r\n", b"\n")
+    assert hashlib.sha256(raw).hexdigest() == src["sha256"]
+    script = (REPO / src["script"]).read_bytes().replace(b"\r\n", b"\n")
+    assert hashlib.sha256(script).hexdigest() == src["script_sha256"]
+    null = json.loads(raw.decode("utf-8"))
+    assert null["session"] == src["recording"]
+    assert round(null["pooled_all_signals"]["p90"], 2) == tm.Z_FLOOR == 1.44
+    per_band = null["per_band_all_signals"]
+    assert set(per_band) == set(tm.NULL_PERCENTILE_Z["p90"])
+    for p in ("p95", "p99"):
+        assert tm.NULL_PERCENTILE_Z[p] == {b: round(v[p], 2) for b, v in per_band.items()}
+    assert set(tm.NULL_PERCENTILE_Z["p90"].values()) == {1.44}
+    assert tm.EXTENT_PERCENTILES == ("p90", "p95", "p99")
+    for b in per_band:  # the cache stage 1b reads is exact at or above 1.44
+        assert tm.NULL_PERCENTILE_Z["p90"][b] <= tm.NULL_PERCENTILE_Z["p95"][b] \
+            <= tm.NULL_PERCENTILE_Z["p99"][b]
+
+
+@pytest.mark.parametrize("pct", ["p95", "p99"])
+def test_the_floor_consumers_take_the_declared_percentile_of_their_band(pct: str) -> None:
+    t = _build(extent_percentile=pct)
+    want = tm.NULL_PERCENTILE_Z[pct]
+    assert dict(t.table.z_tol) == {"breathing": 7.69, "mmc": want["2-50"],
+                                   "slow_wave": want["0-2"], "spikes": want["300-3000"]}
+    assert t.floor_consumers == ("mmc", "slow_wave", "spikes")
+    rec = t.record()
+    assert rec["extent_percentile"] == pct and rec["cross_band_floor"] == dict(want)
+    assert rec["core_pad_always_blanked"] is True and "ALWAYS blanked" in rec["core_pad_rule"]
+    assert rec["null_percentile_source"]["sha256"] == tm.NULL_PERCENTILE_SOURCE["sha256"]
+    assert f"clean null's {pct}" in rec["thresholds"]["mmc"]["setter"]
+    assert rec["thresholds"]["breathing"]["setter"] == "drift"
+    assert t.sha256() != _build().sha256()  # stage 1b is fresh only under the same choice
+
+
+@pytest.mark.parametrize("bad", [None, "", "p50", "P95", 0.95, "p95_pooled"])
+def test_the_percentile_is_required_and_never_defaulted(bad: object) -> None:
+    with pytest.raises(ValueError, match="REQUIRED declaration"):
+        _build(extent_percentile=bad)
+    args = {"tolerances": _tolerances(), "mapping": _mapping(), "scan": _scan(),
+            "tolerances_sha256": TOL_SHA, "criterion_sha256": CRIT_SHA,
+            "mapping_sha256": "m" * 64, "scan_sha256": "s" * 64, "generation": GEN,
+            "cross_band_scope": ALL}
+    with pytest.raises(TypeError, match="extent_percentile"):
+        tm.option1_tolerances(**args)  # type: ignore[call-arg]
+
+
+def test_a_cross_band_pair_counts_while_above_its_own_bands_floor() -> None:
+    """floor_by_band equals the decision table's shift (z - floor > 0) and the scalar floor."""
+    rng = np.random.default_rng(7)
+    ev = _event()
+    z = {}
+    for b in ("0-2", "2-50", "300-3000"):
+        zz = rng.normal(0.0, 1.0, 6000)
+        zz[1900:2300] = np.linspace(1.5, 9.0, 400)
+        z[("R_V1", b)] = zz
+    floors = {"0-2": 2.43, "2-50": 5.88, "300-3000": 1.77}
+    pairs = {"e0": tuple(z)}
+    by_band = tl.CrossBand(pairs=pairs, z=z, floor_z=99.0, scope={"spikes": "all_detecting_pairs"},
+                           own_signals={}, floor_by_band=floors)
+    shifted = tl.CrossBand(pairs=pairs, z={q: v - floors[q[1]] for q, v in z.items()},
+                           floor_z=0.0, scope={"spikes": "all_detecting_pairs"}, own_signals={})
+    a = tl.detected_extent(ev, by_band, "e0", "spikes", signal="L_T", fs=FS, z_t0_s=0.0)
+    b = tl.detected_extent(ev, shifted, "e0", "spikes", signal="L_T", fs=FS, z_t0_s=0.0)
+    assert a is not None and a == b
+    flat = tl.CrossBand(pairs=pairs, z=z, floor_z=2.0, scope={"spikes": "all_detecting_pairs"},
+                        own_signals={}, floor_by_band=dict.fromkeys(floors, 2.0))
+    scalar = tl.CrossBand(pairs=pairs, z=z, floor_z=2.0, scope={"spikes": "all_detecting_pairs"},
+                          own_signals={})
+    assert (tl.detected_extent(ev, flat, "e0", "spikes", signal="L_T", fs=FS, z_t0_s=0.0)
+            == tl.detected_extent(ev, scalar, "e0", "spikes", signal="L_T", fs=FS, z_t0_s=0.0))
+    missing = tl.CrossBand(pairs=pairs, z=z, floor_z=2.0, scope={"spikes": "all_detecting_pairs"},
+                           own_signals={}, floor_by_band={"0-2": 2.0})
+    with pytest.raises(KeyError, match="no cross-band floor for band"):
+        tl.detected_extent(ev, missing, "e0", "spikes", signal="L_T", fs=FS, z_t0_s=0.0)
 
 
 def test_residual_risk_is_recorded_per_consumer() -> None:

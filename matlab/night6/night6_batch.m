@@ -28,7 +28,11 @@ function summary = night6_batch(listFile, nWorkers, varargin)
 %     "slow_wave_rate": "<rate>",           (REQUIRED, no default: 'full' | 'decimated78',
 %                                            RULING 2026-10-09 (c) 6; night6_slow_wave_rates)
 %     "recordings": [ {"mask_folder": "data/A/<session>/masks/<model-id>",
-%                      "meta_file": "..."} ] }   (meta_file optional)
+%                      "meta_file": "...",          (optional)
+%                      "consumers": ["hrv", ...]} ] }   (optional: run only these consumers
+%                                            of this recording - RULING 2026-10-10 item 5;
+%                                            default every consumer; night6_run_recording
+%                                            Consumers)
 % A relative path is POSIX and resolves against gems_root (cross-platform rule 2).
 %
 % nWorkers: 0 runs in this session, single-threaded (maxNumCompThreads(1), restored
@@ -78,11 +82,20 @@ function summary = night6_batch(listFile, nWorkers, varargin)
     recs = L.recordings;
     if isstruct(recs), recs = num2cell(recs); end
     n = numel(recs);
-    folders = cell(1, n); metas = cell(1, n);
+    folders = cell(1, n); metas = cell(1, n); subsets = cell(1, n);
+    known = {'spikes', 'slow_wave', 'mmc', 'hrv', 'breathing', 'velocity'};
     for i = 1:n
         folders{i} = resolve(L.gems_root, recs{i}.mask_folder);
         metas{i} = '';
         if isfield(recs{i}, 'meta_file'), metas{i} = resolve(L.gems_root, recs{i}.meta_file); end
+        subsets{i} = {};
+        if isfield(recs{i}, 'consumers')   % refused by name here, before anything is loaded
+            subsets{i} = night6_consumer_subset(recs{i}.consumers, known);
+            if isempty(subsets{i})
+                error('night6:consumers', '%s: an empty consumers list runs nothing', ...
+                      recs{i}.mask_folder);
+            end
+        end
     end
     starts = '';
     if isfield(L, 'recovery_starts'), starts = resolve(L.gems_root, L.recovery_starts); end
@@ -116,7 +129,7 @@ function summary = night6_batch(listFile, nWorkers, varargin)
         threads = maxNumCompThreads(1);
         restore = onCleanup(@() maxNumCompThreads(threads)); %#ok<NASGU>
         for i = 1:n
-            [status{i}, wall(i)] = one(folders{i}, metas{i}, args);
+            [status{i}, wall(i)] = one(folders{i}, metas{i}, [args, {'Consumers', subsets{i}}]);
         end
     else
         c = parcluster('Processes');
@@ -126,14 +139,15 @@ function summary = night6_batch(listFile, nWorkers, varargin)
         if isempty(pool), pool = parpool(c, nWorkers); end %#ok<NASGU>
         pctRunOnAll(sprintf('addpath(''%s''); addpath(''%s'');', pnew, here));
         parfor i = 1:n
-            [status{i}, wall(i)] = one(folders{i}, metas{i}, args);
+            [status{i}, wall(i)] = one(folders{i}, metas{i}, [args, {'Consumers', subsets{i}}]);
         end
     end
     summary = struct('list_file', listFile, 'n', n, 'workers', nWorkers, 'commit', commit, ...
                      'wall_s', toc(t0), 'label', label, 'recovery_trim_mode', mode, ...
                      'slow_wave_rate', SW.name, 'pilot_root', pilotRoot, 'beats_root', broot);
-    summary.recordings = cellfun(@(f, s, w) struct('mask_folder', f, 'status', s, 'wall_s', w), ...
-                                 folders, status, num2cell(wall), 'UniformOutput', false);
+    summary.recordings = cellfun(@(f, s, w, c) struct('mask_folder', f, 'status', s, ...
+                                 'wall_s', w, 'consumers', {c}), folders, status, ...
+                                 num2cell(wall), subsets, 'UniformOutput', false);
     summary.n_ok = nnz(strcmp(status, 'ok'));
     stamp = char(datetime('now', 'Format', 'yyyyMMdd''T''HHmmss'));
     if ~isfolder(L.out_root), mkdir(L.out_root); end

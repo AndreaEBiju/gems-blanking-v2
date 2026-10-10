@@ -875,6 +875,11 @@ class CrossBand:
     consumer that reaches :func:`detected_extent` needs one; a consumer without one is
     refused, never defaulted. ``own_signals`` maps each ``own_signals_only`` consumer to the
     detection signals it may take its extent from (:func:`own_detection_signals`).
+
+    ``floor_by_band`` (RULING 2026-10-10 item 2), when given, replaces ``floor_z`` per
+    detecting pair: a pair's run counts while its z is above the declared clean-null
+    percentile of ITS OWN band ("the band is clearly abnormal"), as the decision table
+    computed it. A detecting pair whose band it does not name is refused.
     """
 
     pairs: Mapping[str, Sequence[tuple[str, str]]]
@@ -882,6 +887,7 @@ class CrossBand:
     floor_z: float
     scope: Mapping[str, str]
     own_signals: Mapping[str, frozenset[str]]
+    floor_by_band: Mapping[str, float] | None = None
 
 
 _CUFF_SIGNAL_SUFFIXES: Final = tuple(f"_{s}" for s in NERVE_SIGNALS)
@@ -1050,6 +1056,16 @@ def _scoped_pairs(cross: CrossBand, event_id: str, consumer: str
     return pairs
 
 
+def _pair_floor(cross: CrossBand, pair: tuple[str, str], event_id: str) -> float:
+    """Return a detecting pair's floor: its band's ``floor_by_band`` value, else ``floor_z``."""
+    if cross.floor_by_band is None:
+        return float(cross.floor_z)
+    if pair[1] not in cross.floor_by_band:
+        msg = f"event {event_id}: no cross-band floor for band {pair[1]} (pair {pair})"
+        raise KeyError(msg)
+    return float(cross.floor_by_band[pair[1]])
+
+
 def detected_extent(event: Event, cross: CrossBand, event_id: str, consumer: str, *,
                     signal: str, fs: float, z_t0_s: float,
                     grid_s: float = GRID_S) -> Extent | None:
@@ -1095,7 +1111,7 @@ def detected_extent(event: Event, cross: CrossBand, event_id: str, consumer: str
             msg = f"detection z for {pair} has {zz.size} frames, others {n}"
             raise ValueError(msg)
         n = zz.size
-        over = np.isfinite(zz) & (zz > cross.floor_z)
+        over = np.isfinite(zz) & (zz > _pair_floor(cross, pair, event_id))
         for a, b in _runs(over):
             if a < i1 and b > i0:
                 lo_f = a if lo_f is None else min(lo_f, a)

@@ -91,6 +91,9 @@ from tests.test_night6_wrapper import (
     _write_epoch,
 )
 
+V6 = {"animal": "A", "electrical_basis": "from_electrical_end"}
+"""The v6 fields of a file_starts call (RULING 2026-10-10 item 7) for the older cases."""
+
 SESSION = "syn_s_t01_ms1_sr_100000_20260101T150000Z"
 START = 2.0
 I0 = seconds_to_sample(START, FS)
@@ -161,7 +164,8 @@ def _file(rows: list[dict[str, Any]], ke: int = I0, session: str = SESSION,
     """
     km = ke if km is None else km
     k = max(ke, km)
-    return {"session": session, "fs": fs, "times_source": "synthetic",
+    return {"session": session, "animal": "A", "electrical_basis": "from_electrical_end",
+            "fs": fs, "times_source": "synthetic",
             "electrical_end_s": min(ke, km) / fs - 0.25, "mechanical_end_s": km / fs,
             "mechanical_end_sample0": km, "electrical_settle_s": ke / fs,
             "electrical_settle_sample0": ke, "electrical_s": 0.25,
@@ -222,11 +226,12 @@ def _cases(tmp: Path) -> dict[str, Any]:
     # (i) 3 (c): the electrical settling is before the epoch, the gate closes 2 rows in -
     # the input is masked through the MECHANICAL end, not the electrical settling
     mech = _file([_row(c, own[c]) for c in CONSUMERS], ke=I0 - 5, cut_at=cut_own, km=I0 + 2)
-    py = rs.file_starts(session=SESSION, fs=FS, electrical_end_s=1.0, mechanical_end_s=1.0,
+    py = rs.file_starts(**V6, session=SESSION, fs=FS, electrical_end_s=1.0, mechanical_end_s=1.0,
                         electrical_settle_s=1.5,
                         times_source="synthetic", electrical_source="synthetic",
                         table=TEST_TABLE, fixed_start_s=START)
-    held = rs.file_starts(session=SESSION, fs=FS, electrical_end_s=None, mechanical_end_s=None,
+    held = rs.file_starts(**V6,
+                          session=SESSION, fs=FS, electrical_end_s=None, mechanical_end_s=None,
                           electrical_settle_s=None,
                           times_source="a", electrical_source="b")
     other = _file([_row("spikes", I0)], session="someone_else")
@@ -476,7 +481,7 @@ def _need_matlab() -> None:
 
 
 READER_WORDS = {
-    "v4": "'gems-blanking-v2 recovery starts v5'",
+    "v4": "'gems-blanking-v2 recovery starts v6'",
     "no_mechanical": "mechanical_end_sample0 must be one integer >= 0",
     "no_input_mask": "input_mask_sample0 must be one integer >= 0",
     "no_electrical": "electrical_settle_sample0 must be one integer >= 0",

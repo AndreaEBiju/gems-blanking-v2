@@ -65,6 +65,16 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
 % rather than kept and flagged, so it is not the mask (g) 1 rules. plan.noHeartRef is the
 % record (rule, minute count); [] when the check does not apply.
 %
+% WHICH CONSUMERS RUN (night6_consumer_gate, the one site): a consumer the file names in
+% elsewhere_json is finished in another mask file (RULING 2026-10-10 item 5: slow wave, HRV,
+% breathing and mmc per recording, spikes per animal) - status 'skipped_elsewhere', and a file
+% that carries masks for it is refused (night6:elsewhereReads); a consumer outside the batch's
+% subset ('Consumers', name-value; default {} = all) is 'skipped_not_in_batch'; a consumer QC
+% holds (heldconsumers_json, RULING 2026-10-10 item 1: per consumer, never per recording) and
+% nobody released is 'skipped_held' with its reasons. A file without heldconsumers_json /
+% elsewhere_json was written before 2026-10-10: a held recording was then never published,
+% and every file finished every consumer, so both read as empty (plan.gateNotes says so).
+%
 % RECOVERY START (RULING 2026-10-08 (k) 2), name-value 'Recovery', struct(starts, session,
 % mode) - mode is the declared trim mode (night6_trim_modes), refused by name if unknown
 % or withdrawn:
@@ -78,9 +88,11 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
     ip = inputParser;
     ip.addParameter('Recovery', [], @(x) isempty(x) || (isstruct(x) && isscalar(x) ...
                     && all(isfield(x, {'starts', 'session', 'mode'}))));
+    ip.addParameter('Consumers', {}, @(x) iscell(x) || isstring(x) || ischar(x));
     ip.parse(varargin{:});
     recovery = ip.Results.Recovery;
     known = {'spikes', 'slow_wave', 'mmc', 'hrv', 'breathing', 'velocity'};
+    subset = night6_consumer_subset(ip.Results.Consumers, known);
     if ~ismember(units, {'V', 'mV', 'uV'})
         error('night6:units', 'units must be declared as V, mV or uV; got ''%s''', char(units));
     end
@@ -120,6 +132,22 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
 
     % ---- masks: one entry per (consumer, signal), never merged ------------------
     plan.notComputed = decode_object(M, 'notcomputed_json');
+    plan.gateNotes = {};
+    plan.held = struct();
+    if isfield(M, 'heldconsumers_json')
+        plan.held = decode_object(M, 'heldconsumers_json');
+    else
+        plan.gateNotes{end + 1} = ['no heldconsumers_json: written before RULING 2026-10-10 ' ...
+                                   'item 1 (a held recording was not published then)'];
+    end
+    plan.elsewhere = struct();
+    if isfield(M, 'elsewhere_json')
+        plan.elsewhere = decode_object(M, 'elsewhere_json');
+    else
+        plan.gateNotes{end + 1} = ['no elsewhere_json: written before RULING 2026-10-10 item 5 ' ...
+                                   '(every file finished every consumer)'];
+    end
+    plan.consumerSubset = subset;
     masks = struct('consumer', {}, 'signal', {}, 'token', {}, 'spans', {});
     names = fieldnames(M);
     for i = 1:numel(names)
@@ -171,9 +199,17 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
             error('night6:notComputedReads', ...
                   '%s is marked not computed but the file carries masks for it', cn);
         end
+        [gs, gr] = night6_consumer_gate(cn, plan.held, plan.elsewhere, subset);
+        if strcmp(gs, 'skipped_elsewhere') && any(sel)
+            error('night6:elsewhereReads', ['%s is finished in another mask file (%s) but this ' ...
+                  'file carries masks for it'], cn, gr);
+        end
         if nc
             st.status = 'skipped_not_computed';
             st.reason = char(plan.notComputed.(cn));
+        elseif ~isempty(gs)
+            st.status = gs;
+            st.reason = gr;
         elseif ~any(sel)
             st.status = 'reads_nothing';
             st.reason = 'no mask in this file: the consumer reads no signal in this recording';

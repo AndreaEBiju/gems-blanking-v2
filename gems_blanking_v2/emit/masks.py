@@ -48,7 +48,7 @@ OUTSIDE THE GENERATION HASH.
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
@@ -180,15 +180,26 @@ def spans_from_routing(extents: Iterable[tuple[str, Extent]],
 
 
 def distrusted_spike_spans(entry: Mapping[str, Any], *, region_start_s: float,
-                           region_stop_s: float) -> list[MaskSpan]:
+                           region_stop_s: float, released: Collection[str] = ()
+                           ) -> list[MaskSpan]:
     """Return the routing entry's spike distrust as spike-consumer spans (recording s).
 
     Ruling 2026-10-03: a cuff's ``distrusted_spans`` (region-relative, half-open s) join
     the spike consumer's mask for that cuff. A cuff whose route is ``distrusted`` outright
-    is invalid for the spike consumer over the whole region. No other consumer is touched.
+    is invalid for the spike consumer over the whole region - unless it is in ``released``
+    (RULING 2026-10-10 item 6, ``emit.cuff_trust``: kept and flagged, never blanked). A
+    released cuff the entry does not distrust outright is refused. No other consumer is
+    touched.
     """
+    spike = entry.get("spike", {})
+    bad = sorted(c for c in released if (spike.get(c) or {}).get("route") != "distrusted")
+    if bad:
+        msg = f"cuffs {bad} are released but the routing entry does not distrust them outright"
+        raise ValueError(msg)
     out: list[MaskSpan] = []
-    for cuff, s in sorted(entry.get("spike", {}).items()):
+    for cuff, s in sorted(spike.items()):
+        if s.get("route") == "distrusted" and cuff in released:
+            continue
         if s.get("route") == "distrusted":
             out.append(MaskSpan("spikes", f"{cuff}_T", region_start_s, region_stop_s,
                                 "cuff_distrusted"))

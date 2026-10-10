@@ -18,7 +18,7 @@ import math
 
 import numpy as np
 import pytest
-from gems_blanking_v2.constants import ENG_BAND
+from gems_blanking_v2.constants import BANDS, ENG_BAND, GRID_S
 from gems_blanking_v2.emit import line_distrust as ld
 from gems_blanking_v2.emit.masks import ConsumerMask
 from gems_blanking_v2.extent import routing as rt
@@ -111,10 +111,13 @@ def test_the_cache_answers_every_threshold_set_and_scope_as_the_full_arrays(
     scopes = data.draw(hs.one_of(hs.none(), hs.fixed_dictionaries(
         {c: hs.sampled_from(tl.CROSS_BAND_SCOPES) for c in Z_CONSUMERS})), label="scopes")
     floor = data.draw(hs.floats(st1.CACHE_FLOOR_Z, 5.0), label="floor")
-    want = st1.extents_routing_masks(full, confirmed, tolerances=_table(thr), scopes=scopes,
-                                     floor_z=floor)
-    got = st1.extents_routing_masks(_sparse(seed, cached), confirmed, tolerances=_table(thr),
-                                    scopes=scopes, floor_z=floor)
+    by_band = data.draw(hs.one_of(hs.none(), hs.fixed_dictionaries(
+        {b: hs.floats(st1.CACHE_FLOOR_Z, 8.0) for b in BANDS})), label="floor_by_band")
+    core_pad = data.draw(hs.booleans(), label="core_pad")
+    kw = {"tolerances": _table(thr), "scopes": scopes, "floor_z": floor,
+          "floor_by_band": by_band, "core_pad": core_pad}
+    want = st1.extents_routing_masks(full, confirmed, **kw)  # type: ignore[arg-type]
+    got = st1.extents_routing_masks(_sparse(seed, cached), confirmed, **kw)  # type: ignore[arg-type]
     _same(want, got)
 
 
@@ -132,6 +135,36 @@ def test_the_generator_makes_every_route_and_extent_basis() -> None:
     assert spike_routes == {"correct", "reject"}
     assert any(r is None for *_x, r in ext)
     assert all(m.invalid.any() for m in masks.values())
+
+
+def test_the_core_and_padding_are_always_blanked_for_every_z_consumer() -> None:
+    """RULING 2026-10-10 item 2: with no own-band run and cross-band off, core + pad blank."""
+    full = _full(1)
+    ids = sorted(full.events)[:6]
+    thr = dict.fromkeys(Z_CONSUMERS, 99.0)
+    off = dict.fromkeys(Z_CONSUMERS, tl.CROSS_BAND_SCOPE_OFF)
+    _c, _e, _d, without = st1.extents_routing_masks(full, ids, tolerances=_table(thr),
+                                                    scopes=off)
+    _c, _e, dec, masks = st1.extents_routing_masks(full, ids, tolerances=_table(thr),
+                                                   scopes=off, core_pad=True)
+    assert all(d.consumer == "hrv" for d in dec)  # nothing is routed but hrv
+    for (c, s, _b), m in masks.items():
+        if c == "hrv":
+            assert np.array_equal(m.invalid, without[(c, s, _b)].invalid)
+            continue
+        pad = tl.consumer_settling(c, full.fs).total_s  # type: ignore[union-attr]
+        want = np.zeros(full.n_frames, dtype=bool)
+        end = full.z_t0_s + full.n_frames * GRID_S
+        spans = [(max(full.z_t0_s, full.events[e].candidate.start_s - pad),
+                  min(end, full.events[e].candidate.stop_s + pad)) for e in ids]
+        from gems_blanking_v2.emit.masks import mask_frames  # noqa: PLC0415
+        want |= mask_frames(spans, full.n_frames, t0_s=full.z_t0_s)
+        want |= without[(c, s, _b)].invalid  # R's routing-entry distrust is none here
+        assert np.array_equal(m.invalid, want), (c, s)
+        assert m.invalid.sum() > without[(c, s, _b)].invalid.sum()
+    spans = st1.core_pad_spans(full, ids)
+    assert {sp.reason for sp in spans} == {st1.CORE_PAD_REASON}
+    assert {sp.consumer for sp in spans} == set(Z_CONSUMERS)
 
 
 def test_a_cache_built_with_core_frames_only_is_caught() -> None:

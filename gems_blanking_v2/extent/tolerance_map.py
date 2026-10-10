@@ -38,6 +38,7 @@ OUTSIDE THE GENERATION HASH.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import math
@@ -57,9 +58,14 @@ from gems_blanking_v2.extent.tolerance import (
     TOLERANCES_NOT_PRODUCTION,
     ToleranceTable,
     expected_consumers,
+    extent_consumers,
 )
 
 __all__ = [
+    "CORE_PAD_RULE",
+    "EXTENT_PERCENTILES",
+    "NULL_PERCENTILE_SOURCE",
+    "NULL_PERCENTILE_Z",
     "OPTION1_RULE",
     "RISE_MIN_Z",
     "SCOPE_OWN_HOST_COLUMNS",
@@ -69,6 +75,7 @@ __all__ = [
     "Option1Tolerances",
     "assess_window",
     "check_cross_band_scope",
+    "check_extent_percentile",
     "kind_visible",
     "option1_threshold",
     "option1_tolerances",
@@ -93,7 +100,59 @@ OPTION1_RULE: Final = (
     "detector blanks the consumer over the event's detected extent, never routed; harmful "
     "kinds the detector cannot see are residual risk, recorded, not blanked")
 
+EXTENT_PERCENTILES: Final[tuple[str, ...]] = ("p90", "p95", "p99")
+"""RULING 2026-10-10 item 2: the candidate extent thresholds for the consumers on the floor -
+the clean null's 90th, 95th and 99th percentiles. Andrea picks one from the decision table; it
+is a REQUIRED declaration (:func:`check_extent_percentile`), never defaulted."""
+
+NULL_PERCENTILE_Z: Final[Mapping[str, Mapping[str, float]]] = {
+    "p90": {"0-2": 1.44, "0.5-3": 1.44, "2-50": 1.44, "10-150": 1.44, "100-300": 1.44,
+            "300-3000": 1.44},
+    "p95": {"0-2": 2.43, "0.5-3": 2.20, "2-50": 2.52, "10-150": 1.61, "100-300": 1.81,
+            "300-3000": 2.46},
+    "p99": {"0-2": 7.42, "0.5-3": 6.67, "2-50": 5.88, "10-150": 3.46, "100-300": 3.11,
+            "300-3000": 4.35},
+}
+"""The clean null's percentiles per band, z on the log envelope (invariant 5), exactly as the
+extent decision table uses them (RULING 2026-10-10 item 4): p90 is the ruled floor 1.44 in every
+band (:data:`Z_FLOOR`); p95 and p99 are each band's percentile over every detection signal of
+the clean null that gave 1.44, rounded to 0.01 (:data:`NULL_PERCENTILE_SOURCE`)."""
+
+NULL_PERCENTILE_SOURCE: Final[Mapping[str, Any]] = {
+    "file": "measurements/2026-10-10/extent_null/null.json",
+    "sha256": "2e25d4dfd451f7f4824bbfb3612acb1f27c1076a12320fa3da236b3d6e1fec33",
+    "script": "measurements/2026-10-10/extent_null/null_z.py",
+    "script_sha256": "d5b3c7e0c6b29018e48af947598648fc4eb9f958b795f2e3e9f120b7464b1f5f",
+    "recording": "gems_j_t01_ms3_bl_230315_20260916T030321Z",
+    "what": ("the J baseline of 601 s that IMPLEMENTATION.md 'MEASURED 2026-09-19' measured 1.44 "
+             "on: robust z of the log envelope against the file's own median reference, every "
+             "frame, 6 bands, today's chain.detect_region; per band over every detection signal "
+             "(9 raw contacts, L_T, R_T, stomach_ref). Pooled over every signal: p90 1.441 "
+             "(reproduces 1.44), p95 2.149, p99 5.308 (the recorded p99 4.21 is NOT reproduced: "
+             "the 09-19 code differed in details not recorded)"),
+}
+"""Where :data:`NULL_PERCENTILE_Z` comes from; ``tests/test_tolerance_map.py`` holds the two to
+each other through the archived file."""
+
+CORE_PAD_RULE: Final = (
+    "RULING 2026-10-10 item 2: the motion core and the consumer's padding (its measured "
+    "settling) are ALWAYS blanked for every z consumer; beyond the core the extent grows only "
+    "while the consumer's own band is above its threshold (the declared clean-null percentile "
+    "for the consumers on the floor, the visible-kind threshold otherwise - breathing 7.69), "
+    "and a cross-band extent counts a detecting pair while it is above the declared percentile "
+    "of its own band")
+
 F64 = npt.NDArray[np.float64]
+
+
+def check_extent_percentile(value: object) -> str:
+    """Return the declared extent percentile, or raise ValueError (required, no default)."""
+    if value not in EXTENT_PERCENTILES:
+        msg = (f"the extent percentile is a REQUIRED declaration, one of "
+               f"{list(EXTENT_PERCENTILES)} (RULING 2026-10-10 item 2: Andrea picks it from the "
+               f"decision table); got {value!r} - nothing is defaulted")
+        raise ValueError(msg)
+    return str(value)
 
 
 def assess_window(z_inj: npt.ArrayLike, z_base: npt.ArrayLike,
@@ -314,9 +373,29 @@ class Option1Tolerances:
     core whose own band stays under the threshold blanks over its detected extent
     (``tolerance.detected_extent``)."""
 
+    extent_percentile: str = "p90"
+    """The DECLARED clean-null percentile (:func:`check_extent_percentile`; the builder
+    requires it, this default only keeps the dataclass constructible field by field)."""
+
+    @property
+    def cross_band_floor(self) -> dict[str, float]:
+        """The cross-band floor per band: the declared percentile's value in each band."""
+        return dict(NULL_PERCENTILE_Z[self.extent_percentile])
+
+    @property
+    def floor_consumers(self) -> tuple[str, ...]:
+        """The consumers on the floor: no harmful kind visible in their band at or over 1.44."""
+        return tuple(c for c, t in sorted(self.thresholds.items())
+                     if t.setter.startswith("floor"))
+
     def record(self) -> dict[str, Any]:
         """Everything a mask's provenance carries about its thresholds (JSON-ready)."""
         return {"version": TOLERANCE_VERSION, "rule": OPTION1_RULE,
+                "core_pad_rule": CORE_PAD_RULE, "core_pad_always_blanked": True,
+                "extent_percentile": self.extent_percentile,
+                "floor_consumers": list(self.floor_consumers),
+                "cross_band_floor": self.cross_band_floor,
+                "null_percentile_source": dict(NULL_PERCENTILE_SOURCE),
                 "cross_band_scope": dict(sorted(self.cross_band_scope.items())),
                 "cross_band_scope_source": "declared per consumer in the night config "
                                            "(review 7 finding 2; no default)",
@@ -336,7 +415,8 @@ class Option1Tolerances:
 def option1_tolerances(tolerances: Mapping[str, Any], mapping: Mapping[str, Any],
                        scan: Mapping[str, Any], *, tolerances_sha256: str,
                        criterion_sha256: str, mapping_sha256: str, scan_sha256: str,
-                       generation: str, cross_band_scope: object) -> Option1Tolerances:
+                       generation: str, cross_band_scope: object,
+                       extent_percentile: object) -> Option1Tolerances:
     """Build the option-(1) table from the declared, hashed v2 inputs, or raise ValueError.
 
     Refused by name: tolerances without the v2 harm criterion, or whose ``criterion_v2``
@@ -345,8 +425,14 @@ def option1_tolerances(tolerances: Mapping[str, Any], mapping: Mapping[str, Any]
     :data:`~gems_blanking_v2.extent.tolerance.TOLERANCES_NOT_PRODUCTION`, or missing a
     consumer; a scan of another generation, or one that does not record these tolerances as
     its input (``input.sha256``, review 7 finding 4); a cross-band scope that is not declared
-    for exactly the z consumers (:func:`check_cross_band_scope`). ``mmc_provenance_flag`` is
-    carried as a flag.
+    for exactly the z consumers (:func:`check_cross_band_scope`); an extent percentile that is not
+    declared (:func:`check_extent_percentile`). ``mmc_provenance_flag`` is carried as a flag.
+
+    RULING 2026-10-10 item 2: a consumer on the floor (no harmful kind visible in its band)
+    takes the declared clean-null percentile of its own band (:data:`NULL_PERCENTILE_Z`) as
+    its threshold; a consumer with a visible kind keeps its option-(1) threshold (breathing
+    7.69). Every consumer's core and padding are always blanked (:data:`CORE_PAD_RULE`;
+    ``extent.stage1.extents_routing_masks``).
     """
     crit = tolerances.get("criterion_v2")
     if not isinstance(crit, Mapping) or crit.get("sha256") != criterion_sha256:
@@ -378,6 +464,7 @@ def option1_tolerances(tolerances: Mapping[str, Any], mapping: Mapping[str, Any]
                "finding 4): its residual risk would describe other tolerances")
         raise ValueError(msg)
     scopes = check_cross_band_scope(cross_band_scope)
+    pct = check_extent_percentile(extent_percentile)
     thresholds: dict[str, ConsumerThreshold] = {}
     residual: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for c in z_consumers():
@@ -385,8 +472,13 @@ def option1_tolerances(tolerances: Mapping[str, Any], mapping: Mapping[str, Any]
         if not isinstance(entry, Mapping):
             msg = f"the tolerance mapping has no entry for {c}: its threshold is unknown"
             raise ValueError(msg)
-        thresholds[c] = option1_threshold(c, entry.get("kinds") or {},
-                                          entry.get("kinds_not_raised") or ())
+        t = option1_threshold(c, entry.get("kinds") or {}, entry.get("kinds_not_raised") or ())
+        if t.setter.startswith("floor"):
+            band = extent_consumers()[c].band
+            t = dataclasses.replace(t, z=float(NULL_PERCENTILE_Z[pct][band]),
+                                    setter=f"{t.setter}; extent at the clean null's {pct} of "
+                                           f"band {band} (RULING 2026-10-10 item 2)")
+        thresholds[c] = t
         residual[c] = residual_risk(scan, c)
         if scopes[c] != CROSS_BAND_SCOPE_ALL:
             key = ("cross_band_off" if scopes[c] == CROSS_BAND_SCOPE_OFF
@@ -401,4 +493,4 @@ def option1_tolerances(tolerances: Mapping[str, Any], mapping: Mapping[str, Any]
     inputs = {"tolerances_sha256": tolerances_sha256, "criterion_sha256": criterion_sha256,
               "mapping_sha256": mapping_sha256, "visibility_scan_sha256": scan_sha256,
               "generation": generation, "mapping_refused": dict(mapping.get("refused") or {})}
-    return Option1Tolerances(table, thresholds, residual, flags, inputs, scopes)
+    return Option1Tolerances(table, thresholds, residual, flags, inputs, scopes, pct)

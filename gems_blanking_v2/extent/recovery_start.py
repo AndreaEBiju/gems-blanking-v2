@@ -126,6 +126,26 @@ class the map uses) the cut point the same way - plus the table it was computed 
 the output time map, the cited files' hashes and the held files. Night 6 records the
 file's path and SHA-256 in every stim_rec epoch's record.
 
+Version 6 (RULING 2026-10-10 item 7)
+-----------------------------------
+* every file names its ELECTRICAL BASIS (:data:`ELECTRICAL_BASES`): measured from the electrical
+  end (as before); ``mechanical_only_zero`` - a mechanical-only file (no electrical stimulus)
+  has electrical settling 0, so it starts at the mechanical end + each analysis's own
+  settling; ``from_mechanical_end`` - where the motor runs past the electrical end (by more
+  than :data:`MOTOR_PAST_ELECTRICAL_S`), the electrical-settling search started at the
+  mechanical end, so motor activity is never measured as electrical;
+* a file whose settling was measured against a LATER reference window (the late files) keeps
+  the latest clean window and is flagged ``reference-sensitive`` (:data:`REFERENCE_SENSITIVE`)
+  with the spread of the settling over every clean window; each analysis carries
+  ``reference_sensitive_until_s`` / ``_sample0`` - its start under the latest settling any
+  clean window gives - and outputs before it are reference-sensitive;
+* every file names its ``animal``, and the DOSE-RESPONSE SAFEGUARD (:data:`COMMON_START_RULE`)
+  gives every analysis and every cut a ``common_start_s`` / ``common_start_sample0``: the
+  latest start among ALL the animal's stim_recovery files, measured from each file's
+  mechanical end. Night 6 reports both and writes a common-start version of the outputs;
+  :func:`dose_response_disagreement` is the definition of "the two versions disagree",
+  fixed before any result.
+
 Electrical settling only: no term here, and nothing that feeds one, uses heart rate,
 firing rate or slow-wave rate (RULING (j) 6).
 
@@ -169,18 +189,25 @@ __all__ = [
     "BASIS_MEASURED",
     "BEAT_SPACING_S",
     "BREATH_TROUGH_SPACING_S",
+    "COMMON_START_RULE",
     "CONVENTIONS",
+    "DISAGREEMENT_RULE",
+    "DISAGREE_FRACTION",
+    "ELECTRICAL_BASES",
     "FIXED_START_S",
     "FIXED_START_SOURCE",
     "HELD_NO_SETTLING",
     "HELD_UNDETECTED",
+    "MOTOR_PAST_ELECTRICAL_S",
     "OUTPUT_FILES",
     "OUTPUT_VARS",
     "RECOMPUTE_KINDS",
+    "REFERENCE_SENSITIVE",
     "RULING",
     "RULING_SETTLING",
     "RULING_TIMES",
     "RULING_TRIM",
+    "RULING_V6",
     "SCHEMA",
     "SOURCE_FILES",
     "SOURCE_LABEL",
@@ -203,6 +230,7 @@ __all__ = [
     "analysis_settling",
     "beat_decimation_factor",
     "cut_id",
+    "dose_response_disagreement",
     "file_starts",
     "input_mask",
     "output_reach_s",
@@ -219,7 +247,41 @@ __all__ = [
 
 RULING: Final = "RULING 2026-10-08 (k) 2"
 RULING_TRIM: Final = "RULING 2026-10-09 item 6"
-SCHEMA: Final = "gems-blanking-v2 recovery starts v5"
+SCHEMA: Final = "gems-blanking-v2 recovery starts v6"
+RULING_V6: Final = "RULING 2026-10-10 item 7"
+ELECTRICAL_BASES: Final[Mapping[str, str]] = {
+    "from_electrical_end": "the electrical-only rule, measured from the electrical end "
+                           "(RULING 2026-10-09 (i) 3 (a)-(c))",
+    "mechanical_only_zero": "a mechanical-only file (no electrical stimulus): electrical "
+                            "settling = 0, the start is the mechanical end + each analysis's "
+                            "own settling (RULING 2026-10-10 item 7)",
+    "from_mechanical_end": "the motor runs past the electrical end: the electrical-settling "
+                           "search starts at the mechanical end, so motor activity is never "
+                           "measured as electrical (RULING 2026-10-10 item 7)",
+}
+"""How each file's electrical settling was obtained (v6: required per measured file)."""
+MOTOR_PAST_ELECTRICAL_S: Final = 1.0
+"""Mechanical end - electrical end above which the motor "runs past the electrical end": the
+measured gap is bimodal (0.02-0.07 s on 119 combined files - the gate's own lag, under the
+rule's 1 s hold - and 2.03-2.04 s on 63), and only the second puts motor activity inside the
+window the electrical rule reads."""
+REFERENCE_SENSITIVE: Final = "reference-sensitive"
+COMMON_START_RULE: Final = (
+    "RULING 2026-10-10 item 7, dose-response safeguard: for comparisons between stim levels, "
+    "every stim_recovery file of an animal starts each analysis - and cuts each output - at "
+    "the LATEST start among all the animal's files, measured from each file's mechanical end "
+    "(recovery never starts before it): common start = mechanical end + max over the "
+    "animal's files of (start - mechanical end). The common-start version re-uses each "
+    "file's outputs and only cuts them later; the own-start version is kept beside it")
+DISAGREE_FRACTION: Final = 0.10
+DISAGREEMENT_RULE: Final = (
+    "RULING 2026-10-10 item 7, fixed 2026-10-10 before any Night 6 result: for one animal x "
+    "output, summarised per stim level (one value per level, the same summary in both "
+    "versions), the own-start and common-start versions DISAGREE when (a) the stim levels' "
+    "rank order differs, or (b) some level's own-start value differs from its common-start "
+    "value by more than 10% of the common-start values' range across levels (with one level, "
+    "or a zero range, 10% of that level's common-start magnitude). A level missing or "
+    "non-finite in either version makes the comparison 'not_comparable', never 'agree'")
 """v5 (RULING 2026-10-09 (i) 3 (c)): stim-off is two times. Every measured file carries
 ``electrical_end_s``, ``mechanical_end_s`` and ``mechanical_end_sample0`` beside the
 electrical settling, and ``input_mask_s`` / ``input_mask_sample0`` = their maximum, with
@@ -1585,6 +1647,51 @@ def input_mask(*, fs: float, electrical_settle_s: float,
             "electrical_settle_sample0": ke, "mechanical_end_sample0": km}
 
 
+def _check_basis(session: str, basis: str, *, electrical_end_s: float,
+                 mechanical_end_s: float, electrical_settle_s: float) -> None:
+    """Refuse a v6 electrical basis that the file's own times contradict."""
+    if basis not in ELECTRICAL_BASES:
+        msg = (f"{session}: electrical basis {basis!r} is none of {sorted(ELECTRICAL_BASES)} "
+               f"({RULING_V6})")
+        raise ValueError(msg)
+    if basis == "mechanical_only_zero" and electrical_settle_s != electrical_end_s:
+        msg = (f"{session}: a mechanical-only file has electrical settling 0, but the settling "
+               f"is at {electrical_settle_s} s and the electrical end at {electrical_end_s} s")
+        raise ValueError(msg)
+    if basis == "from_mechanical_end" and not (
+            electrical_settle_s >= mechanical_end_s
+            and mechanical_end_s - electrical_end_s > MOTOR_PAST_ELECTRICAL_S):
+        msg = (f"{session}: a search from the mechanical end needs the motor to run past the "
+               f"electrical end by > {MOTOR_PAST_ELECTRICAL_S:g} s and the settling at or after "
+               f"the mechanical end; got E {electrical_end_s}, M {mechanical_end_s}, settling "
+               f"{electrical_settle_s}")
+        raise ValueError(msg)
+
+
+def _reference_sensitive(session: str, ref: Mapping[str, Any]) -> dict[str, Any]:
+    """Check the late-reference spread and return the file's reference-sensitive record."""
+    need = ("window_s", "anchor_s", "after_anchor_s", "n_clean", "n_candidates")
+    gap = [k for k in need if k not in ref]
+    after = ref.get("after_anchor_s") or {}
+    if gap or not all(k in after for k in ("chosen", "clean_min", "clean_max")):
+        msg = (f"{session}: a reference-sensitive file needs {list(need)} and after_anchor_s "
+               f"{{chosen, clean_min, clean_max}}; missing {gap}")
+        raise ValueError(msg)
+    lo, ch, hi = (float(after[k]) for k in ("clean_min", "chosen", "clean_max"))
+    if not lo <= ch or not ch <= hi:
+        msg = f"{session}: the chosen settling {ch} lies outside the clean spread [{lo}, {hi}]"
+        raise ValueError(msg)
+    return {"flag": REFERENCE_SENSITIVE, "window_s": [float(x) for x in ref["window_s"]],
+            "anchor_s": float(ref["anchor_s"]),
+            "after_anchor_s": {"chosen": ch, "clean_min": lo, "clean_max": hi},
+            "spread_s": hi - lo, "n_clean": int(ref["n_clean"]),
+            "n_candidates": int(ref["n_candidates"]),
+            "rule": (f"{RULING_V6}: settled against the latest clean 60 s reference window; the "
+                     "early-recovery outputs are reference-sensitive - every output before an "
+                     "analysis's reference_sensitive_until (its start under the latest "
+                     "settling any clean window gives) is flagged")}
+
+
 def _held_record(*, session: str, fs: float | None, electrical_end_s: float | None,
                  mechanical_end_s: float | None, electrical_settle_s: float | None,
                  times_source: str) -> dict[str, Any] | None:
@@ -1613,7 +1720,9 @@ def _held_record(*, session: str, fs: float | None, electrical_end_s: float | No
 
 def file_starts(*, session: str, fs: float | None, electrical_end_s: float | None,
                 mechanical_end_s: float | None, electrical_settle_s: float | None,
-                times_source: str, electrical_source: str,
+                times_source: str, electrical_source: str, animal: str,
+                electrical_basis: str,
+                reference_sensitive: Mapping[str, Any] | None = None,
                 analyses: Sequence[str] | None = None,
                 table: Mapping[str, Analysis] | None = None,
                 fixed_start_s: float = FIXED_START_S) -> dict[str, Any]:
@@ -1631,13 +1740,22 @@ def file_starts(*, session: str, fs: float | None, electrical_end_s: float | Non
     the missing figure named; the others get their own starts. Missing values are absent
     keys. ``fs`` (the file's own rate) may be ``None`` only for a file held before it was
     read.
+
+    v6 (RULING 2026-10-10 item 7): ``animal`` (the store's, for the common start) and
+    ``electrical_basis`` (:data:`ELECTRICAL_BASES`, checked against the times) are required;
+    ``reference_sensitive`` (a late file: ``window_s``, ``anchor_s``, ``after_anchor_s``
+    {chosen, clean_min, clean_max}, ``n_clean``, ``n_candidates``) flags it and gives every
+    analysis its ``reference_sensitive_until``.
     """
+    if not animal:
+        msg = f"{session}: v6 needs the file's animal (the common start is per animal)"
+        raise ValueError(msg)
     names = list(ANALYSES if analyses is None else analyses)
     held = _held_record(session=session, fs=fs, electrical_end_s=electrical_end_s,
                         mechanical_end_s=mechanical_end_s,
                         electrical_settle_s=electrical_settle_s, times_source=times_source)
     if held is not None:
-        return held
+        return {**held, "animal": animal}
     if fs is None or electrical_end_s is None or mechanical_end_s is None \
             or electrical_settle_s is None:  # for the type checker: _held_record covers these
         msg = f"{session}: a measured file needs its fs"
@@ -1646,9 +1764,16 @@ def file_starts(*, session: str, fs: float | None, electrical_end_s: float | Non
         msg = (f"{session}: electrical settling {electrical_settle_s} s precedes the "
                f"electrical end {electrical_end_s} s")
         raise ValueError(msg)
+    _check_basis(session, electrical_basis, electrical_end_s=float(electrical_end_s),
+                 mechanical_end_s=float(mechanical_end_s),
+                 electrical_settle_s=float(electrical_settle_s))
+    rsens = (_reference_sensitive(session, reference_sensitive)
+             if reference_sensitive is not None else None)
     im = input_mask(fs=float(fs), electrical_settle_s=float(electrical_settle_s),
                     mechanical_end_s=float(mechanical_end_s))
     t_mask = float(im["input_mask_s"])
+    t_until = (max(rsens["anchor_s"] + rsens["after_anchor_s"]["clean_max"],
+                   float(mechanical_end_s)) if rsens is not None else None)
     basis_text = (f"max(electrical end + electrical settling ({electrical_source}), "
                   f"mechanical end) ({times_source}; {RULING_TIMES})")
     fixed0 = seconds_to_sample(fixed_start_s, fs)
@@ -1669,6 +1794,10 @@ def file_starts(*, session: str, fs: float | None, electrical_end_s: float | Non
             "own_settling_s": s.settling_s, "binding_output": s.binding_output,
             "source": (f"{RULING}: {basis_text} + own settling "
                        f"(extent.recovery_start.ANALYSES[{name!r}], {SOURCE_LABEL})")}
+        if t_until is not None:
+            until = max(start, t_until + s.settling_s)
+            row["reference_sensitive_until_s"] = until
+            row["reference_sensitive_until_sample0"] = seconds_to_sample(until, fs)
         if k0 < fixed0:
             row["relation"] = "earlier_than_fixed: runs from the fixed start; early part " \
                               "deferred to the add-on"
@@ -1678,12 +1807,16 @@ def file_starts(*, session: str, fs: float | None, electrical_end_s: float | Non
             row["relation"] = "later_than_fixed: trimmed at Night 6"
         rows.append(row)
     cuts = _file_cuts(float(fs), t_mask, float(fixed_start_s), basis_text, table)
-    return {"session": session, "fs": float(fs), "times_source": times_source,
+    return {"session": session, "animal": animal, "fs": float(fs),
+            "times_source": times_source,
+            "electrical_basis": electrical_basis,
+            "electrical_basis_rule": ELECTRICAL_BASES[electrical_basis],
             "electrical_end_s": float(electrical_end_s),
             "mechanical_end_s": float(mechanical_end_s),
             "electrical_settle_s": float(electrical_settle_s),
             "electrical_s": float(electrical_settle_s) - float(electrical_end_s),
-            **im, "analyses": rows, "cuts": cuts}
+            **im, "analyses": rows, "cuts": cuts,
+            **({"reference_sensitive": rsens} if rsens is not None else {})}
 
 
 def _file_cuts(fs: float, input_mask_s: float, fixed_start_s: float, basis_text: str,
@@ -1833,6 +1966,90 @@ def _check_times(sess: str, f: Mapping[str, Any]) -> None:
         raise ValueError(msg)
 
 
+def _check_v6(sess: str, f: Mapping[str, Any]) -> None:
+    """v6 fields: animal, a known electrical basis its times allow, reference-sensitive rows."""
+    if not f.get("animal") or f.get("electrical_basis") not in ELECTRICAL_BASES:
+        msg = (f"{sess}: v6 needs animal and electrical_basis (one of "
+               f"{sorted(ELECTRICAL_BASES)}) ({RULING_V6})")
+        raise ValueError(msg)
+    _check_basis(sess, str(f["electrical_basis"]), electrical_end_s=float(f["electrical_end_s"]),
+                 mechanical_end_s=float(f["mechanical_end_s"]),
+                 electrical_settle_s=float(f["electrical_settle_s"]))
+    for r in f["analyses"]:
+        u = r.get("reference_sensitive_until_sample0")
+        if (u is None) != ("reference_sensitive" not in f) or (
+                u is not None and int(u) < int(r["start_sample0"])):
+            msg = (f"{sess}/{r['analysis']}: reference_sensitive_until must be present exactly "
+                   "on a reference-sensitive file, at or after the start")
+            raise ValueError(msg)
+
+
+def _common_starts(measured: list[dict[str, Any]]) -> dict[str, Any]:
+    """Give every analysis and cut its common start (:data:`COMMON_START_RULE`); the record.
+
+    Per animal and per analysis (and per cut id): offset = max over the animal's measured
+    files of (start - mechanical end); each row's ``common_start_s`` = its file's mechanical
+    end + that offset, ``common_start_sample0`` its sample (as starts are converted), and
+    ``common_start_set_by`` the file that set it. Never before the row's own start.
+    """
+    by: dict[str, list[dict[str, Any]]] = {}
+    for f in measured:
+        by.setdefault(str(f["animal"]), []).append(f)
+    record: dict[str, Any] = {}
+    for animal, files in sorted(by.items()):
+        rec: dict[str, Any] = {"files": sorted(str(f["session"]) for f in files),
+                               "analyses": {}, "cuts": {}}
+        for kind, key in (("analyses", "analysis"), ("cuts", "cut")):
+            best: dict[str, tuple[float, str]] = {}
+            for f in files:
+                m = float(f["mechanical_end_s"])
+                for r in f[kind]:
+                    off = float(r["start_s"]) - m
+                    name = str(r[key])
+                    if name not in best or off > best[name][0]:
+                        best[name] = (off, str(f["session"]))
+            for f in files:
+                m, fs = float(f["mechanical_end_s"]), float(f["fs"])
+                for r in f[kind]:
+                    off, who = best[str(r[key])]
+                    t = m + off
+                    k = max(seconds_to_sample(t, fs), int(r["start_sample0"]))
+                    r.update(common_start_s=max(t, float(r["start_s"])),
+                             common_start_sample0=k, common_start_set_by=who)
+            rec[kind] = {n: {"offset_after_mechanical_end_s": o, "set_by": w}
+                         for n, (o, w) in sorted(best.items())}
+        record[animal] = rec
+    return {"rule": COMMON_START_RULE, "anchor": "mechanical_end", "by_animal": record}
+
+
+def dose_response_disagreement(own: Mapping[str, float], common: Mapping[str, float]
+                               ) -> dict[str, Any]:
+    """Whether the own-start and common-start versions disagree (:data:`DISAGREEMENT_RULE`).
+
+    ``own`` and ``common`` map each stim level to one animal x output's summary in that
+    version. Returns ``verdict`` ("agree" | "disagree" | "not_comparable"), whether the rank
+    order changed, the levels that moved by more than the tolerance, the tolerance, and the
+    rule.
+    """
+    levels = sorted(set(own) | set(common))
+    bad = [lv for lv in levels if lv not in own or lv not in common
+           or not math.isfinite(float(own[lv])) or not math.isfinite(float(common[lv]))]
+    out: dict[str, Any] = {"rule": DISAGREEMENT_RULE, "levels": levels}
+    if bad or not levels:
+        return {**out, "verdict": "not_comparable", "missing_or_nonfinite": bad}
+    o = {lv: float(own[lv]) for lv in levels}
+    c = {lv: float(common[lv]) for lv in levels}
+    rank_o = sorted(levels, key=lambda lv: (o[lv], lv))
+    rank_c = sorted(levels, key=lambda lv: (c[lv], lv))
+    span = max(c.values()) - min(c.values())
+    tol = {lv: DISAGREE_FRACTION * (span if span > 0 else abs(c[lv])) for lv in levels}
+    moved = [lv for lv in levels if abs(o[lv] - c[lv]) > tol[lv]]
+    changed = rank_o != rank_c
+    return {**out, "verdict": "disagree" if (changed or moved) else "agree",
+            "rank_changed": changed, "rank_own": rank_o, "rank_common": rank_c,
+            "levels_moved": moved, "tolerance": tol}
+
+
 def recovery_starts_document(files: Sequence[Mapping[str, Any]], *, fs: float,
                              fixed_start_s: float = FIXED_START_S,
                              table: Mapping[str, Analysis] | None = None,
@@ -1859,11 +2076,15 @@ def recovery_starts_document(files: Sequence[Mapping[str, Any]], *, fs: float,
                     raise TypeError(msg)
             _check_cuts(sess, f.get("cuts"))
             _check_times(sess, f)
+            _check_v6(sess, f)
             measured.append(dict(f))
         else:
             held.append(dict(f))
+    common = _common_starts(measured)
     doc: dict[str, Any] = {
-        "schema": SCHEMA, "ruling": RULING, "fs": float(fs),
+        "schema": SCHEMA, "ruling": RULING, "ruling_v6": RULING_V6, "fs": float(fs),
+        "electrical_bases": dict(ELECTRICAL_BASES), "common_start": common,
+        "disagreement_rule": DISAGREEMENT_RULE,
         "fixed_start_s": float(fixed_start_s), "fixed_start_source": FIXED_START_SOURCE,
         "source_files": source_files_record(), "trim_modes": list(TRIM_MODES),
         "withdrawn_trim_modes": dict(WITHDRAWN_TRIM_MODES),
@@ -1903,7 +2124,7 @@ def read_recovery_starts(path: Path) -> dict[str, Any]:
             or doc["edge_settling_sha256"] != edge_settling_sha256()):
         msg = (f"{path}: its edge_settling (sha256 {str(doc['edge_settling_sha256'])[:16]}) is "
                f"not this build's (sha256 {edge_settling_sha256()[:16]}): the starts were "
-               "derived under other edge settlings - regenerate the file (schema v5)")
+               "derived under other edge settlings - regenerate the file (schema v6)")
         raise ValueError(msg)
     recovery_starts_document([*doc["files"], *doc["held"]], fs=float(doc["fs"]),
                              fixed_start_s=float(doc["fixed_start_s"]))

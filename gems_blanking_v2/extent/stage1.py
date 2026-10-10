@@ -69,6 +69,7 @@ from gems_blanking_v2.types import Candidate, Event
 
 __all__ = [
     "CACHE_FLOOR_Z",
+    "CORE_PAD_REASON",
     "EXTENT_DEPENDENT",
     "INFERENCE_CONFIG_KEYS",
     "STAGE1A_KEYS",
@@ -79,6 +80,7 @@ __all__ = [
     "check_stage1a_fresh",
     "content_sha256",
     "core_frames",
+    "core_pad_spans",
     "eng_cache_spans",
     "event_from_row",
     "event_row",
@@ -114,7 +116,7 @@ inference."""
 
 INFERENCE_CONFIG_KEYS: Final[tuple[str, ...]] = (
     "decision_rules", "p_threshold", "sensitivity_p", "hrv_window_s", "wave", "stand_in",
-    "model_choice", "no_beat_minutes",
+    "model_choice", "no_beat_minutes", "previous_waves",
 )
 """The night-config fields stage 1a may read (:func:`inference_config`). Everything else -
 ``tolerances``, ``cross_band_scope``, extent thresholds, ``min_retention``, the hold - is
@@ -372,30 +374,47 @@ class EpochCache:
     cache_floor_z: float = CACHE_FLOOR_Z
 
 
-def extents_routing_masks(
-    cache: EpochCache, confirmed: Iterable[str], *, tolerances: tl.ToleranceTable,
-    scopes: Mapping[str, str] | None, floor_z: float = CACHE_FLOOR_Z,
-    route: Callable[[rt.EventEvidence, str, tl.ToleranceTable], rt.RouteDecision] | None = None,
-) -> tuple[dict[str, Event], list[tuple[str, str, str, tl.Extent | tl.NotAssessable | None]],
-           list[rt.RouteDecision], dict[mk.MaskKey, mk.ConsumerMask]]:
-    """Return confirmed events, extents, routing decisions and masks for one threshold set.
+CORE_PAD_REASON: Final = "core_pad_always"
+"""The mask reason of RULING 2026-10-10 item 2's always-blanked core + padding (never routed)."""
 
-    Night 4's stage-1 ``at_rule``, moved here so the cache and the full arrays can be held to
-    the same answer. ``confirmed`` are event ids (stage 1a decided them); ``scopes`` each
-    consumer's cross-band scope (None: no cross-band rule); ``floor_z`` the detected extent's
-    floor. Refused: a confirmed event the cache was not built for, and a floor below the
-    cache's (:class:`ValueError`, naming them).
+
+def core_pad_spans(cache: EpochCache, confirmed: Iterable[str]) -> list[mk.MaskSpan]:
+    """Return the always-blanked spans: each confirmed core widened by the consumer's padding.
+
+    RULING 2026-10-10 item 2: "the motion core itself and the consumer's padding are always
+    blanked", for every z consumer and every signal it reads - the padding is the consumer's
+    measured settling (``tolerance.consumer_settling(...).total_s``), the span is clipped to
+    the epoch's z record, and it is never routed (whatever the own band shows). hrv keeps
+    its operational extent.
     """
-    route = rt.route_event if route is None else route
-    ids = list(confirmed)
+    out: list[mk.MaskSpan] = []
+    end = cache.z_t0_s + cache.n_frames * GRID_S
+    for consumer, sigs in cache.signals.items():
+        if consumer == "hrv" or not sigs:
+            continue
+        settle = tl.consumer_settling(consumer, cache.fs)
+        if settle is None:  # pragma: no cover - every extent consumer has a chain
+            msg = f"{consumer}: settling unknown, so its padding is unknown (invariant 19)"
+            raise ValueError(msg)
+        pad = settle.total_s
+        for eid in confirmed:
+            c = cache.events[eid].candidate
+            a, b = max(cache.z_t0_s, c.start_s - pad), min(end, c.stop_s + pad)
+            out += [mk.MaskSpan(consumer, sig, a, b, CORE_PAD_REASON) for sig in sigs if b > a]
+    return out
+
+
+def _refuse_inexact(cache: EpochCache, ids: Sequence[str], tolerances: tl.ToleranceTable,
+                    scopes: Mapping[str, str] | None, floors: Sequence[float]) -> None:
+    """Refuse what the stage-1a cache cannot answer exactly (ValueError, naming it)."""
     missing = sorted(set(ids) - set(cache.cached_events))
     if missing:
         msg = (f"{len(missing)} confirmed event(s) {missing[:3]} are not in the stage-1a cache "
                "(it holds the events confirmed under the declared variants only)")
         raise ValueError(msg)
-    if scopes is not None and floor_z < cache.cache_floor_z:
-        msg = (f"cross-band floor {floor_z} is below the cache floor {cache.cache_floor_z}: the "
-               "sparse detection z cannot answer it exactly")
+    if scopes is not None and min(floors) < cache.cache_floor_z:
+        msg = (f"cross-band floor {min(floors)} is below the cache floor {cache.cache_floor_z}: "
+               "the sparse detection z cannot answer it exactly")
         raise ValueError(msg)
     for name, v in cache.signals.items():
         if name == "hrv" or not v:
@@ -405,11 +424,35 @@ def extents_routing_masks(
             msg = (f"{name}: threshold {thr} is below the cache floor {cache.cache_floor_z}: the "
                    "stage-1a cache is exact only at or above it")
             raise ValueError(msg)
+
+
+def extents_routing_masks(
+    cache: EpochCache, confirmed: Iterable[str], *, tolerances: tl.ToleranceTable,
+    scopes: Mapping[str, str] | None, floor_z: float = CACHE_FLOOR_Z,
+    floor_by_band: Mapping[str, float] | None = None, core_pad: bool = False,
+    route: Callable[[rt.EventEvidence, str, tl.ToleranceTable], rt.RouteDecision] | None = None,
+) -> tuple[dict[str, Event], list[tuple[str, str, str, tl.Extent | tl.NotAssessable | None]],
+           list[rt.RouteDecision], dict[mk.MaskKey, mk.ConsumerMask]]:
+    """Return confirmed events, extents, routing decisions and masks for one threshold set.
+
+    Night 4's stage-1 ``at_rule``, moved here so the cache and the full arrays can be held to
+    the same answer. ``confirmed`` are event ids (stage 1a decided them); ``scopes`` each
+    consumer's cross-band scope (None: no cross-band rule); ``floor_z`` the detected extent's
+    floor, or ``floor_by_band`` one per detecting pair's band (RULING 2026-10-10 item 2: the
+    declared clean-null percentile); ``core_pad`` adds :func:`core_pad_spans` (RULING
+    2026-10-10 item 2). Refused: a confirmed event the cache was not built for, and a floor
+    or threshold below the cache's (:class:`ValueError`, naming them).
+    """
+    route = rt.route_event if route is None else route
+    ids = list(confirmed)
+    floors = [floor_z] if floor_by_band is None else list(floor_by_band.values())
+    _refuse_inexact(cache, ids, tolerances, scopes, floors)
     conf = {k: cache.events[k] for k in ids}
     members = {id(e) for e in conf.values()}
     nonhrv = {c: v for c, v in cache.signals.items() if c != "hrv"}
     cross = (tl.CrossBand(pairs={k: cache.detecting[k] for k in conf}, z=cache.zdet,
-                          floor_z=floor_z, scope=dict(scopes), own_signals=cache.own_signals)
+                          floor_z=floor_z, scope=dict(scopes), own_signals=cache.own_signals,
+                          floor_by_band=None if floor_by_band is None else dict(floor_by_band))
              if scopes is not None else None)
     lo = cache.z_t0_s
     ext = tl.extents_for_events(conf, cache.z, nonhrv, tolerances=tolerances, fs=cache.fs,
@@ -447,6 +490,8 @@ def extents_routing_masks(
         decisions.append(dec)
         pairs.append((key, res))
     spans = mk.spans_from_routing(pairs, decisions) + list(cache.extra_spans)
+    if core_pad:
+        spans += core_pad_spans(cache, ids)
     return conf, ext, decisions, mk.build_masks(cache.signals, spans, n_frames=cache.n_frames,
                                                 t0_s=lo)
 

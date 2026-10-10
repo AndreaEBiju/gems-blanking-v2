@@ -79,6 +79,11 @@ function records = night6_run_recording(maskFolder, varargin)
 %               the starts file's output time map). A missing, unknown or withdrawn mode
 %               ((A) 'mask_to_own_start') is refused by name before any work; the mode is
 %               in every record, and a stim_recovery epoch made under another mode reruns.
+%   Consumers   the consumers to run in this recording (RULING 2026-10-10 item 5: the
+%               non-spike consumers per recording as soon as their masks exist, the spike
+%               consumer per animal later). Default {} = every consumer. A subset writes
+%               to <epoch>__<codes> (night6_consumer_subset), so two subsets of one mask
+%               folder never share an output folder or a record; unknown names are refused.
 %   SlowWaveRate  REQUIRED, no default (night6_slow_wave_rates; RULING 2026-10-09 (c) 6):
 %               'full' or 'decimated78', the rate slowWaveAnalysis_new runs at. Either way
 %               each run passes its masked spans as blankIdx as well as NaN
@@ -103,8 +108,11 @@ function records = night6_run_recording(maskFolder, varargin)
     ip.addParameter('RecoveryStarts', '', @(x) ischar(x) || isstring(x));
     ip.addParameter('RecoveryTrimMode', '', @(x) ischar(x) || isstring(x));
     ip.addParameter('SlowWaveRate', '', @(x) ischar(x) || isstring(x));
+    ip.addParameter('Consumers', {}, @(x) iscell(x) || isstring(x) || ischar(x));
     ip.parse(maskFolder, varargin{:});
     o = ip.Results;
+    [o.Consumers, subsetTag] = night6_consumer_subset(o.Consumers, ...
+        {'spikes', 'slow_wave', 'mmc', 'hrv', 'breathing', 'velocity'});
     for req = {'GemsRoot', 'Units', 'OutRoot'}
         if isempty(o.(req{1}))
             error('night6:required', '%s is required', req{1});
@@ -155,7 +163,7 @@ function records = night6_run_recording(maskFolder, varargin)
     todo = true(1, numel(files));
     EdNow = night6_edge_settling();   % the resume key's edge-settling hash (review 2026-10-09)
     for k = 1:numel(files)
-        tag = erase(files(k).name, '_masks.mat');
+        tag = [erase(files(k).name, '_masks.mat') subsetTag];
         recFile = fullfile(o.OutRoot, animal, session, modelId, tag, 'night6_record.json');
         if ~o.Force && isfile(recFile)
             R = jsondecode(fileread(recFile));
@@ -168,7 +176,8 @@ function records = night6_run_recording(maskFolder, varargin)
                 && strcmp(R.slow_wave_rate.name, o.SW.name) ...   % (c) 6: same rate
                 && isfield(R, 'edge_settling') && isstruct(R.edge_settling) ...
                 && isfield(R.edge_settling, 'sha256') ...
-                && strcmp(R.edge_settling.sha256, EdNow.sha256);   % same edge settlings
+                && strcmp(R.edge_settling.sha256, EdNow.sha256) ...   % same edge settlings
+                && same_subset(R, o.Consumers);   % 2026-10-10 item 5: same consumer subset
             % review 7 finding 5: every HR run serves one consumer, with outputs_used ((i) 4)
             [hrOk, hrWhy] = night6_hr_runs_resumable(R);
             if isfield(R, 'status') && strcmp(R.status, 'complete') && same && hrOk
@@ -201,7 +210,7 @@ function records = night6_run_recording(maskFolder, varargin)
             size(S.signal, 1), size(S.signal, 2), loadS);
 
     for k = find(todo)
-        tag = erase(files(k).name, '_masks.mat');
+        tag = [erase(files(k).name, '_masks.mat') subsetTag];
         outDir = fullfile(o.OutRoot, animal, session, modelId, tag);
         if isfolder(outDir)
             % Never write beside a previous attempt: stale files would sit next to the
@@ -296,7 +305,15 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
     plan = night6_prepare_epoch(M, S.chanlabels, meta.channels, size(S.signal, 1), S.fs, ...
                                 o.Units, beats, condition, ...
                                 'Recovery', struct('starts', o.RS, 'session', src.session, ...
-                                                   'mode', o.RecoveryTrimMode));
+                                                   'mode', o.RecoveryTrimMode), ...
+                                'Consumers', o.Consumers);
+    R.consumer_subset = o.Consumers;   % {} = every consumer (RULING 2026-10-10 item 5)
+    R.held_consumers = plan.held;      % RULING 2026-10-10 item 1: per consumer
+    R.elsewhere = plan.elsewhere;      % RULING 2026-10-10 item 5: finished in another file
+    if ~isempty(plan.gateNotes), R.gate_notes = plan.gateNotes; end
+    if isfield(M, 'cuffrelease_json')  % RULING 2026-10-10 item 6: kept and flagged
+        R.cuff_release_json = char(M.cuffrelease_json);
+    end
     R.recovery_start = plan.recoveryStart;   % (k) 2: each analysis's start, basis, source
     R.epoch = struct('start_s', plan.epochStart_s, 'start_sample_0based', plan.i0, ...
                      'n_samples', plan.n, 'fs', plan.fs, ...
@@ -438,6 +455,19 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
                     run.outputs = setdiff({d1.name}, {d0.name});
                     for fn = fieldnames(extra)', run.(fn{1}) = extra.(fn{1}); end
                     if drop_outputs(plan, o)   % mode (B): each variable at its own cut
+                        % RULING 2026-10-10 item 7: the common-start version first, on copies
+                        % of the untouched outputs, cut at the animal's common starts
+                        cdir = fullfile(outDir, 'common_start');
+                        if ~isfolder(cdir), mkdir(cdir); end
+                        for q = 1:numel(run.outputs)
+                            if isfile(fullfile(outDir, run.outputs{q}))
+                                copyfile(fullfile(outDir, run.outputs{q}), cdir);
+                            end
+                        end
+                        run.recovery_trim_common = night6_recovery_trim_outputs(cdir, ...
+                            run.outputs, r.consumers, ...
+                            night6_common_start_rec(plan.recoveryStart), ...
+                            o.RS.outputTimes, plan.fs, 'SlowWaveRate', o.SW);
                         run.recovery_trim = night6_recovery_trim_outputs(outDir, ...
                             run.outputs, r.consumers, plan.recoveryStart, ...
                             o.RS.outputTimes, plan.fs, 'SlowWaveRate', o.SW);
@@ -566,7 +596,8 @@ function F = function_provenance()
             'night6_slow_wave_rates', 'night6_check_decimation', 'night6_decimate_masked', ...
             'night6_call_slow_wave', 'night6_keep_slow_wave', 'night6_slow_wave_settings', ...
             'night6_slow_wave_caveats', 'night6_pilot_root', 'night6_hr_outputs', ...
-            'night6_hr_runs_resumable'};
+            'night6_hr_runs_resumable', 'night6_consumer_gate', 'night6_consumer_subset', ...
+            'night6_common_start_rec'};
     hers = [setdiff({C.name}, ours, 'stable'), night6_v2_steps(), ...
             {'step1a_blank_cardiac', 'pipeline_params', 'bulk_load_one'}];   % step1a: (j) 1 fallback
     here = fileparts(mfilename('fullpath'));
@@ -840,6 +871,17 @@ function tf = same_recovery_start(R, RS, mode)
     elseif isfield(R, 'condition') && strcmp(R.condition, 'stim_recovery')
         tf = false;
     end
+end
+
+function tf = same_subset(R, subset)
+% Resume only an epoch made for THIS consumer subset (RULING 2026-10-10 item 5). A record
+% without one was made for every consumer, which is the empty subset.
+    have = {};
+    if isfield(R, 'consumer_subset') && ~isempty(R.consumer_subset)
+        have = sort(cellstr(R.consumer_subset));
+    end
+    tf = isequal(have(:)', sort(cellstr(subset(:)')));
+    if isempty(subset) && isempty(have), tf = true; end
 end
 
 function o = ternary(c, a, b)

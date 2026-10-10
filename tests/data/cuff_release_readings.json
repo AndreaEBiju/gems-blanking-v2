@@ -1,0 +1,786 @@
+{
+ "cuffs": [
+  {
+   "cuff": "L",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "hrv",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_a_pre01_171937_20260821T211943Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "hrv",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_a_pre01_171937_20260821T211943Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "mask",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_a_pre02_162252_20260908T202258Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "mask",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_a_pre02_162252_20260908T202258Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "mask",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_a_t01_es1_bl_161207_20260831T201212Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "mask",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_a_t01_es1_bl_161207_20260831T201212Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R2",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route"
+   },
+   "recording": "gems_a_t01_es3_bl_184739_20260901T224744Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "hrv",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_a_t01_ms3_bl_191619_20260823T231625Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "hrv",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_a_t01_ms3_bl_191619_20260823T231625Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R1",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route; QRS hump -> distrusted (addendum 1)"
+   },
+   "recording": "gems_a_t02_1_1_bl_200940_20260831T000944Z",
+   "table": "production f17f1a53",
+   "why": "QRS hump and no count-gated train (addendum to ruling (c) 1)"
+  },
+  {
+   "cuff": "L",
+   "expected": "R2",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route"
+   },
+   "recording": "gems_a_t02_es1_bl_164421_20260831T204425Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "hrv",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_a_t03_1_1_bl_204153_20260831T004157Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "hrv",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_a_t03_1_1_bl_204153_20260831T004157Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "mask",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_a_t03_3_1_bl_183134_20260910T223138Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "mask",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_a_t03_3_1_bl_183134_20260910T223138Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R4",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route; QRS hump -> distrusted (addendum 1)"
+   },
+   "recording": "gems_b_pre02_161305_20260825T201310Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside; QRS hump and no count-gated train (addendum to ruling (c) 1)"
+  },
+  {
+   "cuff": "L",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "mask",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_b_pre02_192203_20260908T232209Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "mask",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_b_pre02_192203_20260908T232209Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "mask",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_b_pre03_212106_20260824T012111Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "hrv",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_b_pre04_193346_20260908T233351Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "hrv",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_b_pre04_193346_20260908T233351Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R2",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route"
+   },
+   "recording": "gems_b_pre04_213157_20260824T013207Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R2",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route"
+   },
+   "recording": "gems_b_pre04_213157_20260824T013207Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R2",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route"
+   },
+   "recording": "gems_b_pre06_194529_20260908T234535Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R2",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route"
+   },
+   "recording": "gems_b_pre11_201459_20260909T001508Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R2",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route"
+   },
+   "recording": "gems_b_pre11_201459_20260909T001508Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "hrv",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_b_t01_es2_bl_214117_20260909T014122Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "hrv",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_b_t01_es3_bl_234621_20260909T034627Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "hrv",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_b_t01_es3_bl_234621_20260909T034627Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R2",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route"
+   },
+   "recording": "gems_b_t01_ms3_bl_220400_20260824T020407Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R2",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route"
+   },
+   "recording": "gems_b_t03_1_3_bl_213417_20260910T013421Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R2",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route"
+   },
+   "recording": "gems_b_t03_1_3_bl_213417_20260910T013421Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R1",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route; QRS hump -> distrusted (addendum 1)"
+   },
+   "recording": "gems_h_pre03_181554_20260903T221600Z",
+   "table": "production f17f1a53",
+   "why": "QRS hump and no count-gated train (addendum to ruling (c) 1)"
+  },
+  {
+   "cuff": "L",
+   "expected": "R1",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route; QRS hump -> distrusted (addendum 1)"
+   },
+   "recording": "gems_h_t02_3_2_bl_205345_20260915T005351Z",
+   "table": "production f17f1a53",
+   "why": "QRS hump and no count-gated train (addendum to ruling (c) 1)"
+  },
+  {
+   "cuff": "R",
+   "expected": "R2",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route"
+   },
+   "recording": "gems_h_t02_es1_bl_231014_20260904T031018Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "mask",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_i_pre02_171240_20260827T211250Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "mask",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_i_pre02_171240_20260827T211250Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R1",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route; QRS hump -> distrusted (addendum 1)"
+   },
+   "recording": "gems_i_pre04_172431_20260827T212441Z",
+   "table": "production f17f1a53",
+   "why": "QRS hump and no count-gated train (addendum to ruling (c) 1)"
+  },
+  {
+   "cuff": "L",
+   "expected": "R1",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route; QRS hump -> distrusted (addendum 1)"
+   },
+   "recording": "gems_i_t01_1_3_bl_203627_20260901T003632Z",
+   "table": "production f17f1a53",
+   "why": "QRS hump and no count-gated train (addendum to ruling (c) 1)"
+  },
+  {
+   "cuff": "L",
+   "expected": "R1",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route; QRS hump -> distrusted (addendum 1)"
+   },
+   "recording": "gems_i_t01_3_1_bl_193452_20260901T233458Z",
+   "table": "production f17f1a53",
+   "why": "QRS hump and no count-gated train (addendum to ruling (c) 1)"
+  },
+  {
+   "cuff": "L",
+   "expected": "R1",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route; QRS hump -> distrusted (addendum 1)"
+   },
+   "recording": "gems_i_t01_3_2_bl_162120_20260902T202126Z",
+   "table": "production f17f1a53",
+   "why": "QRS hump and no count-gated train (addendum to ruling (c) 1)"
+  },
+  {
+   "cuff": "L",
+   "expected": "R4",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route; QRS hump -> distrusted (addendum 1)"
+   },
+   "recording": "gems_i_t01_3_3_bl_000014_20260903T040020Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside; QRS hump and no count-gated train (addendum to ruling (c) 1)"
+  },
+  {
+   "cuff": "R",
+   "expected": "R2",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route"
+   },
+   "recording": "gems_i_t01_3_3_bl_000014_20260903T040020Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R1",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route; QRS hump -> distrusted (addendum 1)"
+   },
+   "recording": "gems_i_t01_es1_bl_213500_20260829T013506Z",
+   "table": "production f17f1a53",
+   "why": "QRS hump and no count-gated train (addendum to ruling (c) 1)"
+  },
+  {
+   "cuff": "L",
+   "expected": "R2",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route"
+   },
+   "recording": "gems_i_t02_1_1_bl_220929_20260831T020933Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R2",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route"
+   },
+   "recording": "gems_i_t02_1_1_bl_220929_20260831T020933Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R2",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route"
+   },
+   "recording": "gems_i_t02_1_2_bl_194846_20260831T234851Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R2",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route"
+   },
+   "recording": "gems_i_t02_1_2_bl_194846_20260831T234851Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R4",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route; QRS hump -> distrusted (addendum 1)"
+   },
+   "recording": "gems_i_t02_2_1_bl_032231_20260903T072235Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside; QRS hump and no count-gated train (addendum to ruling (c) 1)"
+  },
+  {
+   "cuff": "R",
+   "expected": "R2",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route"
+   },
+   "recording": "gems_i_t02_2_1_bl_032231_20260903T072235Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R2",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route"
+   },
+   "recording": "gems_i_t02_3_3_bl_003234_20260903T043240Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R4",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route; QRS hump -> distrusted (addendum 1)"
+   },
+   "recording": "gems_i_t02_3_3_bl_003234_20260903T043240Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside; QRS hump and no count-gated train (addendum to ruling (c) 1)"
+  },
+  {
+   "cuff": "L",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "mask",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_j_pre01_155046_20260917T195050Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "mask",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_j_pre01_155046_20260917T195050Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "mask",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_j_pre02_155932_20260915T195936Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "mask",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_j_pre02_155932_20260915T195936Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R2",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route"
+   },
+   "recording": "gems_j_pre05_161402_20260917T201407Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R2",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route"
+   },
+   "recording": "gems_j_pre05_161402_20260917T201407Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R1",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route; QRS hump -> distrusted (addendum 1)"
+   },
+   "recording": "gems_j_t01_1_1_bl_212840_20260918T012845Z",
+   "table": "production f17f1a53",
+   "why": "QRS hump and no count-gated train (addendum to ruling (c) 1)"
+  },
+  {
+   "cuff": "R",
+   "expected": "R1",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route; QRS hump -> distrusted (addendum 1)"
+   },
+   "recording": "gems_j_t01_es2_bl_164831_20260917T204837Z",
+   "table": "production f17f1a53",
+   "why": "QRS hump and no count-gated train (addendum to ruling (c) 1)"
+  },
+  {
+   "cuff": "L",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "mask",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_j_t02_es2_bl_172046_20260917T212050Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "mask",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_j_t02_es2_bl_172046_20260917T212050Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "mask",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_j_t02_ms1_bl_182909_20260915T222913Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "mask",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_j_t02_ms1_bl_182909_20260915T222913Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "mask",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_j_t03_ms3_bl_190122_20260915T230126Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "mask",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_j_t03_ms3_bl_190122_20260915T230126Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "L",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "mask",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_k_pre01_035926_20260825T075931Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R3",
+   "perir_row": {
+    "beat_grade": "mask",
+    "result": "no R-locked core after the veto: no peri-R mask"
+   },
+   "recording": "gems_k_pre01_035926_20260825T075931Z",
+   "table": "production f17f1a53",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R1",
+   "perir_row": {
+    "beat_grade": "none",
+    "result": "no count-gated train: no peri-R route; QRS hump -> distrusted (addendum 1)"
+   },
+   "recording": "gems_k_t03_cme9_bl_014509_20260825T054513Z",
+   "table": "production f17f1a53",
+   "why": "QRS hump and no count-gated train (addendum to ruling (c) 1)"
+  },
+  {
+   "cuff": "L",
+   "expected": "R3",
+   "recording": "gems_b_t02_1_2_sr_181634_20260909T221639Z",
+   "table": "64c2e1ea",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R3",
+   "recording": "gems_b_t02_1_2_sr_181634_20260909T221639Z",
+   "table": "64c2e1ea",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  },
+  {
+   "cuff": "R",
+   "expected": "R3",
+   "recording": "gems_h_t03_ms1_bl_234228_20260904T034232Z",
+   "table": "64c2e1ea",
+   "why": "check (i) fails and no peri-R window exists to rerun it outside"
+  }
+ ],
+ "source": "scratchpad/review6_fix/cuff_release_readings.txt (review 6), cuffs as listed; why and the peri-R row read from the routing tables and pr/b*/perir/perir.json, r14route/perir/perir.json on 2026-10-10",
+ "source_sha256": "2b3a501e85ac676c6c362dd2207ab089e3504541e77129090c5c83cf6e23ac04"
+}

@@ -40,6 +40,9 @@ from scipy.io import savemat
 
 from tests.test_matlab_acceptance import _matlab, _processing_new
 
+V6 = {"animal": "A", "electrical_basis": "from_electrical_end"}
+"""The v6 fields of a file_starts call (RULING 2026-10-10 item 7) for the older cases."""
+
 FS = 24414.0625
 R = 78
 NIGHT6 = Path(__file__).resolve().parents[1] / "matlab" / "night6"
@@ -97,7 +100,7 @@ def _case(tmp: Path) -> dict[str, Any]:
     pnew = _processing_new()
     assert pnew is not None
     starts = tmp / "starts.json"
-    rs.write_recovery_starts(starts, rs.recovery_starts_document([rs.file_starts(
+    rs.write_recovery_starts(starts, rs.recovery_starts_document([rs.file_starts(**V6,
         session=TRIM_SESSION, fs=FS, electrical_end_s=0.5, mechanical_end_s=0.5,
         electrical_settle_s=TRIM_EL_S,
         times_source="test", electrical_source="test")], fs=FS))
