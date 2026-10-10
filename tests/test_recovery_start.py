@@ -43,6 +43,7 @@ import math
 import re
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 from gems_blanking_v2.extent import recovery_start as rs
@@ -339,8 +340,9 @@ def test_an_unknown_analysis_keeps_132_labelled_and_the_others_get_their_own() -
     assert s.settling_s is None and s.binding_output is None
     assert s.missing == ("slow_wave/rate: w",)
     assert s.per_output_s["trace"] == 2.5 and s.per_output_s["rate"] is None
-    f = rs.file_starts(session="x", fs=FS, stim_off_s=120.8, electrical_settle_s=121.4,
-                       stim_off_source="03B", electrical_source="(j) 6 (i)",
+    f = rs.file_starts(session="x", fs=FS, electrical_end_s=120.8, mechanical_end_s=120.8,
+                       electrical_settle_s=121.4,
+                       times_source="03B", electrical_source="(j) 6 (i)",
                        table=TEST_TABLE)
     rows = {r["analysis"]: r for r in f["analyses"]}
     sw = rows["slow_wave"]
@@ -360,8 +362,9 @@ def test_an_unknown_analysis_keeps_132_labelled_and_the_others_get_their_own() -
 
 
 def test_an_analysis_missing_from_the_table_is_unknown_not_zero() -> None:
-    f = rs.file_starts(session="x", fs=FS, stim_off_s=120.8, electrical_settle_s=125.0,
-                       stim_off_source="a", electrical_source="b",
+    f = rs.file_starts(session="x", fs=FS, electrical_end_s=120.8, mechanical_end_s=120.8,
+                       electrical_settle_s=125.0,
+                       times_source="a", electrical_source="b",
                        analyses=["spikes", "velocity"])
     rows = {r["analysis"]: r for r in f["analyses"]}
     assert rows["velocity"]["basis"] == rs.BASIS_FIXED
@@ -370,15 +373,18 @@ def test_an_analysis_missing_from_the_table_is_unknown_not_zero() -> None:
 
 
 def test_undetected_edges_and_no_settling_hold_the_whole_file() -> None:
-    a = rs.file_starts(session="x", fs=FS, stim_off_s=None, electrical_settle_s=None,
-                       stim_off_source="a", electrical_source="b")
+    a = rs.file_starts(session="x", fs=FS, electrical_end_s=None, mechanical_end_s=None,
+                       electrical_settle_s=None,
+                       times_source="a", electrical_source="b")
     assert a["basis"] == rs.HELD_UNDETECTED and "analyses" not in a
-    b = rs.file_starts(session="x", fs=FS, stim_off_s=120.8, electrical_settle_s=None,
-                       stim_off_source="a", electrical_source="b")
+    b = rs.file_starts(session="x", fs=FS, electrical_end_s=120.8, mechanical_end_s=120.8,
+                       electrical_settle_s=None,
+                       times_source="a", electrical_source="b")
     assert b["basis"] == rs.HELD_NO_SETTLING and "analyses" not in b
-    with pytest.raises(ValueError, match="precedes stim-off"):
-        rs.file_starts(session="x", fs=FS, stim_off_s=121.0, electrical_settle_s=120.0,
-                       stim_off_source="a", electrical_source="b")
+    with pytest.raises(ValueError, match="precedes the electrical end"):
+        rs.file_starts(session="x", fs=FS, electrical_end_s=121.0, mechanical_end_s=121.0,
+                       electrical_settle_s=120.0,
+                       times_source="a", electrical_source="b")
 
 
 def test_the_relation_to_the_epoch_start_is_exact_to_one_sample() -> None:
@@ -389,8 +395,9 @@ def test_the_relation_to_the_epoch_start_is_exact_to_one_sample() -> None:
         t = {"spikes": rs.Analysis("spikes", "c", (rs.Output("o", (
             rs.Stage("w", "trailing window", "whole", "x.m:1", "x", "code",
                      window_s=k / FS - 130.0),), "x"),))}
-        f = rs.file_starts(session="x", fs=FS, stim_off_s=120.0, electrical_settle_s=130.0,
-                           stim_off_source="a", electrical_source="b", table=t)
+        f = rs.file_starts(session="x", fs=FS, electrical_end_s=120.0, mechanical_end_s=120.0,
+                           electrical_settle_s=130.0,
+                           times_source="a", electrical_source="b", table=t)
         r = f["analyses"][0]
         assert r["start_sample0"] == k
         assert r["relation"].startswith(word)
@@ -401,8 +408,9 @@ def test_the_relation_to_the_epoch_start_is_exact_to_one_sample() -> None:
        fs=st.sampled_from([FS, 24414.0, 1000.0]))
 def test_every_start_is_its_electrical_time_plus_its_own_settling(off: float, el: float,
                                                                   fs: float) -> None:
-    f = rs.file_starts(session="x", fs=fs, stim_off_s=off, electrical_settle_s=off + el,
-                       stim_off_source="a", electrical_source="b")
+    f = rs.file_starts(session="x", fs=fs, electrical_end_s=off, mechanical_end_s=off,
+                       electrical_settle_s=off + el,
+                       times_source="a", electrical_source="b")
     assert f["electrical_settle_sample0"] == seconds_to_sample(off + el, fs)
     for r in f["analyses"]:
         own = rs.analysis_settling(r["analysis"], fs).settling_s
@@ -417,10 +425,12 @@ def _doc(*files: dict) -> dict:
 
 
 def test_the_document_refuses_duplicates_and_non_integer_samples() -> None:
-    a = rs.file_starts(session="Sess_A", fs=FS, stim_off_s=120.8, electrical_settle_s=125.0,
-                       stim_off_source="a", electrical_source="b")
-    held = rs.file_starts(session="sess_a", fs=FS, stim_off_s=None, electrical_settle_s=None,
-                          stim_off_source="a", electrical_source="b")
+    a = rs.file_starts(session="Sess_A", fs=FS, electrical_end_s=120.8, mechanical_end_s=120.8,
+                       electrical_settle_s=125.0,
+                       times_source="a", electrical_source="b")
+    held = rs.file_starts(session="sess_a", fs=FS, electrical_end_s=None, mechanical_end_s=None,
+                          electrical_settle_s=None,
+                          times_source="a", electrical_source="b")
     with pytest.raises(ValueError, match="appears twice"):
         _doc(a, held)  # case-insensitive: macOS and Windows would collide
     twice = {**a, "analyses": [*a["analyses"], a["analyses"][0]]}
@@ -441,8 +451,9 @@ def _refuse(token: str) -> None:
 
 
 def test_the_file_round_trips_exactly_as_canonical_ascii(tmp_path: Path) -> None:
-    files = [rs.file_starts(session=s, fs=FS, stim_off_s=o, electrical_settle_s=e,
-                            stim_off_source="03B — cached", electrical_source="(j) 6 (i)")
+    files = [rs.file_starts(session=s, fs=FS, electrical_end_s=o, mechanical_end_s=o,
+                            electrical_settle_s=e,
+                            times_source="03B — cached", electrical_source="(j) 6 (i)")
              for s, o, e in (("b_sr", 120.79, 124.2), ("a_sr", None, None),
                              ("c_sr", 121.5, None))]
     doc = rs.recovery_starts_document(files, fs=FS, extra={"run": "synthetic"})
@@ -476,11 +487,12 @@ def test_the_file_round_trips_exactly_as_canonical_ascii(tmp_path: Path) -> None
 
 
 def test_a_starts_file_from_other_edge_settlings_is_refused(tmp_path: Path) -> None:
-    """Review 2026-10-09: v4 records the edge settlings' sha256; a stale file is refused."""
-    files = [rs.file_starts(session="b_sr", fs=FS, stim_off_s=120.79, electrical_settle_s=124.2,
-                            stim_off_source="03B", electrical_source="(j) 6 (i)")]
+    """Review 2026-10-09: v4+ records the edge settlings' sha256; a stale file is refused."""
+    files = [rs.file_starts(session="b_sr", fs=FS, electrical_end_s=120.79, mechanical_end_s=120.79,
+                            electrical_settle_s=124.2,
+                            times_source="03B", electrical_source="(j) 6 (i)")]
     doc = rs.recovery_starts_document(files, fs=FS)
-    assert rs.SCHEMA == "gems-blanking-v2 recovery starts v4"
+    assert rs.SCHEMA == "gems-blanking-v2 recovery starts v5"
     assert doc["edge_settling_sha256"] == tl.edge_settling_sha256()
     assert doc["edge_settling"] == tl.edge_settling_record()
     good = tmp_path / "good.json"
@@ -505,7 +517,7 @@ def test_a_starts_file_from_other_edge_settlings_is_refused(tmp_path: Path) -> N
         rs.read_recovery_starts(f)
     j["schema"] = "gems-blanking-v2 recovery starts v3"
     f.write_text(json.dumps(j), encoding="utf-8", newline="\n")
-    with pytest.raises(ValueError, match="expected 'gems-blanking-v2 recovery starts v4'"):
+    with pytest.raises(ValueError, match="expected 'gems-blanking-v2 recovery starts v5'"):
         rs.read_recovery_starts(f)
 
 
@@ -611,8 +623,9 @@ def test_every_trimmed_variable_is_cut_at_its_class_reach_to_the_sample() -> Non
     trims = {(v.file, v.path): v for v in rs.OUTPUT_VARS if v.role == "trim"}
     assert set(trims) == set(CLASS_TABLE), sorted(set(trims) ^ set(CLASS_TABLE))
     el = 125.0
-    f = rs.file_starts(session="x", fs=FS, stim_off_s=120.8, electrical_settle_s=el,
-                       stim_off_source="a", electrical_source="b")
+    f = rs.file_starts(session="x", fs=FS, electrical_end_s=120.8, mechanical_end_s=120.8,
+                       electrical_settle_s=el,
+                       times_source="a", electrical_source="b")
     cuts = {c["cut"]: c for c in f["cuts"]}
     for key, (cls, r) in CLASS_TABLE.items():
         v = trims[key]
@@ -647,8 +660,9 @@ def test_only_cv2_roll_is_cut_at_15_s_every_other_spike_output_at_its_ms_reach()
     or beyond 1 s fails.
     """
     el = 125.0
-    f = rs.file_starts(session="x", fs=FS, stim_off_s=120.8, electrical_settle_s=el,
-                       stim_off_source="a", electrical_source="b")
+    f = rs.file_starts(session="x", fs=FS, electrical_end_s=120.8, mechanical_end_s=120.8,
+                       electrical_settle_s=el,
+                       times_source="a", electrical_source="b")
     cuts = {c["cut"]: c for c in f["cuts"]}
     trims = [v for v in rs.OUTPUT_VARS if v.role == "trim" and v.file in SPIKE_FILES]
     by_path = {v.path: cuts[rs.cut_id("spikes", v.reach, str(v.trim_class))] for v in trims}
@@ -683,8 +697,9 @@ def test_the_hr_band_edge_moves_the_hrv_and_breathing_starts_and_the_trace_cut()
 @settings(max_examples=100, deadline=None)
 @given(el=st.floats(120.0, 200.0), fs=st.sampled_from([FS, 24414.0, 1000.0]))
 def test_every_cut_is_one_rounding_of_electrical_plus_reach(el: float, fs: float) -> None:
-    f = rs.file_starts(session="x", fs=fs, stim_off_s=119.0, electrical_settle_s=el,
-                       stim_off_source="a", electrical_source="b")
+    f = rs.file_starts(session="x", fs=fs, electrical_end_s=119.0, mechanical_end_s=119.0,
+                       electrical_settle_s=el,
+                       times_source="a", electrical_source="b")
     for c in f["cuts"]:
         r, missing = rs.output_reach_s(c["owner"], c["output_key"], c["trim_class"], fs)
         assert r is not None and missing == ()
@@ -697,8 +712,9 @@ def test_an_unknown_reach_keeps_132_labelled_never_the_known_part() -> None:
         rs.Output("trace", (_stage(5.0),), "x", key="sw_trace"),
         rs.Output("rate", (_stage(5.0), _stage(None, "unknown"), _stage(60.0)), "x",
                   key="sw_rate", own_window=True)))}
-    f = rs.file_starts(session="x", fs=FS, stim_off_s=120.8, electrical_settle_s=121.4,
-                       stim_off_source="a", electrical_source="b", table=t)
+    f = rs.file_starts(session="x", fs=FS, electrical_end_s=120.8, mechanical_end_s=120.8,
+                       electrical_settle_s=121.4,
+                       times_source="a", electrical_source="b", table=t)
     cuts = {c["cut"]: c for c in f["cuts"]}
     rate = cuts[rs.cut_id("slow_wave", "sw_rate", _II)]
     assert rate["basis"] == rs.BASIS_FIXED and rate["start_s"] == 132.0
@@ -825,8 +841,9 @@ def test_the_recomputed_averages_are_the_ruled_ones() -> None:
 
 
 def test_every_file_carries_the_maps_cuts_once_as_samples() -> None:
-    a = rs.file_starts(session="Sess_A", fs=FS, stim_off_s=120.8, electrical_settle_s=125.0,
-                       stim_off_source="a", electrical_source="b")
+    a = rs.file_starts(session="Sess_A", fs=FS, electrical_end_s=120.8, mechanical_end_s=120.8,
+                       electrical_settle_s=125.0,
+                       times_source="a", electrical_source="b")
     for edit, err, words in (
             (lambda f: f.pop("cuts"), TypeError, "cuts"),
             (lambda f: f["cuts"].append(dict(f["cuts"][0])), ValueError, "a cut appears twice"),
@@ -836,3 +853,105 @@ def test_every_file_carries_the_maps_cuts_once_as_samples() -> None:
         edit(bad)
         with pytest.raises(err, match=words):
             _doc(bad)
+
+
+# ---------------------------------------------------------------------------
+# RULING 2026-10-09 (i) 3 (c): stim-off is two times (starts v5)
+# ---------------------------------------------------------------------------
+
+
+def _two(e_end: float, settle: float, m_end: float, fs: float = FS,
+         table: dict[str, rs.Analysis] | None = None) -> dict[str, Any]:
+    return rs.file_starts(session="x", fs=fs, electrical_end_s=e_end, mechanical_end_s=m_end,
+                          electrical_settle_s=settle, times_source="tsq AmA / Mon",
+                          electrical_source="electrical-only rule", table=table)
+
+
+def test_the_later_of_the_two_stim_times_sets_every_start_and_cut() -> None:
+    """max(E + settling + own, M + own): either time can bind, and both are recorded."""
+    # electrical binds: AmA ended 2 s before the gate, its settling ends after the gate
+    a = _two(118.69, 121.40, 120.73)
+    # mechanical binds: the electrical recovery is settled before the gate closes
+    b = _two(118.69, 119.10, 120.73)
+    for f, t, bind in ((a, 121.40, "electrical"), (b, 120.73, "mechanical")):
+        assert f["input_mask_s"] == t and f["input_mask_binding"] == bind
+        assert f["input_mask_sample0"] == seconds_to_sample(t, FS)
+        assert f["input_mask_sample0"] == max(f["electrical_settle_sample0"],
+                                              f["mechanical_end_sample0"])
+        assert f["electrical_end_s"] == 118.69 and f["mechanical_end_s"] == 120.73
+        assert f["electrical_s"] == pytest.approx(f["electrical_settle_s"] - 118.69)
+        assert "stim_off_s" not in f
+        for r in f["analyses"]:
+            own = rs.analysis_settling(r["analysis"], FS).settling_s
+            assert own is not None
+            assert r["start_s"] == t + own, (bind, r["analysis"])
+            assert r["start_sample0"] == seconds_to_sample(t + own, FS)
+            assert r["basis"] == rs.BASIS_MEASURED
+        for c in f["cuts"]:
+            assert c["basis"] == rs.BASIS_CUT
+            assert c["start_s"] == t + c["reach_s"], (bind, c["cut"])
+            assert c["start_sample0"] == seconds_to_sample(t + c["reach_s"], FS)
+    same = _two(120.0, 120.5, 120.5)
+    assert same["input_mask_binding"] == "both"
+
+
+@settings(max_examples=300, deadline=None)
+@given(e_end=st.floats(100.0, 140.0), el=st.floats(0.0, 60.0), dm=st.floats(-3.0, 3.0),
+       fs=st.sampled_from([FS, 24414.0, 1000.0]))
+def test_every_start_and_cut_is_the_max_of_both_times_plus_its_reach(
+        e_end: float, el: float, dm: float, fs: float) -> None:
+    f = _two(e_end, e_end + el, e_end + dm, fs)
+    t = max(e_end + el, e_end + dm)
+    assert f["input_mask_s"] == t
+    assert f["input_mask_sample0"] == max(seconds_to_sample(e_end + el, fs),
+                                          seconds_to_sample(e_end + dm, fs))
+    for r in f["analyses"]:
+        own = rs.analysis_settling(r["analysis"], fs).settling_s
+        assert own is not None
+        assert r["start_s"] == t + own
+        assert r["start_s"] == pytest.approx(max(e_end + el + own, e_end + dm + own), abs=1e-9)
+    for c in f["cuts"]:
+        assert c["start_s"] == t + c["reach_s"]
+        assert c["start_sample0"] >= f["input_mask_sample0"]
+    rs.recovery_starts_document([f], fs=fs)  # consistent by construction
+
+
+def test_a_file_missing_either_stim_time_is_held_naming_it() -> None:
+    for e_end, m_end, word in ((None, 120.7, "electrical"), (118.7, None, "mechanical"),
+                               (None, None, "electrical and mechanical")):
+        f = rs.file_starts(session="x", fs=FS, electrical_end_s=e_end, mechanical_end_s=m_end,
+                           electrical_settle_s=121.0, times_source="t", electrical_source="e")
+        assert f["basis"] == rs.HELD_UNDETECTED and "analyses" not in f
+        assert f"({word})" in f["why"], f["why"]
+    with pytest.raises(ValueError, match="precedes the electrical end"):
+        _two(120.0, 119.9, 118.0)  # settling is measured FROM the electrical end
+
+
+def test_the_document_refuses_a_file_that_disagrees_with_its_two_times() -> None:
+    a = _two(118.69, 119.10, 120.73)  # mechanical binds
+    for edit, err, words in (
+            (lambda f: f.pop("mechanical_end_sample0"), TypeError, "mechanical_end_sample0"),
+            (lambda f: f.pop("mechanical_end_s"), TypeError, "mechanical_end_s"),
+            (lambda f: f.pop("electrical_end_s"), TypeError, "electrical_end_s"),
+            (lambda f: f.pop("input_mask_sample0"), TypeError, "input_mask_sample0"),
+            (lambda f: f.update(input_mask_sample0=f["electrical_settle_sample0"]), ValueError,
+             "is not max"),
+            (lambda f: f["analyses"][0].update(start_sample0=f["input_mask_sample0"] - 1),
+             ValueError, "precede the input mask"),
+            (lambda f: f["cuts"][0].update(start_sample0=f["input_mask_sample0"] - 1),
+             ValueError, "precede the input mask")):
+        bad = json.loads(json.dumps(a))
+        edit(bad)
+        with pytest.raises(err, match=words):
+            _doc(bad)
+    _doc(a)
+
+
+def test_a_v4_starts_file_with_one_stim_time_is_refused(tmp_path: Path) -> None:
+    doc = rs.recovery_starts_document([_two(118.69, 121.4, 120.73)], fs=FS)
+    j = json.loads(json.dumps(doc))
+    j["schema"] = "gems-blanking-v2 recovery starts v4"
+    f = tmp_path / "v4.json"
+    f.write_text(json.dumps(j), encoding="utf-8", newline="\n")
+    with pytest.raises(ValueError, match="expected 'gems-blanking-v2 recovery starts v5'"):
+        rs.read_recovery_starts(f)

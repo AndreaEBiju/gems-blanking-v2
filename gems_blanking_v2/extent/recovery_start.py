@@ -1,15 +1,20 @@
 """RULING 2026-10-08 (k) 2: where each analysis's recovery starts, and the file Night 6 reads.
 
-Each analysis starts at
+Each analysis starts at (RULING 2026-10-09 (i) 3 (c): stim-off is TWO times)
 
-    the file's detected stim-off  +  the measured electrical settling ((j) 6 (i))
-                                  +  THAT analysis's own filter or window settling.
+    max(electrical end + electrical settling + its own settling,
+        mechanical end                       + its own settling)
+  = max(electrical end + electrical settling, mechanical end) + its own settling.
 
-There is no shared maximum over analyses. The first two terms are per file and are
-measured by the recovery-start script (``electrical_settle_s`` returns their sum as one
-absolute time). The third is per analysis and is declared here, once (invariant 33):
-:data:`ANALYSES` is the one table, and :func:`analysis_settling` is the one place a
-figure is derived from it.
+The electrical end is the stimulator's ``AmA`` record; the electrical settling is measured
+from it; recovery never starts before the mechanical end (the gate/MotorOn offset), and
+motion from the mechanical stimulus is the motion masks' job. There is no shared maximum
+over analyses. The first terms are per file, measured by the recovery-start script
+(``electrical_settle_s`` is the ABSOLUTE time electrical end + settling); their maximum is
+the file's INPUT MASK point (:func:`input_mask`, the one place it is derived), and every
+start and cut is that point plus a reach. The last term is per analysis and is declared
+here, once (invariant 33): :data:`ANALYSES` is the one table, and
+:func:`analysis_settling` is the one place a figure is derived from it.
 
 The table
 ---------
@@ -63,25 +68,30 @@ What counts, and what does not (RULING 2026-10-09 (c) 3, :data:`RULING_SETTLING`
   electrical lead-in included, because Night 6 passes each channel's masked spans as
   ``blankIdx`` (RULING 2026-10-09 (c) 6); HR's acts only at the array ends (``blankIdx = []``).
 * **epoch-wide statistics** (session sigma, detrend, averages) have no time to trim by;
-  the input is masked through the electrical settling, which keeps them free of unsettled
-  data, and they are computed over [electrical settling, epoch end].
+  the input is masked through the input mask point (max of the electrical settling and
+  the mechanical end), which keeps them free of unsettled data, and they are computed over
+  [input mask point, epoch end].
 
 Trim mode (:data:`TRIM_MODES`, a REQUIRED declaration of every Night 6 batch)
 ------------------------------------------------------------------------------
 RULING 2026-10-09 item 6: Night 6 runs mode (B), ``mask_to_electrical_drop_outputs``,
 defined PER OUTPUT VARIABLE:
 
-* every analysis's input is masked (NaN) only through the electrical settling, one point
-  for all;
+* every analysis's input is masked (NaN) only through the INPUT MASK point,
+  max(electrical end + electrical settling, mechanical end) (RULING 2026-10-09 (i) 3 (c)),
+  one point for all;
 * every time-stamped output variable is then cut at ITS OWN cut point, by its class
   (:data:`TRIM_CLASSES`, declared per variable in :data:`OUTPUT_VARS` with ``file:line``):
 
   - ``valid_only`` (i): computed over valid input samples or events only, so her own
     rule decides the edge windows (the rule is cited per variable, :class:`EdgeRule`):
-    cut at the electrical settling + the settling of its own INPUT (its cascade without
+    cut at the input mask point + the settling of its own INPUT (its cascade without
     its own window), never half its window;
   - ``filled_or_filtered`` (ii): computed on filled-in or filtered data: cut at the
-    electrical settling + its FULL reach (the whole cascade);
+    input mask point + its FULL reach (the whole cascade);
+
+  (the input mask point + a reach is max(electrical end + electrical settling + reach,
+  mechanical end + reach): RULING 2026-10-09 (i) 3 (c), exactly);
   - a trimmed variable with no class, or an unknown one, is refused by name;
 
 * every windowed output value carries its valid fraction (:class:`ValidFraction`): her
@@ -96,7 +106,7 @@ defined PER OUTPUT VARIABLE:
 Mode (A), ``mask_to_own_start`` (each analysis's input masked to its own start), is
 withdrawn by the same ruling and refused by name (:data:`WITHDRAWN_TRIM_MODES`), so a
 stale batch list cannot run it. Epoch-wide scalars that are not recomputed stay, recorded
-as computed over [electrical settling, epoch end]; an output whose time convention is
+as computed over [input mask point, epoch end]; an output whose time convention is
 not known is left untrimmed and listed by name, never dropped silently.
 
 An unknown stage makes the analysis's settling ``None`` with the missing stage named -
@@ -105,8 +115,11 @@ file, labelled ``fixed_132s_settling_unknown`` (the user's rule, 2026-10-08).
 
 The file Night 6 reads
 ----------------------
-:func:`write_recovery_starts` writes one JSON document - per file: the electrical
-settling as an exact 0-based FILE sample, per analysis the start in seconds (for the
+:func:`write_recovery_starts` writes one JSON document - per file: the two stim times
+(electrical and mechanical end, with their source), the electrical settling and the
+mechanical end each as an exact 0-based FILE sample, and the input mask point - their
+maximum - as one too (which of the two binds is recorded), per analysis the start in
+seconds (for the
 record) and as an exact 0-based FILE sample (MATLAB never converts seconds to samples,
 invariants 15 and 22), its basis and its source, and per CUT (one per owner, output and
 class the map uses) the cut point the same way - plus the table it was computed with,
@@ -166,6 +179,7 @@ __all__ = [
     "RECOMPUTE_KINDS",
     "RULING",
     "RULING_SETTLING",
+    "RULING_TIMES",
     "RULING_TRIM",
     "SCHEMA",
     "SOURCE_FILES",
@@ -190,6 +204,7 @@ __all__ = [
     "beat_decimation_factor",
     "cut_id",
     "file_starts",
+    "input_mask",
     "output_reach_s",
     "output_times_record",
     "read_recovery_starts",
@@ -204,8 +219,14 @@ __all__ = [
 
 RULING: Final = "RULING 2026-10-08 (k) 2"
 RULING_TRIM: Final = "RULING 2026-10-09 item 6"
-SCHEMA: Final = "gems-blanking-v2 recovery starts v4"
-"""v4: ``edge_settling_sha256`` (``tolerance.edge_settling_sha256``) beside
+SCHEMA: Final = "gems-blanking-v2 recovery starts v5"
+"""v5 (RULING 2026-10-09 (i) 3 (c)): stim-off is two times. Every measured file carries
+``electrical_end_s``, ``mechanical_end_s`` and ``mechanical_end_sample0`` beside the
+electrical settling, and ``input_mask_s`` / ``input_mask_sample0`` = their maximum, with
+``input_mask_binding``; ``stim_off_s`` is gone (one word, one meaning). Every start and cut
+is the input mask point plus a reach. A v4 file (one stim time) is refused here and by
+``night6_recovery_start``.
+v4: ``edge_settling_sha256`` (``tolerance.edge_settling_sha256``) beside
 ``edge_settling``; a file whose edge settlings are not this build's is stale and refused
 here and by ``night6_recovery_start`` (review 2026-10-09). v3: per-file ``cuts`` (one cut
 point per owner, output and trim class, RULING
@@ -252,7 +273,7 @@ list must still name it (no default). The same name is ``matlab/night6/night6_tr
 WITHDRAWN_TRIM_MODES: Final[Mapping[str, str]] = {
     "mask_to_own_start": (
         "trim mode (A), withdrawn by RULING 2026-10-09 item 6: Night 6 runs mode (B), "
-        "mask_to_electrical_drop_outputs (input masked through the electrical settling only, "
+        "mask_to_electrical_drop_outputs (input masked through the input mask point only, "
         "outputs trimmed per variable)"),
 }
 """Modes refused BY NAME, with the ruling, so a stale batch list cannot run one. (A) is
@@ -263,10 +284,10 @@ TrimClass = Literal["valid_only", "filled_or_filtered"]
 TRIM_CLASSES: Final[Mapping[str, str]] = {
     "valid_only": (
         "(i) computed over valid input samples or events only, so her own rule decides the "
-        "edge windows: cut at the electrical settling + the settling of its own INPUT (its "
+        "edge windows: cut at the input mask point + the settling of its own INPUT (its "
         "cascade without its own window), never half its window"),
     "filled_or_filtered": (
-        "(ii) computed on filled-in or filtered data: cut at the electrical settling + its "
+        "(ii) computed on filled-in or filtered data: cut at the input mask point + its "
         "full reach (the whole cascade)"),
 }
 """RULING 2026-10-09 item 6. Every trimmed variable declares one; none is guessed."""
@@ -283,8 +304,10 @@ FIXED_START_SOURCE: Final = (
     "every stim_rec recovery epoch there")
 """Where the current recovery epoch starts. Not a settling measurement (RULING (k))."""
 
-BASIS_MEASURED: Final = "stim_off_plus_electrical_plus_own_settling"
-BASIS_CUT: Final = "stim_off_plus_electrical_plus_class_reach"
+BASIS_MEASURED: Final = "input_mask_plus_own_settling"
+BASIS_CUT: Final = "input_mask_plus_class_reach"
+"""The input mask point is max(electrical end + electrical settling, mechanical end)."""
+RULING_TIMES: Final = "RULING 2026-10-09 (i) 3 (c)"
 BASIS_FIXED: Final = "fixed_132s_settling_unknown"
 HELD_UNDETECTED: Final = "held_stim_edges_undetected"
 HELD_NO_SETTLING: Final = "held_no_electrical_settling"
@@ -947,7 +970,7 @@ def _many(file: str, role: Role, paths: str, source: str, why: str = "",
     return tuple(OutputVar(file, p, role, source, owner, why=why) for p in paths.split())
 
 
-_EPOCH_WHY = "no time: computed over [electrical settling, epoch end] (mode (B))"
+_EPOCH_WHY = "no time: computed over [input mask point, epoch end] (mode (B))"
 _RECOMPUTED_WHY = ("a whole-epoch average or count of a trimmed series: recomputed from the "
                    "kept values (RULING 2026-10-09 item 6); her value is kept in the marker")
 
@@ -1535,43 +1558,93 @@ def trim_cuts() -> list[tuple[str, str, str]]:
     return sorted(out)
 
 
-def file_starts(*, session: str, fs: float | None, stim_off_s: float | None,
-                electrical_settle_s: float | None, stim_off_source: str,
-                electrical_source: str, analyses: Sequence[str] | None = None,
-                table: Mapping[str, Analysis] | None = None,
-                fixed_start_s: float = FIXED_START_S) -> dict[str, Any]:
-    """Return one file's record: per-analysis starts, or the reason the file is held.
+def input_mask(*, fs: float, electrical_settle_s: float,
+               mechanical_end_s: float) -> dict[str, Any]:
+    """Return the file's input mask point: max(electrical end + settling, mechanical end).
 
-    ``electrical_settle_s`` is the ABSOLUTE time from the file start at which rule (j) 6 (i)
-    found every channel settled (stim-off + electrical settling); it is also written as
-    ``electrical_settle_sample0``, the one rounding, for the drop mode's input mask.
-    A file whose stim edges
-    were not detected, or whose signal never settles, is HELD as a whole (invariant 41):
-    no start rows, so Night 6 refuses it by name. Within a measured file, an analysis
-    whose own settling is unknown keeps ``fixed_start_s``, labelled, with the missing
-    figure named; the others get their own starts. Missing values are absent keys.
-    ``fs`` (the file's own rate) may be ``None`` only for a file held before it was read.
+    The ONE place it is derived (invariant 33). Returned in seconds and as the exact 0-based
+    FILE sample (``seconds_to_sample`` is monotone, so the sample of the maximum is the
+    maximum of the two samples - both are written, and the document asserts the identity),
+    with which time binds: ``electrical``, ``mechanical``, or ``both`` on the same sample.
     """
-    names = list(ANALYSES if analyses is None else analyses)
-    held: dict[str, Any] = {"session": session}
+    ke = seconds_to_sample(float(electrical_settle_s), fs)
+    km = seconds_to_sample(float(mechanical_end_s), fs)
+    t = max(float(electrical_settle_s), float(mechanical_end_s))
+    k = seconds_to_sample(t, fs)
+    if k != max(ke, km):
+        msg = f"input mask sample {k} is not max({ke}, {km})"
+        raise AssertionError(msg)
+    bind = "both" if ke == km else ("electrical" if ke > km else "mechanical")
+    return {"input_mask_s": t, "input_mask_sample0": k, "input_mask_binding": bind,
+            "electrical_settle_sample0": ke, "mechanical_end_sample0": km}
+
+
+def _held_record(*, session: str, fs: float | None, electrical_end_s: float | None,
+                 mechanical_end_s: float | None, electrical_settle_s: float | None,
+                 times_source: str) -> dict[str, Any] | None:
+    """Return the held record of a file that gets no starts, or ``None`` if it gets them."""
+    held: dict[str, Any] = {"session": session, "times_source": times_source}
     if fs is not None:
         if not (math.isfinite(fs) and fs > 0):
             msg = f"{session}: fs must be finite and positive, got {fs}"
             raise ValueError(msg)
         held["fs"] = float(fs)
-    if stim_off_s is None:
+    for key, v in (("electrical_end_s", electrical_end_s),
+                   ("mechanical_end_s", mechanical_end_s)):
+        if v is not None:
+            held[key] = float(v)
+    if electrical_end_s is None or mechanical_end_s is None:
+        gone = [k for k, v in (("electrical", electrical_end_s),
+                               ("mechanical", mechanical_end_s)) if v is None]
         return {**held, "basis": HELD_UNDETECTED,
-                "why": "stim edges not detected (03B): the start is never assumed (invariant 41)"}
+                "why": f"stim end not determined ({' and '.join(gone)}): the start is never "
+                       f"assumed (invariant 41, {RULING_TIMES})"}
     if electrical_settle_s is None:
-        return {**held, "basis": HELD_NO_SETTLING, "stim_off_s": float(stim_off_s),
-                "why": "no channel set settled for 1 s inside its 140-200 s range ((j) 6 (i))"}
-    if fs is None:
+        return {**held, "basis": HELD_NO_SETTLING,
+                "why": "the electrical-only rule found no settling (RULING 2026-10-09 (i) 3)"}
+    return None
+
+
+def file_starts(*, session: str, fs: float | None, electrical_end_s: float | None,
+                mechanical_end_s: float | None, electrical_settle_s: float | None,
+                times_source: str, electrical_source: str,
+                analyses: Sequence[str] | None = None,
+                table: Mapping[str, Analysis] | None = None,
+                fixed_start_s: float = FIXED_START_S) -> dict[str, Any]:
+    """Return one file's record: per-analysis starts, or the reason the file is held.
+
+    RULING 2026-10-09 (i) 3 (c): ``electrical_end_s`` (the stimulator's ``AmA`` record) and
+    ``mechanical_end_s`` (the gate/MotorOn offset) are BOTH required - from file start, s.
+    ``electrical_settle_s`` is the ABSOLUTE time at which the electrical-only rule found the
+    file settled, measured from the electrical end (so never before it). The input mask
+    point is ``max(electrical_settle_s, mechanical_end_s)`` (:func:`input_mask`); each
+    analysis starts there + its own settling, each cut there + its class reach.
+    A file whose stim times were not determined, or whose signal never settles, is HELD as
+    a whole (invariant 41): no start rows, so Night 6 refuses it by name. Within a measured
+    file, an analysis whose own settling is unknown keeps ``fixed_start_s``, labelled, with
+    the missing figure named; the others get their own starts. Missing values are absent
+    keys. ``fs`` (the file's own rate) may be ``None`` only for a file held before it was
+    read.
+    """
+    names = list(ANALYSES if analyses is None else analyses)
+    held = _held_record(session=session, fs=fs, electrical_end_s=electrical_end_s,
+                        mechanical_end_s=mechanical_end_s,
+                        electrical_settle_s=electrical_settle_s, times_source=times_source)
+    if held is not None:
+        return held
+    if fs is None or electrical_end_s is None or mechanical_end_s is None \
+            or electrical_settle_s is None:  # for the type checker: _held_record covers these
         msg = f"{session}: a measured file needs its fs"
         raise ValueError(msg)
-    if electrical_settle_s < stim_off_s:
-        msg = (f"{session}: electrical settling {electrical_settle_s} s precedes stim-off "
-               f"{stim_off_s} s")
+    if electrical_settle_s < electrical_end_s:
+        msg = (f"{session}: electrical settling {electrical_settle_s} s precedes the "
+               f"electrical end {electrical_end_s} s")
         raise ValueError(msg)
+    im = input_mask(fs=float(fs), electrical_settle_s=float(electrical_settle_s),
+                    mechanical_end_s=float(mechanical_end_s))
+    t_mask = float(im["input_mask_s"])
+    basis_text = (f"max(electrical end + electrical settling ({electrical_source}), "
+                  f"mechanical end) ({times_source}; {RULING_TIMES})")
     fixed0 = seconds_to_sample(fixed_start_s, fs)
     rows: list[dict[str, Any]] = []
     for name in names:
@@ -1583,13 +1656,12 @@ def file_starts(*, session: str, fs: float | None, stim_off_s: float | None,
                          "source": f"{RULING}: own settling unknown, keeps {fixed_start_s:g} s "
                                    "(user rule 2026-10-08; never a partial maximum)"})
             continue
-        start = float(electrical_settle_s) + s.settling_s
+        start = t_mask + s.settling_s
         k0 = seconds_to_sample(start, fs)
         row: dict[str, Any] = {
             "analysis": name, "start_s": start, "start_sample0": k0, "basis": BASIS_MEASURED,
             "own_settling_s": s.settling_s, "binding_output": s.binding_output,
-            "source": (f"{RULING}: stim-off ({stim_off_source}) + electrical settling "
-                       f"({electrical_source}) + own settling "
+            "source": (f"{RULING}: {basis_text} + own settling "
                        f"(extent.recovery_start.ANALYSES[{name!r}], {SOURCE_LABEL})")}
         if k0 < fixed0:
             row["relation"] = "earlier_than_fixed: runs from the fixed start; early part " \
@@ -1599,19 +1671,18 @@ def file_starts(*, session: str, fs: float | None, stim_off_s: float | None,
         else:
             row["relation"] = "later_than_fixed: trimmed at Night 6"
         rows.append(row)
-    cuts = _file_cuts(float(fs), float(electrical_settle_s), float(fixed_start_s),
-                      f"stim-off ({stim_off_source}) + electrical settling "
-                      f"({electrical_source})", table)
-    return {"session": session, "fs": float(fs), "stim_off_s": float(stim_off_s),
+    cuts = _file_cuts(float(fs), t_mask, float(fixed_start_s), basis_text, table)
+    return {"session": session, "fs": float(fs), "times_source": times_source,
+            "electrical_end_s": float(electrical_end_s),
+            "mechanical_end_s": float(mechanical_end_s),
             "electrical_settle_s": float(electrical_settle_s),
-            "electrical_settle_sample0": seconds_to_sample(float(electrical_settle_s), fs),
-            "electrical_s": float(electrical_settle_s) - float(stim_off_s),
-            "analyses": rows, "cuts": cuts}
+            "electrical_s": float(electrical_settle_s) - float(electrical_end_s),
+            **im, "analyses": rows, "cuts": cuts}
 
 
-def _file_cuts(fs: float, electrical_settle_s: float, fixed_start_s: float, basis_text: str,
+def _file_cuts(fs: float, input_mask_s: float, fixed_start_s: float, basis_text: str,
                table: Mapping[str, Analysis] | None) -> list[dict[str, Any]]:
-    """One row per cut the map uses: electrical settling + the class reach, or 132 s."""
+    """One row per cut the map uses: the input mask point + the class reach, or 132 s."""
     fixed0 = seconds_to_sample(fixed_start_s, fs)
     cuts: list[dict[str, Any]] = []
     for owner, key, cls in trim_cuts():
@@ -1624,7 +1695,7 @@ def _file_cuts(fs: float, electrical_settle_s: float, fixed_start_s: float, basi
                   "source": f"{RULING_TRIM}: reach unknown, keeps {fixed_start_s:g} s "
                             "(user rule 2026-10-08; never a partial reach)"}
         else:
-            start = electrical_settle_s + reach
+            start = input_mask_s + reach
             c |= {"start_s": start, "start_sample0": seconds_to_sample(start, fs),
                   "basis": BASIS_CUT, "reach_s": reach,
                   "source": (f"{RULING_TRIM}: {basis_text} + the {cls} reach of "
@@ -1701,6 +1772,39 @@ def _check_cuts(sess: str, cuts: object) -> None:
             raise TypeError(msg)
 
 
+def _is_sample(k: object) -> bool:
+    return isinstance(k, int) and not isinstance(k, bool) and k >= 0
+
+
+def _check_times(sess: str, f: Mapping[str, Any]) -> None:
+    """Both stim times and the input mask point, consistent to the sample (RULING (i) 3 (c)).
+
+    ``input_mask_sample0`` must equal max(``electrical_settle_sample0``,
+    ``mechanical_end_sample0``), and no measured start or cut may precede it: a file that
+    disagrees with itself is refused at write time and at read time (invariant 27).
+    """
+    for key in ("electrical_settle_sample0", "mechanical_end_sample0", "input_mask_sample0"):
+        if not _is_sample(f.get(key)):
+            msg = f"{sess}: {key} must be an int >= 0 (mode (B), {RULING_TIMES})"
+            raise TypeError(msg)
+    for key in ("electrical_end_s", "mechanical_end_s", "electrical_settle_s", "input_mask_s"):
+        v = f.get(key)
+        if not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v):
+            msg = f"{sess}: {key} is absent or not a finite number ({RULING_TIMES})"
+            raise TypeError(msg)
+    ke, km, k = (int(f[x]) for x in ("electrical_settle_sample0", "mechanical_end_sample0",
+                                     "input_mask_sample0"))
+    if k != max(ke, km):
+        msg = (f"{sess}: input_mask_sample0 {k} is not max(electrical_settle_sample0 {ke}, "
+               f"mechanical_end_sample0 {km}) ({RULING_TIMES})")
+        raise ValueError(msg)
+    late = [str(r.get("analysis", r.get("cut"))) for r in (*f["analyses"], *f.get("cuts", []))
+            if r.get("basis") in (BASIS_MEASURED, BASIS_CUT) and int(r["start_sample0"]) < k]
+    if late:
+        msg = f"{sess}: measured start(s) {late} precede the input mask sample {k}"
+        raise ValueError(msg)
+
+
 def recovery_starts_document(files: Sequence[Mapping[str, Any]], *, fs: float,
                              fixed_start_s: float = FIXED_START_S,
                              table: Mapping[str, Analysis] | None = None,
@@ -1725,11 +1829,8 @@ def recovery_starts_document(files: Sequence[Mapping[str, Any]], *, fs: float,
                 if not isinstance(k, int) or isinstance(k, bool) or k < 0:
                     msg = f"{sess}/{r['analysis']}: start_sample0 must be an int >= 0"
                     raise TypeError(msg)
-            ke = f.get("electrical_settle_sample0")
-            if not isinstance(ke, int) or isinstance(ke, bool) or ke < 0:
-                msg = f"{sess}: electrical_settle_sample0 must be an int >= 0 (mode (B))"
-                raise TypeError(msg)
             _check_cuts(sess, f.get("cuts"))
+            _check_times(sess, f)
             measured.append(dict(f))
         else:
             held.append(dict(f))
@@ -1774,7 +1875,7 @@ def read_recovery_starts(path: Path) -> dict[str, Any]:
             or doc["edge_settling_sha256"] != edge_settling_sha256()):
         msg = (f"{path}: its edge_settling (sha256 {str(doc['edge_settling_sha256'])[:16]}) is "
                f"not this build's (sha256 {edge_settling_sha256()[:16]}): the starts were "
-               "derived under other edge settlings - regenerate the file (schema v4)")
+               "derived under other edge settlings - regenerate the file (schema v5)")
         raise ValueError(msg)
     recovery_starts_document([*doc["files"], *doc["held"]], fs=float(doc["fs"]),
                              fixed_start_s=float(doc["fixed_start_s"]))

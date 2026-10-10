@@ -4,15 +4,19 @@ function RS = night6_recovery_start(file)
 %   RS = night6_recovery_start(file)
 %
 % The file is written by gems_blanking_v2.extent.recovery_start.write_recovery_starts
-% (schema 'gems-blanking-v2 recovery starts v4'): per stim_rec file the electrical
-% settling as an exact 0-based FILE sample (electrical_settle_sample0), per analysis
+% (schema 'gems-blanking-v2 recovery starts v5'): per stim_rec file BOTH stim times
+% (RULING 2026-10-09 (i) 3 (c): electrical_end_s, the stimulator's AmA record, and
+% mechanical_end_s, the gate/MotorOn offset), the electrical settling and the mechanical
+% end as exact 0-based FILE samples (electrical_settle_sample0, mechanical_end_sample0),
+% and the INPUT MASK point input_mask_sample0 = their maximum, per analysis
 % (= consumer) the analysis's start as one (start_sample0) with its basis and source, and
 % per CUT (owner.output.class, RULING 2026-10-09 item 6) the cut point as one; the output
 % time map (RS.outputTimes: per-variable stamps, classes, cuts, valid fractions and
 % recomputed averages - Python's extent.recovery_start.OUTPUT_VARS); the edge settlings
 % the cuts were derived under (edge_settling, edge_settling_sha256); and the files held
 % for want of stim edges or settling. A v1 or v2 file (no cuts: the owner-start cut is
-% not mode (B)) and a v3 file (no edge-settling hash) are refused by name. It is a
+% not mode (B)), a v3 file (no edge-settling hash) and a v4 file (one stim time) are
+% refused by name. It is a
 % DECLARED input: its path and SHA-256 go into every record (RS.file, RS.sha256).
 % An empty path returns [] - Night 6 then refuses every stim_recovery epoch by name
 % (night6_recovery_lead_in), never runs one untrimmed.
@@ -20,7 +24,10 @@ function RS = night6_recovery_start(file)
 % Refused here by name ('night6:recoveryStartFile'): an unreadable file, another schema,
 % a session listed twice (case-insensitively, as the store matches names), a file both
 % measured and held, an analysis or a cut listed twice for one file, a file with no
-% cuts, a start_sample0 or an electrical_settle_sample0 that is not one integer >= 0, and
+% cuts, a start_sample0, electrical_settle_sample0, mechanical_end_sample0 or
+% input_mask_sample0 that is not one integer >= 0, a file without both stim times, an
+% input_mask_sample0 that is not max(electrical_settle_sample0, mechanical_end_sample0),
+% a measured start or cut before the input mask point, and
 % a missing output map or source list. Refused as 'night6:recoveryStartSource', naming
 % the file: a cited processing_new file (source_files, Python SOURCE_FILES) that is not on the path, or
 % whose SHA-256 is not the one the starts file was computed from. Refused as
@@ -38,7 +45,7 @@ function RS = night6_recovery_start(file)
         error('night6:recoveryStartFile', 'the recovery-starts file %s does not exist', file);
     end
     D = jsondecode(fileread(file));
-    want = 'gems-blanking-v2 recovery starts v4';
+    want = 'gems-blanking-v2 recovery starts v5';
     if ~isstruct(D) || ~isfield(D, 'schema') || ~strcmp(D.schema, want)
         error('night6:recoveryStartFile', '%s is not a ''%s'' file', file, want);
     end
@@ -60,10 +67,7 @@ function RS = night6_recovery_start(file)
     for k = 1:numel(RS.files)
         F = RS.files{k};
         seen = add_session(seen, F, file);
-        if ~isfield(F, 'electrical_settle_sample0') || ~is_sample(F.electrical_settle_sample0)
-            error('night6:recoveryStartFile', ['%s: %s electrical_settle_sample0 must be ' ...
-                  'one integer >= 0'], file, F.session);
-        end
+        check_times(F, file);   % both stim times, and the input mask = their maximum
         rows = as_cells(F.analyses);
         names = cellfun(@(r) char(r.analysis), rows, 'UniformOutput', false);
         if numel(unique(names)) ~= numel(names)
@@ -96,6 +100,42 @@ function RS = night6_recovery_start(file)
     end
     for k = 1:numel(RS.held)
         seen = add_session(seen, RS.held{k}, file);
+    end
+end
+
+function check_times(F, file)
+% RULING 2026-10-09 (i) 3 (c): stim-off is two times. Both are required, the electrical
+% settling and the mechanical end are exact samples, and the input mask point Night 6
+% masks through is their maximum, to the sample; no measured start or cut precedes it.
+    for g = {'electrical_settle_sample0', 'mechanical_end_sample0', 'input_mask_sample0'}
+        if ~isfield(F, g{1}) || ~is_sample(F.(g{1}))
+            error('night6:recoveryStartFile', '%s: %s %s must be one integer >= 0', ...
+                  file, F.session, g{1});
+        end
+    end
+    for g = {'electrical_end_s', 'mechanical_end_s', 'electrical_settle_s', 'input_mask_s'}
+        if ~isfield(F, g{1}) || ~isnumeric(F.(g{1})) || ~isscalar(F.(g{1})) ...
+                || ~isfinite(F.(g{1}))
+            error('night6:recoveryStartFile', ['%s: %s has no %s (both stim times are ' ...
+                  'required, RULING 2026-10-09 (i) 3 (c))'], file, F.session, g{1});
+        end
+    end
+    k = double(F.input_mask_sample0);
+    if k ~= max(double(F.electrical_settle_sample0), double(F.mechanical_end_sample0))
+        error('night6:recoveryStartFile', ['%s: %s input_mask_sample0 %d is not ' ...
+              'max(electrical_settle_sample0 %d, mechanical_end_sample0 %d)'], file, ...
+              F.session, k, F.electrical_settle_sample0, F.mechanical_end_sample0);
+    end
+    rows = as_cells(F.analyses);
+    if isfield(F, 'cuts'), rows = [rows, as_cells(F.cuts)]; end
+    for j = 1:numel(rows)
+        r = rows{j};
+        if isfield(r, 'basis') && any(strcmp(r.basis, {'input_mask_plus_own_settling', ...
+                                                       'input_mask_plus_class_reach'})) ...
+                && isnumeric(r.start_sample0) && double(r.start_sample0) < k
+            error('night6:recoveryStartFile', ['%s: %s has a measured start (sample %d) ' ...
+                  'before its input mask sample %d'], file, F.session, r.start_sample0, k);
+        end
     end
 end
 

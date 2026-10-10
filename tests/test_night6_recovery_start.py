@@ -152,9 +152,21 @@ def _cuts(cut_at: Mapping[str, int] | None, default: int) -> list[dict[str, Any]
 
 
 def _file(rows: list[dict[str, Any]], ke: int = I0, session: str = SESSION,
-          cut_at: Mapping[str, int] | None = None) -> dict[str, Any]:
-    return {"session": session, "fs": FS, "electrical_settle_sample0": ke, "analyses": rows,
-            "cuts": _cuts(cut_at, ke)}
+          cut_at: Mapping[str, int] | None = None, km: int | None = None) -> dict[str, Any]:
+    """Build a v5 row: electrical settling at ``ke``, mechanical end at ``km`` (or ``ke``).
+
+    The input mask is their maximum (RULING 2026-10-09 (i) 3 (c)).
+    """
+    km = ke if km is None else km
+    k = max(ke, km)
+    return {"session": session, "fs": FS, "times_source": "synthetic",
+            "electrical_end_s": min(ke, km) / FS - 0.25, "mechanical_end_s": km / FS,
+            "mechanical_end_sample0": km, "electrical_settle_s": ke / FS,
+            "electrical_settle_sample0": ke, "electrical_s": 0.25,
+            "input_mask_s": k / FS, "input_mask_sample0": k,
+            "input_mask_binding": "both" if ke == km else (
+                "electrical" if ke > km else "mechanical"),
+            "analyses": rows, "cuts": _cuts(cut_at, k)}
 
 
 def _row(name: str, k0: int, basis: str = rs.BASIS_MEASURED) -> dict[str, Any]:
@@ -205,11 +217,16 @@ def _cases(tmp: Path) -> dict[str, Any]:
     cut_own = {cid: own[cid.split(".")[0]] for cid in CUT_IDS}
     elec = {d: _file([_row(c, own[c]) for c in CONSUMERS], ke=I0 + d, cut_at=cut_own)
             for d in (-1, 0, 1, 2)}
-    py = rs.file_starts(session=SESSION, fs=FS, stim_off_s=1.0, electrical_settle_s=1.5,
-                        stim_off_source="synthetic", electrical_source="synthetic",
+    # (i) 3 (c): the electrical settling is before the epoch, the gate closes 2 rows in -
+    # the input is masked through the MECHANICAL end, not the electrical settling
+    mech = _file([_row(c, own[c]) for c in CONSUMERS], ke=I0 - 5, cut_at=cut_own, km=I0 + 2)
+    py = rs.file_starts(session=SESSION, fs=FS, electrical_end_s=1.0, mechanical_end_s=1.0,
+                        electrical_settle_s=1.5,
+                        times_source="synthetic", electrical_source="synthetic",
                         table=TEST_TABLE, fixed_start_s=START)
-    held = rs.file_starts(session=SESSION, fs=FS, stim_off_s=None, electrical_settle_s=None,
-                          stim_off_source="a", electrical_source="b")
+    held = rs.file_starts(session=SESSION, fs=FS, electrical_end_s=None, mechanical_end_s=None,
+                          electrical_settle_s=None,
+                          times_source="a", electrical_source="b")
     other = _file([_row("spikes", I0)], session="someone_else")
     no_spikes = {**file_b, "analyses": [_row(c, I0 + 1) for c in CONSUMERS[1:]]}
     d = tmp / "starts"
@@ -221,6 +238,7 @@ def _cases(tmp: Path) -> dict[str, Any]:
          "other": _starts(d / "other.json", [other]),
          "no_spikes": _starts(d / "nos.json", [no_spikes]),
          "fs": _starts(d / "fs.json", [{**file_b, "fs": FS + 1.0}], fs=FS + 1.0),
+         "mech": _starts(d / "mech.json", [mech]),
          **{f"elec{k}": _starts(d / f"elec{k}.json", [v]) for k, v in elec.items()}}
     readers = []
     for name, edit in (("schema", lambda j: j.update(schema="v0")),
@@ -249,7 +267,17 @@ def _cases(tmp: Path) -> dict[str, Any]:
                        ("no_edge_hash", lambda j: j.pop("edge_settling_sha256")),
                        ("edge_stale", lambda j: j.update(edge_settling_sha256="0" * 64)),
                        ("edge_changed", lambda j: j["edge_settling"]["mmc"].update(
-                           pad_s=1.0))):
+                           pad_s=1.0)),
+                       ("v4", lambda j: j.update(schema="gems-blanking-v2 recovery starts v4")),
+                       ("no_mechanical", lambda j: j["files"][0].pop("mechanical_end_sample0")),
+                       ("no_mechanical_time", lambda j: j["files"][0].pop("mechanical_end_s")),
+                       ("no_electrical_time", lambda j: j["files"][0].pop("electrical_end_s")),
+                       ("no_input_mask", lambda j: j["files"][0].pop("input_mask_sample0")),
+                       ("mask_not_max", lambda j: j["files"][0].update(
+                           input_mask_sample0=j["files"][0]["input_mask_sample0"] + 1)),
+                       ("start_before_mask", lambda j: j["files"][0]["analyses"][0].update(
+                           start_sample0=j["files"][0]["input_mask_sample0"] - 1,
+                           basis=rs.BASIS_MEASURED))):
         j = json.loads(Path(s["boundary"]).read_text(encoding="utf-8"))
         edit(j)
         f = d / f"reader_{name}.json"
@@ -263,6 +291,7 @@ def _cases(tmp: Path) -> dict[str, Any]:
              plan("baseline_row", s["boundary"], bl, "baseline"),
              plan("baseline", s["other"], bl, "baseline"),
              *(plan(f"elec{k}", s[f"elec{k}"]) for k in elec),
+             plan("mech", s["mech"]),
              plan("mode_missing", s["boundary"], mode=""),
              plan("mode_bad", s["boundary"], mode="mask_to_somewhere")]
     run = {"gems_root": (tmp / "store").as_posix(), "mask_folder": st["mask_folder"].as_posix(),
@@ -442,6 +471,16 @@ def test_night6_trims_in_mode_b_to_the_sample(  # noqa: PLR0915 - one MATLAB run
             owner = cid.split(".")[0]
             assert c["start_sample0"] == case["own"][owner], cid
             assert c["output_rows_before_start"] == case["own"][owner] - I0, cid
+    # (i) 3 (c): the mechanical end binds - every input masked on rows 1..2, not 0
+    m = got["mech"]
+    _check_trim(m, dict.fromkeys(CONSUMERS, 2))
+    mrec = json.loads(m["record"])
+    assert mrec["input_mask_sample0"] == I0 + 2 and mrec["electrical_settle_sample0"] == I0 - 5
+    assert mrec["mechanical_end_sample0"] == I0 + 2
+    assert mrec["input_mask_binding"] == "mechanical"
+    assert {mrec["consumers"][c]["trimmed_rows"] for c in CONSUMERS} == {2}
+    assert {mrec["consumers"][c]["status"] for c in CONSUMERS} == {"trimmed"}
+    assert "mechanical end" in mrec["rule"]
     t1 = _inputs(got["elec1"]["trim"])
     assert t1[("spikes", "L_T")][:2].tolist() == [True, False]  # one sample, not two
     assert t1[("mmc", "ANT1")][:2].tolist() == [True, False]
@@ -491,7 +530,8 @@ def test_night6_trims_in_mode_b_to_the_sample(  # noqa: PLR0915 - one MATLAB run
     assert readers["ok"]["error"] == ""
     for name in ("schema", "twice", "fractional", "v1", "v2", "no_electrical", "no_cuts",
                  "cut_twice", "cut_fractional", "no_map", "no_sources", "sources_as_object",
-                 "v3", "no_edge_hash"):
+                 "v3", "no_edge_hash", "v4", "no_mechanical", "no_mechanical_time",
+                 "no_electrical_time", "no_input_mask", "mask_not_max", "start_before_mask"):
         assert readers[name]["error"] == "night6:recoveryStartFile", (name, readers[name])
     # review 2026-10-09: a starts file derived under other edge settlings is stale
     for name in ("edge_stale", "edge_changed"):

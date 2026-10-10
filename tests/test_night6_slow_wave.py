@@ -97,8 +97,9 @@ def _case(tmp: Path) -> dict[str, Any]:
     assert pnew is not None
     starts = tmp / "starts.json"
     rs.write_recovery_starts(starts, rs.recovery_starts_document([rs.file_starts(
-        session=TRIM_SESSION, fs=FS, stim_off_s=0.5, electrical_settle_s=TRIM_EL_S,
-        stim_off_source="test", electrical_source="test")], fs=FS))
+        session=TRIM_SESSION, fs=FS, electrical_end_s=0.5, mechanical_end_s=0.5,
+        electrical_settle_s=TRIM_EL_S,
+        times_source="test", electrical_source="test")], fs=FS))
     return {"processing_new": pnew.as_posix(), "night6": NIGHT6.as_posix(),
             "work": work.as_posix(), "decimate": {"input_file": (tmp / "dec.mat").as_posix()},
             "calls": {"input_file": (tmp / "calls.mat").as_posix()},

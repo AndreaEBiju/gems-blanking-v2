@@ -12,9 +12,10 @@ function [lead, rec] = night6_recovery_lead_in(RS, session, condition, i0, n, fs
 %   mode       the declared trim mode (night6_trim_modes; refused by name otherwise)
 %
 % RULING 2026-10-08 (k) 2 and RULING 2026-10-09 item 6 (mode (B)): Night 6 runs every
-% stim_rec recovery epoch from its own start (132 s). The file's electrical settling ke,
-% each analysis's own start k0 and each CUT's point kc (owner.output.class) are exact
-% 0-based FILE samples. Rows are 1-based into the epoch, so row r is file sample
+% stim_rec recovery epoch from its own start (132 s). The file's INPUT MASK point ke =
+% max(electrical end + electrical settling, mechanical end) (RULING 2026-10-09 (i) 3 (c),
+% input_mask_sample0), each analysis's own start k0 and each CUT's point kc
+% (owner.output.class) are exact 0-based FILE samples. Rows are 1-based into the epoch, so row r is file sample
 % i0 + r - 1 (0-based) and the rows before file sample k are 1 .. k - i0.
 %
 %   EVERY consumer's input rows 1 .. ke - i0 are NaN (one point for all, so her
@@ -77,16 +78,19 @@ function [lead, rec] = night6_recovery_lead_in(RS, session, condition, i0, n, fs
     end
     rec.applies = true;
     rec.epoch_start_sample0 = i0;
-    for f = {'stim_off_s', 'electrical_settle_s', 'electrical_settle_sample0', 'electrical_s'}
+    for f = {'electrical_end_s', 'mechanical_end_s', 'mechanical_end_sample0', ...
+             'times_source', 'electrical_settle_s', 'electrical_settle_sample0', ...
+             'electrical_s', 'input_mask_s', 'input_mask_sample0', 'input_mask_binding'}
         if isfield(F, f{1}), rec.(f{1}) = F.(f{1}); end
     end
-    ke = double(F.electrical_settle_sample0);
+    ke = double(F.input_mask_sample0);   % max(electrical settling, mechanical end)
     rows = min(n, max(0, ke - i0));
     rec.rule = sprintf(['input of every analysis masked on epoch rows 1..%d (before the ' ...
-                        'electrical settling, file sample %d 0-based); each output variable ' ...
+                        'input mask point = max(electrical end + electrical settling, ' ...
+                        'mechanical end), file sample %d 0-based); each output variable ' ...
                         'stamped before its own cut dropped or flagged (RULING 2026-10-09 ' ...
                         'item 6)'], rows, ke);
-    rec.epoch_scalars = ['computed over [electrical settling, epoch end]: they have no ' ...
+    rec.epoch_scalars = ['computed over [input mask point, epoch end]: they have no ' ...
                          'time to trim by (whole-epoch averages of trimmed series are ' ...
                          'recomputed from the kept values)'];
     rec.cuts = cellfun(@(c) struct('cut', char(c.cut), 'owner', char(c.owner), ...
