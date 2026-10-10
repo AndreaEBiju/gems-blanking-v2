@@ -1017,12 +1017,13 @@ def own_signals_by_signal(signals: Mapping[str, Sequence[str]], detection_signal
     contacts and tripole for that cuff's spikes; the routed HR channel, or both channels of its
     pair, for breathing. ``signals`` is what each consumer reads (a stage-1a record's
     ``signals``), ``detection_signals`` what detection read (its ``detection_signals``) and
-    ``channel_signals`` :func:`channel_detection_signals` of the recording's channels. hrv is
-    left out (its extent is operational). A signal whose family cannot be resolved is refused
+    ``channel_signals`` :func:`channel_detection_signals` of the recording's channels. hrv's
+    are its HR-source channels, as breathing's (its core rule, ``own_signals``, reads them; its
+    extent stays operational). A signal whose family cannot be resolved is refused
     (ValueError, naming it): never guessed, never skipped.
     """
     return {(c, s): core_own_signals(c, s, detection_signals, channel_signals)
-            for c, sigs in signals.items() if c != "hrv" for s in sigs}
+            for c, sigs in signals.items() for s in sigs}
 
 
 class ExtentNotAssessableError(ValueError):

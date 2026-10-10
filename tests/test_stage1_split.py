@@ -38,6 +38,11 @@ from tests.conftest import (
 Z_CONSUMERS = ("spikes", "mmc", "slow_wave", "breathing")
 
 
+def _cb(mode: str, **over: str) -> dict[str, str]:
+    """Return a core-blanking declaration: every z consumer ``mode``, hrv ``off``."""
+    return {**dict.fromkeys(Z_CONSUMERS, mode), "hrv": "off", **over}
+
+
 @functools.cache
 def _synth(seed: int) -> Stage1Synth:
     return make_stage1_epoch(seed=seed)
@@ -113,8 +118,9 @@ def test_the_cache_answers_every_threshold_set_and_scope_as_the_full_arrays(
     by_band = data.draw(hs.one_of(hs.none(), hs.fixed_dictionaries(
         {b: hs.floats(st1.CACHE_FLOOR_Z, 8.0) for b in BANDS})), label="floor_by_band")
     cores = data.draw(hs.one_of(hs.none(), hs.fixed_dictionaries(
-        {c: hs.sampled_from(["always", "when_visible", "own_signals_or_visible"])
-         for c in Z_CONSUMERS})), label="cores")
+        {**{c: hs.sampled_from(["always", "when_visible", "own_signals_or_visible",
+                                "own_signals"]) for c in Z_CONSUMERS},
+         "hrv": hs.sampled_from(["own_signals", "off"])})), label="cores")
     kw = {"tolerances": _table(thr), "scopes": scopes, "floor_z": floor,
           "floor_by_band": by_band, "core_blanking": cores}
     want = st1.extents_routing_masks(full, confirmed, **kw)  # type: ignore[arg-type]
@@ -146,7 +152,7 @@ def test_the_core_and_padding_are_always_blanked_for_every_z_consumer() -> None:
     off = dict.fromkeys(Z_CONSUMERS, tl.CROSS_BAND_SCOPE_OFF)
     _c, _e, _d, without = st1.extents_routing_masks(full, ids, tolerances=_table(thr),
                                                     scopes=off)
-    always = dict.fromkeys(Z_CONSUMERS, "always")
+    always = _cb("always")
     _c, _e, dec, masks = st1.extents_routing_masks(full, ids, tolerances=_table(thr),
                                                    scopes=off, core_blanking=always)
     assert all(d.consumer == "hrv" for d in dec)  # nothing is routed but hrv
@@ -166,21 +172,21 @@ def test_the_core_and_padding_are_always_blanked_for_every_z_consumer() -> None:
         assert m.invalid.sum() > without[(c, s, _b)].invalid.sum()
     spans = st1.core_pad_spans(full, ids, core_blanking=always)
     assert {sp.reason for sp in spans} == {st1.CORE_PAD_REASON}
-    assert {sp.consumer for sp in spans} == set(Z_CONSUMERS)
+    assert {sp.consumer for sp in spans} == set(Z_CONSUMERS)  # hrv declared off
 
 
 def test_when_visible_blanks_the_core_only_where_its_own_band_crosses_over_the_core() -> None:
     """The coordinator's second setting: core + pad only where the band is visible there."""
     full = _full(3)
     ids = sorted(full.events)
-    vis = dict.fromkeys(Z_CONSUMERS, "when_visible")
+    vis = _cb("when_visible")
     high = st1.core_pad_spans(full, ids, core_blanking=vis,
                               tolerances=_table(dict.fromkeys(Z_CONSUMERS, 99.0)))
     assert high == []  # nothing visible at z 99: nothing blanked beyond the extents
     thr = dict.fromkeys(Z_CONSUMERS, 4.0)
     got = {(sp.consumer, sp.signal, sp.start_s)
            for sp in st1.core_pad_spans(full, ids, core_blanking=vis, tolerances=_table(thr))}
-    every = st1.core_pad_spans(full, ids, core_blanking=dict.fromkeys(Z_CONSUMERS, "always"))
+    every = st1.core_pad_spans(full, ids, core_blanking=_cb("always"))
     specs = tl.extent_consumers()
     want = set()
     for sp in every:
@@ -200,7 +206,7 @@ def test_when_visible_blanks_the_core_only_where_its_own_band_crosses_over_the_c
     assert sum(sp.consumer == "slow_wave" for sp in m) == sum(sp.consumer == "slow_wave"
                                                               for sp in every)
     for bad in ({**vis, "mmc": "sometimes"}, {c: v for c, v in vis.items() if c != "spikes"}):
-        with pytest.raises(ValueError, match="not declared as always"):
+        with pytest.raises(ValueError, match="is not declared as one of"):
             st1.core_pad_spans(full, ids, core_blanking=bad, tolerances=_table(thr))
 
 
@@ -377,13 +383,13 @@ def _own_cache(seed: int, *, empty: bool = False) -> st1.EpochCache:
     full = _full(seed)
     own = {(c, s): (frozenset() if empty else
                     tl.core_own_signals(c, s, STAGE1_SIGNALS, {}))
-           for c, v in full.signals.items() if c != "hrv" for s in v}
+           for c, v in full.signals.items() for s in v}
     return st1.EpochCache(**{**full.__dict__, "own_signals": own})
 
 
 def _spans(cache: st1.EpochCache, thr: float) -> set[tuple[str, str, str]]:
     ids = sorted(cache.events)
-    got = st1.core_pad_spans(cache, ids, core_blanking=dict.fromkeys(Z_CONSUMERS, OWN),
+    got = st1.core_pad_spans(cache, ids, core_blanking=_cb(OWN),
                              tolerances=_table(dict.fromkeys(Z_CONSUMERS, thr)))
     out = set()
     for sp in got:
@@ -415,7 +421,7 @@ def test_a_core_detected_on_the_consumers_own_signals_blanks_it() -> None:
 def test_a_core_visible_in_the_own_band_blanks_it() -> None:
     cache = _own_cache(2, empty=True)  # no core counts as detected on own signals
     vis = st1.core_pad_spans(cache, sorted(cache.events),
-                             core_blanking=dict.fromkeys(Z_CONSUMERS, "when_visible"),
+                             core_blanking=_cb("when_visible"),
                              tolerances=_table(dict.fromkeys(Z_CONSUMERS, 4.0)))
     got = _spans(cache, 4.0)
     assert got and len(got) == len(vis)
@@ -428,13 +434,13 @@ def test_a_core_neither_own_nor_visible_does_not_blank() -> None:
 def test_the_core_and_its_padding_are_blanked_together_whenever_it_blanks() -> None:
     cache = _own_cache(1)
     ids = sorted(cache.events)
-    for sp in st1.core_pad_spans(cache, ids, core_blanking=dict.fromkeys(Z_CONSUMERS, OWN),
+    for sp in st1.core_pad_spans(cache, ids, core_blanking=_cb(OWN),
                                  tolerances=_table(dict.fromkeys(Z_CONSUMERS, 99.0))):
         assert any(_bounds(cache, e, sp.consumer) == (sp.start_s, sp.stop_s) for e in ids)
         assert sp.reason == st1.CORE_PAD_REASON
     no_own = st1.EpochCache(**{**cache.__dict__, "own_signals": {}})
     with pytest.raises(ValueError, match="needs its own signals"):
-        st1.core_pad_spans(no_own, ids, core_blanking=dict.fromkeys(Z_CONSUMERS, OWN),
+        st1.core_pad_spans(no_own, ids, core_blanking=_cb(OWN),
                            tolerances=_table(dict.fromkeys(Z_CONSUMERS, 4.0)))
 
 
@@ -492,3 +498,70 @@ def test_a_record_without_code_keys_takes_its_waves_launch_declaration_or_is_ref
                 {**launch, "driver_sha256": DRIVER.upper()}):
         with pytest.raises(ValueError, match="stage1a_launch"):
             st1.stage1a_code(_code_keys(), bad, wave_id="w1b", what="x")
+
+
+# ---------------------------------------------------------------------------
+# Andrea's revised core rule (2026-10-10, scope A)
+# ---------------------------------------------------------------------------
+
+
+def test_when_visible_is_any_frame_of_the_core_then_the_whole_core_plus_padding() -> None:
+    """Rule (ii): ONE finite frame of the core window above the threshold blanks core + pad."""
+    full = _full(1)
+    eid = sorted(full.events)[0]
+    c = full.events[eid].candidate
+    band = tl.extent_consumers()["slow_wave"].band
+    i0, i1 = st1.core_frames(c.start_s, c.stop_s, full.z_t0_s)
+    z = {k: np.asarray(v, dtype=np.float64).copy() for k, v in full.z.items()}
+    for s_ in full.signals["slow_wave"]:
+        z[(s_, band)][max(0, i0):i1] = 0.0
+    one = st1.EpochCache(**{**full.__dict__, "z": z})
+    thr = _table(dict.fromkeys(Z_CONSUMERS, 5.0))
+    assert not [sp for sp in st1.core_pad_spans(one, [eid], core_blanking=_cb("when_visible"),
+                                                tolerances=thr) if sp.consumer == "slow_wave"]
+    sig = full.signals["slow_wave"][0]
+    z[(sig, band)][i1 - 1] = 5.01  # the last frame of the core window only
+    got = [sp for sp in st1.core_pad_spans(one, [eid], core_blanking=_cb("when_visible"),
+                                           tolerances=thr) if sp.consumer == "slow_wave"]
+    pad = tl.consumer_settling("slow_wave", full.fs).total_s  # type: ignore[union-attr]
+    end = full.z_t0_s + full.n_frames * GRID_S
+    assert [(sp.signal, sp.start_s, sp.stop_s) for sp in got] == [
+        (sig, max(full.z_t0_s, c.start_s - pad), min(end, c.stop_s + pad))]
+
+
+def test_hrv_honours_its_core_rule_own_signals_only() -> None:
+    """Rule (i) for HRV: only cores detected on its HR-source channels blank it.
+
+    Core + HRV's padding; any other core does not (a beat-train change is not visible);
+    ``off`` blanks none.
+    """
+    cache = _own_cache(1)
+    ids = sorted(cache.events)
+    hr = cache.signals["hrv"][0]
+    own = cache.own_signals[("hrv", hr)]
+    got = {sp.start_s for sp in st1.core_pad_spans(cache, ids, core_blanking=_cb(
+        "always", hrv="own_signals")) if sp.consumer == "hrv"}
+    pad = tl.consumer_settling("hrv", cache.fs).total_s  # type: ignore[union-attr]
+    want = {max(cache.z_t0_s, cache.events[e].candidate.start_s - pad) for e in ids
+            if {q[0] for q in cache.detecting[e]} & own}
+    assert got == want and 0 < len(want) < len(ids)
+    assert not [sp for sp in st1.core_pad_spans(cache, ids, core_blanking=_cb("always"))
+                if sp.consumer == "hrv"]
+    for bad in ("when_visible", "always", "own_signals_or_visible"):
+        with pytest.raises(ValueError, match="hrv: core blanking"):
+            st1.core_pad_spans(cache, ids, core_blanking=_cb("always", hrv=bad))
+    # the beat-train extent is unchanged: hrv's mask = its operational extents + the core rule
+    thr = _table(dict.fromkeys(Z_CONSUMERS, 6.0))
+    _c, ext, _d, off = st1.extents_routing_masks(cache, ids, tolerances=thr, scopes=None,
+                                                 core_blanking=_cb("always"))
+    _c, ext2, _d, on = st1.extents_routing_masks(cache, ids, tolerances=thr, scopes=None,
+                                                 core_blanking=_cb("always", hrv="own_signals"))
+    assert [x for x in ext if x[1] == "hrv"] == [x for x in ext2 if x[1] == "hrv"]
+    k = next(k for k in on if k[0] == "hrv")
+    assert (on[k].invalid >= off[k].invalid).all() and on[k].invalid.sum() > off[k].invalid.sum()
+
+
+def test_breathing_own_signals_are_the_pair_leads_two_contacts_or_the_routed_channel() -> None:
+    det, chmap = STAGE1_SIGNALS, {"RVN2": "R_V2", "LVN3": "L_V3"}
+    own = tl.own_signals_by_signal({"breathing": ("RVN2-LVN3",), "hrv": ("R_T",)}, det, chmap)
+    assert own == {("breathing", "RVN2-LVN3"): {"R_V2", "L_V3"}, ("hrv", "R_T"): {"R_T"}}

@@ -147,8 +147,9 @@ def _build(**over: Any) -> tm.Option1Tolerances:  # noqa: ANN401 - keyword overr
                             "mapping_sha256": "m" * 64, "scan_sha256": "s" * 64,
                             "generation": GEN, "cross_band_scope": ALL,
                             "extent_percentile": "p90",
-                            "core_blanking": dict.fromkeys(
-                                ("breathing", "mmc", "slow_wave", "spikes"), "always")}
+                            "core_blanking": {**dict.fromkeys(
+                                ("breathing", "mmc", "slow_wave", "spikes"), "always"),
+                                "hrv": "off"}}
     args.update(over)
     return tm.option1_tolerances(**args)
 
@@ -198,8 +199,8 @@ def test_the_floor_consumers_take_the_declared_percentile_of_their_band(pct: str
     assert t.floor_consumers == ("mmc", "slow_wave", "spikes")
     rec = t.record()
     assert rec["extent_percentile"] == pct and rec["cross_band_floor"] == dict(want)
-    assert rec["core_blanking"] == dict.fromkeys(("breathing", "mmc", "slow_wave", "spikes"),
-                                                 "always")
+    assert rec["core_blanking"] == {**dict.fromkeys(("breathing", "mmc", "slow_wave",
+                                                      "spikes"), "always"), "hrv": "off"}
     assert "DECLARED core blanking" in rec["core_pad_rule"]
     assert rec["null_percentile_source"]["sha256"] == tm.NULL_PERCENTILE_SOURCE["sha256"]
     assert f"clean null's {pct}" in rec["thresholds"]["mmc"]["setter"]
@@ -223,7 +224,9 @@ def test_the_percentile_is_required_and_never_defaulted(bad: object) -> None:
                                  dict.fromkeys(("breathing", "mmc", "slow_wave", "spikes"),
                                                "sometimes"),
                                  {**dict.fromkeys(("breathing", "mmc", "slow_wave", "spikes"),
-                                                  "always"), "hrv": "always"}])
+                                                  "always"), "hrv": "always"},
+                                 dict.fromkeys(("breathing", "mmc", "slow_wave", "spikes"),
+                                               "always")])
 def test_core_blanking_is_declared_per_consumer_and_never_defaulted(bad: object) -> None:
     with pytest.raises(ValueError, match="core blanking"):
         _build(core_blanking=bad)
@@ -231,12 +234,19 @@ def test_core_blanking_is_declared_per_consumer_and_never_defaulted(bad: object)
 
 def test_both_core_blanking_settings_are_recorded_and_hashed() -> None:
     zc = ("breathing", "mmc", "slow_wave", "spikes")
-    vis = _build(core_blanking=dict.fromkeys(zc, "when_visible"))
-    mixed = _build(core_blanking={**dict.fromkeys(zc, "when_visible"), "breathing": "always"})
-    assert vis.record()["core_blanking"] == dict.fromkeys(zc, "when_visible")
+    vis = _build(core_blanking={**dict.fromkeys(zc, "when_visible"), "hrv": "off"})
+    mixed = _build(core_blanking={**dict.fromkeys(zc, "when_visible"), "breathing": "always",
+                                  "hrv": "own_signals"})
+    assert vis.record()["core_blanking"] == {**dict.fromkeys(zc, "when_visible"), "hrv": "off"}
     assert mixed.core_blanking["breathing"] == "always"
+    assert mixed.core_blanking["hrv"] == "own_signals"
     assert len({_build().sha256(), vis.sha256(), mixed.sha256()}) == 3
-    assert tm.CORE_BLANKING == ("always", "when_visible", "own_signals_or_visible")
+    assert tm.CORE_BLANKING == ("always", "when_visible", "own_signals_or_visible",
+                                "own_signals")
+    assert tm.HRV_CORE_BLANKING == ("own_signals", "off")
+    andrea = {"slow_wave": "when_visible", "mmc": "when_visible", "spikes": "when_visible",
+              "hrv": "own_signals", "breathing": "own_signals_or_visible"}
+    assert _build(core_blanking=andrea).core_blanking == andrea  # expressible (scope A)
 
 
 def test_a_cross_band_pair_counts_while_above_its_own_bands_floor() -> None:
@@ -559,7 +569,8 @@ def test_own_signals_only_is_per_signal_never_per_consumer() -> None:
 def test_own_signals_by_signal_is_the_one_mapping_for_both_rules() -> None:
     own = tl.own_signals_by_signal({**SC_SIGNALS, "hrv": ("LVN2-RVN1",)}, DET, CH)
     assert own == {("spikes", "L_T"): NERVE_L, ("spikes", "R_T"): NERVE_R,
-                   ("breathing", "LVN2-RVN1"): {"L_V2", "R_V1"}, ("mmc", "ANT1"): STOMACH}
+                   ("breathing", "LVN2-RVN1"): {"L_V2", "R_V1"}, ("mmc", "ANT1"): STOMACH,
+                   ("hrv", "LVN2-RVN1"): {"L_V2", "R_V1"}}
     assert all(own[k] == tl.core_own_signals(*k, DET, CH) for k in own)
     with pytest.raises(ValueError, match="HR-source channels are unknown"):
         tl.own_signals_by_signal({"breathing": ("ECG",)}, DET, CH)

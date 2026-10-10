@@ -65,6 +65,7 @@ __all__ = [
     "CORE_BLANKING",
     "CORE_PAD_RULE",
     "EXTENT_PERCENTILES",
+    "HRV_CORE_BLANKING",
     "NULL_PERCENTILE_SOURCE",
     "NULL_PERCENTILE_Z",
     "OPTION1_RULE",
@@ -136,21 +137,33 @@ NULL_PERCENTILE_SOURCE: Final[Mapping[str, Any]] = {
 """Where :data:`NULL_PERCENTILE_Z` comes from; ``tests/test_tolerance_map.py`` holds the two to
 each other through the archived file."""
 
-CORE_BLANKING: Final[tuple[str, ...]] = ("always", "when_visible", "own_signals_or_visible")
+CORE_BLANKING: Final[tuple[str, ...]] = ("always", "when_visible", "own_signals_or_visible",
+                                         "own_signals")
 """The core-blanking declaration every z consumer makes, with no default (coordinator, after
 the decision table showed the clause decides the holds by itself: slow wave held 10/10 at p99
 with it, 1/10 without): ``always`` - the ruling as written, the core plus padding always
-blanked; ``when_visible`` - only where the consumer's own band is above its threshold over the
-core; ``own_signals_or_visible`` (Andrea, 2026-10-10) - when the core was detected on the
-consumer's OWN signals (``tolerance.core_own_signals``) or its own band is above its threshold
-over the core (``extent.stage1.core_pad_spans``)."""
+blanked; ``when_visible`` (Andrea's rule (ii)) - only where the consumer's own band is above
+its threshold in ANY finite frame of the core window (``stage1.core_frames``, the window
+``compute_extent`` takes), then the whole core plus the padding; ``own_signals`` (rule (i)) -
+only when the core was detected on the consumer's OWN signals
+(``tolerance.own_signals_by_signal``); ``own_signals_or_visible`` (Andrea, 2026-10-10) -
+either (``extent.stage1.core_pad_spans``)."""
+
+HRV_CORE_BLANKING: Final[tuple[str, ...]] = ("own_signals", "off")
+"""HRV's core-blanking declaration (Andrea, revised 2026-10-10), required, no default: HRV
+has no z band, so only rule (i) can apply - ``own_signals``: a core blanks HRV (core plus
+HRV's padding) when it was detected on the HR-source channels; a beat-train change is NOT
+"visible" (the beat-train extent stays HRV's operational extent, unchanged) - or ``off``
+(HRV takes only its beat-train extent, the behaviour before this declaration existed)."""
 
 CORE_PAD_RULE: Final = (
     "RULING 2026-10-10 item 2: the motion core and the consumer's padding (its measured "
-    "settling) are blanked per each z consumer's DECLARED core blanking - 'always' (the ruling "
-    "as written), 'when_visible' (only where its own band is above its threshold over the "
-    "core) or 'own_signals_or_visible' (Andrea 2026-10-10: also when the core was detected on "
-    "the consumer's own signals); beyond the core the extent grows only "
+    "settling) are blanked per each consumer's DECLARED core blanking - 'always' (the ruling "
+    "as written), 'when_visible' (only where its own band is above its threshold in any frame "
+    "of the core), 'own_signals' (only when the core was detected on the consumer's own "
+    "signals) or 'own_signals_or_visible' (either; Andrea 2026-10-10); hrv declares "
+    "'own_signals' (its HR-source channels; a beat-train change is not visible) or 'off', its "
+    "beat-train extent unchanged; beyond the core the extent grows only "
     "while the consumer's own band is above its threshold (the declared clean-null percentile "
     "for the consumers on the floor, the visible-kind threshold otherwise - breathing 7.69), "
     "and a cross-band extent counts a detecting pair while it is above the declared percentile "
@@ -160,20 +173,29 @@ F64 = npt.NDArray[np.float64]
 
 
 def check_core_blanking(decl: object) -> dict[str, str]:
-    """Return each z consumer's declared core blanking, or raise ValueError (no default)."""
+    """Return each consumer's declared core blanking, or raise ValueError (no default).
+
+    Every z consumer declares one of :data:`CORE_BLANKING`; hrv one of
+    :data:`HRV_CORE_BLANKING` (Andrea, revised 2026-10-10: HRV honours the core rule, rule (i)
+    only).
+    """
+    want = (*z_consumers(), "hrv")
     if not isinstance(decl, Mapping):
-        msg = (f"core blanking is a mapping z consumer -> one of {list(CORE_BLANKING)}, declared "
-               f"for every z consumer {list(z_consumers())}; got {decl!r}")
+        msg = (f"core blanking is a mapping consumer -> value, declared for every z consumer "
+               f"{list(z_consumers())} (one of {list(CORE_BLANKING)}) and hrv (one of "
+               f"{list(HRV_CORE_BLANKING)}); got {decl!r}")
         raise ValueError(msg)
-    missing = [c for c in z_consumers() if c not in decl]
-    extra = sorted(str(c) for c in decl if c not in z_consumers())
-    bad = {str(c): v for c, v in decl.items() if v not in CORE_BLANKING}
+    missing = [c for c in want if c not in decl]
+    extra = sorted(str(c) for c in decl if c not in want)
+    bad = {str(c): v for c, v in decl.items()
+           if v not in (HRV_CORE_BLANKING if c == "hrv" else CORE_BLANKING)}
     if missing or extra or bad:
-        msg = (f"core blanking: undeclared {missing}, not z consumers {extra}, unknown values "
-               f"{bad}; each of {list(z_consumers())} declares one of {list(CORE_BLANKING)}, "
-               "nothing is defaulted (RULING 2026-10-10 item 2)")
+        msg = (f"core blanking: undeclared {missing}, not consumers {extra}, unknown values "
+               f"{bad}; each of {list(z_consumers())} declares one of {list(CORE_BLANKING)} and "
+               f"hrv one of {list(HRV_CORE_BLANKING)}, nothing is defaulted (RULING 2026-10-10 "
+               "item 2; Andrea, revised 2026-10-10)")
         raise ValueError(msg)
-    return {c: str(decl[c]) for c in z_consumers()}
+    return {c: str(decl[c]) for c in want}
 
 
 def check_extent_percentile(value: object) -> str:
