@@ -53,6 +53,15 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
 % recorded, and a file with no perir_json was written before (k) 1 - never read as "no
 % train". plan.periR states which (train_state 'train' | 'none'); [] when no spike signal.
 %
+% NO HEARTBEAT REFERENCE (RULING 2026-10-09 (g) 1; review 2026-10-10 fix 4): when the spike
+% consumer reads any signal AND the recording has a train (peri-R train_state 'train', or a
+% beats file), the file must carry noheartref_json (rule, signals = exactly the spike
+% signals, minutes), a noheartref_spikes_<token> per spike signal and the provenance's
+% spike_no_heartbeat_reference - or the epoch is refused by name (night6:noHeartRef). A file
+% without them was written before (g) 1, when its no-beat minutes were BLANKED under (b) 2
+% rather than kept and flagged, so it is not the mask (g) 1 rules. plan.noHeartRef is the
+% record (rule, minute count); [] when the check does not apply.
+%
 % RECOVERY START (RULING 2026-10-08 (k) 2), name-value 'Recovery', struct(starts, session,
 % mode) - mode is the declared trim mode (night6_trim_modes), refused by name if unknown
 % or withdrawn:
@@ -124,6 +133,7 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
     end
     plan.masks = masks;
     plan.periR = check_peri_r(M, masks, plan.n);
+    plan.noHeartRef = check_no_heartref(M, masks, plan.periR, beats, plan.n);
     plan.notMeasuredMmc = struct();
     for i = 1:numel(names)
         if startsWith(names{i}, 'notmeasured_mmc_')
@@ -413,6 +423,43 @@ function P = check_peri_r(M, masks, n)
     end
     P = struct('train_state', state, 'n_spans', J.n_spans, ...
                'window_sha256', J.window.sha256, 'signals', {got});
+end
+
+function H = check_no_heartref(M, masks, periR, beats, n)
+% Review 2026-10-10 fix 4: no pre-(g) 1 mask file reaches the spike consumer when a train exists.
+    H = [];
+    sel = strcmp({masks.consumer}, 'spikes');
+    if ~any(sel), return, end
+    hasTrain = (~isempty(periR) && strcmp(periR.train_state, 'train')) || ~isempty(beats);
+    if ~hasTrain, return, end
+    sigs = sort({masks(sel).signal});
+    if ~isfield(M, 'noheartref_json')
+        error('night6:noHeartRef', ['the spike consumer reads [%s] and the recording has a ' ...
+              'train, but the mask file has no noheartref_json: it was written before RULING ' ...
+              '2026-10-09 (g) 1, so its no-beat minutes were blanked under (b) 2, not kept and ' ...
+              'flagged. Refused; re-emit the masks'], strjoin(sigs, ' '));
+    end
+    J = jsondecode(char(M.noheartref_json));
+    if ~isstruct(J) || ~all(isfield(J, {'rule', 'signals', 'minutes'}))
+        error('night6:noHeartRef', 'noheartref_json lacks rule, signals or minutes');
+    end
+    got = sort(cellstr(J.signals));
+    if ~isequal(got(:)', sigs(:)')
+        error('night6:noHeartRef', 'noheartref_json covers [%s]; the spike consumer reads [%s]', ...
+              strjoin(got, ' '), strjoin(sigs, ' '));
+    end
+    for t = {masks(sel).token}
+        nm = ['noheartref_spikes_' t{1}];
+        if ~isfield(M, nm)
+            error('night6:noHeartRef', 'the mask file has noheartref_json but no %s', nm);
+        end
+        check_spans(M.(nm), n, nm);
+    end
+    if ~isfield(M, 'provenance_json') ...
+            || ~isfield(jsondecode(char(M.provenance_json)), 'spike_no_heartbeat_reference')
+        error('night6:noHeartRef', 'the mask provenance names no spike_no_heartbeat_reference');
+    end
+    H = struct('rule', char(J.rule), 'n_minutes', numel(J.minutes), 'signals', {got(:)'});
 end
 
 function tf = same_mask(masks, a, b)

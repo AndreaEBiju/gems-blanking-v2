@@ -67,6 +67,7 @@ import hashlib
 import json
 import math
 import os
+import stat
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -108,6 +109,8 @@ __all__ = [
     "ToleranceTable",
     "beat_train_changed",
     "cardiac_operational_damage",
+    "check_pilot_root",
+    "check_stand_in_outputs",
     "compute_extent",
     "confirms_motion",
     "consumer_settling",
@@ -616,15 +619,73 @@ def _under(path: Path, root: Path) -> bool:
     return p == r or p.is_relative_to(r)
 
 
+def _is_reparse_point(path: Path) -> bool:
+    """Whether ``path`` itself (not its target) is a reparse point or a symbolic link."""
+    st = os.lstat(path)
+    attrs = getattr(st, "st_file_attributes", 0)  # Windows only; 0 elsewhere
+    return bool(attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)) or stat.S_ISLNK(
+        st.st_mode)
+
+
+def check_pilot_root(root: Path) -> Path:
+    """Return the declared pilot folder, resolved, or raise ``ValueError`` naming the reason.
+
+    Refused (review 2026-10-10 fix 2): a root that is not an existing folder, and one that
+    is, or sits under, a reparse point - a junction or a symbolic link, judged on every
+    component of the path AS GIVEN (made absolute, never resolved, since resolving follows
+    the link). Such a folder can name another folder (production) while its path still
+    reads "pilot", and :func:`_under` would then accept outputs written there. An 8.3 alias
+    is not a reparse point and is accepted (it resolves to the same folder).
+    """
+    given = Path(os.path.normpath(Path(root).absolute()))  # lexical, as Win32 normalises
+    if not given.is_dir():
+        msg = f"the declared pilot_root {root} is not an existing folder"
+        raise ValueError(msg)
+    for part in (given, *given.parents):
+        if _is_reparse_point(part):
+            msg = (f"the declared pilot_root {root} is or sits under a reparse point ({part}: a "
+                   "junction or symbolic link), which can name another folder; refused")
+            raise ValueError(msg)
+    return given.resolve()
+
+
+def check_stand_in_outputs(output_roots: Sequence[Path], pilot_root: Path | None) -> Path:
+    """Return the checked pilot folder when every output root lies under it, or raise.
+
+    The one rule for where anything made on the STAND-IN tolerance table may go (RULING
+    2026-10-09 (g) 7: "written to the pilot folder only"), shared by
+    :func:`tolerance_table_use` (the mask writer) and the readers (night4 ``verify``; Night 6
+    has its MATLAB twin, ``night6_pilot_root``). ``pilot_root`` is the folder a pilot run
+    DECLARES (``None``: no pilot run declared, so refused), checked by
+    :func:`check_pilot_root`. Raises ``ValueError`` naming the reason.
+    """
+    if not output_roots:
+        msg = "the stand-in check needs the output roots the masks are written under"
+        raise ValueError(msg)
+    if pilot_root is None:
+        msg = (f"{STAND_IN_TOLERANCE_LABEL}: refused - no pilot run is declared (pilot_run and "
+               "pilot_root). Night 5 / production refuses stand-ins")
+        raise ValueError(msg)
+    root = check_pilot_root(pilot_root)
+    outside = [str(p) for p in output_roots if not _under(Path(p), root)]
+    if outside:
+        msg = (f"{STAND_IN_TOLERANCE_LABEL}: refused for outputs outside the pilot folder "
+               f"{pilot_root}: {outside}. Night 5 / production refuses stand-ins")
+        raise ValueError(msg)
+    return root
+
+
 def tolerance_table_use(doc: Mapping[str, Any], *, output_roots: Sequence[Path],
-                        pilot_root: Path) -> Literal["production", "stand_in"]:
+                        pilot_root: Path | None) -> Literal["production", "stand_in"]:
     """Return how ``doc`` may be used for masks written under ``output_roots``, or raise.
 
     * Anything marked :data:`TOLERANCES_NOT_PRODUCTION` is refused everywhere.
     * A table that says it is a stand-in (``stand_in``, its label, or "STAND-IN" anywhere)
       is accepted only when it is exactly :func:`stand_in_tolerance_doc` AND every output
-      root lies under ``pilot_root`` (RULING 2026-10-09 (g) 7: "written to the pilot folder
-      only. Night 5 refuses stand-ins"). Returns ``"stand_in"``.
+      root lies under the DECLARED ``pilot_root`` (:func:`check_stand_in_outputs`: ``None``
+      or a root that is or sits under a junction or symbolic link is refused; RULING
+      2026-10-09 (g) 7: "written to the pilot folder only. Night 5 refuses stand-ins").
+      Returns ``"stand_in"``.
     * Otherwise it must be tolmap's production output - ``rows_rule == "gate"``, no
       ``flags``, a non-empty ``z_tol`` - and is accepted anywhere: ``"production"``.
 
@@ -645,11 +706,7 @@ def tolerance_table_use(doc: Mapping[str, Any], *, output_roots: Sequence[Path],
                    f"table (z {STAND_IN_TOLERANCE_Z:g} for every consumer, "
                    "stand_in_tolerance_doc()); this one differs")
             raise ValueError(msg)
-        outside = [str(p) for p in output_roots if not _under(Path(p), pilot_root)]
-        if outside:
-            msg = (f"{STAND_IN_TOLERANCE_LABEL}: refused for outputs outside the pilot folder "
-                   f"{pilot_root}: {outside}. Night 5 / production refuses stand-ins")
-            raise ValueError(msg)
+        check_stand_in_outputs(output_roots, pilot_root)
         return "stand_in"
     if doc.get("rows_rule") != "gate" or doc.get("flags"):
         msg = (f"rows_rule {doc.get('rows_rule')!r}, flags {doc.get('flags')!r}: only tolmap's "

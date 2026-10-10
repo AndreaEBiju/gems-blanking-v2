@@ -94,26 +94,6 @@ function night6_check(caseFile, outFile)
         out.fallback_sha = cellfun(@fallback_sha, cellstr(C.fallback_hash), ...
                                    'UniformOutput', false);
     end
-    % BeatsRoot: the beats file resolves under another root (store copy moved away here),
-    % hash-checked; an absent file names the root, a changed one is refused by its sha256.
-    if isfield(C, 'beats_root')
-        B = C.beats_root;
-        movefile(B.store_beats, [B.store_beats '.moved']);
-        restore = onCleanup(@() movefile([B.store_beats '.moved'], B.store_beats)); %#ok<NASGU>
-        out.beats_root = struct();
-        for c = {'ok', 'missing', 'changed', 'none'}
-            try
-                night6_run_recording(B.mask_folder, 'GemsRoot', C.gems_root, 'Units', C.units, ...
-                    'OutRoot', B.(c{1}).out_root, 'DryRun', true, 'CodeCommit', 'test', ...
-                    'RecoveryTrimMode', 'mask_to_electrical_drop_outputs', ...
-                    'SlowWaveRate', 'full', 'BeatsRoot', B.(c{1}).root);
-                out.beats_root.(c{1}) = '';
-            catch ME
-                out.beats_root.(c{1}) = sprintf('%s: %s', ME.identifier, ME.message);
-            end
-        end
-        clear restore
-    end
     out.joint = joint_mask_case();
     if isfield(C, 'slow_wave'), out.slow_wave = slow_wave_case(C.slow_wave); end
     if isfield(C, 'slow_wave2'), out.slow_wave2 = slow_wave_case(C.slow_wave2); end

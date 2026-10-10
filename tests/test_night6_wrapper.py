@@ -53,6 +53,16 @@ masking and skip logic; the consumers' calls are not made). Checks:
   RULING 2026-10-08 (k) 1), with a train state that is neither, or missing a
   ``perir_spikes_*`` variable is refused by name (``night6:periR``); a file whose spike
   consumer reads nothing needs none;
+* review 2026-10-10 fix 4 (RULING 2026-10-09 (g) 1): with a train, a spike mask needs its
+  "no heartbeat reference" record - ``noheartref_json`` (signals = the spike signals), a
+  ``noheartref_spikes_*`` per signal and the provenance's ``spike_no_heartbeat_reference`` -
+  or it is refused by name (``night6:noHeartRef``: a pre-(g) 1 file blanked those minutes);
+  a no-train file needs none;
+* review 2026-10-10 fixes 1-3 (``tests/matlab/check_pilot_gates.m``): only a DECLARED pilot
+  run (PilotRoot / the list's ``pilot_run`` + ``pilot_root``, out_root inside it, the folder
+  neither a junction nor under one) reads a TOLERANCE_STAND_IN mask or takes ``beats_root``
+  (resolved like ``recovery_starts``); the record carries stand_in, tolerance_stand_in and
+  pilot_root;
 * a recording whose hrv/breathing are "not computed" skips them with the reason; mmc is
   "not computed" on a "pre" recording with no beat train, and skipped for want of R-peaks
   on any other recording without beats.
@@ -499,7 +509,8 @@ PERI_BEATS = np.array([1_000, 30_000, 30_400, 60_000], dtype=np.int64)  # 1-base
 
 def _peri_case(tmp: Path, name: str, *, spikes: bool = True, train: bool = False,
                strip: bool = False, edit: dict[str, Any] | None = None,
-               drop_var: bool = False) -> dict[str, Any]:
+               drop_var: bool = False, drop: tuple[str, ...] = (),
+               heartref_edit: dict[str, Any] | None = None) -> dict[str, Any]:
     """One mask file, written by the real handoff, then possibly reduced (pre-(k) 1 etc.)."""
     sigs = ("L_T", "R_T") if spikes else ()
     reads = {"spikes": sigs, "slow_wave": GASTRIC, "mmc": (), "hrv": (), "breathing": (),
@@ -527,8 +538,19 @@ def _peri_case(tmp: Path, name: str, *, spikes: bool = True, train: bool = False
                     line_distrust=line, peri_r=peri,
                     no_beat_minutes=[] if train and spikes else None,  # (g) 1: none here
                     release="synthetic night6 test: spans are large on purpose")
-    if strip or edit or drop_var:
+    if strip or edit or drop_var or drop or heartref_edit:
         m = {k: v for k, v in loadmat(f).items() if not k.startswith("__")}
+        for k in drop:  # fix 4: a file written before RULING 2026-10-09 (g) 1
+            if k == "spike_no_heartbeat_reference":
+                prov = json.loads(str(np.asarray(m["provenance_json"]).ravel()[0]))
+                del prov[k]
+                m["provenance_json"] = json.dumps(prov)
+            else:
+                del m[k]
+        if heartref_edit:
+            doc = json.loads(str(np.asarray(m["noheartref_json"]).ravel()[0]))
+            doc.update(heartref_edit)
+            m["noheartref_json"] = json.dumps(doc)
         if strip:  # a mask file as written before RULING 2026-10-08 (k) 1
             m = {k: v for k, v in m.items() if not k.startswith("perir")}
             prov = json.loads(str(np.asarray(m["provenance_json"]).ravel()[0]))
@@ -558,7 +580,17 @@ def test_a_spike_mask_without_its_peri_r_record_is_refused(tmp_path: Path) -> No
              _peri_case(tmp_path, "pre_k1", strip=True),
              _peri_case(tmp_path, "unknown_state", edit={"train": {"file": "x"}}),
              _peri_case(tmp_path, "none_with_spans", edit={"n_spans": 2}),
-             _peri_case(tmp_path, "missing_var", drop_var=True)]
+             _peri_case(tmp_path, "missing_var", drop_var=True),
+             # review 2026-10-10 fix 4: no pre-(g) 1 mask file when a train exists
+             _peri_case(tmp_path, "train_no_heartref", train=True,
+                        drop=("noheartref_json",)),
+             _peri_case(tmp_path, "train_no_heartref_var", train=True,
+                        drop=("noheartref_spikes_R_T",)),
+             _peri_case(tmp_path, "train_no_heartref_prov", train=True,
+                        drop=("spike_no_heartbeat_reference",)),
+             _peri_case(tmp_path, "train_heartref_signals", train=True,
+                        heartref_edit={"signals": ["L_T"]}),
+             _peri_case(tmp_path, "no_train_no_heartref", drop=("noheartref_json",))]
     nt = json.loads(str(np.asarray(loadmat(cases[0]["mask_file"])["perir_json"]).ravel()[0]))
     assert nt["train"].startswith("none:") and nt["n_spans"] == 0  # f15bf43's explicit no-train
     case_file, res_file = tmp_path / "perir_case.json", tmp_path / "perir_result.json"
@@ -571,7 +603,8 @@ def test_a_spike_mask_without_its_peri_r_record_is_refused(tmp_path: Path) -> No
                           timeout=900, check=False)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
     got = {c["name"]: c for c in json.loads(res_file.read_text(encoding="utf-8"))["cases"]}
-    for ok, state in (("no_train", "none"), ("train", "train"), ("no_spikes", "not_read")):
+    for ok, state in (("no_train", "none"), ("train", "train"), ("no_spikes", "not_read"),
+                      ("no_train_no_heartref", "none")):
         assert got[ok]["error"] == "", (ok, got[ok]["message"])
         assert got[ok]["train_state"] == state, ok
     assert got["no_train"]["n_spans"] == 0
@@ -581,6 +614,12 @@ def test_a_spike_mask_without_its_peri_r_record_is_refused(tmp_path: Path) -> No
                        ("none_with_spans", "says no train but carries 2 spans"),
                        ("missing_var", "no perir_spikes_R_T")):
         assert got[bad]["error"] == "night6:periR", (bad, got[bad])
+        assert words in got[bad]["message"], (bad, got[bad]["message"])
+    for bad, words in (("train_no_heartref", "written before RULING 2026-10-09 (g) 1"),
+                       ("train_no_heartref_var", "no noheartref_spikes_R_T"),
+                       ("train_no_heartref_prov", "no spike_no_heartbeat_reference"),
+                       ("train_heartref_signals", "covers [L_T]")):
+        assert got[bad]["error"] == "night6:noHeartRef", (bad, got[bad])
         assert words in got[bad]["message"], (bad, got[bad]["message"])
 
 
@@ -637,8 +676,7 @@ def test_night6_wrapper_slices_masks_and_skips(tmp_path: Path) -> None:
                        "keep_tag": "e0", "stale_tag": "e5"},
             "mmc_units": mmc_units, "slow_wave": sw["case"], "v2": v2["case"],
             "slow_wave2": sw2, "fallback_hash": [p.as_posix() for p in fb_hash],
-            "fallback": _fallback_case(tmp_path, root),
-            "beats_root": _beats_root_case(tmp_path, root)}
+            "fallback": _fallback_case(tmp_path, root)}
     case_file, res_file = tmp_path / "case.json", tmp_path / "result.json"
     case_file.write_text(json.dumps(case, ensure_ascii=True), encoding="utf-8", newline="\n")
     cmd = (f"addpath('{pnew.as_posix()}'); addpath('{NIGHT6.as_posix()}'); "
@@ -668,46 +706,6 @@ def test_night6_wrapper_slices_masks_and_skips(tmp_path: Path) -> None:
     _check_fallback_hash(fb_hash, res["fallback_sha"])
     _check_joint_mask(res["joint"])
     _check_spike_params(out_root / "T" / SESSION_A / MODEL / "e5")
-    _check_beats_root(res["beats_root"], tmp_path, root)
-
-
-def _beats_root_case(tmp: Path, root: Path) -> dict[str, Any]:
-    """Return the BeatsRoot case: SESSION_A's beats file under other roots.
-
-    ok: a byte copy; missing: absent; changed: one beat moved (another sha256); none: ''
-    (GemsRoot), whose copy the harness moves away for these runs, so it fails as not found.
-    """
-    rel = Path("data") / "T" / SESSION_A / f"{SESSION_A}_beats.mat"
-    src = root / rel
-    assert src.is_file()
-    out: dict[str, Any] = {"store_beats": src.as_posix(),
-                           "mask_folder": (root / "data" / "T" / SESSION_A / "masks" / MODEL)
-                           .as_posix()}
-    for name in ("ok", "missing", "changed", "none"):
-        r = tmp / f"beats_{name}"
-        if name in ("ok", "changed"):
-            (r / rel).parent.mkdir(parents=True)
-            (r / rel).write_bytes(src.read_bytes())
-        if name == "changed":
-            m = {k: v for k, v in loadmat(r / rel).items() if not k.startswith("__")}
-            m["heartlocs"] = np.asarray(m["heartlocs"], dtype=np.float64) + 1.0
-            savemat(r / rel, m)
-        out[name] = {"root": "" if name == "none" else r.as_posix(),
-                     "out_root": (tmp / f"out_beats_{name}").as_posix()}
-    return out
-
-
-def _check_beats_root(res: dict[str, str], tmp: Path, root: Path) -> None:
-    """Check the beats file resolves under BeatsRoot, hash-checked, named in the record."""
-    assert res["ok"] == "", res["ok"]
-    rec = json.loads(next((tmp / "out_beats_ok").glob("T/*/*/e0/night6_record.json"))
-                     .read_text(encoding="utf-8"))
-    assert Path(rec["source"]["beats_root"]) == tmp / "beats_ok"
-    assert Path(rec["source"]["beats_file"]).is_relative_to(tmp / "beats_ok")
-    assert res["missing"].startswith("night6:beatsMissing") and "beats_missing" in res["missing"]
-    assert res["changed"].startswith("night6:beatsSha"), res["changed"]
-    assert res["none"].startswith("night6:beatsMissing")  # '' is GemsRoot, whose copy moved
-    assert (root / "data" / "T" / SESSION_A / f"{SESSION_A}_beats.mat").is_file()  # restored
 
 
 FALLBACK_OK = {"schema": 1, "ruling": "test", "entries": [
@@ -1175,8 +1173,219 @@ def _check_beats(whole_file: Path, epoch_file: Path, i0: int, n: int) -> None:
     assert float(got["fs"].squeeze()) == FS
 
 
-def test_night6_batch_hands_the_lists_beats_root_to_each_recording() -> None:
-    """The batch list's optional ``beats_root`` reaches night6_run_recording as BeatsRoot."""
+def test_night6_batch_hands_the_lists_pilot_and_beats_roots_to_each_recording() -> None:
+    """The list's pilot_root and beats_root reach night6_run_recording.
+
+    pilot_root is checked (night6_pilot_root) and beats_root is pilot-only and resolved like
+    recovery_starts; they arrive as PilotRoot and BeatsRoot.
+    """
     src = (NIGHT6 / "night6_batch.m").read_text(encoding="utf-8")
-    assert "if isfield(L, 'beats_root'), broot = L.beats_root; end" in src
-    assert re.search(r"args = \{[^}]*'BeatsRoot', broot", src, flags=re.S)
+    assert "pilotRoot = night6_pilot_root(resolve(L.gems_root, L.pilot_root), L.out_root);" in src
+    assert "broot = resolve(L.gems_root, L.beats_root);" in src
+    assert re.search(r"args = \{[^}]*'BeatsRoot', broot, 'PilotRoot', pilotRoot", src, flags=re.S)
+
+
+# ------------------------------------------- review 2026-10-10 fixes 1-3: pilot runs only
+
+MODEL_SI = "5a1d0123456789abcdef0123456789ab"
+"""A mask folder whose provenance carries TOLERANCE_STAND_IN (SESSION_A's masks, relabelled)."""
+SI_LABEL = "STAND-IN (pilot only, RULING 2026-10-09 (g) 7)"
+
+
+def _junction(link: Path, target: Path) -> bool:
+    """Create a directory junction; False where that is not permitted or not Windows."""
+    import os  # noqa: PLC0415
+
+    if os.name != "nt":
+        return False
+    target.mkdir(parents=True, exist_ok=True)
+    try:
+        import _winapi  # noqa: PLC0415
+
+        _winapi.CreateJunction(str(target), str(link))
+    except (ImportError, AttributeError, OSError):
+        return False
+    return True
+
+
+def _stand_in_folder(root: Path) -> Path:
+    src = root / "data" / "T" / SESSION_A / "masks" / MODEL
+    dst = src.parent / MODEL_SI
+    dst.mkdir()
+    for f in sorted(src.glob("e*_masks.mat")):
+        m = {k: v for k, v in loadmat(f).items() if not k.startswith("__")}
+        prov = json.loads(str(np.asarray(m["provenance_json"]).ravel()[0]))
+        prov["extra"]["TOLERANCE_STAND_IN"] = SI_LABEL
+        m["provenance_json"] = json.dumps(prov, sort_keys=True, ensure_ascii=True)
+        savemat(dst / f.name, m, do_compression=True)
+    return dst
+
+
+def _gate_run(name: str, folder: Path, out: Path, pilot_root: Path | None = None,
+              beats: Path | None = None, *, move: bool = False) -> dict[str, Any]:
+    return {"name": name, "mask_folder": folder.as_posix(), "out_root": out.as_posix(),
+            "pilot_root": pilot_root.as_posix() if pilot_root else "",
+            "beats_root": beats.as_posix() if beats else "", "move_store": move}
+
+
+@pytest.fixture(scope="module")
+def gates(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
+    """One MATLAB run of tests/matlab/check_pilot_gates.m over every pilot-gate case."""
+    matlab, pnew = _matlab(), _processing_new()
+    if matlab is None:
+        pytest.skip("MATLAB is not on this machine (set GEMS_MATLAB)")
+    if pnew is None:
+        pytest.skip("processing_new is not on this machine (set GEMS_PROCESSING_NEW)")
+    tmp = tmp_path_factory.mktemp("gates")
+    root = tmp / "store"
+    _store(root)
+    pilot = tmp / "pilot"
+    pilot.mkdir()
+    folder_a = root / "data" / "T" / SESSION_A / "masks" / MODEL
+    folder_si = _stand_in_folder(root)
+    rel = Path("data") / "T" / SESSION_A / f"{SESSION_A}_beats.mat"
+    store_beats = root / rel
+    for d in (tmp / "beats_ok", tmp / "beats_changed", root / "beats_rel"):
+        (d / rel).parent.mkdir(parents=True)
+        (d / rel).write_bytes(store_beats.read_bytes())
+    m = {k: v for k, v in loadmat(tmp / "beats_changed" / rel).items() if not k.startswith("__")}
+    m["heartlocs"] = np.asarray(m["heartlocs"], dtype=np.float64) + 1.0  # another sha256
+    savemat(tmp / "beats_changed" / rel, m)
+
+    g = _gate_run
+    runs = [g("si_no_pilot", folder_si, tmp / "out_si_np"),
+            g("si_pilot_ok", folder_si, pilot / "out_si", pilot),
+            g("si_out_outside", folder_si, tmp / "out_si_x", pilot),
+            g("si_pilot_missing", folder_si, tmp / "gone" / "out", tmp / "gone"),
+            g("plain_pilot_ok", folder_a, pilot / "out_plain", pilot),
+            g("plain_no_pilot", folder_a, tmp / "out_plain"),
+            g("beats_ok", folder_a, pilot / "out_beats_ok", pilot, tmp / "beats_ok", move=True),
+            g("beats_missing", folder_a, pilot / "out_bm", pilot, tmp / "beats_missing",
+              move=True),
+            g("beats_changed", folder_a, pilot / "out_bc", pilot, tmp / "beats_changed",
+              move=True),
+            g("beats_none", folder_a, pilot / "out_bn", pilot, None, move=True),
+            g("beats_no_pilot", folder_a, tmp / "out_bnp", None, tmp / "beats_ok")]
+    junctions = (_junction(tmp / "pilot_link", tmp / "prodj")
+                 and _junction(tmp / "via", tmp / "prodv"))
+    if junctions:
+        (tmp / "prodv" / "pilot").mkdir()
+        runs += [g("junction_root", folder_si, tmp / "pilot_link" / "out", tmp / "pilot_link"),
+                 g("under_junction", folder_si, tmp / "via" / "pilot" / "out",
+                   tmp / "via" / "pilot")]
+    base = {"gems_root": root.as_posix(), "units": "uV", "processing_new": pnew.as_posix(),
+            "recovery_trim_mode": "mask_to_electrical_drop_outputs", "slow_wave_rate": "full",
+            "recordings": [{"mask_folder": f"data/T/{SESSION_A}/masks/{MODEL}"}]}
+    lists: dict[str, dict[str, Any]] = {
+        "b_half_run": {"pilot_run": True},
+        "b_half_root": {"pilot_root": pilot.as_posix()},
+        "b_false_run": {"pilot_run": False, "pilot_root": pilot.as_posix()},
+        "b_beats_no_pilot": {"beats_root": (tmp / "beats_ok").as_posix()},
+        "b_beats_rel": {"pilot_run": True, "pilot_root": pilot.as_posix(),
+                        "beats_root": "beats_rel"},
+        "b_si_no_pilot": {"out_root": (tmp / "out_b_si").as_posix(),
+                          "recordings": [{"mask_folder":
+                                          f"data/T/{SESSION_A}/masks/{MODEL_SI}"}]}}
+    batch = []
+    for name, extra in lists.items():
+        f = tmp / f"{name}.json"
+        doc = {**base, "out_root": (pilot / f"out_{name}").as_posix(), **extra}
+        f.write_text(json.dumps(doc, ensure_ascii=True), encoding="utf-8", newline="\n")
+        batch.append({"name": name, "list_file": f.as_posix()})
+    case = {"gems_root": root.as_posix(), "units": "uV", "store_beats": store_beats.as_posix(),
+            "run_cases": runs, "batch_cases": batch}
+    case_file, res_file = tmp / "gates_case.json", tmp / "gates_result.json"
+    case_file.write_text(json.dumps(case, ensure_ascii=True), encoding="utf-8", newline="\n")
+    cmd = (f"addpath('{pnew.as_posix()}'); addpath('{NIGHT6.as_posix()}'); "
+           f"addpath('{HARNESS.as_posix()}'); "
+           f"check_pilot_gates('{case_file.as_posix()}', '{res_file.as_posix()}');")
+    done = subprocess.run([str(matlab), "-batch", cmd], capture_output=True, text=True,
+                          timeout=1500, check=False)
+    assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
+    assert store_beats.is_file()  # restored after every moved case
+    return {"res": json.loads(res_file.read_text(encoding="utf-8")), "tmp": tmp, "root": root,
+            "pilot": pilot, "junctions": junctions}
+
+
+def _record(out: Path, model: str = MODEL) -> dict[str, Any]:
+    return json.loads(next(out.glob(f"T/*/{model}/e0/night6_record.json"))
+                      .read_text(encoding="utf-8"))
+
+
+def test_a_stand_in_tolerance_mask_is_read_only_in_a_declared_pilot_run(
+        gates: dict[str, Any]) -> None:
+    """Fix 1: TOLERANCE_STAND_IN is a stand-in; outside a pilot run it is refused by name."""
+    r, tmp, pilot = gates["res"]["run"], gates["tmp"], gates["pilot"]
+    assert r["si_no_pilot"].startswith("night6:toleranceStandIn"), r["si_no_pilot"]
+    assert SI_LABEL in r["si_no_pilot"]
+    assert not (tmp / "out_si_np").exists()  # refused before anything was written
+    assert r["si_pilot_ok"] == "", r["si_pilot_ok"]
+    rec = _record(pilot / "out_si", MODEL_SI)
+    assert rec["stand_in"] is True and rec["tolerance_stand_in"] == SI_LABEL
+    assert Path(rec["pilot_root"]) == pilot.resolve()
+    assert r["si_out_outside"].startswith("night6:pilotRoot"), r["si_out_outside"]
+    assert "not inside" in r["si_out_outside"]
+    assert r["si_pilot_missing"].startswith("night6:pilotRoot"), r["si_pilot_missing"]
+    assert "not an existing folder" in r["si_pilot_missing"]
+    assert r["plain_pilot_ok"] == "" and r["plain_no_pilot"] == ""
+    plain = _record(pilot / "out_plain")
+    assert plain["stand_in"] is False and "tolerance_stand_in" not in plain
+    assert Path(plain["pilot_root"]) == pilot.resolve()
+    assert "pilot_root" not in _record(tmp / "out_plain")
+    b = gates["res"]["batch"]["b_si_no_pilot"]
+    assert b.startswith("returned: error: night6:toleranceStandIn"), b
+
+
+def test_beats_root_is_pilot_only_and_hash_checked(gates: dict[str, Any]) -> None:
+    """Fix 3: beats_root is pilot-only (and keeps the BeatsRoot behaviour it restricts).
+
+    The beats file resolves under BeatsRoot only in a pilot run, hash-checked, with the root
+    named in the record.
+    """
+    r, tmp, pilot = gates["res"]["run"], gates["tmp"], gates["pilot"]
+    assert r["beats_ok"] == "", r["beats_ok"]
+    rec = _record(pilot / "out_beats_ok")
+    assert Path(rec["source"]["beats_root"]) == tmp / "beats_ok"
+    assert Path(rec["source"]["beats_file"]).is_relative_to(tmp / "beats_ok")
+    assert r["beats_missing"].startswith("night6:beatsMissing"), r["beats_missing"]
+    assert "beats_missing" in r["beats_missing"]
+    assert r["beats_changed"].startswith("night6:beatsSha"), r["beats_changed"]
+    assert r["beats_none"].startswith("night6:beatsMissing")  # '' is GemsRoot, moved away
+    assert r["beats_no_pilot"].startswith("night6:beatsRoot"), r["beats_no_pilot"]
+    assert not (tmp / "out_bnp").exists()
+
+
+def test_the_beats_file_is_hashed_before_and_after_it_is_loaded() -> None:
+    """Fix 3: the bytes loaded are the bytes hashed (a change during the load is refused).
+
+    A file changing between two reads cannot be staged deterministically from here, so the
+    order of the three operations and the comparison are checked in the source.
+    """
+    src = (NIGHT6 / "night6_run_recording.m").read_text(encoding="utf-8")
+    seq = re.search(r"h0 = night6_sha256_file\(R\.source\.beats_file\);\s*"
+                    r"data = load\(R\.source\.beats_file\);\s*"
+                    r"h1 = night6_sha256_file\(R\.source\.beats_file\);\s*"
+                    r"if ~strcmp\(h0, h1\)\s*error\('night6:beatsChanged'", src)
+    assert seq, "the beats file must be hashed before and after load(), and compared"
+    assert "beats = struct('data', data, 'record', ref, 'sha256', h0);" in src
+
+
+def test_a_batch_list_declares_a_pilot_run_whole_or_not_at_all(gates: dict[str, Any]) -> None:
+    b, root = gates["res"]["batch"], gates["root"]
+    for name in ("b_half_run", "b_half_root", "b_false_run"):
+        assert b[name].startswith("night6:pilotRun"), (name, b[name])
+    assert b["b_beats_no_pilot"].startswith("night6:beatsRoot"), b["b_beats_no_pilot"]
+    assert b["b_beats_rel"] == "returned: ok", b["b_beats_rel"]
+    rec = _record(gates["pilot"] / "out_b_beats_rel")
+    assert Path(rec["source"]["beats_root"]) == root / "beats_rel"  # resolved against gems_root
+
+
+def test_a_pilot_root_that_is_or_sits_under_a_junction_is_refused(gates: dict[str, Any]) -> None:
+    """Fix 2, MATLAB side. Skips (saying so) where junction creation is not permitted."""
+    if not gates["junctions"]:
+        pytest.skip("directory junctions could not be created here (not Windows, or not "
+                    "permitted)")
+    r = gates["res"]["run"]
+    for name in ("junction_root", "under_junction"):
+        assert r[name].startswith("night6:pilotRoot"), r[name]
+        assert "reparse point" in r[name], r[name]
