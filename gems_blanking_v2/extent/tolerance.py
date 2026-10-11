@@ -95,6 +95,7 @@ __all__ = [
     "EXTENT_BASIS_DETECTED",
     "EXTENT_BASIS_OWN_BAND",
     "HR_BAND_EDGE_S",
+    "JOINT_CALL_CONSUMERS",
     "MMC_NOT_MEASURED_HALF_S",
     "OUT_OF_BUILD_CONSUMERS",
     "SPIKE_STEP1_EDGE_S",
@@ -123,7 +124,6 @@ __all__ = [
     "confirms_motion",
     "consumer_settling",
     "consumer_signals",
-    "core_own_signals",
     "decision_rule",
     "detected_extent",
     "edge_settling_record",
@@ -132,15 +132,16 @@ __all__ = [
     "expected_consumers",
     "extent_consumers",
     "extents_for_events",
-    "hr_source_signals",
     "hrv_extent",
     "hrv_fiducial_tolerance_s",
     "impulse_settling_s",
     "is_confirmed_motion",
     "mmc_not_measured_spans",
     "own_detection_signals",
+    "own_signal_population",
     "own_signals_by_signal",
     "settling_provenance",
+    "signal_sources",
     "stand_in_tolerance_doc",
     "step_settling_s",
     "tolerance_table_use",
@@ -930,9 +931,8 @@ def own_detection_signals(consumer_signals: Sequence[str], detection_signals: Se
                           channel_signals: Mapping[str, str]) -> frozenset[str]:
     """Return the union of the detection-signal families of ``consumer_signals``.
 
-    A building block of :func:`core_own_signals`, which calls it with ONE signal: a
-    consumer's own signals are defined per signal (:func:`own_signals_by_signal`), never as
-    the union over every signal the consumer reads. Each signal brings a family:
+    NOT a consumer's own signals (those are :func:`own_signals_by_signal`); kept for the
+    host-level residual-risk listing. Each signal brings a family:
 
     * a cuff signal (``"L_T"``, ``"R_V2"``) brings its cuff's nerve signals
       (``<cuff>_V1..V3`` and ``<cuff>_T``: the channels it is built from, and the tripole
@@ -966,63 +966,100 @@ def own_detection_signals(consumer_signals: Sequence[str], detection_signals: Se
     return frozenset(out)
 
 
-def hr_source_signals(hr_signal: str, detection_signals: Sequence[str],
-                      channel_signals: Mapping[str, str]) -> frozenset[str]:
-    """Return the HR-source channels of the routed HR channel, as detection signals.
+JOINT_CALL_CONSUMERS: Final[Mapping[str, str]] = {
+    "mmc": ("extract_mmc reads every gastric channel in ONE call (matlab/night6/"
+            "night6_prepare_epoch.m: sigs = gastric, her column order ANT1-ANT3) and its "
+            "cross-channel delay output reads pairs of them (recovery_start mmc_delay_window), so "
+            "each of its signals is analysed together with the others"),
+}
+"""Consumers whose one call analyses all their signals jointly: a signal's own signals are then
+those of every signal the consumer reads. slow_wave is NOT one: slowWaveAnalysis_new filters and
+detects per column (processing_new/slowWaveAnalysis_new.m, ``for ch = 1:size(signal,2)``) and
+Night 6 keeps each channel's output from a run masked with that channel's mask
+(night6_consumer_input maskSignal). Spikes are per cuff (holds per cuff, 4791ecb)."""
 
-    Andrea's extent configuration (2026-10-10, RULING 2026-10-10 item 2 follow-up): a core is
-    on HRV's and breathing's OWN signals when it was detected on the HR-source channels - the
-    routing entry's HR channel itself, or both channels of its cross-site pair - and nothing
-    else of their cuffs (unlike :func:`own_detection_signals`, which takes the whole family).
-    ``hr_signal`` is the routed name: a detection signal (``"R_T"``), a raw channel
-    (``"RVN2"`` -> ``R_V2`` through ``channel_signals``), or a pairs lead ``"<plus>-<minus>"``
-    (``physio.hr_pairs``; each part resolved the same way). A name or part that resolves to no
-    detection signal is refused (ValueError): never guessed.
+
+def signal_sources(name: str, detection_signals: Sequence[str],
+                   channel_signals: Mapping[str, str]) -> frozenset[str]:
+    """Return the channel ``name`` plus every contact it is computed from, as detection signals.
+
+    Andrea's definition (2026-10-11), traced to how each signal is built:
+
+    * a tripole ``<cuff>_T`` (derive.derivations.build_derivations and Night 6's recipe:
+      T = 0.5 V1 - V2 + 0.5 V3) -> T and that cuff's contacts V1-V3 that detection read (none
+      for a hardware tripole, whose contacts are unrecoverable);
+    * a raw contact (``R_V2``, or its channel ``RVN2`` through ``channel_signals``) or a raw
+      stomach channel (``ANT1``; Night 6 recipe 'raw') -> itself;
+    * ``stomach_ref`` (derivations.build_stomach_reference: ANT1 minus the common average of
+      the stomach channels, or a hardware pass-through) -> itself and every raw stomach channel
+      detection read;
+    * a pairs lead ``"<plus>-<minus>"`` (physio.hr_pairs; Night 6 recipe 'pair') -> the sources
+      of both parts (two contacts).
+
+    A name or part that resolves to no detection signal is refused (ValueError): never guessed.
     """
     det = tuple(detection_signals)
-    whole = hr_signal in det or hr_signal in channel_signals or "-" not in hr_signal
+    whole = name in det or name in channel_signals or "-" not in name
     out: set[str] = set()
-    for part in ([hr_signal] if whole else hr_signal.split("-")):
+    for part in ([name] if whole else name.split("-")):
         d = part if part in det else channel_signals.get(part)
         if d is None or d not in det:
-            msg = (f"HR channel {hr_signal!r}: {part!r} is no detection signal and no channel "
-                   "that carries one; its HR-source channels are unknown")
+            msg = (f"signal {name!r}: {part!r} is no detection signal and no channel that carries "
+                   "one; what it is computed from is unknown")
             raise ValueError(msg)
         out.add(d)
+        cuff = _cuff_of(d)
+        if cuff is not None and d == f"{cuff}_T":
+            out |= {x for x in det if _cuff_of(x) == cuff and x != d}
+        elif d == "stomach_ref":
+            out |= {x for x in det if _cuff_of(x) is None and x != "stomach_ref"}
     return frozenset(out)
-
-
-def core_own_signals(consumer: str, signal: str, detection_signals: Sequence[str],
-                     channel_signals: Mapping[str, str]) -> frozenset[str]:
-    """Return the detection signals a core must be detected on to be on ``consumer``'s own signals.
-
-    Andrea's extent configuration (2026-10-10): the stomach channels (ANT1-3, stomach_ref) for
-    slow wave and mmc; that cuff's contacts (V1-V3, T) for that cuff's spikes (per signal, not
-    both cuffs); the HR-source channels (:func:`hr_source_signals`) for hrv and breathing.
-    """
-    if consumer in ("hrv", "breathing"):
-        return hr_source_signals(signal, detection_signals, channel_signals)
-    return own_detection_signals([signal], detection_signals, channel_signals)
 
 
 def own_signals_by_signal(signals: Mapping[str, Sequence[str]], detection_signals: Sequence[str],
                           channel_signals: Mapping[str, str]
                           ) -> dict[tuple[str, str], frozenset[str]]:
-    """Return ``(consumer, signal)`` -> that signal's own detection signals, for every z consumer.
+    """Return ``(consumer, signal)`` -> that signal's own detection signals, for every consumer.
 
     THE construction site of "own signals" (invariant 33): the cross-band ``own_signals_only``
-    scope (:class:`CrossBand`) and the core rule ``own_signals_or_visible``
-    (``stage1.core_pad_spans``) both read this mapping. Andrea's definition (2026-10-10), per
-    signal (:func:`core_own_signals`): the stomach channels for slow wave and mmc; that cuff's
-    contacts and tripole for that cuff's spikes; the routed HR channel, or both channels of its
-    pair, for breathing. ``signals`` is what each consumer reads (a stage-1a record's
-    ``signals``), ``detection_signals`` what detection read (its ``detection_signals``) and
+    scope (:class:`CrossBand`), the core rule ``own_signals_or_visible``
+    (``stage1.core_pad_spans``) and the floor populations (:func:`own_signal_population`) all
+    read it. Andrea's definition (2026-10-11): the channel the consumer actually analyses plus
+    every contact that channel is computed from (:func:`signal_sources`) - spikes on ``L_T``:
+    L_T + L_V1-3; breathing / hrv on a tripole: T + its three contacts, on a pair lead: its two
+    contacts, on a contact: itself; slow_wave on ``ANT1``: ANT1; mmc: every gastric channel its
+    one call analyses (:data:`JOINT_CALL_CONSUMERS`). ``signals`` is what each consumer reads (a
+    stage-1a record's ``signals``), ``detection_signals`` what detection read and
     ``channel_signals`` :func:`channel_detection_signals` of the recording's channels. hrv is
-    left out (its extent is operational). A signal whose family cannot be resolved is refused
-    (ValueError, naming it): never guessed, never skipped.
+    included (only the measurement candidates act on it; its production extent stays
+    operational). A signal that cannot be resolved is refused (ValueError): never skipped.
     """
-    return {(c, s): core_own_signals(c, s, detection_signals, channel_signals)
-            for c, sigs in signals.items() if c != "hrv" for s in sigs}
+    out: dict[tuple[str, str], frozenset[str]] = {}
+    for c, sigs in signals.items():
+        src = {s: signal_sources(s, detection_signals, channel_signals) for s in sigs}
+        joint = frozenset().union(*src.values()) if c in JOINT_CALL_CONSUMERS else None
+        for s in sigs:
+            out[(c, s)] = joint if joint is not None else src[s]
+    return out
+
+
+def own_signal_population(consumer: str, signals: Mapping[str, Sequence[str]],
+                          detection_signals: Sequence[str],
+                          channel_signals: Mapping[str, str]) -> tuple[str, ...]:
+    """Return the signals a consumer's floor population pools: the union of its own signals.
+
+    Andrea (2026-10-11): each floor's population uses exactly the same set of signals as that
+    consumer's own signals - the union over the signals it reads in the baseline recording, from
+    :func:`own_signals_by_signal` and nowhere else. A consumer that reads nothing there (a
+    baseline with no routed HR channel, for breathing / hrv) has no population: refused.
+    """
+    if not signals.get(consumer):
+        msg = (f"{consumer} reads no signal in this recording: it has no own-signal floor "
+               "population here (for breathing / hrv: no routed HR channel)")
+        raise ValueError(msg)
+    own = own_signals_by_signal({consumer: signals[consumer]}, detection_signals,
+                                channel_signals)
+    return tuple(sorted(frozenset().union(*own.values())))
 
 
 class ExtentNotAssessableError(ValueError):

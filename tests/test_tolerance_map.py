@@ -551,18 +551,26 @@ def test_own_signals_only_is_per_signal_never_per_consumer() -> None:
     assert r[("breathing", "LVN2-RVN1")] is None
     on_rt = _scoped_run("L_T", {"breathing": ("R_T",)})
     assert on_rt[("breathing", "R_T")] is None
+    # Andrea 2026-10-11: a tripole-routed breathing channel owns its three contacts too
+    assert _detected(_scoped_run("R_V2", {"breathing": ("R_T",)})[("breathing", "R_T")])
     r = _scoped_run("R_V1")  # one of the HR pair's two channels
     assert _detected(r[("breathing", "LVN2-RVN1")]) and _detected(r[("spikes", "R_T")])
     assert r[("spikes", "L_T")] is None
-    assert _detected(_scoped_run("stomach_ref")[("mmc", "ANT1")])
+    gastric = {"mmc": ("ANT1", "ANT2", "ANT3"), "slow_wave": ("ANT1", "ANT2", "ANT3")}
+    r = _scoped_run("ANT2", gastric)  # mmc's one call reads all three; slow wave per channel
+    assert _detected(r[("mmc", "ANT1")]) and r[("slow_wave", "ANT1")] is None
+    assert _detected(r[("slow_wave", "ANT2")])
+    r = _scoped_run("stomach_ref", gastric)  # analysed by neither consumer
+    assert r[("mmc", "ANT1")] is None and r[("slow_wave", "ANT1")] is None
 
 
 def test_own_signals_by_signal_is_the_one_mapping_for_both_rules() -> None:
     own = tl.own_signals_by_signal({**SC_SIGNALS, "hrv": ("LVN2-RVN1",)}, DET, CH)
     assert own == {("spikes", "L_T"): NERVE_L, ("spikes", "R_T"): NERVE_R,
-                   ("breathing", "LVN2-RVN1"): {"L_V2", "R_V1"}, ("mmc", "ANT1"): STOMACH}
-    assert all(own[k] == tl.core_own_signals(*k, DET, CH) for k in own)
-    with pytest.raises(ValueError, match="HR-source channels are unknown"):
+                   ("breathing", "LVN2-RVN1"): {"L_V2", "R_V1"}, ("mmc", "ANT1"): {"ANT1"},
+                   ("hrv", "LVN2-RVN1"): {"L_V2", "R_V1"}}
+    assert all(own[k] == tl.signal_sources(k[1], DET, CH) for k in own)
+    with pytest.raises(ValueError, match="what it is computed from is unknown"):
         tl.own_signals_by_signal({"breathing": ("ECG",)}, DET, CH)
     # a consumer-keyed mapping (the old shape) is refused by name, never read as "no own"
     with pytest.raises(KeyError, match="own detection signals of"):
@@ -721,3 +729,19 @@ def test_an_own_signal_floor_on_another_consumers_signals_or_band_is_refused() -
             _build(extent_floors=bad)
     with pytest.raises(ValueError, match=r">= 1.44"):
         _build(extent_floors={**decl, "mmc": {**decl["mmc"], "value": 1.2}})
+
+
+
+def test_a_consumer_without_an_own_signal_population_keeps_its_visible_kind_threshold() -> None:
+    """Breathing on a baseline with no routed HR channel declares {"none": why}.
+
+    Never for a floor consumer, never without a reason.
+    """
+    decl = {**_floors(_own_archive()), "breathing": {"none": "the J baseline routes no HR channel"}}
+    t = _build(extent_floors=decl)
+    assert t.table.z_tol["breathing"] == 7.69
+    assert "no own-signal floor population" in t.thresholds["breathing"].setter
+    with pytest.raises(ValueError, match="on the floor"):
+        _build(extent_floors={**decl, "mmc": {"none": "x"}})
+    with pytest.raises(ValueError, match="must say why"):
+        _build(extent_floors={**decl, "breathing": {"none": " "}})

@@ -146,7 +146,7 @@ the decision table showed the clause decides the holds by itself: slow wave held
 with it, 1/10 without): ``always`` - the ruling as written, the core plus padding always
 blanked; ``when_visible`` - only where the consumer's own band is above its threshold over the
 core; ``own_signals_or_visible`` (Andrea, 2026-10-10) - when the core was detected on the
-consumer's OWN signals (``tolerance.core_own_signals``) or its own band is above its threshold
+consumer's OWN signals (``tolerance.own_signals_by_signal``) or its own band is above its threshold
 over the core (``extent.stage1.core_pad_spans``)."""
 
 CORE_PAD_RULE: Final = (
@@ -209,7 +209,10 @@ def check_extent_floors(decl: object) -> str | dict[str, dict[str, Any]]:
     archive_file, archive_sha256}, source}`` (Andrea, revised 2026-10-10): the floor computed
     on THAT consumer's own signals (invariant 3, :data:`OWN_SIGNAL_FAMILY`) in its own band,
     at a percentile of :data:`EXTENT_PERCENTILES`, from one archived baseline. A value below
-    :data:`Z_FLOOR` (the stage-1a cache's exact floor) is refused.
+    :data:`Z_FLOOR` (the stage-1a cache's exact floor) is refused. A consumer that has no
+    own-signal population on the baseline (breathing on a baseline with no routed HR channel)
+    declares ``{"none": <why>}``: its option-(1) threshold stands, which is allowed only where a
+    visible kind sets it (never for a consumer on the floor).
     """
     if decl == EXTENT_FLOORS_PER_BAND:
         return EXTENT_FLOORS_PER_BAND
@@ -234,6 +237,11 @@ def _check_floor_entry(c: str, e: object) -> dict[str, Any]:
     if not isinstance(e, Mapping):
         msg = f"extent_floors.{c} must be {{value, percentile, population, source}}"
         raise ValueError(msg)
+    if set(e) == {"none"}:
+        if not str(e["none"]).strip():
+            msg = f"extent_floors.{c}: 'none' must say why the consumer has no population"
+            raise ValueError(msg)
+        return {"none": str(e["none"])}
     pop = e.get("population")
     gap = [k for k in ("value", "percentile", "population", "source") if not e.get(k)]
     gap += ([f"population.{k}" for k in FLOOR_POPULATION_KEYS if not pop.get(k)]
@@ -608,6 +616,13 @@ def _floored(c: str, t: ConsumerThreshold, floors: str | Mapping[str, Mapping[st
     """Apply the declared floors to one option-(1) threshold (:func:`option1_tolerances`)."""
     if not isinstance(floors, str):
         f = floors[c]
+        if "none" in f:
+            if t.setter.startswith("floor"):
+                msg = (f"extent_floors.{c} declares no own-signal population, but {c} is on the "
+                       "floor (no visible kind sets its threshold): it needs a population")
+                raise ValueError(msg)
+            return dataclasses.replace(t, setter=f"{t.setter}; no own-signal floor population "
+                                                 f"({f['none']}): the option-(1) threshold stands")
         fv = float(f["value"])
         pop = f["population"]
         binds = "own-signal floor" if fv >= t.z else "option-(1) threshold"

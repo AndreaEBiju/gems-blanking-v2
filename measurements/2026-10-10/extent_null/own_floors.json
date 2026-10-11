@@ -1,0 +1,192 @@
+{
+ "consumer_signals": {
+  "breathing": [],
+  "hrv": [],
+  "mmc": [
+   "ANT1",
+   "ANT2",
+   "ANT3"
+  ],
+  "slow_wave": [
+   "ANT1",
+   "ANT2",
+   "ANT3"
+  ],
+  "spikes": [
+   "L_T",
+   "R_T"
+  ]
+ },
+ "detection_signals": [
+  "ANT1",
+  "ANT2",
+  "ANT3",
+  "L_T",
+  "L_V1",
+  "L_V2",
+  "L_V3",
+  "R_T",
+  "R_V1",
+  "R_V2",
+  "R_V3",
+  "stomach_ref"
+ ],
+ "fs": 24414.0625,
+ "no_population": {
+  "breathing": "breathing reads no signal in this recording: it has no own-signal floor population here (for breathing / hrv: no routed HR channel)"
+ },
+ "per_consumer_own_signals": {
+  "mmc": [
+   {
+    "band": "2-50",
+    "consumer": "mmc",
+    "n_frames": 179895,
+    "percentile": "p90",
+    "signals": [
+     "ANT1",
+     "ANT2",
+     "ANT3"
+    ],
+    "value": 1.36
+   },
+   {
+    "band": "2-50",
+    "consumer": "mmc",
+    "n_frames": 179895,
+    "percentile": "p95",
+    "signals": [
+     "ANT1",
+     "ANT2",
+     "ANT3"
+    ],
+    "value": 1.94
+   },
+   {
+    "band": "2-50",
+    "consumer": "mmc",
+    "n_frames": 179895,
+    "percentile": "p99",
+    "signals": [
+     "ANT1",
+     "ANT2",
+     "ANT3"
+    ],
+    "value": 3.69
+   }
+  ],
+  "slow_wave": [
+   {
+    "band": "0-2",
+    "consumer": "slow_wave",
+    "n_frames": 175686,
+    "percentile": "p90",
+    "signals": [
+     "ANT1",
+     "ANT2",
+     "ANT3"
+    ],
+    "value": 1.2
+   },
+   {
+    "band": "0-2",
+    "consumer": "slow_wave",
+    "n_frames": 175686,
+    "percentile": "p95",
+    "signals": [
+     "ANT1",
+     "ANT2",
+     "ANT3"
+    ],
+    "value": 2.47
+   },
+   {
+    "band": "0-2",
+    "consumer": "slow_wave",
+    "n_frames": 175686,
+    "percentile": "p99",
+    "signals": [
+     "ANT1",
+     "ANT2",
+     "ANT3"
+    ],
+    "value": 5.39
+   }
+  ],
+  "spikes": [
+   {
+    "band": "300-3000",
+    "consumer": "spikes",
+    "n_frames": 480464,
+    "percentile": "p90",
+    "signals": [
+     "L_T",
+     "L_V1",
+     "L_V2",
+     "L_V3",
+     "R_T",
+     "R_V1",
+     "R_V2",
+     "R_V3"
+    ],
+    "value": 1.75
+   },
+   {
+    "band": "300-3000",
+    "consumer": "spikes",
+    "n_frames": 480464,
+    "percentile": "p95",
+    "signals": [
+     "L_T",
+     "L_V1",
+     "L_V2",
+     "L_V3",
+     "R_T",
+     "R_V1",
+     "R_V2",
+     "R_V3"
+    ],
+    "value": 2.45
+   },
+   {
+    "band": "300-3000",
+    "consumer": "spikes",
+    "n_frames": 480464,
+    "percentile": "p99",
+    "signals": [
+     "L_T",
+     "L_V1",
+     "L_V2",
+     "L_V3",
+     "R_T",
+     "R_V1",
+     "R_V2",
+     "R_V3"
+    ],
+    "value": 4.71
+   }
+  ]
+ },
+ "populations": {
+  "mmc": [
+   "ANT1",
+   "ANT2",
+   "ANT3"
+  ],
+  "slow_wave": [
+   "ANT1",
+   "ANT2",
+   "ANT3"
+  ],
+  "spikes": [
+   "L_T",
+   "L_V1",
+   "L_V2",
+   "L_V3",
+   "R_T",
+   "R_V1",
+   "R_V2",
+   "R_V3"
+  ]
+ },
+ "session": "gems_j_t01_ms3_bl_230315_20260916T030321Z"
+}

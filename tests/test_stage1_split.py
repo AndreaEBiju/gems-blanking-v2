@@ -375,9 +375,8 @@ OWN = "own_signals_or_visible"
 
 def _own_cache(seed: int, *, empty: bool = False) -> st1.EpochCache:
     full = _full(seed)
-    own = {(c, s): (frozenset() if empty else
-                    tl.core_own_signals(c, s, STAGE1_SIGNALS, {}))
-           for c, v in full.signals.items() if c != "hrv" for s in v}
+    by = tl.own_signals_by_signal(full.signals, STAGE1_SIGNALS, {})
+    own = {k: (frozenset() if empty else v) for k, v in by.items()}
     return st1.EpochCache(**{**full.__dict__, "own_signals": own})
 
 
@@ -438,19 +437,34 @@ def test_the_core_and_its_padding_are_blanked_together_whenever_it_blanks() -> N
                            tolerances=_table(dict.fromkeys(Z_CONSUMERS, 4.0)))
 
 
-def test_the_hr_source_channels_are_the_routed_hr_channel_or_pair_only() -> None:
+def test_own_signals_are_the_channel_analysed_plus_the_contacts_it_is_computed_from() -> None:
+    """Andrea, 2026-10-11: the channel analysed plus the contacts it is computed from.
+
+    A tripole brings its three contacts, a pair lead its two, a contact itself; slow wave per
+    gastric channel; mmc every gastric channel its one call reads.
+    """
     det = STAGE1_SIGNALS
     chmap = {"RVN2": "R_V2", "LVN3": "L_V3", "ANT1": "ANT1"}
-    assert tl.hr_source_signals("RVN2-LVN3", det, chmap) == {"R_V2", "L_V3"}
-    assert tl.hr_source_signals("RVN2", det, chmap) == {"R_V2"}
-    assert tl.hr_source_signals("R_T", det, chmap) == {"R_T"}
-    assert tl.core_own_signals("breathing", "RVN2", det, chmap) == {"R_V2"}  # not the cuff
-    assert tl.core_own_signals("spikes", "R_T", det, chmap) == {"R_V1", "R_V2", "R_V3", "R_T"}
-    assert tl.core_own_signals("mmc", "ANT1", det, chmap) == {"ANT1", "ANT2", "ANT3",
-                                                              "stomach_ref"}
+    assert tl.signal_sources("RVN2-LVN3", det, chmap) == {"R_V2", "L_V3"}
+    assert tl.signal_sources("RVN2", det, chmap) == {"R_V2"}
+    assert tl.signal_sources("R_T", det, chmap) == {"R_T", "R_V1", "R_V2", "R_V3"}
+    assert tl.signal_sources("stomach_ref", det, chmap) == {"stomach_ref", "ANT1", "ANT2",
+                                                            "ANT3"}
+    own = tl.own_signals_by_signal(
+        {"breathing": ("R_T",), "hrv": ("RVN2-LVN3",), "spikes": ("L_T", "R_T"),
+         "slow_wave": ("ANT1", "ANT2", "ANT3"), "mmc": ("ANT1", "ANT2", "ANT3")}, det, chmap)
+    assert own[("breathing", "R_T")] == {"R_T", "R_V1", "R_V2", "R_V3"}
+    assert own[("hrv", "RVN2-LVN3")] == {"R_V2", "L_V3"}
+    assert own[("spikes", "L_T")] == {"L_T", "L_V1", "L_V2", "L_V3"}
+    assert own[("slow_wave", "ANT2")] == {"ANT2"}
+    assert own[("mmc", "ANT2")] == {"ANT1", "ANT2", "ANT3"}  # one joint call (extract_mmc)
+    assert tl.own_signal_population("spikes", {"spikes": ("L_T", "R_T")}, det, chmap) == (
+        "L_T", "L_V1", "L_V2", "L_V3", "R_T", "R_V1", "R_V2", "R_V3")
+    with pytest.raises(ValueError, match="no own-signal floor population"):
+        tl.own_signal_population("breathing", {"breathing": ()}, det, chmap)
     for bad in ("RVN9", "RVN2-XYZ"):
-        with pytest.raises(ValueError, match="HR-source channels are unknown"):
-            tl.hr_source_signals(bad, det, chmap)
+        with pytest.raises(ValueError, match="what it is computed from is unknown"):
+            tl.signal_sources(bad, det, chmap)
 
 
 # ---------------------------------------------------------------------------
