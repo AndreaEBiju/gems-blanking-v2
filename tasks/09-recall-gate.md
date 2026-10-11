@@ -2596,6 +2596,97 @@ The rulings headed **2026-10-08**, **(b)** and **(c)** were written on **2026-10
      - If the two versions disagree, it is reported.
 8. **mmc value choice:** on Sunday, after routing, as planned.
 
+### RULING 2026-10-11 — extent by evidence; sham-controlled harm test; stimulation mapping from the instrument; peri-R cuffs; floors and guards
+
+**Andrea, 2026-10-10 night:** scientific correctness comes before the Sunday target. No step is taken because of the deadline.
+
+**Withdrawn:** the 2026-10-10 extent proposal (rule (ii) only for slow wave, mmc and spikes; rule (i) only for HRV; auto-declare if the pilot passed). It was never declared or merged. Its commits `ddbaa0f` and `e80ae67` are reverted by `e00f71a` and `22a9451` (new commits; no history rewritten).
+
+1. **Extent: nothing is declared.** Three candidates exist for measurement only, and the production driver refuses any configuration that names one:
+   - **C1:** (i) OR (ii), 99th-percentile floors;
+   - **C2:** (ii) only for slow wave, mmc and spikes; (i) only for HRV; breathing unchanged;
+   - **C3:** (i) only.
+
+   All three use own-signals cross-band scope, per-consumer holds, and per-cuff spike holds.
+2. **Pilot evidence (10 recordings).**
+   - **Blanked time:**
+     - C1/C3: slow wave 71% (held 10/10), mmc 38% (9/10);
+     - C2: slow wave 0% (0–9), mmc 13%.
+   - **Agreement with Andrea's marks:**
+     - by count: 15 of 18 marks overlap a confirmed core, and only 3 of 161 cores inside the spans touch no mark;
+     - by time: 48%.
+
+     So the earlier low coverage was mainly a unit mismatch (long marks, short cores), not cores in the wrong place.
+   - **Pilot harm test:** it compared outputs with and without the marks masked, which confounds artifact harm with the cost of masking. Only one pilot recording (I t02 es2 bl) is held out. It does not carry the decision.
+3. **Harm test, extended to held-out marks.**
+   - **Which marks:** marks never used to train or adapt the judged model. That is I/J/K set A judgements, the I/J blind-audit spans and the K exam: 10 recordings. Every A, B and H label is excluded.
+   - **Pre-registered** 2026-10-11 03:33, amended 10:55, before any extension result.
+   - **Measure:** D_real is the change in each consumer's tolerance-v2 measures between (config mask) and (config mask plus the unblanked real marks).
+   - **Control:** K = 19 sham sets, matched in count and length, placed at random (recorded seed). Shams avoid marks, masks and padding, and post-stim shams go in the post-stim window where possible.
+   - **Harmed** = D_real exceeds the tolerance on **any** sweep host **and** exceeds every sham. The "every host" reading is also reported.
+   - **Execution:** full design, one MATLAB session per recording, two workers. Verified identical to single-session on I t02 es2 bl (20 of 20 comparisons).
+   - **Released for this measurement only:** 2 held baselines and the 7 held-out stim-recovery recordings. QC holds all 7 in production; reasons in `extension_qc_holds.csv`.
+   - **Reporting:**
+     - whole-file and first-60-s-after-stim-end results separately, stating both windows (production epoch from 132 s; v6 starts);
+     - K t03 ms3 in its own flagged row.
+   - **Spikes:** primary without the 24 peri-R-failing cuffs, sensitivity with them. This is as pre-registered and is not changed mid-run, even though item 9 swaps this in production.
+4. **Decision rule (pre-registered).** For each consumer, the candidate is the configuration with the least blanked time for which no held-out recording counts as harmed. If none qualifies, nothing is chosen automatically and Andrea decides with the evidence. Nothing is declared or merged before she confirms.
+5. **Own signals** = the channel a consumer analyses, plus every contact it is computed from:
+
+   | Consumer | Own signals |
+   |---|---|
+   | Spikes, or breathing/HRV on a tripole | the tripole plus its three contacts |
+   | Breathing/HRV on a pair lead | its two contacts |
+   | Slow wave | each stomach channel separately |
+   | mmc | all three stomach channels together |
+
+   - The stomach reference channel is in neither stomach consumer's set.
+   - Each floor's population uses the same signal set.
+   - **Floors (J clean baseline, 99th percentile):** slow wave 5.39, mmc 3.69, spikes 4.71 (spike detection reads only the tripoles, so tripoles plus contacts).
+   - **Breathing keeps 7.69.** The builder's 3.94 was computed on the wrong signals and is withdrawn.
+   - **Pooled floor not adopted:** the only qualifying population is about 70 s from I t02 es2 bl, which is also a held-out harm-test recording.
+   - **Limitation, recorded:** no independent held-out clean population with an HR channel exists for breathing, and the I span gives lower floors than J on every consumer.
+6. **Routing integrity.**
+   - **Identical, defined:** a difference confined to the recorded code commit, with every numeric variable identical, counts as identical (correct provenance).
+   - **Pause patches:** a routing-only pause, and the pause checked at every stage start.
+   - **Audit:** no damaged output, in finished or unfinished batches.
+   - **Budget:** estimate budget 60 GB. The routing-only guard pauses below 30 GB free; the 14 GB guard is unchanged.
+   - **Adapters (frozen scripts never edited):**
+
+     | Version | Change |
+     |---|---|
+     | v1 | spike times always 1-D |
+     | v2 | beat times always 1-D |
+     | v3 | fewer than 20 beats: no template, epoch flagged, cuff falls back to the existing route |
+     | v4 | the count is the beats the template is fitted from |
+
+     - Each was proven to change no production output; production minimum is 27 template beats.
+     - Any future flagged epoch is reported to Andrea.
+   - **b001/b002:** the 8 pre files of 0.06–13.4 s are below routing's 14 s minimum and are excluded per analysis, with reasons. None is a paired baseline.
+   - **CV2 minimum:** to be defined later as a number of consecutive ISI pairs, not seconds.
+7. **Stimulation level.** It comes from the corrected folder names, verified against the instrument (TDT stored settings, controller logs, monitor channels), and never from the analysed signals.
+   - **X_Y** = mechanical level X with electrical level Y (Andrea). Provisional until the all-animal instrument check is reported; early files agree.
+   - **K `cme<n>`** = electrical level ⌈n/3⌉, mechanical level ((n−1) mod 3)+1. Three instrument sources agree on all 11 files. This corrects the mechanical-first rule Andrea first stated.
+   - **Unmappable names block,** and never default to "no stimulation".
+   - **ES3** is delivered at 1017.25 Hz with a 117.96 s train; the label stays ES3.
+   - **No other delivery exceptions** (Andrea).
+   - **Stim-level table v2:** NOT CONFIRMED until Andrea reviews it after the instrument check.
+8. **Recovery starts.**
+   - **MotorOn is not a motor record** (it appears in electrical-only blocks and is absent from K ms3). Where checked, v6's mechanical end matches the measured drive end within 1.1 ms.
+   - **Motor-end margins:** none of the 7 held-out recordings starts before the motor stopped. K t03 ms3 (0.049 s) and two A files (within one ADC2 sample) are accepted as flagged.
+   - **Electrical end:** becomes the later of the TDT gate offset and the end of the measured last pulse, as **starts v7**. Only ES3 moves, by about 0.8 ms. v7 is built after the harm-test extension; v6 is unchanged.
+   - **Dose-response common start:** on hold until the instrument check and the stim-level table are confirmed.
+9. **Peri-R cuffs.**
+   - **Rule:** a cuff is distrusted for heart-locking only if it has significant heart-locked excess *outside* its peri-R window (±30 ms test, p < 0.01).
+   - **Why:** in all 24 failing cuffs the locked excess peaks inside the current window, which already blanks it.
+   - **Primary:** releases 23. B t03 1_3 bl R stays distrusted (lower side p = 0.0054). Two sides were marginal at p < 0.05 (B t01 es3 sr L, B t03 1_3 bl L) and are recorded only.
+   - **Sensitivity:** excludes all 24, whole-animal scope.
+   - **Window:** no change.
+10. **Open, report only:**
+    - controller-log runs with no TDT block: dates, nearest recordings, any recording within 2 h after an unrecorded stim run, and the 754 s J run;
+    - the 12 names with no animal letter, which stay blocked until Andrea assigns them;
+    - the all-animal mismatch table.
+
 ### Adapter-check findings, 2026-09-28
 
 - **Tripole polarity.** The old hardware tripole's large events are mostly
