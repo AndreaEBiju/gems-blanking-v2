@@ -62,6 +62,7 @@ from gems_blanking_v2.extent.tolerance import (
 )
 
 __all__ = [
+    "BREATHING_FLOOR_LIMITATION",
     "CORE_BLANKING",
     "CORE_PAD_RULE",
     "EXTENT_FLOORS_PER_BAND",
@@ -180,6 +181,17 @@ def check_core_blanking(decl: object) -> dict[str, str]:
     return {c: str(decl[c]) for c in z_consumers()}
 
 
+BREATHING_FLOOR_LIMITATION: Final = (
+    "Andrea 2026-10-11: breathing keeps 7.69 and the pooled floor is NOT adopted - no "
+    "independent held-out clean population with an HR channel exists for breathing; the only "
+    "candidate (I t02 es2 bl blind span, ~70 s) is also a held-out harm-test recording; the I "
+    "span gives lower floors than J on every consumer (pooled-rule info: G:/My Drive/"
+    "gems_figures/2026-10-11_breathing_floor/, proposal.md sha256 c48966e465a04f68, floors.csv "
+    "sha256 fbf76cb7540cfda1)")
+"""THE construction site of the breathing-floor limitation text (Andrea 2026-10-11): every
+declaration that leaves breathing without an own-signal floor carries it
+(:func:`check_extent_floors`, the candidates' provenance)."""
+
 EXTENT_FLOORS_PER_BAND: Final = "per_band_percentile"
 """The ``extent_floors`` value that keeps the per-band clean-null values
 (:data:`NULL_PERCENTILE_Z` at the declared ``extent_percentile``, pooled over every detection
@@ -237,11 +249,15 @@ def _check_floor_entry(c: str, e: object) -> dict[str, Any]:
     if not isinstance(e, Mapping):
         msg = f"extent_floors.{c} must be {{value, percentile, population, source}}"
         raise ValueError(msg)
-    if set(e) == {"none"}:
+    if set(e) <= {"none", "limitation"} and "none" in e:
         if not str(e["none"]).strip():
             msg = f"extent_floors.{c}: 'none' must say why the consumer has no population"
             raise ValueError(msg)
-        return {"none": str(e["none"])}
+        if c == "breathing" and e.get("limitation") != BREATHING_FLOOR_LIMITATION:
+            msg = ("extent_floors.breathing: a 'none' declaration carries the recorded "
+                   "limitation (tolerance_map.BREATHING_FLOOR_LIMITATION), verbatim")
+            raise ValueError(msg)
+        return {k: str(v) for k, v in e.items()}
     pop = e.get("population")
     gap = [k for k in ("value", "percentile", "population", "source") if not e.get(k)]
     gap += ([f"population.{k}" for k in FLOOR_POPULATION_KEYS if not pop.get(k)]

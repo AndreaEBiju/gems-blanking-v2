@@ -114,50 +114,49 @@ def test_the_release_is_flagged_every_minute_never_blanked(tmp_path: Path) -> No
 
 
 # ---------------------------------------------------------------------------
-# Andrea 2026-10-11 item 4: released cuff-epochs that failed the peri-R test
+# Andrea 2026-10-11 (afternoon): each spike scope distrusts exactly its own declared list
 # ---------------------------------------------------------------------------
 
 SHA = "a" * 64
 
 
-def _list(entries: list[dict[str, str]]) -> dict[str, Any]:
+def _list(entries: list[dict[str, str]], role: str = "primary") -> dict[str, Any]:
     return {"schema": "gems-blanking-v2 perir-failed cuffs v1",
-            "ruling": "Andrea 2026-10-11 item 4: test", "source": {"file": "x.json", "sha256": SHA},
-            "entries": entries}
+            "ruling": "Andrea 2026-10-11: test", "role": role, "rule": ct.PERIR_FAILED_RULE,
+            "criterion": ct.PERIR_OUTSIDE_CRITERION,
+            "source": {"file": "x.json", "sha256": SHA}, "entries": entries}
 
 
-def test_a_failing_release_is_distrusted_in_primary_and_released_in_sensitivity() -> None:
-    lst = ct.perir_failed_list(_list([{"session": "s", "cuff": "L", "epoch": "e0"}]),
-                               sha256="b" * 64)
-    assert lst.failing("s", "e0") == {"L"} and lst.failing("s", "e132") == frozenset()
-    assert lst.record()["sha256"] == "b" * 64 and lst.record()["n_cuff_epochs"] == 1
-    entry = {"spike": {"L": {"route": "distrusted", "why": ct.NO_WINDOW_CLAUSE},  # R3: failed
-                       "R": {"route": "distrusted", "why": ct.NO_WINDOW_CLAUSE}}}  # untestable
-    rows = {"L": None, "R": None}
-    prim = ct.cuff_trust(entry, rows, perir_failed=lst.failing("s", "e0"))
-    sens = ct.cuff_trust(entry, rows, perir_failed=lst.failing("s", "e0"), scope="sensitivity")
-    assert not prim["L"].released and prim["L"].perir_failed
-    assert prim["L"].record()["perir_failed"] == ct.PERIR_FAILED_RULE
-    assert "flag" not in prim["L"].record()
-    assert sens["L"].released and sens["L"].perir_failed
-    assert prim["R"].released and sens["R"].released and not prim["R"].perir_failed  # unchanged
-    assert prim["R"].record()["flag"] == ct.RELEASE_FLAG
-    assert ct.cuff_trust(entry, rows)["L"].released  # a passing / unlisted release stays
+def test_each_scope_distrusts_exactly_its_own_list() -> None:
+    """Primary: outside-window heart-locking only (one cuff); sensitivity: every failure."""
+    prim = ct.perir_failed_list(_list([{"session": "s", "cuff": "R", "epoch": "e0"}]),
+                                sha256="b" * 64)
+    sens = ct.perir_failed_list(_list([{"session": "s", "cuff": "R", "epoch": "e0"},
+                                       {"session": "s", "cuff": "L", "epoch": "e0"}],
+                                      "sensitivity"), sha256="c" * 64)
+    assert prim.record()["role"] == "primary" and sens.record()["role"] == "sensitivity"
+    assert prim.record()["criterion"] == ct.PERIR_OUTSIDE_CRITERION
+    entry = {"spike": {c: {"route": "distrusted", "why": ct.NO_WINDOW_CLAUSE}
+                       for c in ("L", "R", "X")}}  # X: an untestable / passing release
+    rows = {"L": None, "R": None, "X": None}
+    p = ct.cuff_trust(entry, rows, perir_failed=prim.failing("s", "e0"))
+    q = ct.cuff_trust(entry, rows, perir_failed=sens.failing("s", "e0"), scope="sensitivity")
+    assert {c for c, t in p.items() if not t.released} == {"R"}
+    assert {c for c, t in q.items() if not t.released} == {"L", "R"}
+    assert p["L"].released and p["X"].released and q["X"].released  # unchanged
+    assert p["R"].record()["perir_failed"] == ct.PERIR_FAILED_RULE and "flag" not in p["R"].record()
     spans = mk.distrusted_spike_spans(entry, region_start_s=0.0, region_stop_s=60.0,
-                                      released=("R",), perir_failed=("L",))
-    assert [(s.signal, s.reason, s.start_s, s.stop_s) for s in spans] == [
-        ("L_T", mk.PERIR_FAILED_REASON, 0.0, 60.0)]
-    assert mk.distrusted_spike_spans(entry, region_start_s=0.0, region_stop_s=60.0,
-                                     released=("L", "R")) == []  # sensitivity: kept
+                                      released=("L", "X"), perir_failed=("R",))
+    assert [(s.signal, s.reason) for s in spans] == [("R_T", mk.PERIR_FAILED_REASON)]
     with pytest.raises(ValueError, match="both released and distrusted"):
         mk.distrusted_spike_spans(entry, region_start_s=0.0, region_stop_s=60.0,
-                                  released=("L",), perir_failed=("L",))
+                                  released=("R",), perir_failed=("R",))
     r1 = {"spike": {"L": {"route": "distrusted", "why": ct.QRS_CLAUSE}}}
     with pytest.raises(ValueError, match="does not release it"):
         ct.cuff_trust(r1, {"L": None}, perir_failed={"L"})
 
 
-def test_the_peri_r_failed_list_is_declared_unique_and_never_null() -> None:
+def test_the_distrust_lists_are_declared_unique_and_never_null() -> None:
     e = {"session": "s", "cuff": "L", "epoch": "e0"}
     with pytest.raises(ValueError, match="appears twice"):
         ct.perir_failed_list(_list([e, dict(e)]), sha256=SHA)
@@ -165,5 +164,7 @@ def test_the_peri_r_failed_list_is_declared_unique_and_never_null() -> None:
         ct.perir_failed_list(_list([{**e, "p": None}]), sha256=SHA)
     with pytest.raises(ValueError, match="must name"):
         ct.perir_failed_list({**_list([e]), "ruling": "someone"}, sha256=SHA)
+    with pytest.raises(ValueError, match="role"):
+        ct.perir_failed_list({**_list([e]), "role": "both"}, sha256=SHA)
     with pytest.raises(ValueError, match="scope"):
         ct.cuff_trust({}, {}, scope="both")

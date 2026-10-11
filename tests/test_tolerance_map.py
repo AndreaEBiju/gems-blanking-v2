@@ -737,7 +737,9 @@ def test_a_consumer_without_an_own_signal_population_keeps_its_visible_kind_thre
 
     Never for a floor consumer, never without a reason.
     """
-    decl = {**_floors(_own_archive()), "breathing": {"none": "the J baseline routes no HR channel"}}
+    decl = {**_floors(_own_archive()), "breathing": {
+        "none": "the J baseline routes no HR channel",
+        "limitation": tm.BREATHING_FLOOR_LIMITATION}}
     t = _build(extent_floors=decl)
     assert t.table.z_tol["breathing"] == 7.69
     assert "no own-signal floor population" in t.thresholds["breathing"].setter
@@ -745,3 +747,8 @@ def test_a_consumer_without_an_own_signal_population_keeps_its_visible_kind_thre
         _build(extent_floors={**decl, "mmc": {"none": "x"}})
     with pytest.raises(ValueError, match="must say why"):
         _build(extent_floors={**decl, "breathing": {"none": " "}})
+    with pytest.raises(ValueError, match="carries the recorded limitation"):
+        _build(extent_floors={**decl, "breathing": {"none": "x"}})
+    assert "pooled floor is NOT adopted" in tm.BREATHING_FLOOR_LIMITATION
+    assert _build(extent_floors=decl).record()["extent_floors"]["breathing"]["limitation"] == (
+        tm.BREATHING_FLOOR_LIMITATION)

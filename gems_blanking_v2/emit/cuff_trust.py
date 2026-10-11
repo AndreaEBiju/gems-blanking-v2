@@ -19,11 +19,12 @@ no peri-R span can be placed on that cuff, as for the no-beat minutes of (g) 1. 
 clause set (another reason, or both clauses with a train) keeps its distrust: "distrust for
 any other reason stays". This is applied at mask emission; the routing tables are unchanged.
 
-Andrea 2026-10-11 item 4: the released cuff-epochs that FAILED the peri-R test (a declared,
-hashed list, :func:`perir_failed_list`) are distrusted for the PRIMARY spike analysis (whole
-recording, :data:`PERIR_FAILED_RULE`) and kept as released only in the SENSITIVITY scope, so
-results can also be reported with them included. Untestable releases (no routed beats) and
-passing ones are unchanged.
+Andrea 2026-10-11 (afternoon, superseding item 4's assignment): each spike scope reads its OWN
+declared, hashed distrust list (:func:`perir_failed_list`). PRIMARY distrusts only the cuffs with
+significant heart-locked excess OUTSIDE their peri-R window (:data:`PERIR_FAILED_RULE`,
+:data:`PERIR_OUTSIDE_CRITERION`) - one cuff, B t03 1_3 bl R; the other failing releases are
+released again. SENSITIVITY distrusts all 24 releases that failed the peri-R test. Untestable
+releases (no routed beats) and passing ones are released in both.
 
 "No count-gated train" is the peri-R pass row's own verdict for that cuff (``result`` starting
 "no count-gated train", or ``beat_grade == "none"``), exactly as the review-6 script read it;
@@ -41,6 +42,7 @@ from typing import Any, Final
 __all__ = [
     "NO_WINDOW_CLAUSE",
     "PERIR_FAILED_RULE",
+    "PERIR_OUTSIDE_CRITERION",
     "QRS_CLAUSE",
     "READINGS",
     "RELEASED_READINGS",
@@ -75,12 +77,17 @@ RELEASE_RULE: Final = (
 
 
 PERIR_FAILED_RULE: Final = (
-    "Andrea 2026-10-11 item 4: a released cuff-epoch that failed the peri-R test (Poisson excess "
-    "of peri-R spike lags, p < 0.01) is DISTRUSTED for the primary spike analysis (whole "
-    "recording); its spike outputs are kept in the sensitivity scope only, labelled, never "
-    "mixed into primary. No peri-R window changes")
+    "Andrea 2026-10-11: a cuff is distrusted for heart-locking only if it has significant "
+    "heart-locked excess outside its peri-R window (primary); the sensitivity scope distrusts "
+    "every released cuff-epoch that failed the peri-R test. Whole-recording spike distrust; no "
+    "peri-R window changes")
+PERIR_OUTSIDE_CRITERION: Final = (
+    "the per-cuff report's outside-window test: E_out = the heart-locked excess in the central "
+    "region |lag| < 30 ms minus the excess inside the peri-R window; significant when the "
+    "one-sided Poisson p of the central-outside-window count against the flank rate is < 0.01 "
+    "(G:/My Drive/gems_figures/2026-10-11_perir_cuffs/methods.md, column p_central_outside_win)")
 SCOPES: Final = ("primary", "sensitivity")
-"""The two spike scopes item 4 creates: the failing cuff-epochs distrusted / released."""
+"""The two spike scopes: primary and sensitivity, each with its own declared distrust list."""
 PERIR_LIST_SCHEMA: Final = "gems-blanking-v2 perir-failed cuffs v1"
 
 
@@ -92,6 +99,9 @@ class PerirFailedList:
     source_file: str
     source_sha256: str
     keys: frozenset[tuple[str, str, str]]
+    role: str = "primary"
+    rule: str = ""
+    criterion: str = ""
 
     def failing(self, session: str, epoch: str) -> frozenset[str]:
         """Return the cuffs of ``session`` x ``epoch`` on the list."""
@@ -99,23 +109,29 @@ class PerirFailedList:
 
     def record(self) -> dict[str, Any]:
         """Return what provenance carries: the rule, the list sha256, its source and size."""
-        return {"rule": PERIR_FAILED_RULE, "sha256": self.sha256, "source_file": self.source_file,
-                "source_sha256": self.source_sha256, "n_cuff_epochs": len(self.keys)}
+        return {"rule": self.rule or PERIR_FAILED_RULE, "role": self.role,
+                "criterion": self.criterion, "sha256": self.sha256,
+                "source_file": self.source_file, "source_sha256": self.source_sha256,
+                "n_cuff_epochs": len(self.keys)}
 
 
 def perir_failed_list(doc: Mapping[str, Any], *, sha256: str) -> PerirFailedList:
     """Return the declared list, checked; raise ValueError naming the defect.
 
-    ``doc`` = {"schema", "ruling" (must name Andrea 2026-10-11 item 4), "source": {"file",
-    "sha256"}, "entries": [{"session", "cuff" (L | R), "epoch"}]}; ``sha256`` is the list
-    file's own hash (recorded in provenance). A (session, cuff, epoch) given twice is refused
-    (invariant 27), as is an entry with another field.
+    ``doc`` = {"schema", "ruling" (must name Andrea 2026-10-11), "role" (primary |
+    sensitivity), "rule", "criterion", "source": {"file", "sha256"}, "entries": [{"session",
+    "cuff" (L | R), "epoch"}]}; ``sha256`` is the list file's own hash (recorded in
+    provenance). A (session, cuff, epoch) given twice is refused (invariant 27), as is an
+    entry with another field.
     """
     if doc.get("schema") != PERIR_LIST_SCHEMA:
         msg = f"peri-R failed list: schema {doc.get('schema')!r}, expected {PERIR_LIST_SCHEMA!r}"
         raise ValueError(msg)
-    if "Andrea 2026-10-11 item 4" not in str(doc.get("ruling", "")):
-        msg = "peri-R failed list: its ruling must name 'Andrea 2026-10-11 item 4'"
+    if "Andrea 2026-10-11" not in str(doc.get("ruling", "")):
+        msg = "peri-R failed list: its ruling must name 'Andrea 2026-10-11'"
+        raise ValueError(msg)
+    if doc.get("role") not in SCOPES or not doc.get("rule") or not doc.get("criterion"):
+        msg = f"peri-R failed list: role must be one of {list(SCOPES)}, with its rule and criterion"
         raise ValueError(msg)
     src = doc.get("source")
     if not isinstance(src, Mapping) or not src.get("file") or len(str(src.get("sha256", ""))) != 64:  # noqa: PLR2004
@@ -131,7 +147,8 @@ def perir_failed_list(doc: Mapping[str, Any], *, sha256: str) -> PerirFailedList
             msg = f"peri-R failed list: {k} appears twice (invariant 27)"
             raise ValueError(msg)
         keys.add(k)
-    return PerirFailedList(str(sha256), str(src["file"]), str(src["sha256"]), frozenset(keys))
+    return PerirFailedList(str(sha256), str(src["file"]), str(src["sha256"]), frozenset(keys),
+                           str(doc["role"]), str(doc["rule"]), str(doc["criterion"]))
 
 
 def _clauses(why: str) -> tuple[str, ...]:
@@ -190,11 +207,11 @@ def cuff_trust(entry: Mapping[str, Any], rows: Mapping[str, Mapping[str, Any] | 
                ) -> dict[str, CuffTrust]:
     """Each cuff of a routing entry's spike section, classified (``rows``: cuff -> peri-R row).
 
-    ``perir_failed``: the cuffs of this recording x epoch on the item-4 list
-    (:meth:`PerirFailedList.failing`). In ``scope`` "primary" a released cuff on it is NOT
-    released (distrusted, :data:`PERIR_FAILED_RULE`); in "sensitivity" it stays released. Either
-    way it is marked ``perir_failed``. A listed cuff that the item-6 rule does not release is
-    refused: the list names releases only.
+    ``perir_failed``: the cuffs of this recording x epoch on THIS scope's declared distrust list
+    (:meth:`PerirFailedList.failing`; Andrea 2026-10-11: primary - outside-window heart-locking
+    only; sensitivity - every peri-R failure). A released cuff on it is NOT released
+    (distrusted, :data:`PERIR_FAILED_RULE`) and marked ``perir_failed``. A listed cuff that the
+    item-6 rule does not release is refused: the lists name releases only.
     """
     if scope not in SCOPES:
         msg = f"cuff trust scope {scope!r} is none of {list(SCOPES)}"
@@ -211,8 +228,7 @@ def cuff_trust(entry: Mapping[str, Any], rows: Mapping[str, Mapping[str, Any] | 
         if failed and not released:
             msg = f"cuff {cuff} is on the peri-R failed list but item 6 does not release it ({r})"
             raise ValueError(msg)
-        out[cuff] = CuffTrust(cuff, True, r, released and not (failed and scope == "primary"),
-                              why, failed)
+        out[cuff] = CuffTrust(cuff, True, r, released and not failed, why, failed)
     stray = sorted(set(perir_failed) - set(out))
     if stray:
         msg = f"cuffs {stray} are on the peri-R failed list but not in the routing entry"
