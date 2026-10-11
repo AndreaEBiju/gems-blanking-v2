@@ -499,7 +499,7 @@ MOTION_REASONS: Final[frozenset[str]] = frozenset({"clip", "beat_train_changed",
 MOTION_REASON_PREFIX: Final = "in_band_"
 """Allow-list of the motion reason codes ``extent.routing`` writes (plus ``in_band_*``)."""
 NON_MOTION_REASONS: Final[frozenset[str]] = frozenset({
-    "cuff_distrusted", "per_minute_cuff_distrust",
+    "cuff_distrusted", "per_minute_cuff_distrust", "cuff_distrusted_perir_failed",
     "excluded_epoch", "cardiac"})
 """Ruled-out reason codes. Line noise has none: it never reaches a mask (``build_masks``
 refuses ``line_noise*`` spans; ruling (d) 2's distrust is ``emit.line_distrust``'s record),
