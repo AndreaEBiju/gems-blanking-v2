@@ -1029,3 +1029,32 @@ def test_review2_4_residual_risk_follows_the_declared_gate() -> None:
     with pytest.raises(ValueError, match="no max_z_lifted"):
         _build(core_blanking=None, extent_rule=_rule(), cross_band_scope=OWN_SCOPES,
                extent_floors=floors, scan=bad)
+
+
+def test_review2_9_effective_thresholds_must_equal_the_tested_runs() -> None:
+    """Review 2 finding 9: the thresholds a declaration PRODUCES must be the tested ones.
+
+    Each candidate's tested outputs record what they ran: z_tol per consumer and the
+    cross-band floor table.
+    """
+    rule = tm.check_extent_rule(_rule(spikes={"gate": "i_or_ii", "candidate": "C1"},
+                                      hrv={"gate": "i", "candidate": "C2"},
+                                      breathing={"gate": "i_or_ii", "candidate": "C1"},
+                                      mmc={"gate": "ii", "candidate": "C2"}))
+    z = {"spikes": 4.35, "mmc": 3.69, "breathing": 7.694646715376746}
+    cbf = {"300-3000": 4.35, "2-50": 5.88, "0.5-3": 6.67}
+    c1 = {"session": "a", "z_tol": {**z, "mmc": 5.88, "slow_wave": 7.42},
+          "cross_band_floor": dict(cbf)}
+    c2 = {"session": "a", "z_tol": {**z, "spikes": 4.71, "slow_wave": 5.39},
+          "cross_band_floor": dict(cbf)}
+    runs = {"C1": [c1, {**c1, "session": "b"}], "C2": [c2]}
+    assert tm.tested_threshold_mismatches(rule, z, cbf, runs) == []
+    for bad_z, bad_f, bad_runs, what in (
+            ({**z, "spikes": 4.71}, cbf, runs, "spikes (C1, a): z_tol"),
+            ({**z, "breathing": 7.69}, cbf, runs, "breathing (C1, a): z_tol"),
+            (z, {**cbf, "2-50": 3.69}, runs, "cross-band floor"),
+            (z, cbf, {"C1": runs["C1"]}, "mmc: no tested output"),
+            (z, cbf, {**runs, "C1": [c1, {**c1, "session": "b", "z_tol": {}}]},
+             "spikes (C1, b): z_tol")):
+        got = tm.tested_threshold_mismatches(rule, bad_z, bad_f, bad_runs)
+        assert any(what in m for m in got), (what, got)

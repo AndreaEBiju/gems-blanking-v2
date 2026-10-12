@@ -98,6 +98,7 @@ __all__ = [
     "scope_residual",
     "source_ref",
     "tested_candidate_mismatches",
+    "tested_threshold_mismatches",
     "verify_floor_archive",
     "z_consumers",
 ]
@@ -416,6 +417,37 @@ def tested_candidate_mismatches(rule: Mapping[str, Any], floors: Mapping[str, An
         fp = (cand.get("floor_populations") or {}).get(c) or {}
         f = floors.get(c) if isinstance(floors, Mapping) else None
         out += _floor_mismatch(c, name, fp, f, cand.get("percentile"))
+    return out
+
+
+def tested_threshold_mismatches(rule: Mapping[str, Any], z_tol: Mapping[str, float],
+                                cross_band_floor: Mapping[str, float],
+                                summaries: Mapping[str, Sequence[Mapping[str, Any]]]
+                                ) -> list[str]:
+    """Return every way the EFFECTIVE thresholds differ from those the tested candidates ran.
+
+    Review 2 finding 9: :func:`tested_candidate_mismatches` compares declarations; this compares
+    what they produce. ``summaries`` maps a candidate name to the summaries of its tested
+    outputs (each with ``z_tol`` and ``cross_band_floor``, the candidate run's own record). For
+    every emitted z consumer: its candidate has outputs, and in every one the consumer's
+    ``z_tol`` and the whole per-band ``cross_band_floor`` (the detecting pairs' floors) equal
+    this run's EXACTLY. Empty: the declaration thresholds as the harm test did.
+    """
+    out: list[str] = []
+    for c, e in sorted(rule["consumers"].items()):
+        if e.get("declared") is False or c == "hrv":
+            continue
+        runs = summaries.get(str(e.get("candidate"))) or []
+        if not runs:
+            out.append(f"{c}: no tested output of candidate {e.get('candidate')!r} to compare")
+        for s in runs:
+            where = f"{c} ({e.get('candidate')}, {s.get('session', '?')})"
+            if (s.get("z_tol") or {}).get(c) != z_tol.get(c):
+                out.append(f"{where}: z_tol {z_tol.get(c)!r}, tested "
+                           f"{(s.get('z_tol') or {}).get(c)!r}")
+            if dict(s.get("cross_band_floor") or {}) != dict(cross_band_floor):
+                out.append(f"{where}: cross-band floor {dict(cross_band_floor)}, tested "
+                           f"{s.get('cross_band_floor')}")
     return out
 
 
