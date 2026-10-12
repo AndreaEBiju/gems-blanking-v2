@@ -91,6 +91,7 @@ __all__ = [
     "own_signal_floor_record",
     "residual_risk",
     "scope_residual",
+    "tested_candidate_mismatches",
     "verify_floor_archive",
     "z_consumers",
 ]
@@ -199,13 +200,16 @@ pair while above its band's declared clean-null percentile); for hrv, core + pad
 operational beat-train extent. A core that fails blanks nothing for it."""
 HRV_GATES: Final[tuple[str, ...]] = ("i", "i_or_ii")
 """hrv has no z band: rule (ii) for hrv is the beat-train change, so 'ii' alone is not offered."""
-EXTENT_RULE_SOURCE_KEYS: Final[tuple[str, ...]] = ("ruling", "decision_files")
+EXTENT_RULE_SOURCE_KEYS: Final[tuple[str, ...]] = ("ruling", "decision_files", "candidate_set")
+"""``candidate_set`` = {file, sha256}: the tested candidates the declaration must equal
+(:func:`tested_candidate_mismatches`; the night driver loads, hashes and compares it)."""
 
 
 def check_extent_rule(decl: object) -> dict[str, Any]:
     """Return the declared per-consumer extent rule, or raise ValueError naming the gap.
 
-    ``{"source": {"ruling": ..., "decision_files": [{file, sha256}, ...]}, "consumers":
+    ``{"source": {"ruling": ..., "decision_files": [{file, sha256}, ...], "candidate_set":
+    {file, sha256}}, "consumers":
     {consumer: {"gate": i | ii | i_or_ii, ...} | {"declared": false, "reason": ...}}}`` for EVERY
     expected consumer (hrv included; hrv's gate is one of :data:`HRV_GATES`). A consumer declared
     ``false`` gets no masks at all (stage 1b marks it not computed, Night 6 lists leave it out);
@@ -219,9 +223,10 @@ def check_extent_rule(decl: object) -> dict[str, Any]:
     if not isinstance(src, Mapping) or any(not src.get(k) for k in EXTENT_RULE_SOURCE_KEYS):
         msg = f"extent_rule.source must name {list(EXTENT_RULE_SOURCE_KEYS)}"
         raise ValueError(msg)
-    for f in src["decision_files"]:
+    for where, f in [*(("decision_files", f) for f in src["decision_files"]),
+                     ("candidate_set", src["candidate_set"])]:
         if not isinstance(f, Mapping) or not f.get("file") or len(str(f.get("sha256", ""))) != 64:  # noqa: PLR2004
-            msg = f"extent_rule.source.decision_files: {f!r} must be {{file, sha256 (64 hex)}}"
+            msg = f"extent_rule.source.{where}: {f!r} must be {{file, sha256 (64 hex)}}"
             raise ValueError(msg)
     cons = decl["consumers"]
     want = tuple(expected_consumers())
@@ -251,6 +256,79 @@ def check_extent_rule(decl: object) -> dict[str, Any]:
         msg = "extent_rule declares no consumer"
         raise ValueError(msg)
     return {"source": json.loads(json.dumps(dict(src), sort_keys=True)), "consumers": out}
+
+
+def tested_candidate_mismatches(rule: Mapping[str, Any], floors: Mapping[str, Any],
+                                scopes: Mapping[str, str], extent_percentile: str,
+                                candidate_set: Mapping[str, Any]) -> list[str]:
+    """Return every way a declared extent configuration differs from the candidate it names.
+
+    Andrea 2026-10-11 night ("Spikes C1, as the rule gives"): each declared consumer must be
+    EXACTLY the candidate the harm test tested. ``candidate_set`` is the measurement candidates'
+    declaration (candidate set v2: ``version``, ``common`` {cross_band_scope, own_signals},
+    ``candidates`` {name: {gates, percentile, floor_populations}}); ``rule`` / ``floors`` /
+    ``scopes`` / ``extent_percentile`` the checked night-config declarations. Compared per emitted
+    consumer: the candidate exists; its gate; its detected-pair percentile; the cross-band scope
+    (own signals only); the own-signal definition (candidate set version 2 = the package's
+    ``tolerance.own_signals_by_signal``); and the floor - a candidate floor population that is
+    'none' must be declared none, an own-signal population (a signal list) must be the declared
+    own-signal floor with the same signals, band, frames and value, a per-band population must be
+    the declared per-band floor with the same band, frames, percentile and value. Empty: the
+    declaration is the tested configuration.
+    """
+    out: list[str] = []
+    if int(candidate_set.get("version", 0)) != 2:  # noqa: PLR2004
+        out.append(f"candidate set version {candidate_set.get('version')!r}: the package's own "
+                   "signals are the version-2 definition")
+    common = candidate_set.get("common") or {}
+    if not str(common.get("cross_band_scope", "")).startswith(CROSS_BAND_SCOPE_OWN):
+        out.append(f"candidate set cross-band scope {common.get('cross_band_scope')!r}")
+    for c, e in sorted(rule["consumers"].items()):
+        if e.get("declared") is False:
+            continue
+        name = e.get("candidate")
+        cand = (candidate_set.get("candidates") or {}).get(name)
+        if cand is None:
+            out.append(f"{c}: names candidate {name!r}, which the candidate set does not hold")
+            continue
+        if cand["gates"].get(c) != e["gate"]:
+            out.append(f"{c}: gate {e['gate']!r}, candidate {name} tested {cand['gates'].get(c)!r}")
+        if c == "hrv":
+            continue
+        if cand.get("percentile") != extent_percentile:
+            out.append(f"{c}: detected-pair percentile {extent_percentile!r}, candidate {name} "
+                       f"tested {cand.get('percentile')!r}")
+        if scopes.get(c) != CROSS_BAND_SCOPE_OWN:
+            out.append(f"{c}: cross-band scope {scopes.get(c)!r}, tested {CROSS_BAND_SCOPE_OWN!r}")
+        fp = (cand.get("floor_populations") or {}).get(c) or {}
+        f = floors.get(c) if isinstance(floors, Mapping) else None
+        out += _floor_mismatch(c, name, fp, f, cand.get("percentile"))
+    return out
+
+
+def _floor_mismatch(c: str, name: str, fp: Mapping[str, Any], f: Any, pct: Any) -> list[str]:  # noqa: ANN401
+    """One consumer's declared floor against the tested candidate's floor population."""
+    if f is None:
+        return [f"{c}: no per-consumer floor declared; candidate {name} tested {fp}"]
+    if "none" in fp:
+        return [] if "none" in f else [f"{c}: declares a floor, candidate {name} tested none"]
+    pop = f.get("population") or {}
+    tested_value = round(float(fp.get("p99", math.nan)), 2)
+    if isinstance(fp.get("signals"), list):
+        same = ("per_band_percentile" not in f and "none" not in f
+                and sorted(pop.get("signals") or []) == sorted(fp["signals"])
+                and pop.get("band") == fp.get("band") and pop.get("n_frames") == fp.get("n_frames")
+                and round(float(f.get("value", math.nan)), 2) == tested_value)
+        kind = "own-signal"
+    else:
+        same = (f.get("per_band_percentile") == pct and pop.get("band") == fp.get("band")
+                and pop.get("n_frames") == fp.get("n_frames")
+                and round(float(f.get("value", math.nan)), 2) == tested_value)
+        kind = "per-band"
+    return [] if same else [f"{c}: declared floor {f.get('value', f.get('none'))} "
+                            f"({'per-band' if 'per_band_percentile' in f else 'own-signal'}), "
+                            f"candidate {name} tested the {kind} floor {tested_value} "
+                            f"on {fp.get('band')} / {fp.get('n_frames')} frames"]
 
 
 def not_emitted(rule: Mapping[str, Any]) -> tuple[str, ...]:
@@ -318,10 +396,40 @@ def check_extent_floors(decl: object, *, skip: Sequence[str] = ()
     if missing or extra:
         msg = (f"extent_floors: undeclared {missing}, not z consumers or not emitted {extra}")
         raise ValueError(msg)
-    return {c: _check_floor_entry(c, decl[c]) for c in want}
+    return {c: (_check_per_band_entry(c, decl[c])
+                if isinstance(decl[c], Mapping) and "per_band_percentile" in decl[c]
+                else _check_floor_entry(c, decl[c])) for c in want}
 
 
 SHA256_HEX: Final = 64
+
+
+def _check_per_band_entry(c: str, e: Mapping[str, Any]) -> dict[str, Any]:
+    """Check a per-band clean-null floor for ONE consumer (its band's NULL_PERCENTILE_Z).
+
+    ``{"per_band_percentile", "value", "source", "population": {signals (a description: every
+    detection signal), band, source_recording, n_frames, archive_file, archive_sha256}}`` - the
+    floor the measurement candidates' C1 used (candidate set v2). The value must be exactly the
+    table's value for the consumer's band at that percentile.
+    """
+    pop = e.get("population")
+    gap = [k for k in ("value", "source", "population") if not e.get(k)]
+    gap += ([f"population.{k}" for k in FLOOR_POPULATION_KEYS if not pop.get(k)]
+            if isinstance(pop, Mapping) else [])
+    if gap:
+        msg = f"extent_floors.{c} lacks {gap} (required, never defaulted)"
+        raise ValueError(msg)
+    assert isinstance(pop, Mapping)
+    pct, band = e["per_band_percentile"], extent_consumers()[c].band
+    if pct not in EXTENT_PERCENTILES or pop["band"] != band:
+        msg = (f"extent_floors.{c}: per-band floor at {pct!r} of band {pop['band']!r}; the "
+               f"consumer's band is {band}, percentiles {list(EXTENT_PERCENTILES)}")
+        raise ValueError(msg)
+    if float(e["value"]) != float(NULL_PERCENTILE_Z[pct][band]):
+        msg = (f"extent_floors.{c}: value {e['value']} is not the clean null's {pct} of band "
+               f"{band} ({NULL_PERCENTILE_Z[pct][band]})")
+        raise ValueError(msg)
+    return dict(json.loads(json.dumps(dict(e), sort_keys=True, allow_nan=False)))
 
 
 def _check_floor_entry(c: str, e: object) -> dict[str, Any]:
@@ -408,13 +516,28 @@ def own_signal_floor_record(z: Mapping[tuple[str, str], npt.ArrayLike], *, consu
 
 def verify_floor_archive(consumer: str, entry: Mapping[str, Any], archive: Mapping[str, Any]
                          ) -> None:
-    """Refuse a declared own-signal floor its archive does not reproduce (ValueError).
+    """Refuse a declared floor its archive does not reproduce (ValueError).
 
-    ``archive`` is the hashed file the declaration names (its ``per_consumer_own_signals``
-    rows, :func:`own_signal_floor_record`); the declared value, percentile, band, signals,
-    n_frames and source recording must be one of its rows exactly.
+    ``archive`` is the hashed file the declaration names. Own-signal floor: its
+    ``per_consumer_own_signals`` rows (:func:`own_signal_floor_record`); the declared value,
+    percentile, band, signals, n_frames and source recording must be one of its rows exactly.
+    Per-band floor: the clean-null archive (null.json) of the declared source recording, whose
+    ``per_band_all_signals`` row for the band gives the value (to 0.01) on exactly n_frames.
     """
     pop = entry["population"]
+    if "per_band_percentile" in entry:  # the null.json per-band row of every detection signal
+        if archive.get("session") != pop["source_recording"]:
+            msg = (f"extent_floors.{consumer}: archive is of {archive.get('session')!r}, not the "
+                   f"declared source recording {pop['source_recording']!r}")
+            raise ValueError(msg)
+        row = (archive.get("per_band_all_signals") or {}).get(pop["band"]) or {}
+        pct = entry["per_band_percentile"]
+        if (round(float(row.get(pct, math.nan)), 2) != round(float(entry["value"]), 2)
+                or int(row.get("n", -1)) != int(pop["n_frames"])):
+            msg = (f"extent_floors.{consumer}: the archive's band {pop['band']} {pct} row {row} "
+                   f"does not reproduce {entry['value']} on {pop['n_frames']} frames")
+            raise ValueError(msg)
+        return
     want = {"consumer": consumer, "percentile": entry["percentile"], "band": pop["band"],
             "signals": sorted(str(s) for s in pop["signals"]), "n_frames": int(pop["n_frames"]),
             "value": round(float(entry["value"]), 2)}
@@ -719,6 +842,14 @@ def _floored(c: str, t: ConsumerThreshold, floors: str | Mapping[str, Mapping[st
     """Apply the declared floors to one option-(1) threshold (:func:`option1_tolerances`)."""
     if not isinstance(floors, str):
         f = floors[c]
+        if "per_band_percentile" in f:
+            if not t.setter.startswith("floor"):
+                return t  # a visible kind sets it (as the per-band rule leaves it)
+            return dataclasses.replace(
+                t, z=float(f["value"]),
+                setter=(f"{t.setter}; extent at the clean null's {f['per_band_percentile']} of "
+                        f"band {f['population']['band']} (per-band floor, declared per "
+                        "consumer)"))
         if "none" in f:
             if t.setter.startswith("floor"):
                 msg = (f"extent_floors.{c} declares no own-signal population, but {c} is on the "

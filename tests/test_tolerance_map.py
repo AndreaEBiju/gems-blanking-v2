@@ -761,7 +761,8 @@ def _rule(**over: Any) -> dict[str, Any]:  # noqa: ANN401
             "slow_wave": {"declared": False, "reason": "no extent declared"}}
     cons.update(over)
     return {"source": {"ruling": "Andrea 2026-10-11 night",
-                       "decision_files": [{"file": "d.csv", "sha256": "d" * 64}]},
+                       "decision_files": [{"file": "d.csv", "sha256": "d" * 64}],
+                       "candidate_set": {"file": "c.json", "sha256": "c" * 64}},
             "consumers": cons}
 
 
@@ -806,3 +807,90 @@ def test_the_extent_rule_is_complete_and_never_defaulted(over: dict, words: str)
         tm.check_extent_rule(rule)
     with pytest.raises(ValueError, match="decision_files"):
         tm.check_extent_rule({**_rule(), "source": {"ruling": "x"}})
+
+
+
+def _per_band(c: str, pct: str = "p99") -> dict[str, Any]:
+    band = tl.extent_consumers()[c].band
+    return {"per_band_percentile": pct, "value": tm.NULL_PERCENTILE_Z[pct][band], "source": "t",
+            "population": {"signals": "every detection signal", "band": band,
+                           "source_recording": "base", "n_frames": 100,
+                           "archive_file": "null.json", "archive_sha256": "a" * 64}}
+
+
+def _cset(own: dict[str, Any]) -> dict[str, Any]:
+    """Build a candidate set shaped as candidates_v2.json: C1 per-band, C2 own-signal floors."""
+    per = {c: {"signals": "every detection signal", "band": tl.extent_consumers()[c].band,
+               "n_frames": 100, "p99": tm.NULL_PERCENTILE_Z["p99"][tl.extent_consumers()[c].band]}
+           for c in ("spikes", "mmc", "slow_wave")}
+    per["breathing"] = {"none": "option-(1) 7.69"}
+    own_p = {c: {"signals": v["population"]["signals"], "band": v["population"]["band"],
+                 "n_frames": v["population"]["n_frames"], "p99": v["value"]}
+             for c, v in own.items() if "population" in v}
+    own_p["breathing"] = {"none": "no HR channel"}
+    return {"version": 2, "common": {"cross_band_scope": "own_signals_only (per signal)"},
+            "candidates": {
+                "C1": {"gates": dict.fromkeys(("spikes", "mmc", "slow_wave", "breathing", "hrv"),
+                                              "i_or_ii"), "percentile": "p99",
+                       "floor_populations": per},
+                "C2": {"gates": {"spikes": "ii", "mmc": "ii", "slow_wave": "ii",
+                                 "breathing": "i_or_ii", "hrv": "i"}, "percentile": "p99",
+                       "floor_populations": own_p}}}
+
+
+def test_a_declaration_must_be_exactly_its_tested_candidate() -> None:
+    """Andrea 2026-10-11 night: 'Spikes C1, as the rule gives'.
+
+    The declared configuration is the tested one, or the comparison refuses it.
+    """
+    own = _floors(_own_archive())
+    cset = _cset(own)
+    rule = tm.check_extent_rule(_rule(spikes={"gate": "i_or_ii", "candidate": "C1"},
+                                      hrv={"gate": "i", "candidate": "C2"},
+                                      breathing={"gate": "i_or_ii", "candidate": "C1"},
+                                      mmc={"gate": "ii", "candidate": "C2"}))
+    floors = {"spikes": _per_band("spikes"), "mmc": own["mmc"],
+              "breathing": {"none": "x", "limitation": tm.BREATHING_FLOOR_LIMITATION}}
+    assert tm.tested_candidate_mismatches(rule, floors, OWN_SCOPES, "p99", cset) == []
+    t = _build(core_blanking=None, extent_rule=rule, cross_band_scope=OWN_SCOPES,
+               extent_floors=floors)
+    assert t.table.z_tol["spikes"] == tm.NULL_PERCENTILE_Z["p99"]["300-3000"] == 4.35
+    bad_cases = {
+        "spikes": ({**floors, "spikes": own["spikes"]}, OWN_SCOPES, "p99", rule),  # 4.71 vs C1
+        "kind": ({**floors, "spikes": {**own["spikes"], "value": 4.35, "population": {
+            **own["spikes"]["population"], "n_frames": 100}}}, OWN_SCOPES, "p99", rule),
+        "mmc": ({**floors, "mmc": _per_band("mmc")}, OWN_SCOPES, "p99", rule),
+        "breathing": ({**floors, "breathing": own["breathing"]}, OWN_SCOPES, "p99", rule),
+        "percentile": (floors, OWN_SCOPES, "p95", rule),
+        "scope": (floors, {**OWN_SCOPES, "mmc": tl.CROSS_BAND_SCOPE_ALL}, "p99", rule),
+        "gate": (floors, OWN_SCOPES, "p99",
+                 {**rule, "consumers": {**rule["consumers"],
+                                        "hrv": {"gate": "i_or_ii", "candidate": "C2"}}}),
+        "candidate": (floors, OWN_SCOPES, "p99",
+                      {**rule, "consumers": {**rule["consumers"],
+                                             "mmc": {"gate": "ii", "candidate": "C9"}}}),
+    }
+    for name, (fl, sc, pct, rl) in bad_cases.items():
+        assert tm.tested_candidate_mismatches(rl, fl, sc, pct, cset), name
+    assert tm.tested_candidate_mismatches(rule, floors, OWN_SCOPES, "p99",
+                                          {**cset, "version": 1})
+    with pytest.raises(ValueError, match="is not the clean null"):
+        _build(core_blanking=None, extent_rule=rule, cross_band_scope=OWN_SCOPES,
+               extent_floors={**floors, "spikes": {**_per_band("spikes"), "value": 4.71}})
+    with pytest.raises(ValueError, match="candidate_set"):
+        tm.check_extent_rule({**rule, "source": {k: v for k, v in rule["source"].items()
+                                                 if k != "candidate_set"}})
+
+
+
+def test_a_per_band_floor_is_reproduced_from_its_null_archive() -> None:
+    e = _per_band("spikes")
+    archive = {"session": "base",
+               "per_band_all_signals": {"300-3000": {"n": 100, "p95": 2.46, "p99": 4.3512}}}
+    tm.verify_floor_archive("spikes", e, archive)
+    for bad in ({**archive, "session": "other"},
+                {**archive, "per_band_all_signals": {"300-3000": {"n": 101, "p99": 4.3512}}},
+                {**archive, "per_band_all_signals": {"300-3000": {"n": 100, "p99": 4.71}}},
+                {**archive, "per_band_all_signals": {}}):
+        with pytest.raises(ValueError, match=r"extent_floors[.]spikes"):
+            tm.verify_floor_archive("spikes", e, bad)
