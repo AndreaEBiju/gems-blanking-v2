@@ -7,7 +7,8 @@ function X = night6_consumer_input(plan, Y, run)
 %   run  an element of plan.runs
 %
 % Returns plan.n x numel(run.signals) double: the epoch rows i0+1 .. i0+n of each
-% signal's recipe (raw contact, pairs lead, or software tripole), scaled to volts,
+% signal's recipe (raw contact, pairs lead, software tripole, or the stomach_ref the mask
+% provenance records - night6_apply_recipe), scaled to volts,
 % then NaN at every span of the run's consumer's mask - and only that consumer's
 % (invariant 2). Masked samples are NaN, never 0 (invariant 1): Andrea's functions
 % test isnan. The spans are 1-based inclusive into the epoch, so span [a b] is X(a:b)
@@ -23,7 +24,7 @@ function X = night6_consumer_input(plan, Y, run)
     for j = 1:numel(run.signals)
         sig = run.signals{j};
         r = plan.recipes.(matlab.lang.makeValidName(sig));
-        X(:, j) = (double(Y(rows, r.cols)) * r.weights) * plan.scaleToVolts;
+        X(:, j) = night6_apply_recipe(r, Y, rows) * plan.scaleToVolts;
         maskSig = sig;
         if isfield(run, 'maskSignal') && ~isempty(run.maskSignal)
             maskSig = run.maskSignal;
