@@ -4,7 +4,7 @@ function RS = night6_recovery_start(file)
 %   RS = night6_recovery_start(file)
 %
 % The file is written by gems_blanking_v2.extent.recovery_start.write_recovery_starts
-% (schema 'gems-blanking-v2 recovery starts v7'; RULING 2026-10-10 item 7 adds per file its
+% (schema 'gems-blanking-v2 recovery starts v8'; RULING 2026-10-10 item 7 adds per file its
 % animal, its electrical_basis - from_electrical_end, mechanical_only_zero (settling 0) or
 % from_mechanical_end (the search started at the mechanical end) - a reference_sensitive
 % record on the late files with each analysis's reference_sensitive_until_sample0, and per
@@ -21,7 +21,9 @@ function RS = night6_recovery_start(file)
 % the cuts were derived under (edge_settling, edge_settling_sha256); and the files held
 % for want of stim edges or settling. A v1 or v2 file (no cuts: the owner-start cut is
 % not mode (B)), a v3 file (no edge-settling hash) and a v4 file (one stim time) are
-% refused by name. It is a
+% refused by name; so are v6 and v7 - v8 (Andrea 2026-10-12) is the starts file of record: a
+% file with no measured motor drive (electrical_basis no_mechanical_drive) has no mechanical
+% term, no mechanical_end_* field, and its input mask point is the electrical settling. It is a
 % DECLARED input: its path and SHA-256 go into every record (RS.file, RS.sha256).
 % An empty path returns [] - Night 6 then refuses every stim_recovery epoch by name
 % (night6_recovery_lead_in), never runs one untrimmed.
@@ -52,7 +54,7 @@ function RS = night6_recovery_start(file)
         error('night6:recoveryStartFile', 'the recovery-starts file %s does not exist', file);
     end
     D = jsondecode(fileread(file));
-    want = 'gems-blanking-v2 recovery starts v7';
+    want = 'gems-blanking-v2 recovery starts v8';
     if ~isstruct(D) || ~isfield(D, 'schema') || ~strcmp(D.schema, want)
         error('night6:recoveryStartFile', '%s is not a ''%s'' file', file, want);
     end
@@ -115,13 +117,31 @@ function check_times(F, file)
 % RULING 2026-10-09 (i) 3 (c): stim-off is two times. Both are required, the electrical
 % settling and the mechanical end are exact samples, and the input mask point Night 6
 % masks through is their maximum, to the sample; no measured start or cut precedes it.
-    for g = {'electrical_settle_sample0', 'mechanical_end_sample0', 'input_mask_sample0'}
+% v8 (Andrea 2026-10-12): a file with no measured motor drive (electrical_basis
+% 'no_mechanical_drive') has NO mechanical term - it carries no mechanical_end_* field and its
+% input mask point is the electrical end + settling, to the sample.
+    noDrive = isfield(F, 'electrical_basis') && strcmp(F.electrical_basis, 'no_mechanical_drive');
+    mech = {'mechanical_end_sample0', 'mechanical_end_s'};
+    if noDrive
+        present = mech(cellfun(@(g) isfield(F, g), mech));
+        if ~isempty(present)
+            error('night6:recoveryStartFile', ['%s: %s is a no_mechanical_drive file but ' ...
+                  'carries %s: it has no mechanical term (Andrea 2026-10-12)'], file, ...
+                  F.session, strjoin(present, ', '));
+        end
+        samples = {'electrical_settle_sample0', 'input_mask_sample0'};
+        times = {'electrical_end_s', 'electrical_settle_s', 'input_mask_s'};
+    else
+        samples = {'electrical_settle_sample0', 'mechanical_end_sample0', 'input_mask_sample0'};
+        times = {'electrical_end_s', 'mechanical_end_s', 'electrical_settle_s', 'input_mask_s'};
+    end
+    for g = samples
         if ~isfield(F, g{1}) || ~is_sample(F.(g{1}))
             error('night6:recoveryStartFile', '%s: %s %s must be one integer >= 0', ...
                   file, F.session, g{1});
         end
     end
-    for g = {'electrical_end_s', 'mechanical_end_s', 'electrical_settle_s', 'input_mask_s'}
+    for g = times
         if ~isfield(F, g{1}) || ~isnumeric(F.(g{1})) || ~isscalar(F.(g{1})) ...
                 || ~isfinite(F.(g{1}))
             error('night6:recoveryStartFile', ['%s: %s has no %s (both stim times are ' ...
@@ -133,16 +153,25 @@ function check_times(F, file)
         error('night6:recoveryStartFile', '%s: %s has no positive finite fs', file, F.session);
     end
     k = double(F.input_mask_sample0);
-    if k ~= max(double(F.electrical_settle_sample0), double(F.mechanical_end_sample0))
+    if noDrive
+        if k ~= double(F.electrical_settle_sample0)
+            error('night6:recoveryStartFile', ['%s: %s input_mask_sample0 %d is not ' ...
+                  'electrical_settle_sample0 %d: a no_mechanical_drive file has no ' ...
+                  'mechanical term (Andrea 2026-10-12)'], file, F.session, k, ...
+                  F.electrical_settle_sample0);
+        end
+    elseif k ~= max(double(F.electrical_settle_sample0), double(F.mechanical_end_sample0))
         error('night6:recoveryStartFile', ['%s: %s input_mask_sample0 %d is not ' ...
               'max(electrical_settle_sample0 %d, mechanical_end_sample0 %d)'], file, ...
               F.session, k, F.electrical_settle_sample0, F.mechanical_end_sample0);
     end
     % each sample is the first sample at or after its seconds field (review 8 finding 4;
     % night6_first_sample = Python extent.grid.first_sample_at_or_after, the one conversion)
-    for g = {'electrical_settle_sample0', 'electrical_settle_s'; ...
+    pairs = {'electrical_settle_sample0', 'electrical_settle_s'; ...
              'mechanical_end_sample0', 'mechanical_end_s'; ...
-             'input_mask_sample0', 'input_mask_s'}'
+             'input_mask_sample0', 'input_mask_s'};
+    if noDrive, pairs(2, :) = []; end
+    for g = pairs'
         want = night6_first_sample(F.(g{2}), F.fs);
         if double(F.(g{1})) ~= want
             error('night6:recoveryStartFile', ['%s: %s %s %d is not the first sample at ' ...
@@ -173,7 +202,8 @@ function check_v6(F, file)
 % and cut has a common start (an integer sample, never before its own start); the
 % reference-sensitive "until" is present exactly on a reference-sensitive file, and never
 % before the analysis's start.
-    bases = {'from_electrical_end', 'mechanical_only_zero', 'from_mechanical_end'};
+    bases = {'from_electrical_end', 'mechanical_only_zero', 'from_mechanical_end', ...
+             'no_mechanical_drive'};
     if ~isfield(F, 'animal') || ~ischar(F.animal) || isempty(F.animal) ...
             || ~isfield(F, 'electrical_basis') || ~any(strcmp(F.electrical_basis, bases))
         error('night6:recoveryStartFile', ['%s: %s has no animal or no known electrical_basis ' ...

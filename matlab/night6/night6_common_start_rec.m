@@ -5,7 +5,8 @@ function rc = night6_common_start_rec(rec)
 %
 % RULING 2026-10-10 item 7 (dose-response safeguard): for comparisons between stim levels,
 % every stim_recovery file of an animal starts each analysis at the latest start among them,
-% measured from each file's mechanical end (Python extent.recovery_start.COMMON_START_RULE).
+% measured from each file's mechanical end, or its electrical end when it has no mechanical
+% term (v8, Andrea 2026-10-12; Python extent.recovery_start.COMMON_START_RULE).
 % The common-start version RE-USES the run's outputs and cuts every output variable at its
 % cut's common start instead of its own: rc is rec (night6_recovery_lead_in, applies true)
 % with every cut's start_s, start_sample0 and output_rows_before_start replaced by its

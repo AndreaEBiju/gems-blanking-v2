@@ -175,6 +175,14 @@ def _file(rows: list[dict[str, Any]], ke: int = I0, session: str = SESSION,
             "analyses": rows, "cuts": _cuts(cut_at, k)}
 
 
+def _nodrive(f: dict[str, Any]) -> dict[str, Any]:
+    """Return the same file with no measured motor drive (v8, Andrea 2026-10-12)."""
+    g = {k: v for k, v in f.items() if k not in ("mechanical_end_s", "mechanical_end_sample0")}
+    ke = int(f["electrical_settle_sample0"])
+    return {**g, "electrical_basis": rs.NO_MECHANICAL_DRIVE, "input_mask_sample0": ke,
+            "input_mask_s": ke / float(f["fs"]), "input_mask_binding": "electrical_only"}
+
+
 def _row(name: str, k0: int, basis: str = rs.BASIS_MEASURED) -> dict[str, Any]:
     return {"analysis": name, "start_s": k0 / FS, "start_sample0": k0, "basis": basis,
             "source": "synthetic"}
@@ -226,6 +234,9 @@ def _cases(tmp: Path) -> dict[str, Any]:
     # (i) 3 (c): the electrical settling is before the epoch, the gate closes 2 rows in -
     # the input is masked through the MECHANICAL end, not the electrical settling
     mech = _file([_row(c, own[c]) for c in CONSUMERS], ke=I0 - 5, cut_at=cut_own, km=I0 + 2)
+    # v8: the same gate, but no measured drive - no mechanical term, masked through ke only
+    nodrive = _nodrive(_file([_row(c, own[c]) for c in CONSUMERS], ke=I0 + 1, cut_at=cut_own,
+                             km=I0 + 2))
     py = rs.file_starts(**V6, session=SESSION, fs=FS, electrical_end_s=1.0, mechanical_end_s=1.0,
                         electrical_settle_s=1.5,
                         times_source="synthetic", electrical_source="synthetic",
@@ -247,6 +258,7 @@ def _cases(tmp: Path) -> dict[str, Any]:
          "fs": _starts(d / "fs.json", [_file([_row(c, I0 + 1) for c in CONSUMERS],
                                              fs=FS + 1.0)], fs=FS + 1.0),
          "mech": _starts(d / "mech.json", [mech]),
+         "nodrive": _starts(d / "nodrive.json", [nodrive]),
          **{f"elec{k}": _starts(d / f"elec{k}.json", [v]) for k, v in elec.items()}}
     readers = []
     for name, edit, *base in (("schema", lambda j: j.update(schema="v0")),
@@ -313,7 +325,16 @@ def _cases(tmp: Path) -> dict[str, Any]:
                            / FS), "mech"),
                        ("start_before_mask", lambda j: j["files"][0]["analyses"][0].update(
                            start_sample0=j["files"][0]["input_mask_sample0"] - 1,
-                           basis=rs.BASIS_MEASURED))):
+                           basis=rs.BASIS_MEASURED)),
+                       # v8 (Andrea 2026-10-12): a no-drive file, accepted as written ...
+                       ("nodrive_ok", lambda j: None, "nodrive"),
+                       # ... refused with a mechanical term, or masked past its settling
+                       ("nodrive_mech", lambda j: j["files"][0].update(
+                           mechanical_end_s=(I0 + 2) / FS, mechanical_end_sample0=I0 + 2),
+                        "nodrive"),
+                       ("nodrive_mask", lambda j: j["files"][0].update(
+                           input_mask_sample0=I0 + 2, input_mask_s=(I0 + 2) / FS), "nodrive"),
+                       ("v7", lambda j: j.update(schema="gems-blanking-v2 recovery starts v7"))):
         j = json.loads(Path(s[base[0] if base else "boundary"]).read_text(encoding="utf-8"))
         edit(j)
         f = d / f"reader_{name}.json"
@@ -328,6 +349,7 @@ def _cases(tmp: Path) -> dict[str, Any]:
              plan("baseline", s["other"], bl, "baseline"),
              *(plan(f"elec{k}", s[f"elec{k}"]) for k in elec),
              plan("mech", s["mech"]),
+             plan("nodrive", s["nodrive"]),
              plan("mode_missing", s["boundary"], mode=""),
              plan("mode_bad", s["boundary"], mode="mask_to_somewhere")]
     run = {"gems_root": (tmp / "store").as_posix(), "mask_folder": st["mask_folder"].as_posix(),
@@ -482,7 +504,7 @@ def _need_matlab() -> None:
 
 
 READER_WORDS = {
-    "v4": "'gems-blanking-v2 recovery starts v7'",
+    "v4": "'gems-blanking-v2 recovery starts v8'",
     "no_mechanical": "mechanical_end_sample0 must be one integer >= 0",
     "no_input_mask": "input_mask_sample0 must be one integer >= 0",
     "no_electrical": "electrical_settle_sample0 must be one integer >= 0",
@@ -500,6 +522,10 @@ READER_WORDS = {
     "settle_before_end": "precedes electrical_end_s",
     "mech_rounded": "mechanical_end_sample0 {km} is not the first sample at or after "
                     "mechanical_end_s",
+    "nodrive_mech": "is a no_mechanical_drive file but carries mechanical_end_sample0, "
+                    "mechanical_end_s",
+    "nodrive_mask": "input_mask_sample0 {km} is not electrical_settle_sample0",
+    "v7": "'gems-blanking-v2 recovery starts v8'",
 }
 """The words each refusal must carry: the error id alone is shared by every case, so a
 case caught by a DIFFERENT check would pass on the id (review 8 finding 1)."""
@@ -511,6 +537,7 @@ def _check_reader_words(readers: Mapping[str, Any]) -> None:
         w = words.format(km=I0 + 2, ke=I0)
         assert w in readers[name]["message"], (name, readers[name]["message"])
     assert readers["mech_ceil_ok"]["error"] == "", readers["mech_ceil_ok"]
+    assert readers["nodrive_ok"]["error"] == "", readers["nodrive_ok"]
 
 
 def _check_first_sample(got: object) -> None:
@@ -568,6 +595,15 @@ def test_night6_trims_in_mode_b_to_the_sample(  # noqa: PLR0915 - one MATLAB run
     assert {mrec["consumers"][c]["trimmed_rows"] for c in CONSUMERS} == {2}
     assert {mrec["consumers"][c]["status"] for c in CONSUMERS} == {"trimmed"}
     assert "mechanical end" in mrec["rule"]
+    # v8 (Andrea 2026-10-12): the same gate with no measured drive - no mechanical term, so
+    # the input is masked through the electrical settling (row 1), not the gate (row 2)
+    nd = got["nodrive"]
+    _check_trim(nd, dict.fromkeys(CONSUMERS, 1))
+    ndrec = json.loads(nd["record"])
+    assert ndrec["input_mask_sample0"] == ndrec["electrical_settle_sample0"] == I0 + 1
+    assert "mechanical_end_sample0" not in ndrec and "mechanical_end_s" not in ndrec
+    assert ndrec["electrical_basis"] == rs.NO_MECHANICAL_DRIVE
+    assert {ndrec["consumers"][c]["trimmed_rows"] for c in CONSUMERS} == {1}
     t1 = _inputs(got["elec1"]["trim"])
     assert t1[("spikes", "L_T")][:2].tolist() == [True, False]  # one sample, not two
     assert t1[("mmc", "ANT1")][:2].tolist() == [True, False]
@@ -621,7 +657,7 @@ def test_night6_trims_in_mode_b_to_the_sample(  # noqa: PLR0915 - one MATLAB run
                  "no_stim_level",
                  "no_electrical_time", "no_input_mask", "mask_not_max", "start_before_mask",
                  "mech_s_not_sample", "settle_s_not_sample", "mask_s_not_sample",
-                 "settle_before_end", "mech_rounded"):
+                 "settle_before_end", "mech_rounded", "nodrive_mech", "nodrive_mask", "v7"):
         assert readers[name]["error"] == "night6:recoveryStartFile", (name, readers[name])
     _check_reader_words(readers)
     _check_first_sample(res["first_sample"])

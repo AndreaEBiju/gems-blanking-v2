@@ -86,7 +86,7 @@ def test_the_common_version_cuts_every_output_at_its_common_start(got: dict[str,
 
 def test_a_v5_starts_file_is_refused_by_night6() -> None:
     src = (NIGHT6 / "night6_recovery_start.m").read_text(encoding="utf-8")
-    assert "want = 'gems-blanking-v2 recovery starts v7';" in src
+    assert "want = 'gems-blanking-v2 recovery starts v8';" in src
     assert "check_v6(F, file);" in src
 
 

@@ -92,7 +92,8 @@ function [lead, rec] = night6_recovery_lead_in(RS, session, condition, i0, n, fs
              'animal', 'electrical_basis', 'reference_sensitive'}
         if isfield(F, f{1}), rec.(f{1}) = F.(f{1}); end
     end
-    kMask = double(F.input_mask_sample0);   % max(electrical settling, mechanical end)
+    kMask = double(F.input_mask_sample0);   % max(electrical settling, mechanical end); v8: a
+    % no_mechanical_drive file has no mechanical term, its point is the electrical settling
     rows = min(n, max(0, kMask - i0));
     rec.rule = sprintf(['input of every analysis masked on epoch rows 1..%d (before the ' ...
                         'input mask point = max(electrical end + electrical settling, ' ...

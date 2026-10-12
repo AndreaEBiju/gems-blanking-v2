@@ -502,7 +502,7 @@ def test_a_starts_file_from_other_edge_settlings_is_refused(tmp_path: Path) -> N
                             electrical_settle_s=124.2,
                             times_source="03B", electrical_source="(j) 6 (i)")]
     doc = rs.recovery_starts_document(files, fs=FS)
-    assert rs.SCHEMA == "gems-blanking-v2 recovery starts v7"
+    assert rs.SCHEMA == "gems-blanking-v2 recovery starts v8"
     assert doc["edge_settling_sha256"] == tl.edge_settling_sha256()
     assert doc["edge_settling"] == tl.edge_settling_record()
     good = tmp_path / "good.json"
@@ -527,7 +527,7 @@ def test_a_starts_file_from_other_edge_settlings_is_refused(tmp_path: Path) -> N
         rs.read_recovery_starts(f)
     j["schema"] = "gems-blanking-v2 recovery starts v3"
     f.write_text(json.dumps(j), encoding="utf-8", newline="\n")
-    with pytest.raises(ValueError, match="expected 'gems-blanking-v2 recovery starts v7'"):
+    with pytest.raises(ValueError, match="expected 'gems-blanking-v2 recovery starts v8'"):
         rs.read_recovery_starts(f)
 
 
@@ -1005,7 +1005,7 @@ def test_a_v4_starts_file_with_one_stim_time_is_refused(tmp_path: Path) -> None:
                 "input_mask_s", "input_mask_sample0", "input_mask_binding"} & set(row)
     f = tmp_path / "v4.json"
     f.write_text(json.dumps(j), encoding="utf-8", newline="\n")
-    with pytest.raises(ValueError, match="expected 'gems-blanking-v2 recovery starts v7'"):
+    with pytest.raises(ValueError, match="expected 'gems-blanking-v2 recovery starts v8'"):
         rs.read_recovery_starts(f)
     j["schema"] = rs.SCHEMA
     f.write_text(json.dumps(j), encoding="utf-8", newline="\n")
@@ -1148,7 +1148,7 @@ def test_the_common_start_is_the_latest_per_level_median_start() -> None:
         med = {"L1": 6.0 + own, "L3": 11.0 + own}  # the max over files would be 30 s (a1c)
         rec = doc["common_start"]["by_animal"]["A"]["analyses"][name]
         assert rec["set_by_level"] == "L3"
-        assert rec["offset_after_mechanical_end_s"] == pytest.approx(med["L3"])
+        assert rec["offset_after_anchor_s"] == pytest.approx(med["L3"])
         assert rec["level_medians"]["L1"]["median_offset_s"] == pytest.approx(med["L1"])
         assert rec["level_medians"]["L1"]["files"] == ["a1a", "a1b", "a1c"]
         for s, m in (("a1a", 120.0), ("a3a", 121.0), ("late", 120.0)):
@@ -1331,3 +1331,63 @@ def test_review2_3_the_reader_verifies_the_stored_common_starts(tmp_path: Path) 
         p = tampered(edit, tag)
         with pytest.raises(ValueError, match="stored common starts are not the rule"):
             rs.read_recovery_starts(p)
+
+
+def test_v8_a_file_with_no_mechanical_drive_has_no_mechanical_term(tmp_path: Path) -> None:
+    """Andrea 2026-10-12 (v8): no measured motor drive on ADC2 means no mechanical term.
+
+    Each start is electrical end + electrical settling + own settling, the record has no
+    mechanical_end_* field, and its common start is measured from its electrical end.
+    """
+    nd = _v6("es3", 118.7, 123.2, None, basis=rs.NO_MECHANICAL_DRIVE, level="E1000")  # type: ignore[arg-type]
+    assert "mechanical_end_s" not in nd and "mechanical_end_sample0" not in nd
+    assert nd["input_mask_s"] == 123.2 and nd["input_mask_binding"] == "electrical_only"
+    assert nd["input_mask_sample0"] == nd["electrical_settle_sample0"] == \
+        first_sample_at_or_after(123.2, FS)
+    for r in nd["analyses"]:
+        own = rs.analysis_settling(r["analysis"], FS).settling_s
+        assert own is not None and r["start_s"] == 123.2 + own
+        assert "no mechanical term" in r["source"]
+    with pytest.raises(ValueError, match="has no mechanical term and every other basis has one"):
+        _v6("es3", 118.7, 123.2, 120.7, basis=rs.NO_MECHANICAL_DRIVE)
+    held = _v6("x", 118.7, 123.2, None, basis="from_electrical_end")  # type: ignore[arg-type]
+    assert held["basis"] == rs.HELD_UNDETECTED and "mechanical" in held["why"]
+    # the common start: a no-drive file's anchor is its electrical end
+    plain = [_v6(f"p{i}", 120.0, 120.0 + d, 120.0, basis="from_electrical_end", level="E10")
+             for i, d in enumerate((4.0, 6.0))]
+    doc = rs.recovery_starts_document([nd, *plain], fs=FS)
+    rec = doc["common_start"]["by_animal"]["A"]
+    assert rec["anchored_at_electrical_end"] == ["es3"]
+    name = sorted(rs.ANALYSES)[0]
+    off = rec["analyses"][name]["offset_after_anchor_s"]
+    own = rs.analysis_settling(name, FS).settling_s
+    assert rec["analyses"][name]["level_medians"]["E1000"]["median_offset_s"] == \
+        pytest.approx(123.2 + own - 118.7)  # measured from the ELECTRICAL end
+    assert _row(doc, "es3", name)["common_start_s"] == pytest.approx(
+        max(118.7 + off, _row(doc, "es3", name)["start_s"]))
+    assert rs.common_start_anchor(nd) == 118.7 and rs.common_start_anchor(plain[0]) == 120.0
+    assert doc["schema"] == "gems-blanking-v2 recovery starts v8"
+    assert doc["common_start"]["ruling_v8"] == rs.RULING_V8
+    # read back, and refuse a no-drive file that carries a mechanical term or another mask
+    good = tmp_path / "v8.json"
+    rs.write_recovery_starts(good, doc)
+    assert rs.read_recovery_starts(good) == json.loads(good.read_text(encoding="utf-8"))
+
+    def edited(edit: Any, tag: str) -> Path:  # noqa: ANN401
+        d = json.loads(good.read_text(encoding="utf-8"))
+        f = next(x for x in d["files"] if x["session"] == "es3")
+        edit(f, d)
+        p = tmp_path / f"{tag}.json"
+        p.write_text(json.dumps(d), encoding="utf-8", newline="\n")
+        return p
+    for tag, edit, words in (
+            ("mech", lambda f, d: f.update(mechanical_end_s=120.7,
+                                           mechanical_end_sample0=first_sample_at_or_after(
+                                               120.7, FS)), "has no mechanical term, but carries"),
+            ("mask", lambda f, d: f.update(input_mask_sample0=f["input_mask_sample0"] + 1,
+                                           input_mask_s=(f["input_mask_sample0"] + 1) / FS),
+             "is not electrical_settle_sample0"),
+            ("v7", lambda f, d: d.update(schema="gems-blanking-v2 recovery starts v7"),
+             "v7 is superseded by v8")):
+        with pytest.raises(ValueError, match=words):
+            rs.read_recovery_starts(edited(edit, tag))

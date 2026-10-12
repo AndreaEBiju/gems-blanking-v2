@@ -215,6 +215,7 @@ __all__ = [
     "RULING_TRIM",
     "RULING_V6",
     "RULING_V7",
+    "RULING_V8",
     "SCHEMA",
     "SOURCE_FILES",
     "SOURCE_LABEL",
@@ -236,6 +237,7 @@ __all__ = [
     "ValidFraction",
     "analysis_settling",
     "beat_decimation_factor",
+    "common_start_anchor",
     "cut_id",
     "dose_response_disagreement",
     "dose_response_from_night6",
@@ -258,9 +260,16 @@ __all__ = [
 
 RULING: Final = "RULING 2026-10-08 (k) 2"
 RULING_TRIM: Final = "RULING 2026-10-09 item 6"
-SCHEMA: Final = "gems-blanking-v2 recovery starts v7"
+SCHEMA: Final = "gems-blanking-v2 recovery starts v8"
 RULING_V6: Final = "RULING 2026-10-10 item 7"
 RULING_V7: Final = "Andrea, revised 2026-10-10 (dose-response safeguard, scope D)"
+RULING_V8: Final = (
+    "Andrea 2026-10-12: a file with no measured motor drive on ADC2 has no mechanical term - "
+    "per-analysis start = electrical end + electrical settling + own settling; common starts "
+    "use the per-level medians of those starts")
+"""v8: the starts file of record from 2026-10-12 (v7 is superseded, refused like v6)."""
+NO_MECHANICAL_DRIVE: Final = "no_mechanical_drive"
+"""The v8 electrical basis of a file whose MotorOn gate opened but whose ADC2 shows no drive."""
 ELECTRICAL_BASES: Final[Mapping[str, str]] = {
     "from_electrical_end": "the electrical-only rule, measured from the electrical end "
                            "(RULING 2026-10-09 (i) 3 (a)-(c))",
@@ -270,6 +279,11 @@ ELECTRICAL_BASES: Final[Mapping[str, str]] = {
     "from_mechanical_end": "the motor runs past the electrical end: the electrical-settling "
                            "search starts at the mechanical end, so motor activity is never "
                            "measured as electrical (RULING 2026-10-10 item 7)",
+    NO_MECHANICAL_DRIVE: "no measured motor drive on ADC2 (the MotorOn gate opened, the motor "
+                         "did not run): there is no mechanical term - the electrical-settling "
+                         "search starts at the electrical end, the input mask point is the "
+                         "electrical end + settling, and the file has no mechanical_end_* "
+                         "fields (" + RULING_V8 + ")",
 }
 """How each file's electrical settling was obtained (v6: required per measured file)."""
 MOTOR_PAST_ELECTRICAL_S: Final = 1.0
@@ -282,9 +296,11 @@ COMMON_START_RULE: Final = (
     "RULING 2026-10-10 item 7, dose-response safeguard, as revised by Andrea 2026-10-10: for "
     "comparisons between stim levels, every stim_recovery file of an animal starts each "
     "analysis - and cuts each output - at the LATEST of the per-stim-level MEDIAN starts, "
-    "measured from each file's mechanical end (recovery never starts before it): per level, "
-    "the median over that level's files of (start - mechanical end), reference-sensitive "
-    "files EXCLUDED; common start = mechanical end + the largest of those medians, never "
+    "measured from each file's mechanical end (recovery never starts before it) - for a file "
+    "with no measured motor drive, which has no mechanical term, from its electrical end "
+    "(Andrea 2026-10-12): per level, the median over that level's files of (start - that "
+    "anchor), reference-sensitive files EXCLUDED; common start = anchor + the largest of those "
+    "medians, never "
     "before the file's own start. Each file's own start stays PRIMARY; the common-start "
     "version re-uses each file's outputs and only cuts them later, beside it. Stim levels "
     "are declared per file (stim_level), never parsed from a name")
@@ -1652,8 +1668,12 @@ def trim_cuts() -> list[tuple[str, str, str]]:
 
 
 def input_mask(*, fs: float, electrical_settle_s: float,
-               mechanical_end_s: float) -> dict[str, Any]:
+               mechanical_end_s: float | None) -> dict[str, Any]:
     """Return the file's input mask point: max(electrical end + settling, mechanical end).
+
+    v8 (:data:`RULING_V8`): ``mechanical_end_s`` None = a file with no measured motor drive -
+    no mechanical term, so the point is the electrical end + settling, binding
+    ``electrical_only``, and no ``mechanical_end_sample0`` is returned.
 
     The ONE place it is derived (invariant 33). Returned in seconds and as exact 0-based
     FILE samples, each the FIRST SAMPLE AT OR AFTER its time (``ceil(t fs)``, the rule's
@@ -1665,6 +1685,9 @@ def input_mask(*, fs: float, electrical_settle_s: float,
     ``mechanical``, or ``both`` on the same sample.
     """
     ke = first_sample_at_or_after(float(electrical_settle_s), fs)
+    if mechanical_end_s is None:
+        return {"input_mask_s": float(electrical_settle_s), "input_mask_sample0": ke,
+                "input_mask_binding": "electrical_only", "electrical_settle_sample0": ke}
     km = first_sample_at_or_after(float(mechanical_end_s), fs)
     t = max(float(electrical_settle_s), float(mechanical_end_s))
     k = first_sample_at_or_after(t, fs)
@@ -1677,12 +1700,23 @@ def input_mask(*, fs: float, electrical_settle_s: float,
 
 
 def _check_basis(session: str, basis: str, *, electrical_end_s: float,
-                 mechanical_end_s: float, electrical_settle_s: float) -> None:
-    """Refuse a v6 electrical basis that the file's own times contradict."""
+                 mechanical_end_s: float | None, electrical_settle_s: float) -> None:
+    """Refuse a v6 electrical basis that the file's own times contradict.
+
+    v8: a :data:`NO_MECHANICAL_DRIVE` file has NO mechanical end (None), every other basis has
+    one - a mechanical term on a no-drive file, or none on another, is refused by name.
+    """
     if basis not in ELECTRICAL_BASES:
         msg = (f"{session}: electrical basis {basis!r} is none of {sorted(ELECTRICAL_BASES)} "
                f"({RULING_V6})")
         raise ValueError(msg)
+    if (basis == NO_MECHANICAL_DRIVE) != (mechanical_end_s is None):
+        msg = (f"{session}: a {NO_MECHANICAL_DRIVE} file has no mechanical term and every other "
+               f"basis has one; got basis {basis!r} with mechanical end {mechanical_end_s!r} "
+               f"({RULING_V8})")
+        raise ValueError(msg)
+    if mechanical_end_s is None:
+        return
     if basis == "mechanical_only_zero" and electrical_settle_s != electrical_end_s:
         msg = (f"{session}: a mechanical-only file has electrical settling 0, but the settling "
                f"is at {electrical_settle_s} s and the electrical end at {electrical_end_s} s")
@@ -1723,7 +1757,7 @@ def _reference_sensitive(session: str, ref: Mapping[str, Any]) -> dict[str, Any]
 
 def _held_record(*, session: str, fs: float | None, electrical_end_s: float | None,
                  mechanical_end_s: float | None, electrical_settle_s: float | None,
-                 times_source: str) -> dict[str, Any] | None:
+                 times_source: str, no_drive: bool = False) -> dict[str, Any] | None:
     """Return the held record of a file that gets no starts, or ``None`` if it gets them."""
     held: dict[str, Any] = {"session": session, "times_source": times_source}
     if fs is not None:
@@ -1735,9 +1769,10 @@ def _held_record(*, session: str, fs: float | None, electrical_end_s: float | No
                    ("mechanical_end_s", mechanical_end_s)):
         if v is not None:
             held[key] = float(v)
-    if electrical_end_s is None or mechanical_end_s is None:
+    if electrical_end_s is None or (mechanical_end_s is None and not no_drive):
         gone = [k for k, v in (("electrical", electrical_end_s),
-                               ("mechanical", mechanical_end_s)) if v is None]
+                               ("mechanical", mechanical_end_s)) if v is None
+                and (k == "electrical" or not no_drive)]
         return {**held, "basis": HELD_UNDETECTED,
                 "why": f"stim end not determined ({' and '.join(gone)}): the start is never "
                        f"assumed (invariant 41, {RULING_TIMES})"}
@@ -1780,18 +1815,24 @@ def file_starts(*, session: str, fs: float | None, electrical_end_s: float | Non
     caller (never parsed from the name) - is required for a measured file: the common start is
     the latest of the per-level median starts (:data:`COMMON_START_RULE`). A held file may
     pass None.
+
+    v8 (:data:`RULING_V8`): ``electrical_basis`` :data:`NO_MECHANICAL_DRIVE` with
+    ``mechanical_end_s`` None - no mechanical term: each start is electrical end + electrical
+    settling + own settling, and the record carries no ``mechanical_end_*`` field.
     """
     if not animal:
         msg = f"{session}: v6 needs the file's animal (the common start is per animal)"
         raise ValueError(msg)
     level = {"stim_level": str(stim_level)} if stim_level else {}
     names = list(ANALYSES if analyses is None else analyses)
+    no_drive = electrical_basis == NO_MECHANICAL_DRIVE
     held = _held_record(session=session, fs=fs, electrical_end_s=electrical_end_s,
                         mechanical_end_s=mechanical_end_s,
-                        electrical_settle_s=electrical_settle_s, times_source=times_source)
+                        electrical_settle_s=electrical_settle_s, times_source=times_source,
+                        no_drive=no_drive)
     if held is not None:
         return {**held, "animal": animal, **level}
-    if fs is None or electrical_end_s is None or mechanical_end_s is None \
+    if fs is None or electrical_end_s is None or (mechanical_end_s is None and not no_drive) \
             or electrical_settle_s is None:  # for the type checker: _held_record covers these
         msg = f"{session}: a measured file needs its fs"
         raise ValueError(msg)
@@ -1803,17 +1844,19 @@ def file_starts(*, session: str, fs: float | None, electrical_end_s: float | Non
         msg = (f"{session}: electrical settling {electrical_settle_s} s precedes the "
                f"electrical end {electrical_end_s} s")
         raise ValueError(msg)
+    mech = None if mechanical_end_s is None else float(mechanical_end_s)
     _check_basis(session, electrical_basis, electrical_end_s=float(electrical_end_s),
-                 mechanical_end_s=float(mechanical_end_s),
-                 electrical_settle_s=float(electrical_settle_s))
+                 mechanical_end_s=mech, electrical_settle_s=float(electrical_settle_s))
     rsens = (_reference_sensitive(session, reference_sensitive)
              if reference_sensitive is not None else None)
     im = input_mask(fs=float(fs), electrical_settle_s=float(electrical_settle_s),
-                    mechanical_end_s=float(mechanical_end_s))
+                    mechanical_end_s=mech)
     t_mask = float(im["input_mask_s"])
     t_until = (max(rsens["anchor_s"] + rsens["after_anchor_s"]["clean_max"],
-                   float(mechanical_end_s)) if rsens is not None else None)
-    basis_text = (f"max(electrical end + electrical settling ({electrical_source}), "
+                   mech if mech is not None else -math.inf) if rsens is not None else None)
+    basis_text = (f"electrical end + electrical settling ({electrical_source}); no mechanical "
+                  f"term ({times_source}; {RULING_V8})" if mech is None else
+                  f"max(electrical end + electrical settling ({electrical_source}), "
                   f"mechanical end) ({times_source}; {RULING_TIMES})")
     fixed0 = seconds_to_sample(fixed_start_s, fs)
     rows: list[dict[str, Any]] = []
@@ -1851,7 +1894,7 @@ def file_starts(*, session: str, fs: float | None, electrical_end_s: float | Non
             "electrical_basis": electrical_basis,
             "electrical_basis_rule": ELECTRICAL_BASES[electrical_basis],
             "electrical_end_s": float(electrical_end_s),
-            "mechanical_end_s": float(mechanical_end_s),
+            **({"mechanical_end_s": mech} if mech is not None else {}),
             "electrical_settle_s": float(electrical_settle_s),
             "electrical_s": float(electrical_settle_s) - float(electrical_end_s),
             **im, "analyses": rows, "cuts": cuts, **level,
@@ -1964,12 +2007,19 @@ def _check_times(sess: str, f: Mapping[str, Any]) -> None:
     measured start or cut may precede the input mask point: a file that disagrees with
     itself is refused at write time and at read time (invariant 27).
     """
-    for key in ("electrical_settle_sample0", "mechanical_end_sample0", "input_mask_sample0"):
+    no_drive = f.get("electrical_basis") == NO_MECHANICAL_DRIVE
+    mech_keys = ("mechanical_end_s", "mechanical_end_sample0")
+    if no_drive and any(k in f for k in mech_keys):
+        msg = (f"{sess}: a {NO_MECHANICAL_DRIVE} file has no mechanical term, but carries "
+               f"{[k for k in mech_keys if k in f]} ({RULING_V8})")
+        raise ValueError(msg)
+    for key in ("electrical_settle_sample0", *(() if no_drive else ("mechanical_end_sample0",)),
+                "input_mask_sample0"):
         if not _is_sample(f.get(key)):
             msg = f"{sess}: {key} must be an int >= 0 (mode (B), {RULING_TIMES})"
             raise TypeError(msg)
-    for key in ("fs", "electrical_end_s", "mechanical_end_s", "electrical_settle_s",
-                "input_mask_s"):
+    for key in ("fs", "electrical_end_s", *(() if no_drive else ("mechanical_end_s",)),
+                "electrical_settle_s", "input_mask_s"):
         v = f.get(key)
         if not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v):
             msg = f"{sess}: {key} is absent or not a finite number ({RULING_TIMES})"
@@ -1978,14 +2028,16 @@ def _check_times(sess: str, f: Mapping[str, Any]) -> None:
     if fs <= 0:
         msg = f"{sess}: fs must be positive, got {fs}"
         raise ValueError(msg)
-    ke, km, k = (int(f[x]) for x in ("electrical_settle_sample0", "mechanical_end_sample0",
-                                     "input_mask_sample0"))
+    ke, k = int(f["electrical_settle_sample0"]), int(f["input_mask_sample0"])
+    km = ke if no_drive else int(f["mechanical_end_sample0"])
     if k != max(ke, km):
         msg = (f"{sess}: input_mask_sample0 {k} is not max(electrical_settle_sample0 {ke}, "
-               f"mechanical_end_sample0 {km}) ({RULING_TIMES})")
+               f"mechanical_end_sample0 {km}) ({RULING_TIMES})" if not no_drive else
+               f"{sess}: input_mask_sample0 {k} is not electrical_settle_sample0 {ke}: a "
+               f"{NO_MECHANICAL_DRIVE} file has no mechanical term ({RULING_V8})")
         raise ValueError(msg)
     for ks, ts in (("electrical_settle_sample0", "electrical_settle_s"),
-                   ("mechanical_end_sample0", "mechanical_end_s"),
+                   *(() if no_drive else (("mechanical_end_sample0", "mechanical_end_s"),)),
                    ("input_mask_sample0", "input_mask_s")):
         want = first_sample_at_or_after(float(f[ts]), fs)
         if int(f[ks]) != want:
@@ -2012,7 +2064,8 @@ def _check_v6(sess: str, f: Mapping[str, Any]) -> None:
                f"{sorted(ELECTRICAL_BASES)}) ({RULING_V6})")
         raise ValueError(msg)
     _check_basis(sess, str(f["electrical_basis"]), electrical_end_s=float(f["electrical_end_s"]),
-                 mechanical_end_s=float(f["mechanical_end_s"]),
+                 mechanical_end_s=(float(f["mechanical_end_s"]) if "mechanical_end_s" in f
+                                   else None),
                  electrical_settle_s=float(f["electrical_settle_s"]))
     if not f.get("stim_level"):
         msg = f"{sess}: v7 needs the file's declared stim_level ({RULING_V7})"
@@ -2026,13 +2079,26 @@ def _check_v6(sess: str, f: Mapping[str, Any]) -> None:
             raise ValueError(msg)
 
 
+def common_start_anchor(f: Mapping[str, Any]) -> float:
+    """Return the time a file's common start is measured from (the one site).
+
+    Its mechanical end, or its electrical end when it has no mechanical term
+    (:data:`NO_MECHANICAL_DRIVE`, :data:`RULING_V8`).
+    """
+    if f.get("electrical_basis") == NO_MECHANICAL_DRIVE:
+        return float(f["electrical_end_s"])
+    return float(f["mechanical_end_s"])
+
+
 def _common_starts(measured: list[dict[str, Any]]) -> dict[str, Any]:
     """Give every analysis and cut its common start (:data:`COMMON_START_RULE`); the record.
 
     Per animal and per analysis (and per cut id): over the animal's measured files that are
-    NOT reference-sensitive, each stim level's median of (start - mechanical end); the offset
-    is the largest of those medians (ties: the larger level name). Each row's
-    ``common_start_s`` = its file's mechanical end + that offset - never before the row's own
+    NOT reference-sensitive, each stim level's median of (start - anchor); the offset is the
+    largest of those medians (ties: the larger level name). A file's anchor is its mechanical
+    end - or, for a :data:`NO_MECHANICAL_DRIVE` file (no mechanical term, :data:`RULING_V8`),
+    its electrical end (:func:`common_start_anchor`, the one site). Each row's
+    ``common_start_s`` = its file's anchor + that offset - never before the row's own
     start - ``common_start_sample0`` its sample (as starts are converted), and
     ``common_start_set_by`` the level that set it. A reference-sensitive file gets a common
     start but never sets one. An analysis whose every file is reference-sensitive has no
@@ -2053,10 +2119,14 @@ def _common_starts(measured: list[dict[str, Any]]) -> dict[str, Any]:
                                                    if "reference_sensitive" in f),
             "levels": {lv: sorted(v) for lv, v in sorted(levels.items())},
             "analyses": {}, "cuts": {}}
+        no_drive = sorted(str(f["session"]) for f in files
+                          if f.get("electrical_basis") == NO_MECHANICAL_DRIVE)
+        if no_drive:
+            rec["anchored_at_electrical_end"] = no_drive
         for kind, key in (("analyses", "analysis"), ("cuts", "cut")):
             offs: dict[str, dict[str, list[tuple[float, str]]]] = {}
             for f in used:
-                m = float(f["mechanical_end_s"])
+                m = common_start_anchor(f)
                 for r in f[kind]:
                     offs.setdefault(str(r[key]), {}).setdefault(str(f["stim_level"]), []).append(
                         (float(r["start_s"]) - m, str(f["session"])))
@@ -2071,12 +2141,12 @@ def _common_starts(measured: list[dict[str, Any]]) -> dict[str, Any]:
                 top = max(med, key=lambda lv: (med[lv], lv))
                 best[name] = (med[top], top)
                 rec[kind][name] = {
-                    "offset_after_mechanical_end_s": med[top], "set_by_level": top,
+                    "offset_after_anchor_s": med[top], "set_by_level": top,
                     "level_medians": {lv: {"median_offset_s": med[lv],
                                            "files": sorted(s_ for _o, s_ in offs[name][lv])}
                                       for lv in sorted(med)}}
             for f in files:
-                m, fs = float(f["mechanical_end_s"]), float(f["fs"])
+                m, fs = common_start_anchor(f), float(f["fs"])
                 for r in f[kind]:
                     off, lv = best[str(r[key])]
                     t = m + off
@@ -2084,7 +2154,9 @@ def _common_starts(measured: list[dict[str, Any]]) -> dict[str, Any]:
                     r.update(common_start_s=max(t, float(r["start_s"])),
                              common_start_sample0=k, common_start_set_by=f"stim level {lv}")
         record[animal] = rec
-    return {"rule": COMMON_START_RULE, "ruling": RULING_V7, "anchor": "mechanical_end",
+    return {"rule": COMMON_START_RULE, "ruling": RULING_V7, "ruling_v8": RULING_V8,
+            "anchor": ("mechanical_end; electrical_end for a file with no mechanical term "
+                       f"({NO_MECHANICAL_DRIVE})"),
             "summary": "latest per-stim-level median start, reference-sensitive files excluded",
             "by_animal": record}
 
@@ -2403,7 +2475,10 @@ def read_recovery_starts(path: Path) -> dict[str, Any]:
     """
     doc = json.loads(Path(path).read_text(encoding="utf-8"))
     if doc.get("schema") != SCHEMA:
-        msg = f"{path}: schema {doc.get('schema')!r}, expected {SCHEMA!r}"
+        old = str(doc.get("schema", "")).rsplit(" ", 1)[-1]
+        why = (f" - {old} is superseded by v8 ({RULING_V8}); regenerate the starts"
+               if old in ("v6", "v7") else "")
+        msg = f"{path}: schema {doc.get('schema')!r}, expected {SCHEMA!r}{why}"
         raise ValueError(msg)
     for key in ("fs", "fixed_start_s", "files", "held", "table", "output_times",
                 "source_files", "trim_modes", "edge_settling", "edge_settling_sha256"):
