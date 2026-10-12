@@ -1292,3 +1292,42 @@ def test_night6_file_values_reads_both_versions_and_skips_byproducts(tmp_path: P
                                    skip_common=("slowWaves_ANT1",))
     with pytest.raises(ValueError, match="no common-start copy"):
         rs.night6_file_values(bad, animal="A", session="s2")
+
+
+
+def test_review2_3_the_reader_verifies_the_stored_common_starts(tmp_path: Path) -> None:
+    """Review 2 finding 3: the reader refuses stored common starts that differ from the rule.
+
+    MATLAB uses the STORED values, so the reader must never quietly recompute over them.
+    """
+    files = [_v6("a1a", 120.0, 124.0, 120.0, basis="from_electrical_end", level="L1"),
+             _v6("a3a", 119.0, 131.0, 121.0, basis="from_electrical_end", level="L3"),
+             _v6("a3b", 119.0, 133.0, 121.0, basis="from_electrical_end", level="L3")]
+    doc = rs.recovery_starts_document(files, fs=FS)
+    good = tmp_path / "good.json"
+    rs.write_recovery_starts(good, doc)
+    assert rs.read_recovery_starts(good) == json.loads(good.read_text(encoding="utf-8"))
+    name = sorted(rs.ANALYSES)[0]
+
+    def tampered(edit: Any, tag: str) -> Path:  # noqa: ANN401
+        d = json.loads(good.read_text(encoding="utf-8"))
+        edit(d)
+        p = tmp_path / f"{tag}.json"
+        p.write_text(json.dumps(d, sort_keys=True, indent=1) + "\n", encoding="utf-8",
+                     newline="\n")
+        return p
+
+    def row(d: dict) -> dict:
+        return _row(d, "a1a", name)
+    edits = {
+        "sample": lambda d: row(d).update(common_start_sample0=row(d)["common_start_sample0"] + 1),
+        "seconds": lambda d: row(d).update(common_start_s=row(d)["common_start_s"] + 0.5),
+        "level": lambda d: row(d).update(common_start_set_by="stim level L1"),
+        "absent": lambda d: row(d).pop("common_start_sample0"),
+        "record": lambda d: d["common_start"]["by_animal"]["A"]["analyses"][name].update(
+            set_by_level="L1"),
+    }
+    for tag, edit in edits.items():
+        p = tampered(edit, tag)
+        with pytest.raises(ValueError, match="stored common starts are not the rule"):
+            rs.read_recovery_starts(p)

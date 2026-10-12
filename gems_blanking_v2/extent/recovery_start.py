@@ -156,6 +156,7 @@ OUTSIDE THE GENERATION HASH.
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 from collections.abc import Mapping, Sequence
@@ -2367,8 +2368,39 @@ def write_recovery_starts(path: Path, doc: Mapping[str, Any]) -> str:
     return text
 
 
+COMMON_ROW_KEYS: Final = ("common_start_s", "common_start_sample0", "common_start_set_by")
+"""What :func:`_common_starts` writes on every analysis and cut row - and MATLAB reads."""
+
+
+def common_start_mismatches(stored: Mapping[str, Any], again: Mapping[str, Any]) -> list[str]:
+    """Every place the STORED common starts differ from the rule recomputed (exact; samples).
+
+    ``stored`` is a starts document as read; ``again`` the document rebuilt from its files.
+    Compared: the ``common_start`` record, and on every analysis and cut row of every file the
+    :data:`COMMON_ROW_KEYS` - the sample exactly, the time and the setting level exactly. A key
+    absent from a stored row is a mismatch, never a default.
+    """
+    out: list[str] = []
+    if stored.get("common_start") != again["common_start"]:
+        out.append("common_start record")
+    rows = {(str(f["session"]), kind, str(r[key])): r for f in again["files"]
+            for kind, key in (("analyses", "analysis"), ("cuts", "cut")) for r in f[kind]}
+    for f in stored.get("files", []):
+        for kind, key in (("analyses", "analysis"), ("cuts", "cut")):
+            for r in f.get(kind) or []:
+                want = rows.get((str(f["session"]), kind, str(r[key])), {})
+                out += [f"{f['session']}/{r[key]}: {k} {r.get(k)!r} != {want.get(k)!r}"
+                        for k in COMMON_ROW_KEYS if r.get(k) != want.get(k)]
+    return out
+
+
 def read_recovery_starts(path: Path) -> dict[str, Any]:
-    """Read and validate a starts file; refuses a wrong schema or a malformed row by name."""
+    """Read and validate a starts file; refuses a wrong schema or a malformed row by name.
+
+    The common starts are VERIFIED, never recomputed into the result (review 2 finding 3):
+    MATLAB reads the stored ``common_start_*`` values, so the rule is rebuilt on a deep copy and
+    any difference from what the file stores - one sample is enough - is refused by name.
+    """
     doc = json.loads(Path(path).read_text(encoding="utf-8"))
     if doc.get("schema") != SCHEMA:
         msg = f"{path}: schema {doc.get('schema')!r}, expected {SCHEMA!r}"
@@ -2384,12 +2416,19 @@ def read_recovery_starts(path: Path) -> dict[str, Any]:
                f"not this build's (sha256 {edge_settling_sha256()[:16]}): the starts were "
                "derived under other edge settlings - regenerate the file (schema v6)")
         raise ValueError(msg)
-    recovery_starts_document([*doc["files"], *doc["held"]], fs=float(doc["fs"]),
-                             fixed_start_s=float(doc["fixed_start_s"]))
     known = set(expected_consumers())
     for f in doc["files"]:
         for r in f["analyses"]:
             if r["analysis"] not in known:
                 msg = f"{path}: {f['session']} names analysis {r['analysis']!r}, not a consumer"
                 raise ValueError(msg)
+    again = recovery_starts_document(copy.deepcopy([*doc["files"], *doc["held"]]),
+                                     fs=float(doc["fs"]),
+                                     fixed_start_s=float(doc["fixed_start_s"]))
+    bad = common_start_mismatches(doc, again)
+    if bad:
+        msg = (f"{path}: the stored common starts are not the rule's ({len(bad)} differences, "
+               f"first {bad[:3]}): MATLAB reads the stored values - regenerate the file, never "
+               "edit it")
+        raise ValueError(msg)
     return dict(doc)
