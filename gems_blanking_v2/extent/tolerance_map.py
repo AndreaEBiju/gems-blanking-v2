@@ -42,8 +42,10 @@ import dataclasses
 import hashlib
 import json
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Final
 
 import numpy as np
@@ -89,6 +91,7 @@ __all__ = [
     "option1_threshold",
     "option1_tolerances",
     "own_signal_floor_record",
+    "provisional_consumers",
     "residual_risk",
     "scope_residual",
     "tested_candidate_mismatches",
@@ -205,6 +208,50 @@ EXTENT_RULE_SOURCE_KEYS: Final[tuple[str, ...]] = ("ruling", "decision_files", "
 (:func:`tested_candidate_mismatches`; the night driver loads, hashes and compares it)."""
 
 
+def _check_provisional(src: Mapping[str, Any], out: Mapping[str, Mapping[str, Any]]) -> None:
+    """``provisional: true`` entries need ONE ``source.provisional_caveat`` {text, files}.
+
+    The caveat text is written once (here, in the declaration's source) and applied to every
+    provisional consumer by :func:`provisional_consumers`; ``files`` = [{file, sha256}, ...] are
+    the published decision files it comes from. A caveat with no provisional consumer is refused
+    too (a dangling caveat reads as if it applied to something).
+    """
+    prov = [c for c, e in out.items() if "provisional" in e]
+    bad = [c for c in prov if out[c]["provisional"] is not True or out[c].get("declared") is False]
+    if bad:
+        msg = (f"extent_rule.{bad}: provisional is true on a declared consumer (the caveat text "
+               "is source.provisional_caveat, written once)")
+        raise ValueError(msg)
+    cav = src.get("provisional_caveat")
+    if not prov:
+        if cav is not None:
+            msg = "extent_rule.source.provisional_caveat applies to no provisional consumer"
+            raise ValueError(msg)
+        return
+    files = cav.get("files") if isinstance(cav, Mapping) else None
+    if (not isinstance(cav, Mapping) or not str(cav.get("text", "")).strip()
+            or not isinstance(files, list) or not files
+            or not all(isinstance(f, Mapping) and f.get("file")
+                       and re.fullmatch(r"[0-9a-f]{64}", str(f.get("sha256", "")))
+                       for f in files)):
+        msg = (f"extent_rule: {prov} are provisional, so source.provisional_caveat must be "
+               f"{{text, files: [{{file, sha256 (64 hex)}}, ...]}}; got {cav!r}")
+        raise ValueError(msg)
+
+
+def provisional_consumers(rule: Mapping[str, Any]) -> dict[str, str]:
+    """Consumer -> its provisional caveat, from the ONE declared text (+ an entry's own caveat).
+
+    The only place a provisional caveat is assembled (provenance records it per consumer).
+    """
+    cav = rule["source"].get("provisional_caveat") or {}
+    src = ", ".join(f"{Path(str(f['file'])).name} (sha256 {str(f['sha256'])[:16]})"
+                    for f in cav.get("files") or [])
+    return {c: "; ".join([str(cav["text"]), *([str(e["caveat"])] if e.get("caveat") else []),
+                          f"source {src}"])
+            for c, e in sorted(rule["consumers"].items()) if e.get("provisional") is True}
+
+
 def check_extent_rule(decl: object) -> dict[str, Any]:
     """Return the declared per-consumer extent rule, or raise ValueError naming the gap.
 
@@ -214,7 +261,8 @@ def check_extent_rule(decl: object) -> dict[str, Any]:
     expected consumer (hrv included; hrv's gate is one of :data:`HRV_GATES`). A consumer declared
     ``false`` gets no masks at all (stage 1b marks it not computed, Night 6 lists leave it out);
     a consumer with no entry is refused - nothing is defaulted. Other fields of an entry
-    (candidate, provisional, caveat) are carried as they are.
+    (candidate, caveat) are carried as they are; ``provisional`` must be ``true`` and then the
+    source carries the one caveat text (:func:`_check_provisional`).
     """
     if not isinstance(decl, Mapping) or not isinstance(decl.get("consumers"), Mapping):
         msg = f"extent_rule must be {{source, consumers: {{consumer: entry}}}}; got {decl!r}"
@@ -255,6 +303,7 @@ def check_extent_rule(decl: object) -> dict[str, Any]:
     if not any(e.get("declared", True) for e in out.values()):
         msg = "extent_rule declares no consumer"
         raise ValueError(msg)
+    _check_provisional(src, out)
     return {"source": json.loads(json.dumps(dict(src), sort_keys=True)), "consumers": out}
 
 
@@ -811,7 +860,9 @@ class Option1Tolerances:
         """Everything a mask's provenance carries about its thresholds (JSON-ready)."""
         return {"version": TOLERANCE_VERSION, "rule": OPTION1_RULE,
                 **({"extent_rule": dict(self.extent_rule),
-                    "extent_gates": dict(EXTENT_GATES)} if self.extent_rule else
+                    "extent_gates": dict(EXTENT_GATES),
+                    "provisional": provisional_consumers(self.extent_rule)}
+                   if self.extent_rule else
                    {"core_pad_rule": CORE_PAD_RULE,
                     "core_blanking": dict(sorted(self.core_blanking.items()))}),
                 "extent_percentile": self.extent_percentile,

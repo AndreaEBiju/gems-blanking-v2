@@ -757,13 +757,22 @@ def test_a_consumer_without_an_own_signal_population_keeps_its_visible_kind_thre
 
 def _rule(**over: Any) -> dict[str, Any]:  # noqa: ANN401
     cons = {"spikes": {"gate": "i_or_ii", "candidate": "C1"}, "hrv": {"gate": "i"},
-            "breathing": {"gate": "i_or_ii"}, "mmc": {"gate": "ii", "provisional": "x"},
+            "breathing": {"gate": "i_or_ii"},
+            "mmc": {"gate": "ii", "provisional": True, "caveat": "near tie"},
             "slow_wave": {"declared": False, "reason": "no extent declared"}}
     cons.update(over)
     return {"source": {"ruling": "Andrea 2026-10-11 night",
                        "decision_files": [{"file": "d.csv", "sha256": "d" * 64}],
-                       "candidate_set": {"file": "c.json", "sha256": "c" * 64}},
+                       "candidate_set": {"file": "c.json", "sha256": "c" * 64},
+                       **({"provisional_caveat": CAVEAT} if any(
+                           isinstance(e, dict) and "provisional" in e for e in cons.values())
+                          else {})},
             "consumers": cons}
+
+
+CAVEAT = {"text": "PROVISIONAL: 4 of 10 held-out",
+          "files": [{"file": "h/final_v2.csv", "sha256": "f" * 64},
+                    {"file": "h/final_v2.md", "sha256": "e" * 64}]}
 
 
 OWN_SCOPES = dict.fromkeys(("breathing", "mmc", "spikes"), tl.CROSS_BAND_SCOPE_OWN)
@@ -777,7 +786,10 @@ def test_an_extent_rule_replaces_core_blanking_and_drops_an_undeclared_consumer(
     assert "slow_wave" not in t.table.z_tol and "slow_wave" not in t.thresholds
     assert tm.not_emitted(t.extent_rule) == ("slow_wave",)
     rec = t.record()
-    assert rec["extent_rule"]["consumers"]["mmc"]["provisional"] == "x"
+    assert rec["extent_rule"]["consumers"]["mmc"]["provisional"] is True
+    assert rec["provisional"] == {
+        "mmc": "PROVISIONAL: 4 of 10 held-out; near tie; source final_v2.csv (sha256 "
+               f"{'f' * 16}), final_v2.md (sha256 {'e' * 16})"}
     assert "core_blanking" not in rec and rec["extent_gates"] == dict(tm.EXTENT_GATES)
     assert t.table.z_tol["mmc"] == floors["mmc"]["value"]
     with pytest.raises(ValueError, match="exactly one of core blanking"):
@@ -894,3 +906,33 @@ def test_a_per_band_floor_is_reproduced_from_its_null_archive() -> None:
                 {**archive, "per_band_all_signals": {}}):
         with pytest.raises(ValueError, match=r"extent_floors[.]spikes"):
             tm.verify_floor_archive("spikes", e, bad)
+
+
+
+def test_provisional_consumers_share_one_caveat_text() -> None:
+    """Coordinator 2026-10-12 (Andrea): hrv, breathing and mmc share ONE provisional caveat.
+
+    hrv C2 and breathing C1 rest on the same 4 of 10 held-out recordings as mmc.
+    """
+    prov = {"hrv": {"gate": "i", "provisional": True},
+            "breathing": {"gate": "i_or_ii", "provisional": True}}
+    rule = tm.check_extent_rule(_rule(**prov))
+    got = tm.provisional_consumers(rule)
+    assert set(got) == {"hrv", "breathing", "mmc"}
+    assert all(v.startswith(CAVEAT["text"] + "; ") for v in got.values())
+    assert got["hrv"] == got["breathing"] != got["mmc"]
+    assert got["hrv"].endswith(f"final_v2.md (sha256 {'e' * 16})")
+    for bad in ({**CAVEAT, "files": [{"file": "x", "sha256": "pending"}]},
+                {**CAVEAT, "files": [{"file": "", "sha256": "e" * 64}]},
+                {**CAVEAT, "files": []}, {**CAVEAT, "text": " "}, None):
+        r = _rule(**prov)
+        r["source"]["provisional_caveat"] = bad
+        with pytest.raises(ValueError, match="provisional_caveat"):
+            tm.check_extent_rule(r)
+    with pytest.raises(ValueError, match="provisional is true"):
+        tm.check_extent_rule(_rule(hrv={"gate": "i", "provisional": "x"}))
+    dangling = _rule(mmc={"gate": "ii"})
+    dangling["source"]["provisional_caveat"] = CAVEAT
+    with pytest.raises(ValueError, match="applies to no provisional consumer"):
+        tm.check_extent_rule(dangling)
+    assert tm.provisional_consumers(tm.check_extent_rule(_rule(mmc={"gate": "ii"}))) == {}
