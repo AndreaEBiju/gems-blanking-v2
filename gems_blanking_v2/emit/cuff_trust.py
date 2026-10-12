@@ -85,7 +85,8 @@ PERIR_OUTSIDE_CRITERION: Final = (
     "the per-cuff report's outside-window test: E_out = the heart-locked excess in the central "
     "region |lag| < 30 ms minus the excess inside the peri-R window; significant when the "
     "one-sided Poisson p of the central-outside-window count against the flank rate is < 0.01 "
-    "(G:/My Drive/gems_figures/2026-10-11_perir_cuffs/methods.md, column p_central_outside_win)")
+    "(Andrea's Drive, gems_figures/2026-10-11_perir_cuffs/methods.md, column "
+    "p_central_outside_win)")
 SCOPES: Final = ("primary", "sensitivity")
 """The two spike scopes: primary and sensitivity, each with its own declared distrust list."""
 PERIR_LIST_SCHEMA: Final = "gems-blanking-v2 perir-failed cuffs v1"

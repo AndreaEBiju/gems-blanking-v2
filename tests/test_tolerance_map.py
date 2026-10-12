@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import hashlib
 import json
 import math
@@ -936,3 +937,46 @@ def test_provisional_consumers_share_one_caveat_text() -> None:
     with pytest.raises(ValueError, match="applies to no provisional consumer"):
         tm.check_extent_rule(dangling)
     assert tm.provisional_consumers(tm.check_extent_rule(_rule(mmc={"gate": "ii"}))) == {}
+
+
+
+def _rule_at(root: str, sep: str) -> dict[str, Any]:
+    """Build the same declaration with every source file under ``root`` (one machine)."""
+    r = _rule(hrv={"gate": "i", "provisional": True})
+    r["source"]["decision_files"] = [{"file": sep.join([root, "harm", "d.csv"]),
+                                      "sha256": "d" * 64}]
+    r["source"]["candidate_set"] = {"file": sep.join([root, "cands", "c.json"]), "sha256": "c" * 64}
+    r["source"]["provisional_caveat"] = {**CAVEAT, "files": [
+        {"file": sep.join([root, "harm", "final_v2.csv"]), "sha256": "f" * 64}]}
+    return r
+
+
+def test_review2_2_threshold_record_is_machine_independent() -> None:
+    """Cross-platform rule 2: a source file is recorded as name + sha256.
+
+    The record and the threshold-set hash are identical whichever machine (and root) the files
+    were read from.
+    """
+    floors = {k: v for k, v in _floors(_own_archive()).items() if k != "slow_wave"}
+    floors["breathing"] = {"none": "no HR channel", "limitation": tm.BREATHING_FLOOR_LIMITATION}
+    built = [_build(core_blanking=None, extent_rule=_rule_at(root, sep),
+                    cross_band_scope=OWN_SCOPES, extent_floors=floors)
+             for root, sep in (("G:\\My Drive\\gems_figures", "\\"),
+                               ("C:/Users/User/AppData/Local/Temp/scratch", "/"),
+                               ("/Users/andrea/Library/CloudStorage/GoogleDrive-a/My Drive", "/"))]
+    recs = [t.record() for t in built]
+    assert recs[0] == recs[1] == recs[2]
+    assert len({t.sha256() for t in built}) == 1
+    assert tm.absolute_paths_in(recs[0]) == []
+    src = recs[0]["extent_rule"]["source"]
+    assert src["candidate_set"] == {"name": "c.json", "sha256": "c" * 64}
+    assert src["decision_files"] == [{"name": "d.csv", "sha256": "d" * 64}]
+    assert src["provisional_caveat"]["files"] == [{"name": "final_v2.csv", "sha256": "f" * 64}]
+    assert tm.check_extent_rule(built[0].extent_rule) == built[0].extent_rule  # idempotent
+    bad = _rule_at("G:/x", "/")
+    bad["source"]["ruling"] = "Andrea, see C:/Users/User/notes.md"
+    with pytest.raises(ValueError, match="absolute local paths"):
+        tm.check_extent_rule(bad)
+    leaky = dataclasses.replace(built[0], inputs={**built[0].inputs, "x": "/Users/a/b.json"})
+    with pytest.raises(ValueError, match="absolute local paths"):
+        leaky.record()

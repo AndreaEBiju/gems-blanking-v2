@@ -45,7 +45,6 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Final
 
 import numpy as np
@@ -80,6 +79,7 @@ __all__ = [
     "Z_FLOOR",
     "ConsumerThreshold",
     "Option1Tolerances",
+    "absolute_paths_in",
     "assess_window",
     "check_core_blanking",
     "check_cross_band_scope",
@@ -94,6 +94,7 @@ __all__ = [
     "provisional_consumers",
     "residual_risk",
     "scope_residual",
+    "source_ref",
     "tested_candidate_mismatches",
     "verify_floor_archive",
     "z_consumers",
@@ -208,6 +209,49 @@ EXTENT_RULE_SOURCE_KEYS: Final[tuple[str, ...]] = ("ruling", "decision_files", "
 (:func:`tested_candidate_mismatches`; the night driver loads, hashes and compares it)."""
 
 
+_ABSOLUTE_PATH = re.compile(
+    r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]"  # a drive letter: C:/ or G:\
+    r"|\\\\[^\\\s]"  # a UNC share: \\host
+    r"|(?:^|[\s(\"'=,;])/(?:Users|home|Volumes|mnt|tmp|private|var|media)/"  # a POSIX root
+    r"|My Drive[\\/]|Shared drives[\\/]")  # a Google Drive mount, any platform
+"""What an absolute local path looks like on the platforms this tool runs on (rule 2)."""
+
+
+def absolute_paths_in(obj: object) -> list[str]:
+    """Return every string in a JSON-like ``obj`` that carries an absolute local path.
+
+    Cross-platform rule 2: nothing shared, and nothing hashed into an identity, stores a path
+    that only resolves on one machine. Keys and values are both searched.
+    """
+    out: list[str] = []
+    if isinstance(obj, str):
+        if _ABSOLUTE_PATH.search(obj):
+            out.append(obj)
+    elif isinstance(obj, Mapping):
+        for k, v in obj.items():
+            out += absolute_paths_in(str(k)) + absolute_paths_in(v)
+    elif isinstance(obj, list | tuple):
+        for v in obj:
+            out += absolute_paths_in(v)
+    return out
+
+
+def source_ref(f: object, where: str = "source") -> dict[str, str]:
+    """Return a declared source file ``{file, sha256}`` as provenance: ``{name, sha256}``.
+
+    The logical name is the file's base name, whatever the separator; the path it was read from
+    on this machine stays in the (local) night config and never reaches a record or a hash. An
+    entry already ``{name, sha256}`` is returned as it is (checking is idempotent). Anything
+    else - no file, a hash that is not 64 hex - raises ValueError naming ``where``.
+    """
+    raw = str(f.get("file") or f.get("name") or "") if isinstance(f, Mapping) else ""
+    sha = str(f.get("sha256", "")) if isinstance(f, Mapping) else ""
+    if not raw.strip() or not re.fullmatch(r"[0-9a-f]{64}", sha):
+        msg = f"extent_rule.source.{where}: {f!r} must be {{file, sha256 (64 hex)}}"
+        raise ValueError(msg)
+    return {"name": re.split(r"[\\/]", raw.rstrip("\\/"))[-1], "sha256": sha}
+
+
 def _check_provisional(src: Mapping[str, Any], out: Mapping[str, Mapping[str, Any]]) -> None:
     """``provisional: true`` entries need ONE ``source.provisional_caveat`` {text, files}.
 
@@ -230,13 +274,12 @@ def _check_provisional(src: Mapping[str, Any], out: Mapping[str, Mapping[str, An
         return
     files = cav.get("files") if isinstance(cav, Mapping) else None
     if (not isinstance(cav, Mapping) or not str(cav.get("text", "")).strip()
-            or not isinstance(files, list) or not files
-            or not all(isinstance(f, Mapping) and f.get("file")
-                       and re.fullmatch(r"[0-9a-f]{64}", str(f.get("sha256", "")))
-                       for f in files)):
+            or not isinstance(files, list) or not files):
         msg = (f"extent_rule: {prov} are provisional, so source.provisional_caveat must be "
                f"{{text, files: [{{file, sha256 (64 hex)}}, ...]}}; got {cav!r}")
         raise ValueError(msg)
+    for f in files:
+        source_ref(f, "provisional_caveat.files")
 
 
 def provisional_consumers(rule: Mapping[str, Any]) -> dict[str, str]:
@@ -245,7 +288,7 @@ def provisional_consumers(rule: Mapping[str, Any]) -> dict[str, str]:
     The only place a provisional caveat is assembled (provenance records it per consumer).
     """
     cav = rule["source"].get("provisional_caveat") or {}
-    src = ", ".join(f"{Path(str(f['file'])).name} (sha256 {str(f['sha256'])[:16]})"
+    src = ", ".join(f"{f['name']} (sha256 {str(f['sha256'])[:16]})"
                     for f in cav.get("files") or [])
     return {c: "; ".join([str(cav["text"]), *([str(e["caveat"])] if e.get("caveat") else []),
                           f"source {src}"])
@@ -271,11 +314,9 @@ def check_extent_rule(decl: object) -> dict[str, Any]:
     if not isinstance(src, Mapping) or any(not src.get(k) for k in EXTENT_RULE_SOURCE_KEYS):
         msg = f"extent_rule.source must name {list(EXTENT_RULE_SOURCE_KEYS)}"
         raise ValueError(msg)
-    for where, f in [*(("decision_files", f) for f in src["decision_files"]),
-                     ("candidate_set", src["candidate_set"])]:
-        if not isinstance(f, Mapping) or not f.get("file") or len(str(f.get("sha256", ""))) != 64:  # noqa: PLR2004
-            msg = f"extent_rule.source.{where}: {f!r} must be {{file, sha256 (64 hex)}}"
-            raise ValueError(msg)
+    logical = {**src, "decision_files": [source_ref(f, "decision_files")
+                                         for f in src["decision_files"]],
+               "candidate_set": source_ref(src["candidate_set"], "candidate_set")}
     cons = decl["consumers"]
     want = tuple(expected_consumers())
     missing = [c for c in want if c not in cons]
@@ -304,7 +345,16 @@ def check_extent_rule(decl: object) -> dict[str, Any]:
         msg = "extent_rule declares no consumer"
         raise ValueError(msg)
     _check_provisional(src, out)
-    return {"source": json.loads(json.dumps(dict(src), sort_keys=True)), "consumers": out}
+    if src.get("provisional_caveat") is not None:
+        logical["provisional_caveat"] = {**src["provisional_caveat"], "files": [
+            source_ref(f) for f in src["provisional_caveat"]["files"]]}
+    rule = {"source": json.loads(json.dumps(logical, sort_keys=True)), "consumers": out}
+    bad = absolute_paths_in(rule)
+    if bad:
+        msg = (f"extent_rule carries absolute local paths {bad}: provenance stores a logical name "
+               "+ sha256 (cross-platform rule 2); a path belongs only in a {file, sha256} entry")
+        raise ValueError(msg)
+    return rule
 
 
 def tested_candidate_mismatches(rule: Mapping[str, Any], floors: Mapping[str, Any],
@@ -389,7 +439,7 @@ BREATHING_FLOOR_LIMITATION: Final = (
     "Andrea 2026-10-11: breathing keeps 7.69 and the pooled floor is NOT adopted - no "
     "independent held-out clean population with an HR channel exists for breathing; the only "
     "candidate (I t02 es2 bl blind span, ~70 s) is also a held-out harm-test recording; the I "
-    "span gives lower floors than J on every consumer (pooled-rule info: G:/My Drive/"
+    "span gives lower floors than J on every consumer (pooled-rule info: Andrea's Drive, "
     "gems_figures/2026-10-11_breathing_floor/, proposal.md sha256 c48966e465a04f68, floors.csv "
     "sha256 fbf76cb7540cfda1)")
 """THE construction site of the breathing-floor limitation text (Andrea 2026-10-11): every
@@ -857,7 +907,19 @@ class Option1Tolerances:
                      if t.setter.startswith("floor"))
 
     def record(self) -> dict[str, Any]:
-        """Everything a mask's provenance carries about its thresholds (JSON-ready)."""
+        """Everything a mask's provenance carries about its thresholds (JSON-ready).
+
+        Machine-independent: no absolute local path (rule 2), so the threshold-set hash built on
+        it is the same on every machine; a record that would carry one raises ValueError.
+        """
+        rec = self._record()
+        bad = absolute_paths_in(rec)
+        if bad:
+            msg = f"threshold record carries absolute local paths {bad} (cross-platform rule 2)"
+            raise ValueError(msg)
+        return rec
+
+    def _record(self) -> dict[str, Any]:
         return {"version": TOLERANCE_VERSION, "rule": OPTION1_RULE,
                 **({"extent_rule": dict(self.extent_rule),
                     "extent_gates": dict(EXTENT_GATES),
