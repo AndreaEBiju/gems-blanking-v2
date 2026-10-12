@@ -543,6 +543,30 @@ def test_a_gated_core_blanks_core_padding_and_its_own_extents_and_a_failing_one_
         assert counts[k]["gate"] == GATES_C[c] and counts[k]["own_signals"] == sorted(own)
         assert counts[k]["passing"] <= counts[k]["n"]
         assert pad_of[c] > 0
+    # a gated core's detected extent over its OWN detecting pairs is blanked too
+    seen = 0
+    for (c, s_, _b), m in masks.items():
+        if c == "hrv":
+            continue
+        for eid in cache.events:
+            own = cache.own_signals[(c, s_)]
+            i_ok = bool({q[0] for q in cache.detecting[eid]} & own)
+            ii_ok = st1.core_visible(cache, eid, s_, _b, 6.0)
+            if not {"i": i_ok, "ii": ii_ok, "i_or_ii": i_ok or ii_ok}[GATES_C[c]]:
+                continue
+            cross = tl.CrossBand(pairs={eid: cache.detecting[eid]}, z=cache.zdet,
+                                 floor_z=st1.CACHE_FLOOR_Z, scope={c: tl.CROSS_BAND_SCOPE_OWN},
+                                 own_signals=cache.own_signals, floor_by_band=FBB)
+            d = tl.detected_extent(cache.events[eid], cross, eid, c, signal=s_, fs=cache.fs,
+                                   z_t0_s=cache.z_t0_s)
+            if d is None:
+                continue
+            a = int(np.ceil((d.start_s - cache.z_t0_s) / GRID_S))
+            z = int(np.floor((d.stop_s - cache.z_t0_s) / GRID_S))
+            if z > a:
+                assert m.invalid[a:z].all(), (c, s_, eid)
+                seen += 1
+    assert seen > 3
     # nested gates: i and ii each blank a subset of i_or_ii, per key
     full = dict.fromkeys(GATES_C, "i_or_ii")
     only_i = {**dict.fromkeys(Z_CONSUMERS, "i"), "hrv": "i"}
