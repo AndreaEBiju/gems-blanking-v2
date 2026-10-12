@@ -9,12 +9,14 @@ function check_write_atomic(resultFile, writerDir, faultDir)
 %   short    - fwrite writes nothing and returns 0 (disk full before the first byte)
 %   fclose   - fwrite succeeds, fclose's flush fails: the .tmp is left empty, status -1
 %   truncate - as fclose, but fclose reports 0 (a failure nothing reports)
+%   locked   - nothing fails while writing, but the record is held open by another
+%              handle, so the rename onto it fails (Windows refuses to replace an open file)
 % Each case starts from an existing record "OLD" and writes new text over it. The result
 % file maps each case to {error_id, final_text, tmp_left}.
     out = struct();
     newText = sprintf('{\r\n  "new": "\x00B5V caf\x00E9"\r\n}');   % CRLF and non-ASCII
     want = unicode2native(strrep(newText, sprintf('\r\n'), newline), 'UTF-8');
-    for mode = {'none', 'short', 'fclose', 'truncate'}
+    for mode = {'none', 'short', 'fclose', 'truncate', 'locked'}
         d = tempname;
         mkdir(fullfile(d, 'private'));
         copyfile(fullfile(writerDir, 'night6_write_text_atomic.m'), d);
@@ -28,6 +30,10 @@ function check_write_atomic(resultFile, writerDir, faultDir)
         builtin('fwrite', fid, 'OLD', 'char');
         builtin('fclose', fid);
         setenv('N6_FAULT', mode{1});
+        held = -1;
+        if strcmp(mode{1}, 'locked')
+            held = builtin('fopen', f, 'r');   % another reader has the record open
+        end
         r = struct('error_id', '', 'final_text', '', 'tmp_left', false, 'new_bytes_exact', false);
         try
             night6_write_text_atomic(f, newText);
@@ -36,6 +42,9 @@ function check_write_atomic(resultFile, writerDir, faultDir)
             r.message = e.message;
         end
         setenv('N6_FAULT', 'none');
+        if held >= 0
+            builtin('fclose', held);
+        end
         fid = builtin('fopen', f, 'r');
         got = fread(fid, Inf, '*uint8');
         builtin('fclose', fid);

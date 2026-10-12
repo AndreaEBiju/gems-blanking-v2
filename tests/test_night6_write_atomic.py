@@ -70,6 +70,28 @@ def test_a_failed_write_raises_and_the_old_record_survives(results: dict[str, An
     assert cause in r["message"], r
 
 
+def test_a_failed_rename_raises_and_leaves_the_record_and_no_tmp(
+        results: dict[str, Any]) -> None:
+    """The record is held open by another handle, so movefile cannot replace it (review)."""
+    r = results["locked"]
+    assert r["error_id"] == "night6:writeFailed", r
+    assert "cannot replace" in r["message"] and "night6_record.json" in r["message"], r
+    assert r["final_text"] == "OLD", r
+    assert r["tmp_left"] is False, r
+
+
+def test_the_writer_is_hashed_and_shadow_checked_in_the_record() -> None:
+    """The writer is one of the wrapper's own functions in the record's provenance.
+
+    function_provenance refuses a copy that shadows night6_write_text_atomic and records its
+    hash (review of night6-atomic-json).
+    """
+    rec = (NIGHT6 / "night6_run_recording.m").read_text(encoding="utf-8")
+    m = re.search(r"ours = \{(.*?)\};", rec, flags=re.S)
+    assert m is not None
+    assert "night6_write_text_atomic" in re.findall(r"'(\w+)'", m.group(1))
+
+
 def test_every_night6_text_record_goes_through_the_checked_writer() -> None:
     """No other unchecked fopen-for-write / movefile of a text record in matlab/night6."""
     rec = (NIGHT6 / "night6_run_recording.m").read_text(encoding="utf-8")
