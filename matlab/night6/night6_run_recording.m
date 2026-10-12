@@ -86,9 +86,10 @@ function records = night6_run_recording(maskFolder, varargin)
 %               folder never share an output folder or a record; unknown names are refused.
 %   SlowWaveRate  REQUIRED, no default (night6_slow_wave_rates; RULING 2026-10-09 (c) 6):
 %               'full' or 'decimated78', the rate slowWaveAnalysis_new runs at. Either way
-%               each run passes its masked spans as blankIdx as well as NaN
-%               (night6_call_slow_wave). Missing or unknown is refused by name before any
-%               work; the rate is in every record, and an epoch made at another rate reruns.
+%               each run passes its masked spans as NaN only and applies the span rule to
+%               her peaks (RULING 2026-10-12, night6_call_slow_wave). Missing or unknown is
+%               refused by name before any work; the rate and the span rule are in every
+%               record, and an epoch made at another rate or under another rule reruns.
     ip = inputParser;
     ip.addRequired('maskFolder', @(x) ischar(x) || isstring(x));
     ip.addParameter('GemsRoot', '', @(x) ischar(x) || isstring(x));
@@ -162,6 +163,8 @@ function records = night6_run_recording(maskFolder, varargin)
     records = cell(1, numel(files));
     todo = true(1, numel(files));
     EdNow = night6_edge_settling();   % the resume key's edge-settling hash (review 2026-10-09)
+    W0 = night6_slow_wave_settings();
+    SpanRuleNow = W0.spanRule.name;   % RULING 2026-10-12: the slow-wave span rule's name
     for k = 1:numel(files)
         tag = [erase(files(k).name, '_masks.mat') subsetTag];
         recFile = fullfile(o.OutRoot, animal, session, modelId, tag, 'night6_record.json');
@@ -174,6 +177,8 @@ function records = night6_run_recording(maskFolder, varargin)
                 && same_recovery_start(R, o.RS, o.RecoveryTrimMode) ...
                 && isfield(R, 'slow_wave_rate') && isstruct(R.slow_wave_rate) ...
                 && strcmp(R.slow_wave_rate.name, o.SW.name) ...   % (c) 6: same rate
+                && isfield(R, 'slow_wave_span_rule') ...   % RULING 2026-10-12: same rule
+                && strcmp(R.slow_wave_span_rule, SpanRuleNow) ...
                 && isfield(R, 'edge_settling') && isstruct(R.edge_settling) ...
                 && isfield(R.edge_settling, 'sha256') ...
                 && strcmp(R.edge_settling.sha256, EdNow.sha256) ...   % same edge settlings
@@ -247,6 +252,8 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
     R.recovery_trim_mode = o.RecoveryTrimMode;   % (k) 2: declared, never defaulted
     R.slow_wave_rate = struct('name', o.SW.name, 'factors', o.SW.factors, ...
                               'factor', o.SW.factor);   % (c) 6: declared, never defaulted
+    W0 = night6_slow_wave_settings();
+    R.slow_wave_span_rule = W0.spanRule.name;   % RULING 2026-10-12 (resume key)
     R.dry_run = logical(o.DryRun);
     R.matlab = version;
     R.started = char(datetime('now', 'TimeZone', 'local', 'Format', 'yyyy-MM-dd''T''HH:mm:ssXXX'));
@@ -538,8 +545,8 @@ function [label, extra] = call_one(r, X, plan, base, outDir, o)
         case 'slowWaveAnalysis_new'
             % One ANT channel at a time: X carries mask r.maskSignal on all three
             % columns; only the kept channels' outputs survive (night6_keep_slow_wave).
-            % RULING 2026-10-09 (c) 6: the run's masked spans go in as blankIdx too, at
-            % the declared rate (night6_call_slow_wave).
+            % RULING 2026-10-12 (a)-(d): the run's masked spans go in as NaN only, at the
+            % declared rate, and the span rule acts on her peaks (night6_call_slow_wave).
             label = sprintf('%s_swm_%s', base, r.maskSignal);
             m = plan.masks(strcmp({plan.masks.consumer}, 'slow_wave') ...
                            & strcmp({plan.masks.signal}, r.maskSignal));
@@ -551,6 +558,7 @@ function [label, extra] = call_one(r, X, plan, base, outDir, o)
                 r.keep, r.maskSignal, m.spans, o.SlowWaveRate, figs);
             extra.slow_wave = S.slow_wave;
             extra.blank_idx = S.blank_idx;
+            extra.span_rule = S.span_rule;   % RULING 2026-10-12 (d): drops by (b), (c)
             extra.slow_wave_rate = S.slow_wave_rate;
             extra.slow_wave_caveats = S.caveats;   % (h) 2, (f) 1
         case 'extract_mmc'
@@ -597,7 +605,8 @@ function F = function_provenance()
             'night6_call_slow_wave', 'night6_keep_slow_wave', 'night6_slow_wave_settings', ...
             'night6_slow_wave_caveats', 'night6_pilot_root', 'night6_hr_outputs', ...
             'night6_hr_runs_resumable', 'night6_consumer_gate', 'night6_consumer_subset', ...
-            'night6_common_start_rec'};
+            'night6_common_start_rec', 'night6_slow_wave_span_rule', ...
+            'night6_slow_wave_rate_series', 'night6_slow_wave_apply_rule'};
     hers = [setdiff({C.name}, ours, 'stable'), night6_v2_steps(), ...
             {'step1a_blank_cardiac', 'pipeline_params', 'bulk_load_one'}];   % step1a: (j) 1 fallback
     here = fileparts(mfilename('fullpath'));

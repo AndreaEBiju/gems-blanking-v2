@@ -1,8 +1,9 @@
-"""RULING 2026-10-09 (c) 6: slow wave at masked edges, option (a), and the decimated rate.
+"""Slow wave at masked edges (RULING 2026-10-12 (a), replacing (c) 6) and the decimated rate.
 
-Night 6 passes each slow-wave run's masked spans to ``slowWaveAnalysis_new`` as
-``blankIdx`` as well as NaN, so her 15 s ``edgeBufferSec`` guards every masked span; and it
-can run her decimated by 78 (13 x 6) behind a REQUIRED declaration
+Night 6 passes each slow-wave run's masked spans to ``slowWaveAnalysis_new`` as NaN ONLY
+(``blankIdx = []``), so her 15 s ``edgeBufferSec`` guards the file's own start and end and
+no masked span (the span rule acts on her peaks instead: test_night6_slow_wave_span_rule.py);
+and it can run her decimated by 78 (13 x 6) behind a REQUIRED declaration
 (``night6_slow_wave_rates``: ``full`` | ``decimated78``, no default). One MATLAB process
 (``tests/matlab/check_slow_wave_rate.m``) checks, against independent expectations
 computed here:
@@ -17,10 +18,11 @@ computed here:
 * time mapping back with a 1-sample boundary: her decimated peak rows 1, 2, 40 become
   epoch rows 1, 79, 3043 (decimated row j = epoch row (j - 1) 78 + 1), her own rows kept;
 * with her real function, at both rates: a SHARED call (two channels with one mask) and a
-  per-channel call - each kept file's blankIdx is exactly its run's masked spans (mapped
-  by the any-source rule when decimated), her invalidMask is exactly their cover, her
-  edge mask covers 15 s on both sides of every span, the peaks are epoch rows; spans that
-  are not the input's NaN are refused (``night6:blankIdx``).
+  per-channel call - each kept file's blankIdx is EMPTY, her invalidMask is exactly the
+  run's masked spans (mapped by the any-source rule when decimated), her edge mask covers
+  the first and last 15 s and nothing else, the peaks are epoch rows and are the kept
+  subset of her detected peaks; spans that are not the input's NaN are refused
+  (``night6:blankIdx``).
 """
 
 from __future__ import annotations
@@ -173,8 +175,9 @@ def test_her_decimated_peak_rows_map_back_to_epoch_rows_to_the_sample(
 
 @pytest.mark.parametrize("rate", ["full", "decimated"])
 @pytest.mark.parametrize("run", ["shared", "own"])
-def test_blank_idx_is_exactly_each_runs_masked_spans(result: dict[str, Any], rate: str,
-                                                     run: str) -> None:
+def test_masked_spans_are_nan_only_with_no_edge_buffer_at_them(result: dict[str, Any],
+                                                               rate: str, run: str) -> None:
+    """RULING 2026-10-12 (a): NaN only, blankIdx empty, her edge buffer at the file ends only."""
     c = result["calls"][f"{rate}_{run}"]
     assert c["error"] == "", c["error"]
     spans = SPANS_SHARED if run == "shared" else SPANS_ANT2
@@ -183,23 +186,23 @@ def test_blank_idx_is_exactly_each_runs_masked_spans(result: dict[str, Any], rat
     n = n_src if rate == "full" else n_src // R
     fs = FS if rate == "full" else FS / R
     want = spans if rate == "full" else _map(spans, n)
-    assert c["blank_idx"]["n_spans"] == len(want) and c["blank_idx"]["fs"] == pytest.approx(fs)
+    assert c["blank_idx"]["n_spans"] == 0 and c["blank_idx"]["fs"] == pytest.approx(fs)
+    assert c["blank_idx"]["n_masked_spans"] == len(spans)
     assert c["rate"]["name"] == ("full" if rate == "full" else "decimated78")
     eb = int(round(EDGE_S * fs))
     for ch in keep:   # a shared call: each kept channel holds the SHARED spans
         e = c["kept"][ch]
         assert e["channel"] == ch and e["n"] == n and e["fs"] == pytest.approx(fs)
-        assert _runs(e["blankIdx"]) == want
+        assert _runs(e["blankIdx"]) == []   # (a): never blankIdx
         assert _runs(e["invalid_runs"]) == want   # her invalidMask: exactly the spans
-        edge = np.zeros(n, dtype=bool)
-        for a, b in _runs(e["edge_runs"]):
-            edge[a - 1:b] = True
-        for a, b in want:   # her edge buffer on both sides of every masked span
-            assert edge[max(0, a - 1 - eb):min(n, b + eb)].all(), (ch, a, b)
-        lo, hi = FREE_S[run]
-        assert not edge[int(lo * fs):int(hi * fs)].any()   # nor where nothing is masked
+        # her edge buffer: the first and last 15 s only - none at a masked span
+        assert _runs(e["edge_runs"]) == [[1, eb], [n - eb + 1, n]], ch
+        peaks = np.atleast_1d(e["peaks"]).astype(np.int64).tolist()
+        detected = np.atleast_1d(e["peaks_detected"]).astype(np.int64).tolist()
+        assert set(peaks) <= set(detected) and e["n_kept"] == len(peaks)
+        assert e["n_detected"] == len(detected)
         if rate == "decimated":
-            assert _runs(e["blankIdx_source"]) == spans and e["decimation_factor"] == R
+            assert _runs(e["spans_source"]) == spans and e["decimation_factor"] == R
             called = np.atleast_1d(e["peaks_called"]).astype(np.int64)
             assert called.size >= 1
             assert np.atleast_1d(e["peaks"]).tolist() == ((called - 1) * R + 1).tolist()

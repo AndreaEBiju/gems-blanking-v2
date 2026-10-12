@@ -1192,10 +1192,11 @@ def test_mode_b_cuts_her_real_outputs_per_variable(  # noqa: PLR0915 - one run
         assert a["start_sample0"] == own[c] and a["output_rows_before_start"] == own[c] - I0
     runs = [x for x in rd["runs"] if x["status"] == "ok"]
     assert runs and all("recovery_trim" in x for x in runs)
-    # RULING 2026-10-09 (c) 6: every slow-wave run hands her its masked spans as blankIdx
-    # (the electrical lead-in at least), at the declared full rate
+    # RULING 2026-10-12 (a): every slow-wave run hands her its masked spans as NaN only (the
+    # electrical lead-in at least), never as blankIdx, at the declared full rate
     sw = [x for x in runs if x["call"] == "slowWaveAnalysis_new"]
-    assert sw and all(x["blank_idx"]["n_spans"] >= 1 and x["slow_wave_rate"]["name"] == "full"
+    assert sw and all(x["blank_idx"]["n_spans"] == 0 and x["blank_idx"]["n_masked_spans"] >= 1
+                      and x["slow_wave_rate"]["name"] == "full"
                       and x["blank_idx"]["fs"] == FS for x in sw)
     assert rd["slow_wave_rate"]["name"] == "full"
     assert all("recovery_trim" in x for x in rr["runs"] if x["status"] == "ok")

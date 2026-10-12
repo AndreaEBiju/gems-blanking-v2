@@ -98,17 +98,21 @@ function check_slow_wave_rate(caseFile, outFile)
                 rec.rate = r.slow_wave_rate;
                 rec.caveats = r.caveats;
                 rec.files = r.slow_wave.files;
+                rec.span_rule = r.span_rule;   % RULING 2026-10-12 (d)
                 rec.kept = struct();
                 for k = keep(:)'
                     F = load(fullfile(d, sprintf('e0_slowWaves_%s.mat', k{1})));
                     e = struct('blankIdx', F.blankIdx, 'fs', F.fs, ...
                                'invalid_runs', runs(F.invalidMask), ...
                                'edge_runs', runs(F.edgeMask), 'n', numel(F.invalidMask), ...
-                               'peaks', F.slowWavePeakLocs(:)', 'channel', F.channel);
+                               'peaks', F.slowWavePeakLocs(:)', 'channel', F.channel, ...
+                               'peaks_detected', F.slow_wave_span_rule.peaks_detected(:)', ...
+                               'n_detected', F.slow_wave_span_rule.n_detected, ...
+                               'n_kept', F.slow_wave_span_rule.n_kept);
                     if isfield(F, 'decimation')
                         e.peaks_called = F.decimation.peak_locs_called(:)';
                         e.decimation_factor = F.decimation.factor;
-                        e.blankIdx_source = F.decimation.blankIdx_source;
+                        e.spans_source = F.decimation.spans_source;
                     end
                     rec.kept.(k{1}) = e;
                 end
