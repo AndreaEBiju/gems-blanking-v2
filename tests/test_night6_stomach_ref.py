@@ -86,13 +86,14 @@ def _with_nans(rec: Recording) -> Recording:
     return replace(rec, data=data)
 
 
-def _prov(rec: Recording) -> MaskProvenance:
+def _prov(rec: Recording, recipe: dict[str, Any]) -> MaskProvenance:
     return MaskProvenance(
         model={"mode": "pooled", "version": "t", "corpus_hash": "0" * 32,
                "calibrator": "models/t/cal.json"},
         thresholds={"source": "synthetic"}, reference_values={"stomach_ref|0.5-3": {"m": 1}},
         code_commit="test", generation_sha="0133349b3ebeff80", routing_hash="test",
-        created_at="2026-10-12T05:00:00+00:00", recording=rec.session)
+        created_at="2026-10-12T05:00:00+00:00", recording=rec.session,
+        stomach_ref_recipe=recipe)
 
 
 def _edit(src: Path, dst: Path, *, provenance: dict[str, Any] | None = None,
@@ -114,13 +115,13 @@ def _cases(root: Path, rec: Recording) -> dict[str, Any]:
     recipe = sr.stomach_ref_recipe(rec, {})
     masks = mk.build_masks(READS, SPANS, n_frames=n_grid_frames(n, FS), t0_s=0.0)
     ok = cases / "ok.mat"
-    write_mask_file(ok, masks, _prov(rec), signals=READS, fs=FS, n_samples=n,
+    write_mask_file(ok, masks, _prov(rec, recipe), signals=READS, fs=FS, n_samples=n,
                     epoch_start_s=0.0, min_retention=0.5, animal_median={},
                     line_distrust=None, peri_r=None,
                     not_computed={"slow_wave": "synthetic: not computed"},
                     elsewhere={"spikes": "synthetic: finished per animal in masks/m_spikes"},
                     epoch_start_sample=seconds_to_sample(0.0, FS),
-                    stomach_ref_recipe=recipe, release="synthetic: spans large on purpose")
+                    release="synthetic: spans large on purpose")
     prov = json.loads(str(loadmat(ok)["provenance_json"][0]))
     bare = {k: v for k, v in prov.items() if k != "stomach_ref_recipe"}
     held = {c: {"reasons": [f"{c}|stomach_ref|band: synthetic hold"]}
@@ -145,13 +146,24 @@ def _cases(root: Path, rec: Recording) -> dict[str, Any]:
     for key in REQUIRED:
         _edit(ok, cases / f"lacks_{key}.mat", provenance={**prov, "stomach_ref_recipe": {
             k: v for k, v in recipe.items() if k != key}})
+    wide: dict[str, Any] = {}
+    for nc in (7, 8):           # review 2026-10-12: numpy's mean order changes at 8
+        w, _t = make_multichannel(FS, 1.0, n_stomach=nc, seed=20 + nc)
+        wide.update({f"Y{nc}": w.data,
+                     f"labels{nc}": np.array([c.name for c in w.channels], dtype=object),
+                     f"meta{nc}": json.dumps(_meta(w)),
+                     f"recipe{nc}": json.dumps(sr.stomach_ref_recipe(w, {}))})
+        want_wide = build_stomach_reference(w)[0]
+        wide[f"want{nc}"] = want_wide
+    savemat(root / "inputs_wide.mat", {k: v for k, v in wide.items() if not k.startswith("want")})
     nan_rec = _with_nans(rec)
     savemat(root / "inputs.mat", {"Y": rec.data, "Ynan": nan_rec.data,
                                   "labels": np.array([c.name for c in rec.channels],
                                                      dtype=object),
                                   "fs": FS, "n": float(n),
                                   "meta_json": json.dumps(_meta(rec))})
-    return {"recipe": recipe, "masks": masks, "nan_rec": nan_rec, "mutants": sorted(mutants)}
+    return {"recipe": recipe, "masks": masks, "nan_rec": nan_rec, "mutants": sorted(mutants),
+            "want7": wide["want7"]}
 
 
 def _run(matlab: Path, cmd: str) -> None:
@@ -258,6 +270,17 @@ def test_a_held_consumers_signal_never_blocks_the_consumers_that_run(
                              "mmc": "to_run"}
     assert r["recipes"] == ["ANT1", "ANT2", "ANT3"]           # no stomach_ref formed
     assert night6["res"]["ok"]["recipes"] == ["stomach_ref", "ANT1", "ANT2", "ANT3"]
+
+
+def test_seven_contacts_are_built_exactly_and_eight_are_refused_by_name(
+        night6: dict[str, Any]) -> None:
+    """The mean: numpy sums 2..7 columns left to right, and 8 or more pairwise."""
+    assert night6["res"]["wide7"]["error_id"] == "", night6["res"]["wide7"]["message"]
+    x7 = np.asarray(night6["arrays"]["x7"], dtype=np.float64).ravel()
+    assert np.array_equal(x7, night6["want7"])
+    assert night6["res"]["wide8"]["error_id"] == "night6:stomachRefTooMany"
+    assert "8 contacts" in night6["res"]["wide8"]["message"]
+    assert "x8" not in night6["arrays"]
 
 
 def test_recipes_are_formed_after_the_runs_from_the_runs() -> None:

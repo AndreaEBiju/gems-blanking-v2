@@ -35,10 +35,21 @@ original folder: each ``e*_masks.mat`` with every variable identical except
 ``extra.stomach_ref_recipe_proof``; ``e*_provenance.json`` and ``provenance.json`` with
 the same additions in their own format; every other file byte-identical. The written
 files are re-read and checked before the script reports success. A manifest
-(``stomach_ref_proof_<session>.json``) records expected vs recomputed values and every
-file's sha256, and ``real_case_<session>.json`` is what
+(``stomach_ref_proof_<session>_<run stamp>.json``, a new name every run) records expected vs
+recomputed values and every file's sha256, and ``real_case_<session>.json`` is what
 ``tests/test_night6_stomach_ref.py`` reads (``GEMS_STOMACHREF_REAL``) to hold the MATLAB
 build to Python's on this recording.
+
+**The proven recipe** - the recipe and every epoch's proof - is stored once per recording
+at ``data/<animal>/<session>/stomach_ref_recipe_proven.json`` under ``--out``
+(``derive.stomach_recipe.proven_recipe_path``; the store writer places it beside the
+session's ``meta.json``). A finalise driver, which loads no recording, reads it with
+``derive.stomach_recipe.proven_stomach_ref_recipe``, which re-checks the proof.
+
+**Nothing is overwritten on a re-run into the same ``--out``** (review 2026-10-12): the
+report's name carries the run's UTC stamp, and a recording whose ``real_case`` file or new
+mask folder already exists is refused BEFORE anything is loaded (:func:`claim_outputs`).
+Every file is created exclusively (:func:`write_once`), so even a race cannot replace one.
 
 Usage::
 
@@ -67,6 +78,8 @@ from gems_blanking_v2.derive.derivations import build_derivations
 from gems_blanking_v2.derive.stomach_recipe import (
     STOMACH_REF,
     apply_stomach_ref_recipe,
+    proven_recipe_path,
+    proven_recipe_record,
     stomach_ref_recipe,
 )
 from gems_blanking_v2.detect.chain import generation_sha256
@@ -125,6 +138,40 @@ def _code() -> dict[str, Any]:
             "dirty": bool(git("status", "--porcelain", "--", "gems_blanking_v2",
                               Path(__file__).name)),
             "script_sha256": _sha256(Path(__file__).resolve())}
+
+
+def write_once(path: Path, text: str) -> None:
+    """Create ``path`` with ``text`` (UTF-8, LF); refuse if it exists - never overwrite."""
+    try:
+        with path.open("x", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+    except FileExistsError as exc:
+        msg = f"{path} exists; nothing is ever overwritten"
+        raise ProofRefusedError(msg) from exc
+
+
+def claim_outputs(out: Path, animal: str, session: str, stamp: str
+                  ) -> tuple[Path, Path, Path]:
+    """Return ``(report, real_case, proven recipe)`` paths for one recording, or refuse.
+
+    The report is named for the run (``stamp``), so a re-run writes a new one; the
+    ``real_case`` file and the proven recipe (``derive.stomach_recipe.proven_recipe_path``)
+    name no run, so an existing one refuses the recording before any work. Raises
+    :class:`ProofRefusedError` - the report path is then still usable.
+    """
+    report = out / f"stomach_ref_proof_{session}_{stamp}.json"
+    case = out / f"real_case_{session}.json"
+    proven = proven_recipe_path(out, animal, session)
+    if report.exists():
+        msg = f"{report} exists; nothing is ever overwritten"
+        raise ProofRefusedError(msg)
+    for p in (case, proven):
+        if p.exists():
+            msg = (f"{p} exists from an earlier run into this --out; refused before any "
+                   "work (choose a new --out, or move the earlier run aside - nothing is "
+                   "deleted)")
+            raise ProofRefusedError(msg)
+    return report, case, proven
 
 
 def _inside(child: Path, parent: Path) -> bool:
@@ -391,7 +438,8 @@ def _check_mat(old: Path, new: Path, prov: MaskProvenance, recipe: Mapping[str, 
 
 
 def _prove_recording(st: GemsStore, masks_root: Path, out: Path, table: Mapping[str, Any],
-                     routing_file: Path, animal: str, session: str) -> dict[str, Any]:
+                     routing_file: Path, animal: str, session: str, case_path: Path,
+                     proven_path: Path) -> dict[str, Any]:
     """Prove one recording and write its new version; return the report, or refuse."""
     report: dict[str, Any] = {}
     entry = table["entries"].get(session)
@@ -403,6 +451,10 @@ def _prove_recording(st: GemsStore, masks_root: Path, out: Path, table: Mapping[
         raise ProofRefusedError(msg)
     folder = _mask_folder(masks_root, animal, session)
     report["mask_folder"] = folder.relative_to(masks_root).as_posix()
+    dst = out / folder.relative_to(masks_root)
+    if dst.exists() or dst.with_name(dst.name + ".partial").exists():
+        msg = f"{dst} (or its .partial) exists; refused before any work - nothing is overwritten"
+        raise ProofRefusedError(msg)
     meta = json.loads(meta_path(st, animal, session).read_text(encoding="utf-8"))
     report["source_path"] = meta["source_path"]
     print(f"[proof] {session}: loading {meta['source_path']}", flush=True)
@@ -410,15 +462,23 @@ def _prove_recording(st: GemsStore, masks_root: Path, out: Path, table: Mapping[
     proved = {mat.name: prove_epoch(rec, mat, entry, routing_file)
               for mat in sorted(folder.glob("e*_masks.mat"))}
     report["epochs"] = {k: v[1] for k, v in proved.items()}
-    dst = out / folder.relative_to(masks_root)
+    recipes = [v[0] for v in proved.values()]
+    if any(r != recipes[0] for r in recipes):
+        msg = f"{session}: its epochs prove different recipes; none is stored"
+        raise ProofRefusedError(msg)
+    record = proven_recipe_record(session, recipes[0], {k: v[1] for k, v in proved.items()})
     report["files"] = _write_new_version(folder, dst, proved)
+    proven_path.parent.mkdir(parents=True, exist_ok=True)
+    write_once(proven_path, _pretty(record))
+    report["proven_recipe"] = proven_path.relative_to(out).as_posix()
     report["new_folder"] = dst.as_posix()
     first = sorted(proved)[0]
     case = {"gems_root": st.root.as_posix(), "animal": animal, "session": session,
             "source_path": meta["source_path"],
             "meta_file": meta_path(st, animal, session).as_posix(),
             "old_mask": (folder / first).as_posix(), "new_mask": (dst / first).as_posix()}
-    atomic_write_text(out / f"real_case_{session}.json", _pretty(case))
+    write_once(case_path, _pretty(case))
+    report["real_case"] = case_path.name
     return report
 
 
@@ -453,20 +513,27 @@ def run(args: argparse.Namespace) -> int:
         print(f"refused: {routing_file} does not hash to its own 'hash' field")
         return 2
     out.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     status = 0
     for item in args.recording or DEFAULT_RECORDINGS:
         animal, session = item.split(":", 1)
-        report: dict[str, Any] = {"recording": session, "animal": animal}
+        report: dict[str, Any] = {"recording": session, "animal": animal, "run": stamp}
+        report_path = out / f"stomach_ref_proof_{session}_{stamp}.json"
         t0 = time.perf_counter()
         try:
+            report_path, case_path, proven_path = claim_outputs(out, animal, session, stamp)
             report.update(_prove_recording(st, masks_root, out, table, routing_file,
-                                           animal, session))
+                                           animal, session, case_path, proven_path))
             report["result"] = "proved; new provenance version written"
         except ProofRefusedError as exc:
             report.update(result="REFUSED", reason=str(exc), refused_detail=exc.detail)
             status = 1
         report["seconds"] = round(time.perf_counter() - t0, 1)
-        atomic_write_text(out / f"stomach_ref_proof_{session}.json", _pretty(report))
+        try:
+            write_once(report_path, _pretty(report))
+        except ProofRefusedError as exc:      # the stamped name is taken: say so, write nothing
+            print(f"[proof] {session}: report not written - {exc}", flush=True)
+            status = 1
         _print(report)
     return status
 

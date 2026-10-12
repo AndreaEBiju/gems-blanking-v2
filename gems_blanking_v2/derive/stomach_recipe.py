@@ -14,6 +14,10 @@ file's provenance - and is its executable specification:
   applied to the recording itself (:func:`apply_stomach_ref_recipe`) and must equal the
   derivation's output **bit for bit**, or it raises. So a recipe that disagrees with the
   computation cannot be written: the two cannot diverge silently (invariants 28, 33).
+* :func:`proven_stomach_ref_recipe` is what a finalise driver calls (it loads no
+  recording): it returns the recipe ``stomach_ref_proof.py`` proved and stored for the
+  session (:func:`proven_recipe_path`), after re-checking its proof, and refuses by name
+  when the record is absent or its proof does not check.
 * :func:`apply_stomach_ref_recipe` applies a recorded recipe in the derivation's own
   order of operations - for ``positive_minus_nanmean``, the positive contact minus the
   NaN-omitting mean of the contacts, the sum taken left to right ``(c1 + c2) + c3`` and
@@ -31,9 +35,11 @@ OUTSIDE THE GENERATION HASH (nothing in the candidate chain imports this module)
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
+from pathlib import Path
 from typing import Any, Final
 
 import numpy as np
@@ -46,12 +52,17 @@ from gems_blanking_v2.types import Recording
 __all__ = [
     "FORMS",
     "NO_NOTCH",
+    "PROVEN_NAME",
+    "PROVEN_SCHEMA",
     "RECIPE_KEYS",
     "RECIPE_SCHEMA",
     "STOMACH_REF",
     "StomachRecipeError",
     "apply_stomach_ref_recipe",
     "implied_weights",
+    "proven_recipe_path",
+    "proven_recipe_record",
+    "proven_stomach_ref_recipe",
     "stomach_ref_recipe",
     "validate_stomach_ref_recipe",
 ]
@@ -291,3 +302,149 @@ def apply_stomach_ref_recipe(recipe: Mapping[str, Any], columns: Mapping[str, np
         return np.asarray(stack[:, 0], dtype=np.float64)
     pos = contacts.index(recipe["positive"])
     return np.asarray(stack[:, pos] - np.nanmean(stack, axis=1), dtype=np.float64)
+
+# ---------------------------------------------------------------------------
+# the proven recipe: written once per recording by stomach_ref_proof.py, read at finalise
+# ---------------------------------------------------------------------------
+
+PROVEN_SCHEMA: Final = "stomach_ref_recipe_proven/1"
+"""The proven-recipe record's format; :func:`proven_stomach_ref_recipe` refuses any other."""
+
+PROVEN_NAME: Final = "stomach_ref_recipe_proven.json"
+"""The record's file name, in ``data/<animal>/<session>/`` beside ``meta.json``."""
+
+_REF_FIELDS: Final = ("median", "scale", "n_frames", "statistic")
+
+
+def proven_recipe_path(root: Path, animal: str, session: str) -> Path:
+    """Return where one session's proven recipe lives under ``root`` (the one site)."""
+    return Path(root) / "data" / animal / session / PROVEN_NAME
+
+
+def proven_recipe_record(session: str, recipe: Mapping[str, Any],
+                         proofs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    """Return the record ``stomach_ref_proof.py`` writes once a recording is proved.
+
+    ``proofs`` maps each epoch file to the proof block that established ``recipe`` on it
+    (expected vs recomputed reference values, routing entry hash, generation sha). The
+    record is checked as :func:`proven_stomach_ref_recipe` will check it, so a record that
+    would be refused is never written.
+    """
+    rec = {"schema": PROVEN_SCHEMA, "recording": session, "recipe": dict(recipe),
+           "proofs": {k: dict(v) for k, v in proofs.items()}}
+    _check_proven(rec, session, entry_hash_want=None, generation_sha=None)
+    return rec
+
+
+def proven_stomach_ref_recipe(root: Path, animal: str, session: str, *,
+                              signals: Mapping[str, Sequence[str]],
+                              routing_entry: Mapping[str, Any],
+                              generation_sha: str) -> dict[str, Any]:
+    """Return ``MaskProvenance.stomach_ref_recipe`` for one recording at finalise.
+
+    Finalise loads no recording, so it never BUILDS the recipe: it reads the one
+    ``stomach_ref_proof.py`` proved and stored (:func:`proven_recipe_path` under ``root`` -
+    the proof run's ``--out``, or the gems root once the store writer has placed it) and
+    re-checks its proof. Returns ``{}`` - no file is read - when no consumer in ``signals``
+    reads ``stomach_ref``. Otherwise raises :class:`StomachRecipeError`, naming what failed,
+    when the record is absent or unreadable, is for another recording, its recipe is
+    incomplete, or its proof does not check: every epoch's recomputed reference values must
+    equal the recorded ones exactly (median, scale, frame count, statistic), its routing
+    entry hash must be the one recorded AND the hash of ``routing_entry`` (the entry this
+    finalise runs under), its generation sha must be the masks' and the code's AND
+    ``generation_sha``, and the recipe's routing variant must be ``routing_entry``'s.
+
+    The finalise driver::
+
+        recipe = proven_stomach_ref_recipe(root, animal, session, signals=signals,
+                                           routing_entry=entry, generation_sha=GENERATION)
+        prov = MaskProvenance(..., stomach_ref_recipe=recipe)   # every copy carries it
+        write_mask_file(path, masks, prov, signals=signals, ...)
+    """
+    if not any(STOMACH_REF in v for v in signals.values()):
+        return {}
+    path = proven_recipe_path(root, animal, session)
+    try:
+        rec = json.loads(path.read_bytes().decode("utf-8"))
+    except FileNotFoundError as exc:
+        msg = (f"{session}: a consumer reads {STOMACH_REF} but there is no proven recipe at "
+               f"{path} (stomach_ref_proof.py writes it once the recording is proved)")
+        raise StomachRecipeError(msg) from exc
+    except (OSError, ValueError) as exc:
+        msg = f"{session}: the proven recipe at {path} cannot be read: {exc}"
+        raise StomachRecipeError(msg) from exc
+    if "stomach_ref" not in routing_entry:
+        msg = f"{session}: the routing entry has no stomach_ref field, so its variant is unknown"
+        raise StomachRecipeError(msg)
+    from gems_blanking_v2.emit.routing import entry_hash  # noqa: PLC0415 - layer: emit
+    _check_proven(rec, session, entry_hash_want=entry_hash(routing_entry),
+                  generation_sha=str(generation_sha))
+    if rec["recipe"]["routing_stomach_ref"] != dict(routing_entry["stomach_ref"]):
+        msg = (f"{session}: the proven recipe is for routing stomach_ref "
+               f"{rec['recipe']['routing_stomach_ref']}, the entry names "
+               f"{dict(routing_entry['stomach_ref'])}")
+        raise StomachRecipeError(msg)
+    return dict(rec["recipe"])
+
+
+def _check_proven(rec: Mapping[str, Any], session: str, *, entry_hash_want: str | None,
+                  generation_sha: str | None) -> None:
+    """Raise naming the first thing about a proven-recipe record that does not check."""
+    if not isinstance(rec, Mapping) or rec.get("schema") != PROVEN_SCHEMA:
+        msg = f"{session}: the proven recipe's schema is not {PROVEN_SCHEMA!r}"
+        raise StomachRecipeError(msg)
+    if rec.get("recording") != session:
+        msg = f"{session}: the proven recipe is for {rec.get('recording')!r}"
+        raise StomachRecipeError(msg)
+    recipe = rec.get("recipe")
+    if not isinstance(recipe, Mapping):
+        msg = f"{session}: the proven recipe record carries no recipe"
+        raise StomachRecipeError(msg)
+    validate_stomach_ref_recipe(recipe)
+    proofs = rec.get("proofs")
+    if not isinstance(proofs, Mapping) or not proofs:
+        msg = f"{session}: the proven recipe carries no proof"
+        raise StomachRecipeError(msg)
+    for epoch, proof in proofs.items():
+        _check_proof(f"{session} {epoch}", proof, entry_hash_want, generation_sha)
+
+
+def _check_proof(where: str, proof: Mapping[str, Any], entry_hash_want: str | None,
+                 generation_sha: str | None) -> None:
+    expected, got = proof.get("expected"), proof.get("recomputed")
+    if not isinstance(expected, Mapping) or not expected or not isinstance(got, Mapping):
+        msg = f"{where}: the proof has no expected/recomputed reference values"
+        raise StomachRecipeError(msg)
+    if sorted(expected) != sorted(got):
+        msg = f"{where}: the proof recomputed {sorted(got)}, not {sorted(expected)}"
+        raise StomachRecipeError(msg)
+    for key, e in expected.items():
+        if not key.startswith(f"{STOMACH_REF}|"):
+            msg = f"{where}: the proof checks {key}, not a {STOMACH_REF} reference"
+            raise StomachRecipeError(msg)
+        for f in _REF_FIELDS:
+            if e.get(f) is None or e.get(f) != got[key].get(f):
+                msg = (f"{where}: proof {key} {f}: recorded {e.get(f)!r}, recomputed "
+                       f"{got[key].get(f)!r}")
+                raise StomachRecipeError(msg)
+    if proof.get("match") is not True or proof.get("mismatches"):
+        msg = f"{where}: the proof does not say match (mismatches {proof.get('mismatches')})"
+        raise StomachRecipeError(msg)
+    eh = proof.get("routing_entry_hash") or {}
+    if not eh.get("provenance") or eh.get("provenance") != eh.get("recomputed"):
+        msg = (f"{where}: the proof's routing entry hash {eh.get('recomputed')!r} is not the "
+               f"masks' {eh.get('provenance')!r}")
+        raise StomachRecipeError(msg)
+    if entry_hash_want is not None and eh["provenance"] != entry_hash_want:
+        msg = (f"{where}: the proof is for routing entry {eh['provenance']}, this finalise "
+               f"runs under {entry_hash_want}")
+        raise StomachRecipeError(msg)
+    gs = proof.get("generation_sha") or {}
+    if not gs.get("provenance") or gs.get("provenance") != gs.get("code"):
+        msg = (f"{where}: the proof's generation sha {gs.get('code')!r} is not the masks' "
+               f"{gs.get('provenance')!r}")
+        raise StomachRecipeError(msg)
+    if generation_sha is not None and gs["provenance"] != generation_sha:
+        msg = (f"{where}: the proof is for generation {gs['provenance']}, this finalise "
+               f"runs {generation_sha}")
+        raise StomachRecipeError(msg)

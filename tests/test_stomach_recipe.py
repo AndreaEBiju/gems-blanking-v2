@@ -11,8 +11,12 @@ block a mask file's provenance carries; Night 6 builds ``stomach_ref`` from that
   contact, which is why no reader applies the recipe as a dot product;
 * the builder refuses a derivation that is not the construction it records, and every
   incomplete or inconsistent block is refused by name;
-* ``write_mask_file`` requires the recipe when a consumer reads ``stomach_ref``, refuses it
-  when none does, and carries it into ``provenance_json``, which round-trips exactly.
+* the recipe is a field of ``MaskProvenance`` only (review 2026-10-12): ``write_mask_file``
+  requires it there when a consumer reads ``stomach_ref``, refuses an incomplete one, and a
+  sidecar written from the same provenance object (the driver's ``{stem}_provenance.json``)
+  carries the identical recipe. The finalise driver's reader of the PROVEN recipe
+  (``proven_stomach_ref_recipe``) is tested with the proof script that writes it
+  (``tests/test_stomach_ref_proof.py``).
 """
 
 from __future__ import annotations
@@ -29,7 +33,7 @@ from gems_blanking_v2.derive.derivations import build_derivations, build_stomach
 from gems_blanking_v2.derive.stomach_alt import NOTCH_Q, notched_stomach_ref
 from gems_blanking_v2.emit import handoff as ho
 from gems_blanking_v2.emit import masks as mk
-from gems_blanking_v2.emit.provenance import MaskProvenance, ProvenanceError
+from gems_blanking_v2.emit.provenance import MaskProvenance
 from gems_blanking_v2.extent.grid import n_grid_frames
 from gems_blanking_v2.types import Recording
 from hypothesis import given, settings
@@ -233,24 +237,48 @@ def _prov(recipe: dict[str, Any] | None = None) -> MaskProvenance:
         stomach_ref_recipe=recipe or {})
 
 
-def _write(path: Path, reads: dict[str, tuple[str, ...]], prov: MaskProvenance,
-           **kw: Any) -> Path:  # noqa: ANN401
+def _write(path: Path, reads: dict[str, tuple[str, ...]], prov: MaskProvenance) -> Path:
     masks = mk.build_masks(reads, [mk.MaskSpan("hrv", "stomach_ref", 1.0, 2.0, "x")]
                            if reads["hrv"] else [], n_frames=n_grid_frames(N, FS), t0_s=0.0)
+    nc = NOT_COMPUTED if reads["hrv"] else {**NOT_COMPUTED, "hrv": "no train",
+                                             "breathing": "no train"}
     return ho.write_mask_file(path, masks, prov, signals=reads, fs=FS, n_samples=N,
                               epoch_start_s=0.0, min_retention=0.5, animal_median={},
-                              line_distrust=None, peri_r=None, not_computed=NOT_COMPUTED,
-                              elsewhere=ELSEWHERE, **kw)
+                              line_distrust=None, peri_r=None, not_computed=nc,
+                              elsewhere=ELSEWHERE)
 
 
 def test_the_mask_file_carries_the_recipe_when_a_consumer_reads_stomach_ref(
         tmp_path: Path) -> None:
     recipe = _good()
-    path = _write(tmp_path / "a.mat", READS, _prov(), stomach_ref_recipe=recipe)
+    path = _write(tmp_path / "a.mat", READS, _prov(recipe))
     doc = json.loads(str(loadmat(path)["provenance_json"][0]))
     assert doc["stomach_ref_recipe"] == recipe
     again = MaskProvenance.from_json(str(loadmat(path)["provenance_json"][0]))
     assert again.to_json() == str(loadmat(path)["provenance_json"][0])
+
+
+def test_the_json_sidecar_and_the_mat_carry_an_identical_recipe(tmp_path: Path) -> None:
+    """The driver's sidecar and the masks file carry one recipe (review 2026-10-12).
+
+    The driver writes ``{stem}_provenance.json`` from ``prov`` BEFORE the writer (night4.py:
+    ``write_json(..., json.loads(prov.to_json()))``). The recipe is in ``prov`` itself, so
+    the two copies cannot disagree.
+    """
+    rec = _rec()
+    prov = _prov(sr.stomach_ref_recipe(rec, {}))
+    sidecar = tmp_path / "e0_provenance.json"
+    sidecar.write_text(json.dumps(json.loads(prov.to_json()), indent=1, sort_keys=True) + "\n",
+                       encoding="utf-8", newline="\n")
+    mat = _write(tmp_path / "e0_masks.mat", READS, prov)
+    in_mat = json.loads(str(loadmat(mat)["provenance_json"][0]))["stomach_ref_recipe"]
+    in_json = json.loads(sidecar.read_text(encoding="utf-8"))["stomach_ref_recipe"]
+    assert in_mat == in_json == sr.stomach_ref_recipe(rec, {})
+
+
+def test_the_writer_takes_no_recipe_argument() -> None:
+    import inspect  # noqa: PLC0415
+    assert "stomach_ref_recipe" not in inspect.signature(ho.write_mask_file).parameters
 
 
 def test_reading_stomach_ref_without_its_recipe_is_refused(tmp_path: Path) -> None:
@@ -258,24 +286,29 @@ def test_reading_stomach_ref_without_its_recipe_is_refused(tmp_path: Path) -> No
         _write(tmp_path / "a.mat", READS, _prov())
 
 
-def test_a_recipe_nobody_reads_is_refused(tmp_path: Path) -> None:
+def test_a_recipe_is_checked_even_when_nobody_reads_stomach_ref(tmp_path: Path) -> None:
     reads = {**READS, "hrv": (), "breathing": ()}
-    nc = {**NOT_COMPUTED, "hrv": "no train", "breathing": "no train"}
-    masks = mk.build_masks(reads, [], n_frames=n_grid_frames(N, FS), t0_s=0.0)
-    with pytest.raises(ValueError, match="no consumer reads stomach_ref"):
-        ho.write_mask_file(tmp_path / "a.mat", masks, _prov(), signals=reads, fs=FS,
-                           n_samples=N, epoch_start_s=0.0, min_retention=0.5,
-                           animal_median={}, line_distrust=None, peri_r=None,
-                           not_computed=nc, elsewhere=ELSEWHERE, stomach_ref_recipe=_good())
+    path = _write(tmp_path / "a.mat", reads, _prov(_good()))       # allowed, and carried
+    assert json.loads(str(loadmat(path)["provenance_json"][0]))["stomach_ref_recipe"] == _good()
+    broken = {k: v for k, v in _good().items() if k != "weights"}
+    with pytest.raises(ValueError, match="lacks weights"):
+        _write(tmp_path / "b.mat", reads, _prov(broken))
 
 
-def test_an_incomplete_recipe_or_a_second_different_one_is_refused(tmp_path: Path) -> None:
+def test_an_incomplete_recipe_is_refused(tmp_path: Path) -> None:
     broken = {k: v for k, v in _good().items() if k != "notch"}
     with pytest.raises(ValueError, match="lacks notch"):
-        _write(tmp_path / "a.mat", READS, _prov(), stomach_ref_recipe=broken)
-    other = {**_good(), "contacts": ["ANT2", "ANT1", "ANT3"], "positive": "ANT2"}
-    with pytest.raises(ProvenanceError, match="different stomach_ref recipe"):
-        _write(tmp_path / "b.mat", READS, _prov(_good()), stomach_ref_recipe=other)
+        _write(tmp_path / "a.mat", READS, _prov(broken))
+
+
+def test_the_finalise_reader_reads_nothing_when_no_consumer_reads_stomach_ref(
+        tmp_path: Path) -> None:
+    none_read = {**READS, "hrv": (), "breathing": ()}
+    assert sr.proven_stomach_ref_recipe(tmp_path, "A", "syn", signals=none_read,
+                                        routing_entry={}, generation_sha="x") == {}
+    with pytest.raises(sr.StomachRecipeError, match="no proven recipe"):
+        sr.proven_stomach_ref_recipe(tmp_path, "A", "syn", signals=READS,
+                                     routing_entry={"stomach_ref": {}}, generation_sha="x")
 
 
 @settings(max_examples=60, deadline=None)

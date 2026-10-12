@@ -50,6 +50,29 @@ function check_stomach_ref(caseDir, outFile, outMat)
         end
         R.(name) = r;
     end
+    % Wide stomach arrays (review 2026-10-12): 7 contacts are built, 8 are refused by name.
+    W = load(fullfile(caseDir, 'inputs_wide.mat'));
+    for nc = [7 8]
+        tag = sprintf('wide%d', nc);
+        r = struct('error_id', '', 'message', '');
+        try
+            chw = jsondecode(W.(['meta' num2str(nc)]));
+            if isstruct(chw), chw = num2cell(chw(:)'); end
+            rec = night6_signal_recipe('stomach_ref', cellstr(W.(['labels' num2str(nc)])), ...
+                                       chw, jsondecode(W.(['recipe' num2str(nc)])));
+            xw = night6_apply_recipe(rec, W.(['Y' num2str(nc)]), (1:size(W.(['Y' num2str(nc)]), 1))');
+            S = struct(['x' num2str(nc)], xw);
+            if isfile(outMat)
+                save(outMat, '-struct', 'S', '-append');
+            else
+                save(outMat, '-struct', 'S');
+            end
+        catch e
+            r.error_id = e.identifier;
+            r.message = e.message;
+        end
+        R.(tag) = r;
+    end
     fid = fopen(outFile, 'w');
     fwrite(fid, jsonencode(R), 'char');
     fclose(fid);

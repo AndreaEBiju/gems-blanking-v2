@@ -21,8 +21,10 @@ function r = night6_signal_recipe(sig, labels, channels, srRecipe)
 %              name (night6:stomachRef*) when the provenance carries no recipe, when a field
 %              is missing, when the schema, form or notch is one this reader does not
 %              reproduce (a notched stomach_ref is refused: no recording Night 6 runs needs
-%              one yet), when its weights are not its form's, or when its contacts are not
-%              the file's stomach channels in meta.json order under its declared config.
+%              one yet), when its weights are not its form's, when it has 8 or more
+%              contacts (numpy's mean sums those pairwise, so the order would not be the
+%              derivation's: night6:stomachRefTooMany), or when its contacts are not the
+%              file's stomach channels in meta.json order under its declared config.
 %              stomach_ref is never formed from a nerve channel, and its masks are never
 %              moved onto one.
     col = @(lab) find_one(labels, lab, sig);
@@ -87,6 +89,14 @@ function r = stomach_ref(R, col, channels)
     if n < 1 || numel(unique(contacts)) ~= n || ~isequal(pos, 1)
         error('night6:stomachRefContacts', ['stomach_ref_recipe contacts [%s] must be distinct ' ...
               'and start with the positive input %s'], strjoin(contacts, ' '), char(R.positive));
+    end
+    if n >= 8
+        % numpy.nanmean over 8 or more columns sums them pairwise, not left to right, so
+        % night6_apply_recipe's order would no longer be the derivation's (measured: equal
+        % for 2..7 contacts, unequal from 8). Refused rather than built approximately.
+        error('night6:stomachRefTooMany', ['stomach_ref_recipe has %d contacts: from 8 on, ' ...
+              'numpy sums the mean pairwise, so Night 6 cannot reproduce it sample for ' ...
+              'sample'], n);
     end
     if strcmp(form, 'passthrough') && n ~= 1
         error('night6:stomachRefContacts', 'a passthrough stomach_ref reads one contact, not [%s]', ...
