@@ -69,6 +69,7 @@ __all__ = [
     "EXTENT_FLOORS_PER_BAND",
     "EXTENT_GATES",
     "EXTENT_PERCENTILES",
+    "GATED_EXTENT_RULE",
     "HRV_GATES",
     "NULL_PERCENTILE_SOURCE",
     "NULL_PERCENTILE_Z",
@@ -86,6 +87,7 @@ __all__ = [
     "check_extent_floors",
     "check_extent_percentile",
     "check_extent_rule",
+    "gate_residual",
     "kind_visible",
     "not_emitted",
     "option1_threshold",
@@ -115,6 +117,18 @@ OPTION1_RULE: Final = (
     "consumer's measured settling); a harmful kind invisible in the band but caught by the "
     "detector blanks the consumer over the event's detected extent, never routed; harmful "
     "kinds the detector cannot see are residual risk, recorded, not blanked")
+
+GATED_EXTENT_RULE: Final = (
+    "Andrea 2026-10-11 night, the declared per-consumer extent rule (thresholds as RULING "
+    "2026-10-09 (i) 1 option (1), floors as declared): a model-decided motion core blanks a "
+    "consumer only if it passes that consumer's declared gate - (i) detected on the consumer's "
+    "own signals, (ii) the consumer's own band above its threshold in any core frame (hrv: the "
+    "beat train changed), or either; a passing core blanks core + padding, the own-band extent "
+    "(routed) and the detected extent over its own detecting pairs; a failing core blanks "
+    "nothing for it. Harmful kinds the detector cannot see, and detected harmful rows that fail "
+    "the gate, are residual risk, recorded, not blanked")
+"""What a threshold record under a declared extent rule names as its rule (review 2 finding 4):
+the option-(1) text describes ungated cross-band blanking, which this rule does not do."""
 
 EXTENT_PERCENTILES: Final[tuple[str, ...]] = ("p90", "p95", "p99")
 """RULING 2026-10-10 item 2: the candidate extent thresholds for the consumers on the floor -
@@ -865,6 +879,57 @@ def scope_residual(scan: Mapping[str, Any], consumer: str, scope: str,
     return out
 
 
+def gate_residual(scan: Mapping[str, Any], consumer: str, gate: str,
+                  threshold: float) -> list[dict[str, Any]]:
+    """Return the detected harmful rows the declared ``gate`` leaves UNBLANKED for ``consumer``.
+
+    Review 2 finding 4. A row the detector sees still blanks nothing unless its core passes
+    the gate: (i) a detectable pair on the consumer's own host columns
+    (:data:`SCOPE_OWN_HOST_COLUMNS`, the host-level reading of its own signals), (ii) the
+    consumer's own band on those columns lifted ABOVE ``threshold`` (the row's
+    ``max_z_lifted``, its peak over the event - "any core frame"). A row failing the gate is
+    listed with which rules failed. A detectable row without ``max_z_lifted`` cannot be judged
+    for (ii) and is refused (ValueError), never assumed.
+    """
+    if gate not in EXTENT_GATES:
+        msg = f"{consumer}: unknown extent gate {gate!r}"
+        raise ValueError(msg)
+    own = set(SCOPE_OWN_HOST_COLUMNS.get(consumer, ()))
+    band = extent_consumers()[consumer].band
+    out = []
+    for r in scan["rows"]:
+        if r["consumer"] != consumer or not r["pairs_detectable"]:
+            continue
+        lifted = r.get("max_z_lifted")
+        if not isinstance(lifted, Mapping):
+            msg = (f"{consumer}: a detectable scan row ({r['kind']}, {r['host_tag']}) has no "
+                   "max_z_lifted, so rule (ii) cannot be judged for it")
+            raise ValueError(msg)
+        i_ok = any(str(q).split("|", 1)[0] in own for q in r["pairs_detectable"])
+        own_z = [float(z) for q, z in lifted.items()
+                 if str(q).split("|", 1)[0] in own and str(q).split("|", 1)[1] == band]
+        ii_ok = bool(own_z) and max(own_z) > threshold
+        if {"i": i_ok, "ii": ii_ok, "i_or_ii": i_ok or ii_ok}[gate]:
+            continue
+        out.append({"kind": r["kind"], "amplitude_sigma": float(r["tolerance_sigma"]),
+                    "row": {"host_tag": r["host_tag"], "dur_s": float(r["dur_s"]),
+                            "chan_set": r["chan_set"], "status": r["status"],
+                            "censored": bool(r["censored"])},
+                    "pairs_detectable": list(r["pairs_detectable"]),
+                    "own_band_max_z": max(own_z) if own_z else None,
+                    "why": (f"gate {gate}: rule (i) {'passes' if i_ok else 'fails'} (detected "
+                            f"{'on' if i_ok else 'off'} its own signals), rule (ii) "
+                            f"{'passes' if ii_ok else 'fails'} (own band {band} "
+                            f"{'above' if ii_ok else 'not above'} {threshold:g}): detected, "
+                            "not blanked")})
+    out.sort(key=lambda x: (x["kind"], x["amplitude_sigma"], x["row"]["host_tag"],
+                            x["row"]["dur_s"], x["row"]["chan_set"]))
+    for x in out:
+        if x["own_band_max_z"] is None:
+            del x["own_band_max_z"]  # JSON convention: absent, never null
+    return out
+
+
 @dataclass(frozen=True)
 class Option1Tolerances:
     """The option-(1) table: thresholds, residual risk, flags and the inputs it came from."""
@@ -920,7 +985,8 @@ class Option1Tolerances:
         return rec
 
     def _record(self) -> dict[str, Any]:
-        return {"version": TOLERANCE_VERSION, "rule": OPTION1_RULE,
+        return {"version": TOLERANCE_VERSION,
+                "rule": GATED_EXTENT_RULE if self.extent_rule else OPTION1_RULE,
                 **({"extent_rule": dict(self.extent_rule),
                     "extent_gates": dict(EXTENT_GATES),
                     "provisional": provisional_consumers(self.extent_rule)}
@@ -1084,13 +1150,17 @@ def option1_tolerances(tolerances: Mapping[str, Any], mapping: Mapping[str, Any]
         t = option1_threshold(c, entry.get("kinds") or {}, entry.get("kinds_not_raised") or ())
         thresholds[c] = t = _floored(c, t, floors, pct)
         residual[c] = residual_risk(scan, c)
-        if scopes[c] != CROSS_BAND_SCOPE_ALL:
+        if rule:  # review 2 finding 4: what the declared gate leaves unblanked
+            residual[c]["detected_gate_fails"] = gate_residual(
+                scan, c, rule["consumers"][c]["gate"], t.z)
+        elif scopes[c] != CROSS_BAND_SCOPE_ALL:
             key = ("cross_band_off" if scopes[c] == CROSS_BAND_SCOPE_OFF
                    else "detected_only_off_own_signals")
             residual[c][key] = scope_residual(scan, c, scopes[c], thresholds[c].visible_kinds)
     table = ToleranceTable({c: t.z for c, t in thresholds.items()},
-                           f"{OPTION1_RULE}; tolerances {tolerances_sha256[:16]} (criterion v2 "
-                           f"{criterion_sha256[:16]}), mapping {mapping_sha256[:16]}")
+                           f"{GATED_EXTENT_RULE if rule else OPTION1_RULE}; tolerances "
+                           f"{tolerances_sha256[:16]} (criterion v2 {criterion_sha256[:16]}), "
+                           f"mapping {mapping_sha256[:16]}")
     flags: dict[str, Any] = {}
     if "mmc_provenance_flag" in tolerances:
         flags["mmc_provenance_flag"] = tolerances["mmc_provenance_flag"]

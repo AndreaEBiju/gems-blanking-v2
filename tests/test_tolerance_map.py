@@ -118,10 +118,11 @@ def _mapping() -> dict[str, Any]:
 
 
 def _scan_row(consumer: str, kind: str, sigma: float, detectable: list[str],
-              lifted: list[str]) -> dict[str, Any]:
+              lifted: list[str], max_z: dict[str, float] | None = None) -> dict[str, Any]:
     return {"consumer": consumer, "kind": kind, "tolerance_sigma": sigma, "host_tag": "host1",
             "dur_s": 5.0, "chan_set": "stomach", "status": "measured", "censored": False,
-            "pairs_detectable": detectable, "pairs_lifted": lifted}
+            "pairs_detectable": detectable, "pairs_lifted": lifted,
+            "max_z_lifted": max_z if max_z is not None else dict.fromkeys(lifted, 3.0)}
 
 
 def _scan() -> dict[str, Any]:
@@ -980,3 +981,51 @@ def test_review2_2_threshold_record_is_machine_independent() -> None:
     leaky = dataclasses.replace(built[0], inputs={**built[0].inputs, "x": "/Users/a/b.json"})
     with pytest.raises(ValueError, match="absolute local paths"):
         leaky.record()
+
+
+
+def test_review2_4_residual_risk_follows_the_declared_gate() -> None:
+    """Review 2 finding 4: residual risk lists the detected rows the declared gate leaves.
+
+    Under the gated rule a detected harmful row blanks nothing unless it passes the consumer's
+    gate; mmc's gate (ii) leaves a row detected on its own signals but not above its threshold
+    in 2-50 unblanked, so it is listed. The record names the gated rule.
+    """
+    scan = _scan()
+    scan["rows"] += [
+        # detected on ANT2, own band 2-50 at 3.0 < mmc's floor 5.0: passes (i), fails (ii)
+        _scan_row("mmc", "tribo", 0.7, ["ANT2|10-150"], ["ANT2|10-150", "ANT2|2-50"],
+                  {"ANT2|10-150": 6.0, "ANT2|2-50": 3.0}),
+        # own band above 5.0: passes (ii)
+        _scan_row("mmc", "step", 0.9, ["ANT1|2-50"], ["ANT1|2-50"], {"ANT1|2-50": 7.0}),
+        # spikes, detected only off its own (nerve) columns, own band low: fails i_or_ii
+        _scan_row("spikes", "clip", 1.0, ["ANT1|300-3000"], ["ANT1|300-3000", "LVN|300-3000"],
+                  {"ANT1|300-3000": 9.0, "LVN|300-3000": 1.0}),
+        # spikes, detected on LVN: passes (i)
+        _scan_row("spikes", "pop", 1.0, ["LVN|100-300"], ["LVN|100-300"], {"LVN|100-300": 6.0})]
+    floors = {k: v for k, v in _floors(_own_archive()).items() if k != "slow_wave"}
+    floors["breathing"] = {"none": "no HR channel", "limitation": tm.BREATHING_FLOOR_LIMITATION}
+    t = _build(core_blanking=None, extent_rule=_rule(), cross_band_scope=OWN_SCOPES,
+               extent_floors=floors, scan=scan)
+    assert t.table.z_tol["mmc"] == 5.0
+    res = {c: t.residual[c]["detected_gate_fails"] for c in ("mmc", "spikes", "breathing")}
+    assert [x["kind"] for x in res["mmc"]] == ["clip", "tribo"]  # ANT3 clip: own 2-50 absent
+    tribo = res["mmc"][1]
+    assert tribo["own_band_max_z"] == 3.0 and "rule (ii) fails" in tribo["why"]
+    assert "own_band_max_z" not in res["mmc"][0]  # absent, never null
+    assert [x["kind"] for x in res["spikes"]] == ["clip"] and res["breathing"] == []
+    rec = t.record()
+    assert rec["rule"] == tm.GATED_EXTENT_RULE != tm.OPTION1_RULE
+    assert tm.GATED_EXTENT_RULE in t.table.source
+    assert rec["residual_risk"]["mmc"]["detected_gate_fails"] == res["mmc"]
+    assert "detected_only_off_own_signals" not in rec["residual_risk"]["mmc"]
+    # the same rows under gate i_or_ii for mmc: both are detected on stomach columns, pass (i)
+    t2 = _build(core_blanking=None, extent_rule=_rule(mmc={"gate": "i_or_ii"}),
+                cross_band_scope=OWN_SCOPES, extent_floors=floors, scan=scan)
+    assert t2.residual["mmc"]["detected_gate_fails"] == []
+    assert _build().record()["rule"] == tm.OPTION1_RULE  # the 2026-10-10 rule keeps its text
+    bad = _scan()
+    del bad["rows"][2]["max_z_lifted"]
+    with pytest.raises(ValueError, match="no max_z_lifted"):
+        _build(core_blanking=None, extent_rule=_rule(), cross_band_scope=OWN_SCOPES,
+               extent_floors=floors, scan=bad)
