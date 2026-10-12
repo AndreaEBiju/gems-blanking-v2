@@ -19,10 +19,13 @@ Two gates, both refusing to emit a heavily masked recording silently:
   held or not.
 
 The two gates combine into :func:`emit_gate`, which ``emit.handoff.write_mask_file``
-computes from the masks and enforces: a held recording is written only with an explicit
-release. A cuff distrusted outright by the routing table (retention 0 for the spike
-consumer on that cuff) therefore always holds its recording: a ruled distrust counts as
-blank. Whether it should is a question for a ruling (it is not motion).
+computes from the masks and enforces. **The hold is per consumer, never per recording**
+(RULING 2026-10-10 item 1, amending ruling 2026-10-08 (f) 3): a consumer any of whose masks
+breaches the 20% / 3x hold or the retention threshold is held and flagged for that recording
+only (``EmitGate.held_consumers``, with its reasons), and the other consumers' masks are
+emitted and run. A cuff distrusted outright by the routing table (retention 0 for the spike
+consumer on that cuff) therefore holds the spike consumer of its recording: a ruled distrust
+counts as blank. Whether it should is a question for a ruling (it is not motion).
 
 The QC report (:class:`QcReport`) carries what the spec lists; a quantity a recording
 does not have (velocity windows while task 18 is out, R5) is ABSENT from its record,
@@ -47,6 +50,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
@@ -62,6 +66,7 @@ __all__ = [
     "HOLD_BLANK_FRACTION",
     "HOLD_MEDIAN_FLOOR",
     "HOLD_MEDIAN_RATIO",
+    "SPIKE_UNIT_RE",
     "BlankHold",
     "EmitGate",
     "LongitudinalRow",
@@ -70,13 +75,16 @@ __all__ = [
     "append_longitudinal",
     "blank_fraction_by_band",
     "blank_fraction_hold",
+    "consumer_of",
     "emit_gate",
+    "hold_unit",
     "line_distrust_listed",
     "median_key",
     "retention_by_key",
     "retention_gate",
     "spike_time_lost",
     "spike_time_lost_by_animal",
+    "unit_of_key",
 ]
 
 HOLD_BLANK_FRACTION: Final = 0.20
@@ -90,6 +98,39 @@ ruled - provisional."""
 HR_KEYED_BY_BAND: Final[frozenset[str]] = frozenset({"hrv", "breathing"})
 LIST_DISTRUST_FRACTION: Final = 0.5
 """Ruling (e) Q2b: a cuff whose distrusted time exceeds 50% is listed for Andrea (not held)."""
+
+
+def consumer_of(key: str) -> str:
+    """Return the consumer of a ``consumer|signal|band`` (or ``consumer|band``) key."""
+    return key.split("|", 1)[0]
+
+
+SPIKE_UNIT_RE: Final = re.compile(r"([A-Za-z0-9]+)_(?:V\d+|T)")
+"""A spike signal's cuff: ``<cuff>_T`` or ``<cuff>_V<k>`` (the MATLAB token is the same)."""
+
+
+def hold_unit(consumer: str, signal: str) -> str:
+    """Return the unit a mask is HELD in: its consumer, and for spikes its cuff.
+
+    Andrea, revised 2026-10-10: holds are per consumer, and for spikes per cuff - a distrusted
+    or held cuff never holds the other cuff - so the spike consumer's units are
+    ``spikes_<cuff>`` (``spikes_L``, ``spikes_R``); masks are never merged across cuffs. THE
+    construction site; the MATLAB twin is ``matlab/night6/night6_hold_unit.m``. A spike
+    signal with no cuff is refused (ValueError): its unit is unknown, never guessed.
+    """
+    if consumer != "spikes":
+        return consumer
+    m = SPIKE_UNIT_RE.fullmatch(signal)
+    if m is None:
+        msg = f"spike signal {signal!r} names no cuff: its hold unit is unknown"
+        raise ValueError(msg)
+    return f"spikes_{m.group(1)}"
+
+
+def unit_of_key(key: str) -> str:
+    """Return the hold unit of a ``consumer|signal|band`` key (:func:`hold_unit`)."""
+    consumer, signal, *_rest = key.split("|")
+    return hold_unit(consumer, signal)
 
 
 def median_key(consumer: str, signal: str, band: str) -> str:
@@ -137,6 +178,9 @@ class BlankHold:
     top_routes: tuple[tuple[str, int], ...] = ()
     hum_features: Mapping[str, float] = field(default_factory=dict)
     notes: tuple[str, ...] = ()
+    held_consumers: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    """Hold unit (:func:`hold_unit`: the consumer, spikes per cuff) -> its reasons, for every
+    unit held (RULING 2026-10-10 item 1; Andrea, revised 2026-10-10)."""
 
 
 def blank_fraction_hold(
@@ -161,13 +205,15 @@ def blank_fraction_hold(
                    "[0, 1] (use None for unknown)")
             raise ValueError(msg)
     frac = {_key(k): 1.0 - m.retention for k, m in sorted(masks.items())}
-    reasons: list[str] = []
+    by: dict[str, list[str]] = {}
     unknown: list[str] = []
     for (consumer, signal, band), m in sorted(masks.items()):
         f = 1.0 - m.retention
         k = _key((consumer, signal, band))
+        unit = hold_unit(consumer, signal)
         if f > HOLD_BLANK_FRACTION:
-            reasons.append(f"{k}: {100 * f:.1f}% blanked > {100 * HOLD_BLANK_FRACTION:.0f}%")
+            by.setdefault(unit, []).append(
+                f"{k}: {100 * f:.1f}% blanked > {100 * HOLD_BLANK_FRACTION:.0f}%")
         mk = median_key(consumer, signal, band)
         med = animal_median.get(mk)
         if med is None:
@@ -175,19 +221,27 @@ def blank_fraction_hold(
             continue
         floor = max(float(med), HOLD_MEDIAN_FLOOR)
         if f > HOLD_MEDIAN_RATIO * floor:
-            reasons.append(f"{k}: {100 * f:.1f}% blanked > {HOLD_MEDIAN_RATIO:g} x the "
-                           f"animal median {100 * floor:.1f}%")
-    held = bool(reasons)
+            by.setdefault(unit, []).append(
+                f"{k}: {100 * f:.1f}% blanked > {HOLD_MEDIAN_RATIO:g} x the animal median "
+                f"{100 * floor:.1f}%")
+    reasons = [x for c in sorted(by) for x in by[c]]
     notes = tuple(f"animal median unknown for {mk}: the 3x rule was not applied"
                   for mk in sorted(set(unknown)))
     routes = Counter(d.reason_code or d.route for d in decisions if d.masks)
-    return BlankHold(held, tuple(reasons), frac, tuple(routes.most_common(5)),
-                     dict(hum_features or {}), notes)
+    return BlankHold(bool(reasons), tuple(reasons), frac, tuple(routes.most_common(5)),
+                     dict(hum_features or {}), notes,
+                     {c: tuple(v) for c, v in sorted(by.items())})
 
 
 @dataclass(frozen=True)
 class EmitGate:
-    """QC's verdict for one recording, as ``emit.handoff.write_mask_file`` computes it."""
+    """QC's verdict for one recording, as ``emit.handoff.write_mask_file`` computes it.
+
+    ``held_consumers`` maps every held hold unit (:func:`hold_unit`) to its reasons (RULING
+    2026-10-10 item 1: the hold is per consumer; Andrea, revised 2026-10-10: spikes per cuff,
+    ``spikes_L`` / ``spikes_R``); ``held`` says whether ANY unit is held - never that the
+    recording is.
+    """
 
     held: bool
     reasons: tuple[str, ...]
@@ -198,24 +252,26 @@ class EmitGate:
     notes: tuple[str, ...]
     top_routes: tuple[tuple[str, int], ...] = ()
     hum_features: Mapping[str, float] = field(default_factory=dict)
+    held_consumers: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 def emit_gate(masks: Mapping[MaskKey, ConsumerMask], *, min_retention: float,
               animal_median: Mapping[str, float | None],
               decisions: Iterable[RouteDecision] = (),
               hum_features: Mapping[str, float] | None = None) -> EmitGate:
-    """Compute both gates from ``masks`` and combine them (what the writer enforces)."""
+    """Compute both gates from ``masks``, per consumer, and combine them (the writer's gate)."""
     hold = blank_fraction_hold(masks, animal_median, decisions=decisions,
                                hum_features=hum_features)
     retention = retention_gate(masks, min_retention=min_retention)
-    reasons = list(hold.reasons)
-    if retention.flagged:
-        reasons += [f"{k}: retention {r:.3f} < {retention.min_retention:g}"
-                    for k, r in sorted(retention.below.items())]
+    by = {c: list(v) for c, v in hold.held_consumers.items()}
+    for k, r in sorted(retention.below.items()):
+        by.setdefault(unit_of_key(k), []).append(
+            f"{k}: retention {r:.3f} < {retention.min_retention:g}")
+    reasons = [x for c in sorted(by) for x in by[c]]
     used = {k: float(v) for k, v in animal_median.items() if v is not None}
-    return EmitGate(hold.held or retention.flagged, tuple(reasons), retention.flagged,
-                    hold.held, min_retention, used, hold.notes, hold.top_routes,
-                    dict(hold.hum_features))
+    return EmitGate(bool(by), tuple(reasons), retention.flagged, hold.held, min_retention,
+                    used, hold.notes, hold.top_routes, dict(hold.hum_features),
+                    {c: tuple(v) for c, v in sorted(by.items())})
 
 
 def _present(d: Mapping[str, Any]) -> dict[str, Any]:

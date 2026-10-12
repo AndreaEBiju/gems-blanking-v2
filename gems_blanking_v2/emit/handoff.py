@@ -3,9 +3,14 @@
 :func:`write_mask_file` computes the QC gate FROM THE MASKS ITSELF (``emit.qc.emit_gate``:
 the retention gate and the 20% / 3x blank hold), so a caller cannot hand it a gate that
 says "pass" for masks that do not; ``min_retention`` and the animal medians are required
-arguments. A held recording is written only with a non-blank ``release`` naming who
-released it and why. ``gate_json`` records the verdict, ``min_retention``, the medians
-used, the unknown-median notes and the release.
+arguments. **The hold is per consumer** (RULING 2026-10-10 item 1): the file is always
+written, every consumer's masks in it, and ``heldconsumers_json`` names each held consumer
+with its reasons (``{}`` when none is held). Night 6 skips a held consumer of that
+recording and runs the others (``night6_prepare_epoch``: status ``skipped_held``). A held
+consumer runs only with a non-blank release naming who released it and why - ``release``,
+one text for every held consumer (the pilot's builder release) or a ``{consumer: text}``
+map - recorded beside its reasons as ``released``. ``gate_json`` records the verdict per
+consumer, ``min_retention``, the medians used, the unknown-median notes and the releases.
 
 The file holds one ``blank_<consumer>_<signal>`` (N x 2, 1-based inclusive samples into
 the epoch, via ``extent.grid`` - invariant 15) per mask key, never a merged one, plus
@@ -41,6 +46,14 @@ reads anything carries a record (one with no train when the routing gives it non
 its spike spans are exactly the motion and distrust spans), and one that reads nothing
 passes ``None``. The record's provenance - the window, its file's sha256, the train - is
 copied into ``provenance_json`` (``spike_peri_r``) from the record itself.
+
+**Waves (RULING 2026-10-10 item 5).** Slow wave, HRV, breathing and mmc are finished per
+recording; the spike consumer per animal, once the animal's routing completes (its line-noise
+Holm family is the animal). So a file may finish a SUBSET of the consumers: ``elsewhere`` maps
+each consumer it does not carry to where it is finished, written as ``elsewhere_json`` (always
+present; ``{}`` when the file finishes every consumer). Such a consumer has no masks here, is
+not in this file's gate, and Night 6 skips it in this file (``night6_prepare_epoch``: status
+``skipped_elsewhere``) - it runs from the file that finishes it.
 
 **No heartbeat reference (RULING 2026-10-09 (g) 1, replacing (b) 2).** Minutes of the
 routed train's region with no beat are KEPT for the spike consumer and flagged, per minute:
@@ -91,8 +104,9 @@ from gems_blanking_v2.extent.tolerance import (
 )
 from gems_blanking_v2.io.nan_interop import assert_no_zero_runs
 
-__all__ = ["EPOCH_START_SAMPLE_KEY", "PAIR_LEAD_TOKEN", "RecordingHeldError",
-           "epoch_start_fields", "matlab_signal_token", "no_heartbeat_reference_record",
+__all__ = ["EPOCH_START_SAMPLE_KEY", "PAIR_LEAD_TOKEN", "cuff_release_record",
+           "epoch_start_fields",
+           "held_consumers_record", "matlab_signal_token", "no_heartbeat_reference_record",
            "signal_from_matlab_token", "write_mask_file"]
 
 F64 = npt.NDArray[np.float64]
@@ -103,10 +117,6 @@ PAIR_LEAD_TOKEN: Final = "_minus_"
 """How a cross-site pairs lead ``"<plus>-<minus>"`` (``physio.hr_pairs.PairLead.name``;
 adopted for HR by ruling 2026-10-02 (c)) appears inside a MATLAB variable name, where
 ``-`` is illegal: ``LVN2-RVN2`` -> ``LVN2_minus_RVN2``."""
-
-
-class RecordingHeldError(RuntimeError):
-    """QC holds the recording; it is emitted only with an explicit release."""
 
 
 EPOCH_START_SAMPLE_KEY: Final = "epochStartSample0"
@@ -203,6 +213,19 @@ def _matlab_spans(invalid: Bool, fs: float, n_samples: int, grid_s: float, what:
     out = to_matlab_inclusive([a for a, _ in spans], [b for _, b in spans])
     assert_no_zero_runs(out.ravel(), what=what)
     return out
+
+
+def _check_elsewhere(elsewhere: Mapping[str, str], not_computed: Mapping[str, str]
+                     ) -> dict[str, str]:
+    """Return the consumers finished in another file, checked (RULING 2026-10-10 item 5)."""
+    bad = sorted(set(elsewhere) - set(expected_consumers()))
+    both = sorted(set(elsewhere) & set(not_computed))
+    blank = sorted(c for c, why in elsewhere.items() if not str(why).strip())
+    if bad or both or blank:
+        msg = (f"elsewhere: unknown consumers {bad}, also not computed {both}, no reason given "
+               f"{blank}; each names an expected consumer and where it is finished")
+        raise ValueError(msg)
+    return {c: str(elsewhere[c]) for c in sorted(elsewhere)}
 
 
 def _check_coverage(masks: Mapping[MaskKey, ConsumerMask],
@@ -418,6 +441,51 @@ def no_heartbeat_reference_record(no_beat_minutes: Sequence[NoBeatMinute] | None
     return rec
 
 
+def cuff_release_record(released: Mapping[str, Mapping[str, Any]] | None, *,
+                        signals: Mapping[str, Sequence[str]], fs: float, n_samples: int,
+                        epoch_start_s: float) -> dict[str, Any]:
+    """Return ``cuffrelease_json``: each released cuff's spike signal flagged every minute.
+
+    RULING 2026-10-10 item 6 (``emit.cuff_trust``): a released cuff is KEPT for the spike
+    consumer and flagged "no heartbeat reference" over every minute of the epoch (no peri-R
+    span can be placed on it). ``released`` maps the cuff's spike signal (``<cuff>_T``) to its
+    classification (``CuffTrust.record()``); a signal the spike consumer does not read is
+    refused. Always present (``signals`` empty when no cuff is released).
+    """
+    from gems_blanking_v2.emit.cuff_trust import RELEASE_FLAG, RELEASE_RULE  # noqa: PLC0415
+    spike = set(signals.get("spikes", ()))
+    given = dict(released or {})
+    bad = sorted(set(given) - spike)
+    if bad:
+        msg = f"released cuff signals {bad} are not read by the spike consumer here"
+        raise ValueError(msg)
+    stop = epoch_start_s + n_samples / fs
+    rows: list[dict[str, Any]] = []
+    for m in range(int(np.floor(epoch_start_s / 60.0)), int(np.ceil(stop / 60.0))):
+        a, b = max(60.0 * m, epoch_start_s), min(60.0 * (m + 1), stop)
+        k0, k1 = minute_sample_bounds(a, b, epoch_start_s=epoch_start_s, fs=fs,
+                                      n_samples=n_samples)
+        if b > a and k1 > k0:
+            rows.append({"minute": m, "in_epoch_s": [float(a), float(b)],
+                         "samples": [int(k0), int(k1)]})
+    return {"rule": RELEASE_RULE, "flag": RELEASE_FLAG, "blanked": False,
+            "counts_toward_retention_hold": False, "signals": sorted(given),
+            "cuffs": {s: dict(given[s]) for s in sorted(given)},
+            "minutes": rows if given else []}
+
+
+def _write_cuff_release(doc: dict[str, Any], record: Mapping[str, Any]) -> None:
+    """``cuffrelease_json`` (always) and ``cuffrelease_spikes_<cuff>_T`` (1-based flag rows)."""
+    rows = record["minutes"]
+    for sig in record["signals"]:
+        out = to_matlab_inclusive([r["samples"][0] for r in rows],
+                                  [r["samples"][1] for r in rows])
+        assert_no_zero_runs(out.ravel(), what=f"cuff release spans {sig}")
+        doc[_matlab_name("cuffrelease", "spikes", sig)] = out
+    doc["cuffrelease_json"] = json.dumps(dict(record), sort_keys=True, ensure_ascii=True,
+                                         allow_nan=False)
+
+
 def _with_no_heartbeat_reference(provenance: MaskProvenance, record: Mapping[str, Any]
                                  ) -> MaskProvenance:
     """Copy the flag record into the provenance; refuse one that disagrees with it."""
@@ -449,11 +517,44 @@ def _write_no_heartbeat_reference(doc: dict[str, Any], record: Mapping[str, Any]
                                         allow_nan=False)
 
 
+def held_consumers_record(gate: EmitGate, release: str | Mapping[str, str] | None
+                          ) -> dict[str, dict[str, Any]]:
+    """``heldconsumers_json``: each held unit's reasons, and its release if it has one.
+
+    Keys are hold units (``qc.hold_unit``: the consumer; spikes per cuff, ``spikes_L`` /
+    ``spikes_R`` - Andrea, revised 2026-10-10: a held cuff never holds the other).
+    ``release`` is one text for every held unit, or ``{unit: text}``. Refused: a blank
+    release, and a release naming a unit that is not held (it would read as a decision nobody
+    needed to make) - ``spikes`` alone names no unit.
+    """
+    held = dict(gate.held_consumers)
+    if isinstance(release, str) and not release.strip():
+        msg = "a release must say who released the consumer and why; got a blank string"
+        raise ValueError(msg)
+    if isinstance(release, str) or release is None:
+        given = dict.fromkeys(held, release) if release is not None else {}
+    else:
+        given = dict(release)
+    for c, text in given.items():
+        if not isinstance(text, str) or not text.strip():
+            msg = (f"a release must say who released {c} and why; got a blank or non-text "
+                   "release")
+            raise ValueError(msg)
+        if c not in held:
+            msg = f"a release for {c}, which QC does not hold in this recording"
+            raise ValueError(msg)
+    return {c: {"reasons": list(r), **({"released": given[c]} if c in given else {})}
+            for c, r in sorted(held.items())}
+
+
 def _gate_record(gate: EmitGate, *, heart_fraction: Mapping[str, float] | None,
                  heartref: Mapping[str, Any], lost: Mapping[str, Any] | None,
-                 release: str | None) -> dict[str, Any]:
-    """``gate_json``: the verdict, and beside it what the gate never reads."""
+                 held: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    """``gate_json``: the verdict per consumer, and beside it what the gate never reads."""
     out: dict[str, Any] = {"held": gate.held, "reasons": list(gate.reasons),
+                           "held_consumers": {c: dict(v) for c, v in held.items()},
+                           "hold_scope": "per consumer, spikes per cuff (RULING 2026-10-10 "
+                                         "item 1; Andrea, revised 2026-10-10)",
                            "retention_flagged": gate.retention_flagged,
                            "blank_held": gate.blank_held,
                            "min_retention": gate.min_retention,
@@ -468,8 +569,6 @@ def _gate_record(gate: EmitGate, *, heart_fraction: Mapping[str, float] | None,
     if lost is not None:
         out["spike_time_lost"] = lost
         out["line_distrust_listed"] = line_distrust_listed(lost)
-    if release:
-        out["release"] = release
     return out
 
 
@@ -482,11 +581,13 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
                     peri_r: PeriRRecord | None,
                     decisions: Iterable[RouteDecision] = (),
                     hum_features: Mapping[str, float] | None = None,
-                    release: str | None = None,
+                    release: str | Mapping[str, str] | None = None,
                     events: Sequence[Mapping[str, Any]] = (),
                     not_computed: Mapping[str, str] | None = None,
                     epoch_start_sample: int | None = None,
-                    no_beat_minutes: Sequence[NoBeatMinute] | None = None) -> Path:
+                    no_beat_minutes: Sequence[NoBeatMinute] | None = None,
+                    cuff_release: Mapping[str, Mapping[str, Any]] | None = None,
+                    elsewhere: Mapping[str, str] | None = None) -> Path:
     """Write the masks as MATLAB blank spans with their provenance and QC gate.
 
     The file carries the epoch's exact first sample as :data:`EPOCH_START_SAMPLE_KEY`
@@ -501,6 +602,15 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
     ``spike_no_heartbeat_reference_s``. They are not blanked, so they never reach the
     retention gate or the hold. Required (``[]`` when none) whenever the spike consumer
     reads a signal and ``peri_r`` has a train; see :func:`no_heartbeat_reference_record`.
+
+    ``cuff_release`` maps each released cuff's spike signal to its classification (RULING
+    2026-10-10 item 6, :func:`cuff_release_record`): flagged "no heartbeat reference" every
+    minute in ``cuffrelease_json`` / ``cuffrelease_spikes_<cuff>_T`` - flags, never blank spans.
+
+    ``elsewhere`` maps each consumer this file does NOT finish to where it is finished (RULING
+    2026-10-10 item 5, see the module docstring): it reads nothing in this file - no masks, no
+    gate, no spike records when it is the spike consumer - and ``elsewhere_json`` names it. A
+    consumer that is not expected, or is also ``not_computed``, is refused.
 
     ``not_computed`` maps a consumer the recording cannot run to the reason (RULING
     2026-10-08 (f) 6: no beat train passed, so no beats file - ``hrv`` and ``breathing``,
@@ -517,8 +627,9 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
     consumer of :func:`~gems_blanking_v2.extent.tolerance.expected_consumers`; an empty
     ``masks``; a consumer (in ``masks`` or ``signals``) that is not in the tolerance
     table; a mask on a band other than its consumer's; masks that do not cover
-    ``signals``; a held recording (gate computed here, from ``masks``) without a non-blank
-    ``release``; a mask whose grid does not start at
+    ``signals``; a blank release, or one for a consumer that is not held (the gate is computed
+    here, from ``masks``, per consumer: a held consumer is written and flagged, never a reason
+    to withhold the others); a mask whose grid does not start at
     ``epoch_start_s`` or does not have ``floor(n_samples / fs / grid)`` frames; a
     ``line_distrust`` record missing while the spike consumer reads a signal, covering
     other signals than it reads, made for another epoch or recording, or whose rule
@@ -532,6 +643,8 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
         raise ProvenanceError(msg)
     provenance.validate()
     start_fields = epoch_start_fields(epoch_start_s, fs, epoch_start_sample)
+    away = _check_elsewhere(elsewhere or {}, not_computed or {})
+    signals = {c: (() if c in away else tuple(v)) for c, v in signals.items()}
     _check_coverage(masks, signals)
     _check_not_computed(not_computed or {}, signals)
     provenance = _with_peri_r(
@@ -545,13 +658,7 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
         provenance = _with_no_heartbeat_reference(provenance, heartref)
     gate = emit_gate(masks, min_retention=min_retention, animal_median=animal_median,
                      decisions=decisions, hum_features=hum_features)
-    if release is not None and not release.strip():
-        msg = "a release must say who released the recording and why; got a blank string"
-        raise ValueError(msg)
-    if gate.held and not release:
-        msg = ("QC holds this recording (" + "; ".join(gate.reasons) + "); emit it only "
-               "with an explicit release naming who released it and why")
-        raise RecordingHeldError(msg)
+    held = held_consumers_record(gate, release)
     doc: dict[str, Any] = {}
     retention: dict[str, float] = {}
     for (consumer, signal, band), m in sorted(masks.items()):
@@ -574,8 +681,14 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
     lost = _write_line_distrust(doc, masks, line_distrust)
     heart_fraction = _write_peri_r(doc, peri_r, n_samples)
     _write_no_heartbeat_reference(doc, heartref)
+    _write_cuff_release(doc, cuff_release_record(cuff_release, signals=signals, fs=fs,
+                                                 n_samples=n_samples,
+                                                 epoch_start_s=epoch_start_s))
     gate_doc = _gate_record(gate, heart_fraction=heart_fraction, heartref=heartref, lost=lost,
-                            release=release)
+                            held=held)
+    doc["heldconsumers_json"] = json.dumps(held, sort_keys=True, ensure_ascii=True,
+                                           allow_nan=False)
+    doc["elsewhere_json"] = json.dumps(away, sort_keys=True, ensure_ascii=True, allow_nan=False)
     doc["provenance_json"] = provenance.to_json()
     doc["events_json"] = json.dumps(list(events), sort_keys=True, ensure_ascii=True,
                                     allow_nan=False)

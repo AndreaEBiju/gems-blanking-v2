@@ -66,4 +66,4 @@ def test_the_resume_step_requires_it() -> None:
                      r"&& hrOk\s*records\{k\} = R;\s*todo\(k\) = false;", src), \
         "a complete record may be skipped only when night6_hr_runs_resumable passes"
     assert "complete before (i) 4 (%s), rerun" in src
-    assert "'night6_hr_runs_resumable'}" in src  # hashed in function_provenance
+    assert re.search(r"ours = \{[^}]*'night6_hr_runs_resumable'", src)  # hashed in provenance

@@ -57,7 +57,11 @@ from gems_blanking_v2.extent.tolerance import (
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from tests.conftest import make_night6_stim_outputs
 from tests.test_matlab_acceptance import _processing_new
+
+V6 = {"animal": "A", "electrical_basis": "from_electrical_end", "stim_level": "L1"}
+"""The v6 fields of a file_starts call (RULING 2026-10-10 item 7) for the older cases."""
 
 FS = 24414.0625
 REPO = Path(__file__).resolve().parents[1]
@@ -343,7 +347,7 @@ def test_an_unknown_analysis_keeps_132_labelled_and_the_others_get_their_own() -
     assert s.settling_s is None and s.binding_output is None
     assert s.missing == ("slow_wave/rate: w",)
     assert s.per_output_s["trace"] == 2.5 and s.per_output_s["rate"] is None
-    f = rs.file_starts(session="x", fs=FS, electrical_end_s=120.8, mechanical_end_s=120.8,
+    f = rs.file_starts(**V6, session="x", fs=FS, electrical_end_s=120.8, mechanical_end_s=120.8,
                        electrical_settle_s=121.4,
                        times_source="03B", electrical_source="(j) 6 (i)",
                        table=TEST_TABLE)
@@ -365,7 +369,7 @@ def test_an_unknown_analysis_keeps_132_labelled_and_the_others_get_their_own() -
 
 
 def test_an_analysis_missing_from_the_table_is_unknown_not_zero() -> None:
-    f = rs.file_starts(session="x", fs=FS, electrical_end_s=120.8, mechanical_end_s=120.8,
+    f = rs.file_starts(**V6, session="x", fs=FS, electrical_end_s=120.8, mechanical_end_s=120.8,
                        electrical_settle_s=125.0,
                        times_source="a", electrical_source="b",
                        analyses=["spikes", "velocity"])
@@ -376,16 +380,16 @@ def test_an_analysis_missing_from_the_table_is_unknown_not_zero() -> None:
 
 
 def test_undetected_edges_and_no_settling_hold_the_whole_file() -> None:
-    a = rs.file_starts(session="x", fs=FS, electrical_end_s=None, mechanical_end_s=None,
+    a = rs.file_starts(**V6, session="x", fs=FS, electrical_end_s=None, mechanical_end_s=None,
                        electrical_settle_s=None,
                        times_source="a", electrical_source="b")
     assert a["basis"] == rs.HELD_UNDETECTED and "analyses" not in a
-    b = rs.file_starts(session="x", fs=FS, electrical_end_s=120.8, mechanical_end_s=120.8,
+    b = rs.file_starts(**V6, session="x", fs=FS, electrical_end_s=120.8, mechanical_end_s=120.8,
                        electrical_settle_s=None,
                        times_source="a", electrical_source="b")
     assert b["basis"] == rs.HELD_NO_SETTLING and "analyses" not in b
     with pytest.raises(ValueError, match="precedes the electrical end"):
-        rs.file_starts(session="x", fs=FS, electrical_end_s=121.0, mechanical_end_s=121.0,
+        rs.file_starts(**V6, session="x", fs=FS, electrical_end_s=121.0, mechanical_end_s=121.0,
                        electrical_settle_s=120.0,
                        times_source="a", electrical_source="b")
 
@@ -398,7 +402,7 @@ def test_the_relation_to_the_epoch_start_is_exact_to_one_sample() -> None:
         t = {"spikes": rs.Analysis("spikes", "c", (rs.Output("o", (
             rs.Stage("w", "trailing window", "whole", "x.m:1", "x", "code",
                      window_s=k / FS - 130.0),), "x"),))}
-        f = rs.file_starts(session="x", fs=FS, electrical_end_s=120.0, mechanical_end_s=120.0,
+        f = rs.file_starts(**V6, session="x", fs=FS, electrical_end_s=120.0, mechanical_end_s=120.0,
                            electrical_settle_s=130.0,
                            times_source="a", electrical_source="b", table=t)
         r = f["analyses"][0]
@@ -411,7 +415,7 @@ def test_the_relation_to_the_epoch_start_is_exact_to_one_sample() -> None:
        fs=st.sampled_from([FS, 24414.0, 1000.0]))
 def test_every_start_is_its_electrical_time_plus_its_own_settling(off: float, el: float,
                                                                   fs: float) -> None:
-    f = rs.file_starts(session="x", fs=fs, electrical_end_s=off, mechanical_end_s=off,
+    f = rs.file_starts(**V6, session="x", fs=fs, electrical_end_s=off, mechanical_end_s=off,
                        electrical_settle_s=off + el,
                        times_source="a", electrical_source="b")
     assert f["electrical_settle_sample0"] == first_sample_at_or_after(off + el, fs)
@@ -428,10 +432,12 @@ def _doc(*files: dict) -> dict:
 
 
 def test_the_document_refuses_duplicates_and_non_integer_samples() -> None:
-    a = rs.file_starts(session="Sess_A", fs=FS, electrical_end_s=120.8, mechanical_end_s=120.8,
+    a = rs.file_starts(**V6,
+                       session="Sess_A", fs=FS, electrical_end_s=120.8, mechanical_end_s=120.8,
                        electrical_settle_s=125.0,
                        times_source="a", electrical_source="b")
-    held = rs.file_starts(session="sess_a", fs=FS, electrical_end_s=None, mechanical_end_s=None,
+    held = rs.file_starts(**V6,
+                          session="sess_a", fs=FS, electrical_end_s=None, mechanical_end_s=None,
                           electrical_settle_s=None,
                           times_source="a", electrical_source="b")
     with pytest.raises(ValueError, match="appears twice"):
@@ -454,7 +460,7 @@ def _refuse(token: str) -> None:
 
 
 def test_the_file_round_trips_exactly_as_canonical_ascii(tmp_path: Path) -> None:
-    files = [rs.file_starts(session=s, fs=FS, electrical_end_s=o, mechanical_end_s=o,
+    files = [rs.file_starts(**V6, session=s, fs=FS, electrical_end_s=o, mechanical_end_s=o,
                             electrical_settle_s=e,
                             times_source="03B — cached", electrical_source="(j) 6 (i)")
              for s, o, e in (("b_sr", 120.79, 124.2), ("a_sr", None, None),
@@ -491,11 +497,12 @@ def test_the_file_round_trips_exactly_as_canonical_ascii(tmp_path: Path) -> None
 
 def test_a_starts_file_from_other_edge_settlings_is_refused(tmp_path: Path) -> None:
     """Review 2026-10-09: v4+ records the edge settlings' sha256; a stale file is refused."""
-    files = [rs.file_starts(session="b_sr", fs=FS, electrical_end_s=120.79, mechanical_end_s=120.79,
+    files = [rs.file_starts(**V6,
+                            session="b_sr", fs=FS, electrical_end_s=120.79, mechanical_end_s=120.79,
                             electrical_settle_s=124.2,
                             times_source="03B", electrical_source="(j) 6 (i)")]
     doc = rs.recovery_starts_document(files, fs=FS)
-    assert rs.SCHEMA == "gems-blanking-v2 recovery starts v5"
+    assert rs.SCHEMA == "gems-blanking-v2 recovery starts v7"
     assert doc["edge_settling_sha256"] == tl.edge_settling_sha256()
     assert doc["edge_settling"] == tl.edge_settling_record()
     good = tmp_path / "good.json"
@@ -520,7 +527,7 @@ def test_a_starts_file_from_other_edge_settlings_is_refused(tmp_path: Path) -> N
         rs.read_recovery_starts(f)
     j["schema"] = "gems-blanking-v2 recovery starts v3"
     f.write_text(json.dumps(j), encoding="utf-8", newline="\n")
-    with pytest.raises(ValueError, match="expected 'gems-blanking-v2 recovery starts v5'"):
+    with pytest.raises(ValueError, match="expected 'gems-blanking-v2 recovery starts v7'"):
         rs.read_recovery_starts(f)
 
 
@@ -626,7 +633,7 @@ def test_every_trimmed_variable_is_cut_at_its_class_reach_to_the_sample() -> Non
     trims = {(v.file, v.path): v for v in rs.OUTPUT_VARS if v.role == "trim"}
     assert set(trims) == set(CLASS_TABLE), sorted(set(trims) ^ set(CLASS_TABLE))
     el = 125.0
-    f = rs.file_starts(session="x", fs=FS, electrical_end_s=120.8, mechanical_end_s=120.8,
+    f = rs.file_starts(**V6, session="x", fs=FS, electrical_end_s=120.8, mechanical_end_s=120.8,
                        electrical_settle_s=el,
                        times_source="a", electrical_source="b")
     cuts = {c["cut"]: c for c in f["cuts"]}
@@ -663,7 +670,7 @@ def test_only_cv2_roll_is_cut_at_15_s_every_other_spike_output_at_its_ms_reach()
     or beyond 1 s fails.
     """
     el = 125.0
-    f = rs.file_starts(session="x", fs=FS, electrical_end_s=120.8, mechanical_end_s=120.8,
+    f = rs.file_starts(**V6, session="x", fs=FS, electrical_end_s=120.8, mechanical_end_s=120.8,
                        electrical_settle_s=el,
                        times_source="a", electrical_source="b")
     cuts = {c["cut"]: c for c in f["cuts"]}
@@ -700,7 +707,7 @@ def test_the_hr_band_edge_moves_the_hrv_and_breathing_starts_and_the_trace_cut()
 @settings(max_examples=100, deadline=None)
 @given(el=st.floats(120.0, 200.0), fs=st.sampled_from([FS, 24414.0, 1000.0]))
 def test_every_cut_is_one_rounding_of_electrical_plus_reach(el: float, fs: float) -> None:
-    f = rs.file_starts(session="x", fs=fs, electrical_end_s=119.0, mechanical_end_s=119.0,
+    f = rs.file_starts(**V6, session="x", fs=fs, electrical_end_s=119.0, mechanical_end_s=119.0,
                        electrical_settle_s=el,
                        times_source="a", electrical_source="b")
     for c in f["cuts"]:
@@ -715,7 +722,7 @@ def test_an_unknown_reach_keeps_132_labelled_never_the_known_part() -> None:
         rs.Output("trace", (_stage(5.0),), "x", key="sw_trace"),
         rs.Output("rate", (_stage(5.0), _stage(None, "unknown"), _stage(60.0)), "x",
                   key="sw_rate", own_window=True)))}
-    f = rs.file_starts(session="x", fs=FS, electrical_end_s=120.8, mechanical_end_s=120.8,
+    f = rs.file_starts(**V6, session="x", fs=FS, electrical_end_s=120.8, mechanical_end_s=120.8,
                        electrical_settle_s=121.4,
                        times_source="a", electrical_source="b", table=t)
     cuts = {c["cut"]: c for c in f["cuts"]}
@@ -844,7 +851,8 @@ def test_the_recomputed_averages_are_the_ruled_ones() -> None:
 
 
 def test_every_file_carries_the_maps_cuts_once_as_samples() -> None:
-    a = rs.file_starts(session="Sess_A", fs=FS, electrical_end_s=120.8, mechanical_end_s=120.8,
+    a = rs.file_starts(**V6,
+                       session="Sess_A", fs=FS, electrical_end_s=120.8, mechanical_end_s=120.8,
                        electrical_settle_s=125.0,
                        times_source="a", electrical_source="b")
     for edit, err, words in (
@@ -865,7 +873,7 @@ def test_every_file_carries_the_maps_cuts_once_as_samples() -> None:
 
 def _two(e_end: float, settle: float, m_end: float, fs: float = FS,
          table: dict[str, rs.Analysis] | None = None) -> dict[str, Any]:
-    return rs.file_starts(session="x", fs=fs, electrical_end_s=e_end, mechanical_end_s=m_end,
+    return rs.file_starts(**V6, session="x", fs=fs, electrical_end_s=e_end, mechanical_end_s=m_end,
                           electrical_settle_s=settle, times_source="tsq AmA / Mon",
                           electrical_source="electrical-only rule", table=table)
 
@@ -923,7 +931,7 @@ def test_every_start_and_cut_is_the_max_of_both_times_plus_its_reach(
 def test_a_file_missing_either_stim_time_is_held_naming_it() -> None:
     for e_end, m_end, word in ((None, 120.7, "electrical"), (118.7, None, "mechanical"),
                                (None, None, "electrical and mechanical")):
-        f = rs.file_starts(session="x", fs=FS, electrical_end_s=e_end, mechanical_end_s=m_end,
+        f = rs.file_starts(**V6, session="x", fs=FS, electrical_end_s=e_end, mechanical_end_s=m_end,
                            electrical_settle_s=121.0, times_source="t", electrical_source="e")
         assert f["basis"] == rs.HELD_UNDETECTED and "analyses" not in f
         assert f"({word})" in f["why"], f["why"]
@@ -997,7 +1005,7 @@ def test_a_v4_starts_file_with_one_stim_time_is_refused(tmp_path: Path) -> None:
                 "input_mask_s", "input_mask_sample0", "input_mask_binding"} & set(row)
     f = tmp_path / "v4.json"
     f.write_text(json.dumps(j), encoding="utf-8", newline="\n")
-    with pytest.raises(ValueError, match="expected 'gems-blanking-v2 recovery starts v5'"):
+    with pytest.raises(ValueError, match="expected 'gems-blanking-v2 recovery starts v7'"):
         rs.read_recovery_starts(f)
     j["schema"] = rs.SCHEMA
     f.write_text(json.dumps(j), encoding="utf-8", newline="\n")
@@ -1044,3 +1052,282 @@ def test_first_sample_at_or_after_is_the_ceiling_up_to_float_noise(t: float, fs:
 @given(k=st.integers(0, 10**8), fs=st.sampled_from([FS, 24414.0, 1000.0, 48828.125]))
 def test_a_sample_written_as_seconds_converts_back_to_itself(k: int, fs: float) -> None:
     assert first_sample_at_or_after(k / fs, fs) == k
+
+
+# ---------------------------------------------------------------------------
+# RULING 2026-10-10 item 7: starts v6 - electrical basis, reference-sensitive, common start
+# ---------------------------------------------------------------------------
+
+
+def _v6(session: str, e_end: float, settle: float, m_end: float, *, basis: str,
+        animal: str = "A", ref: dict[str, Any] | None = None,
+        level: str = "L1") -> dict[str, Any]:
+    return rs.file_starts(session=session, animal=animal, electrical_basis=basis, fs=FS,
+                          electrical_end_s=e_end, mechanical_end_s=m_end,
+                          electrical_settle_s=settle, times_source="tsq",
+                          electrical_source="electrical-only rule", reference_sensitive=ref,
+                          stim_level=level)
+
+
+def test_a_mechanical_only_file_starts_at_the_mechanical_end_plus_own_settling() -> None:
+    f = _v6("ms", 120.8, 120.8, 120.8, basis="mechanical_only_zero")
+    assert f["electrical_s"] == 0.0 and f["input_mask_s"] == 120.8
+    assert f["electrical_basis"] == "mechanical_only_zero"
+    assert "mechanical-only" in f["electrical_basis_rule"]
+    for r in f["analyses"]:
+        own = rs.analysis_settling(r["analysis"], FS).settling_s
+        assert own is not None and r["start_s"] == 120.8 + own
+    with pytest.raises(ValueError, match="electrical settling 0"):
+        _v6("ms", 120.8, 125.0, 120.8, basis="mechanical_only_zero")
+
+
+def test_a_search_from_the_mechanical_end_needs_the_motor_past_the_electrical_end() -> None:
+    f = _v6("m63", 118.69, 121.5, 120.73, basis="from_mechanical_end")
+    assert f["input_mask_s"] == 121.5 and f["electrical_basis"] == "from_mechanical_end"
+    with pytest.raises(ValueError, match="needs the motor to run past"):
+        _v6("m63", 118.69, 120.5, 120.73, basis="from_mechanical_end")  # settled before M
+    with pytest.raises(ValueError, match="needs the motor to run past"):
+        _v6("j", 120.70, 121.5, 120.72, basis="from_mechanical_end")    # 0.02 s: gate lag
+    with pytest.raises(ValueError, match="electrical basis 'guess'"):
+        _v6("x", 120.0, 121.0, 120.0, basis="guess")
+    assert rs.MOTOR_PAST_ELECTRICAL_S == 1.0
+
+
+REF = {"window_s": [540.0, 600.0], "anchor_s": 120.0, "n_clean": 79, "n_candidates": 81,
+       "after_anchor_s": {"chosen": 70.79, "clean_min": 29.864, "clean_max": 79.528}}
+
+
+def test_a_late_file_is_reference_sensitive_until_its_latest_clean_settling() -> None:
+    f = _v6("late", 120.0, 190.79, 120.0, basis="from_electrical_end", ref=REF)
+    rsens = f["reference_sensitive"]
+    assert rsens["flag"] == rs.REFERENCE_SENSITIVE == "reference-sensitive"
+    assert rsens["spread_s"] == pytest.approx(79.528 - 29.864)
+    for r in f["analyses"]:
+        own = rs.analysis_settling(r["analysis"], FS).settling_s
+        assert own is not None
+        assert r["reference_sensitive_until_s"] == pytest.approx(120.0 + 79.528 + own)
+        assert r["reference_sensitive_until_sample0"] >= r["start_sample0"]
+    plain = _v6("p", 120.0, 124.0, 120.0, basis="from_electrical_end")
+    doc = rs.recovery_starts_document([f, plain], fs=FS)  # a common start needs a plain file
+    assert doc["files"][0]["reference_sensitive"]["n_clean"] == 79
+    assert all("reference_sensitive_until_s" not in r for r in plain["analyses"])
+    bad = json.loads(json.dumps(f))
+    del bad["analyses"][0]["reference_sensitive_until_sample0"]
+    with pytest.raises(ValueError, match="reference_sensitive_until must be present"):
+        rs.recovery_starts_document([bad, plain], fs=FS)
+    with pytest.raises(ValueError, match="outside the clean spread"):
+        _v6("late", 120.0, 190.79, 120.0, basis="from_electrical_end",
+            ref={**REF, "after_anchor_s": {"chosen": 90.0, "clean_min": 29.9, "clean_max": 79.5}})
+
+
+def _row(doc: dict[str, Any], session: str, name: str) -> dict[str, Any]:
+    f = next(f for f in doc["files"] if f["session"] == session)
+    return next(r for r in f["analyses"] if r["analysis"] == name)
+
+
+def test_the_common_start_is_the_latest_per_level_median_start() -> None:
+    """Andrea, revised 2026-10-10: the latest per-level MEDIAN start.
+
+    Per level the median of (start - mechanical end) over its files, reference-sensitive files
+    excluded; the common offset is the largest median; each file's own start stays primary
+    (the common start is never before it).
+    """
+    # level L1: settling 4, 6, 30 s after M (median 6); level L3: 10, 12 (median 11)
+    files = [_v6("a1a", 120.0, 124.0, 120.0, basis="from_electrical_end", level="L1"),
+             _v6("a1b", 120.0, 126.0, 120.0, basis="from_electrical_end", level="L1"),
+             _v6("a1c", 120.0, 150.0, 120.0, basis="from_electrical_end", level="L1"),
+             _v6("a3a", 119.0, 131.0, 121.0, basis="from_electrical_end", level="L3"),
+             _v6("a3b", 119.0, 133.0, 121.0, basis="from_electrical_end", level="L3"),
+             _v6("late", 120.0, 190.79, 120.0, basis="from_electrical_end", ref=REF,
+                 level="L9"),
+             _v6("b1", 120.0, 122.0, 120.0, basis="from_electrical_end", animal="B")]
+    doc = rs.recovery_starts_document(files, fs=FS)
+    for name in rs.ANALYSES:
+        own = rs.analysis_settling(name, FS).settling_s
+        assert own is not None
+        med = {"L1": 6.0 + own, "L3": 11.0 + own}  # the max over files would be 30 s (a1c)
+        rec = doc["common_start"]["by_animal"]["A"]["analyses"][name]
+        assert rec["set_by_level"] == "L3"
+        assert rec["offset_after_mechanical_end_s"] == pytest.approx(med["L3"])
+        assert rec["level_medians"]["L1"]["median_offset_s"] == pytest.approx(med["L1"])
+        assert rec["level_medians"]["L1"]["files"] == ["a1a", "a1b", "a1c"]
+        for s, m in (("a1a", 120.0), ("a3a", 121.0), ("late", 120.0)):
+            r = _row(doc, s, name)
+            assert r["common_start_s"] == pytest.approx(max(m + med["L3"], r["start_s"]))
+            assert r["common_start_set_by"] == "stim level L3"
+            assert r["common_start_sample0"] >= r["start_sample0"]
+        a1c = _row(doc, "a1c", name)  # its own start is later: it stays primary
+        assert a1c["common_start_s"] == a1c["start_s"]
+        assert _row(doc, "b1", name)["common_start_s"] == _row(doc, "b1", name)["start_s"]
+    a = doc["common_start"]["by_animal"]["A"]
+    assert a["excluded_reference_sensitive"] == ["late"]
+    assert "L9" not in a["levels"] and a["levels"]["L3"] == ["a3a", "a3b"]
+    assert "MEDIAN" in doc["common_start"]["rule"] and "EXCLUDED" in doc["common_start"]["rule"]
+
+
+def test_a_common_start_from_reference_sensitive_files_only_is_refused() -> None:
+    late = _v6("late", 120.0, 190.79, 120.0, basis="from_electrical_end", ref=REF)
+    with pytest.raises(ValueError, match="every file is reference-sensitive"):
+        rs.recovery_starts_document([late], fs=FS)
+
+
+def test_the_stim_level_is_declared_never_parsed() -> None:
+    with pytest.raises(ValueError, match="declared stim level"):
+        _v6("gems_a_t02_1_1_sr", 120.0, 124.0, 120.0, basis="from_electrical_end", level="")
+    f = _v6("x", 120.0, 124.0, 120.0, basis="from_electrical_end")
+    bad = {k: v for k, v in f.items() if k != "stim_level"}
+    with pytest.raises(ValueError, match="declared stim_level"):
+        rs.recovery_starts_document([bad], fs=FS)
+
+
+def test_a_v6_file_without_its_animal_or_basis_is_refused() -> None:
+    f = _v6("x", 120.0, 124.0, 120.0, basis="from_electrical_end")
+    for key in ("animal", "electrical_basis"):
+        bad = {k: v for k, v in f.items() if k != key}
+        with pytest.raises(ValueError, match="v6 needs animal and electrical_basis"):
+            rs.recovery_starts_document([bad], fs=FS)
+    with pytest.raises(ValueError, match="needs the file's animal"):
+        rs.file_starts(session="x", animal="", electrical_basis="from_electrical_end", fs=FS,
+                       electrical_end_s=120.0, mechanical_end_s=120.0,
+                       electrical_settle_s=124.0, times_source="t", electrical_source="e",
+                       stim_level="L1")
+
+
+@pytest.mark.parametrize(("own", "common", "verdict"), [
+    ({"1": 1.0, "2": 2.0, "3": 3.0}, {"1": 1.05, "2": 2.1, "3": 3.1}, "agree"),
+    ({"1": 1.0, "2": 2.0, "3": 3.0}, {"1": 1.0, "2": 3.5, "3": 3.0}, "disagree"),   # rank
+    ({"1": 1.0, "2": 2.0, "3": 3.0}, {"1": 1.0, "2": 2.0, "3": 3.25}, "disagree"),  # > 10%
+    ({"1": 1.0, "2": 2.0, "3": 3.0}, {"1": 1.0, "2": 2.0, "3": 3.15}, "agree"),     # < 10%
+    ({"1": 1.0, "2": 2.0}, {"1": 1.0}, "not_comparable"),
+    ({"1": 1.0, "2": float("nan")}, {"1": 1.0, "2": 2.0}, "not_comparable"),
+    ({"1": 5.0}, {"1": 5.4}, "agree"),       # one level: 10% of its magnitude
+    ({"1": 5.0}, {"1": 5.6}, "disagree"),
+])
+def test_the_disagreement_rule_is_fixed_before_any_result(own: dict[str, float],
+                                                          common: dict[str, float],
+                                                          verdict: str) -> None:
+    got = rs.dose_response_disagreement(own, common)
+    assert got["verdict"] == verdict, got
+    assert got["rule"] == rs.DISAGREEMENT_RULE and rs.DISAGREE_FRACTION == 0.10
+
+
+# ---------------------------------------------------------------------------
+# review of r1010, fix 5: the per-stim-level summary, from Night 6's outputs
+# ---------------------------------------------------------------------------
+
+
+def _n6(tmp_path: Path, own: dict[str, float], common: dict[str, float] | None = None,
+        **kw: Any) -> dict[str, tuple[str, Path]]:  # noqa: ANN401
+    """One slow-wave output per session: avgSlowWave own / common."""
+    common = own if common is None else common
+    out = {}
+    for s, v in own.items():
+        make_night6_stim_outputs(tmp_path / s, tag="e132",
+                                 own={"slowWaves_ANT1": {"avgSlowWave": v}},
+                                 common={"slowWaves_ANT1": {"avgSlowWave": common[s]}}, **kw)
+        out[s] = ("A", tmp_path / s)
+    return out
+
+
+LEVELS = {"s1": "100uA", "s2": "100uA", "s3": "100uA", "s4": "300uA", "s5": "300uA"}
+SW_KEY = "A|slow_wave|slowWaves_ANT1:avgSlowWave"
+
+
+def test_the_per_level_summary_is_the_median_of_each_files_own_value(tmp_path: Path) -> None:
+    """PER_LEVEL_SUMMARY_RULE: the median over the level's files (not the mean), per version."""
+    own = {"s1": 1.0, "s2": 2.0, "s3": 10.0, "s4": 5.0, "s5": 7.0}
+    common = {"s1": 1.1, "s2": 2.1, "s3": 9.0, "s4": 5.0, "s5": 7.0}
+    got = rs.dose_response_from_night6(_n6(tmp_path, own, common), LEVELS)[SW_KEY]
+    sm = got["summary"]
+    assert sm["own"] == {"100uA": 2.0, "300uA": 6.0}  # the mean would be 4.33
+    assert sm["common"] == {"100uA": pytest.approx(2.1), "300uA": 6.0}
+    assert sm["files"] == {"100uA": ["s1", "s2", "s3"], "300uA": ["s4", "s5"]}
+    assert sm["rule"] == rs.PER_LEVEL_SUMMARY_RULE and "MEDIAN" in rs.PER_LEVEL_SUMMARY_RULE
+    assert got["verdict"] == "agree" and got["rule"] == rs.DISAGREEMENT_RULE
+
+
+def test_the_median_is_paired_so_both_versions_summarise_the_same_files(tmp_path: Path) -> None:
+    own = {"s1": 1.0, "s2": 2.0, "s3": 10.0, "s4": 5.0, "s5": 7.0}
+    common = {**own, "s3": math.nan}  # s3 not computed in the common version
+    sm = rs.dose_response_from_night6(_n6(tmp_path, own, common), LEVELS)[SW_KEY]["summary"]
+    assert sm["own"]["100uA"] == 1.5 and sm["common"]["100uA"] == 1.5
+    assert sm["unpaired"] == ["s3"] and sm["files"]["100uA"] == ["s1", "s2"]
+
+
+def test_a_rank_change_between_versions_disagrees(tmp_path: Path) -> None:
+    own = {"s1": 1.0, "s2": 2.0, "s3": 3.0, "s4": 5.0, "s5": 7.0}
+    common = {"s1": 8.0, "s2": 9.0, "s3": 9.5, "s4": 5.0, "s5": 7.0}
+    got = rs.dose_response_from_night6(_n6(tmp_path, own, common), LEVELS)[SW_KEY]
+    assert got["verdict"] == "disagree" and got["rank_changed"]
+
+
+def test_a_level_with_no_paired_file_is_not_comparable(tmp_path: Path) -> None:
+    own = {"s1": 1.0, "s2": 2.0, "s3": 3.0, "s4": 5.0, "s5": 7.0}
+    common = {**own, "s4": math.nan, "s5": math.nan}
+    got = rs.dose_response_from_night6(_n6(tmp_path, own, common), LEVELS)[SW_KEY]
+    assert got["verdict"] == "not_comparable" and got["missing_or_nonfinite"] == ["300uA"]
+
+
+def test_stim_levels_are_declared_never_inferred(tmp_path: Path) -> None:
+    epochs = _n6(tmp_path, {"s1": 1.0, "s4": 2.0})
+    with pytest.raises(ValueError, match="no stim level declared"):
+        rs.dose_response_from_night6(epochs, {"s1": "100uA"})
+
+
+def test_night6_file_values_reads_both_versions_and_skips_byproducts(tmp_path: Path) -> None:
+    d = make_night6_stim_outputs(
+        tmp_path / "s1", tag="e132",
+        own={"hrv_HRBR": {"avgHeartRate": 390.0, "avgBreathRate": 88.0},
+             "mmc_in_mmc": {"mmc.firing.avgRate": [1.0, 2.0, 3.0]}},
+        run_consumers={"hrv_HRBR": "hrv"})
+    rows = rs.night6_file_values(d, animal="A", session="s1")
+    got = {(r["analysis"], r["output"]): (r["own"], r["common"]) for r in rows}
+    assert got == {("hrv", "hrv_HRBR:avgHeartRate"): (390.0, 390.0),
+                   ("mmc", "mmc_in_mmc:mmc.firing.avgRate[1]"): (1.0, 1.0),
+                   ("mmc", "mmc_in_mmc:mmc.firing.avgRate[2]"): (2.0, 2.0),
+                   ("mmc", "mmc_in_mmc:mmc.firing.avgRate[3]"): (3.0, 3.0)}
+    # avgBreathRate is breathing's, a byproduct of the hrv run: not breathing's value
+    bad = make_night6_stim_outputs(tmp_path / "s2", tag="e132",
+                                   own={"slowWaves_ANT1": {"avgSlowWave": 1.0}},
+                                   skip_common=("slowWaves_ANT1",))
+    with pytest.raises(ValueError, match="no common-start copy"):
+        rs.night6_file_values(bad, animal="A", session="s2")
+
+
+
+def test_review2_3_the_reader_verifies_the_stored_common_starts(tmp_path: Path) -> None:
+    """Review 2 finding 3: the reader refuses stored common starts that differ from the rule.
+
+    MATLAB uses the STORED values, so the reader must never quietly recompute over them.
+    """
+    files = [_v6("a1a", 120.0, 124.0, 120.0, basis="from_electrical_end", level="L1"),
+             _v6("a3a", 119.0, 131.0, 121.0, basis="from_electrical_end", level="L3"),
+             _v6("a3b", 119.0, 133.0, 121.0, basis="from_electrical_end", level="L3")]
+    doc = rs.recovery_starts_document(files, fs=FS)
+    good = tmp_path / "good.json"
+    rs.write_recovery_starts(good, doc)
+    assert rs.read_recovery_starts(good) == json.loads(good.read_text(encoding="utf-8"))
+    name = sorted(rs.ANALYSES)[0]
+
+    def tampered(edit: Any, tag: str) -> Path:  # noqa: ANN401
+        d = json.loads(good.read_text(encoding="utf-8"))
+        edit(d)
+        p = tmp_path / f"{tag}.json"
+        p.write_text(json.dumps(d, sort_keys=True, indent=1) + "\n", encoding="utf-8",
+                     newline="\n")
+        return p
+
+    def row(d: dict) -> dict:
+        return _row(d, "a1a", name)
+    edits = {
+        "sample": lambda d: row(d).update(common_start_sample0=row(d)["common_start_sample0"] + 1),
+        "seconds": lambda d: row(d).update(common_start_s=row(d)["common_start_s"] + 0.5),
+        "level": lambda d: row(d).update(common_start_set_by="stim level L1"),
+        "absent": lambda d: row(d).pop("common_start_sample0"),
+        "record": lambda d: d["common_start"]["by_animal"]["A"]["analyses"][name].update(
+            set_by_level="L1"),
+    }
+    for tag, edit in edits.items():
+        p = tampered(edit, tag)
+        with pytest.raises(ValueError, match="stored common starts are not the rule"):
+            rs.read_recovery_starts(p)

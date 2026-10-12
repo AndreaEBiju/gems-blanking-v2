@@ -126,6 +126,28 @@ class the map uses) the cut point the same way - plus the table it was computed 
 the output time map, the cited files' hashes and the held files. Night 6 records the
 file's path and SHA-256 in every stim_rec epoch's record.
 
+Version 6 (RULING 2026-10-10 item 7)
+-----------------------------------
+* every file names its ELECTRICAL BASIS (:data:`ELECTRICAL_BASES`): measured from the electrical
+  end (as before); ``mechanical_only_zero`` - a mechanical-only file (no electrical stimulus)
+  has electrical settling 0, so it starts at the mechanical end + each analysis's own
+  settling; ``from_mechanical_end`` - where the motor runs past the electrical end (by more
+  than :data:`MOTOR_PAST_ELECTRICAL_S`), the electrical-settling search started at the
+  mechanical end, so motor activity is never measured as electrical;
+* a file whose settling was measured against a LATER reference window (the late files) keeps
+  the latest clean window and is flagged ``reference-sensitive`` (:data:`REFERENCE_SENSITIVE`)
+  with the spread of the settling over every clean window; each analysis carries
+  ``reference_sensitive_until_s`` / ``_sample0`` - its start under the latest settling any
+  clean window gives - and outputs before it are reference-sensitive;
+* every file names its ``animal``, and the DOSE-RESPONSE SAFEGUARD (:data:`COMMON_START_RULE`)
+  gives every analysis and every cut a ``common_start_s`` / ``common_start_sample0``: the
+  latest start among ALL the animal's stim_recovery files, measured from each file's
+  mechanical end. Night 6 reports both and writes a common-start version of the outputs;
+  :func:`dose_response_disagreement` is the definition of "the two versions disagree",
+  fixed before any result; :data:`PER_LEVEL_SUMMARY_RULE` (:func:`per_level_summaries`) the
+  per-stim-level summary it compares, and :func:`dose_response_from_night6` reads both
+  versions' per-file values from Night 6's outputs (the trim marker's recomputed values).
+
 Electrical settling only: no term here, and nothing that feeds one, uses heart rate,
 firing rate or slow-wave rate (RULING (j) 6).
 
@@ -134,12 +156,15 @@ OUTSIDE THE GENERATION HASH.
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Literal
+
+import numpy as np
 
 from gems_blanking_v2.extent.grid import first_sample_at_or_after, seconds_to_sample
 from gems_blanking_v2.extent.tolerance import (
@@ -169,18 +194,27 @@ __all__ = [
     "BASIS_MEASURED",
     "BEAT_SPACING_S",
     "BREATH_TROUGH_SPACING_S",
+    "COMMON_START_RULE",
     "CONVENTIONS",
+    "DISAGREEMENT_RULE",
+    "DISAGREE_FRACTION",
+    "ELECTRICAL_BASES",
     "FIXED_START_S",
     "FIXED_START_SOURCE",
     "HELD_NO_SETTLING",
     "HELD_UNDETECTED",
+    "MOTOR_PAST_ELECTRICAL_S",
     "OUTPUT_FILES",
     "OUTPUT_VARS",
+    "PER_LEVEL_SUMMARY_RULE",
     "RECOMPUTE_KINDS",
+    "REFERENCE_SENSITIVE",
     "RULING",
     "RULING_SETTLING",
     "RULING_TIMES",
     "RULING_TRIM",
+    "RULING_V6",
+    "RULING_V7",
     "SCHEMA",
     "SOURCE_FILES",
     "SOURCE_LABEL",
@@ -203,10 +237,15 @@ __all__ = [
     "analysis_settling",
     "beat_decimation_factor",
     "cut_id",
+    "dose_response_disagreement",
+    "dose_response_from_night6",
     "file_starts",
     "input_mask",
+    "load_trim_marker",
+    "night6_file_values",
     "output_reach_s",
     "output_times_record",
+    "per_level_summaries",
     "read_recovery_starts",
     "recovery_starts_document",
     "source_files_record",
@@ -219,7 +258,59 @@ __all__ = [
 
 RULING: Final = "RULING 2026-10-08 (k) 2"
 RULING_TRIM: Final = "RULING 2026-10-09 item 6"
-SCHEMA: Final = "gems-blanking-v2 recovery starts v5"
+SCHEMA: Final = "gems-blanking-v2 recovery starts v7"
+RULING_V6: Final = "RULING 2026-10-10 item 7"
+RULING_V7: Final = "Andrea, revised 2026-10-10 (dose-response safeguard, scope D)"
+ELECTRICAL_BASES: Final[Mapping[str, str]] = {
+    "from_electrical_end": "the electrical-only rule, measured from the electrical end "
+                           "(RULING 2026-10-09 (i) 3 (a)-(c))",
+    "mechanical_only_zero": "a mechanical-only file (no electrical stimulus): electrical "
+                            "settling = 0, the start is the mechanical end + each analysis's "
+                            "own settling (RULING 2026-10-10 item 7)",
+    "from_mechanical_end": "the motor runs past the electrical end: the electrical-settling "
+                           "search starts at the mechanical end, so motor activity is never "
+                           "measured as electrical (RULING 2026-10-10 item 7)",
+}
+"""How each file's electrical settling was obtained (v6: required per measured file)."""
+MOTOR_PAST_ELECTRICAL_S: Final = 1.0
+"""Mechanical end - electrical end above which the motor "runs past the electrical end": the
+measured gap is bimodal (0.02-0.07 s on 119 combined files - the gate's own lag, under the
+rule's 1 s hold - and 2.03-2.04 s on 63), and only the second puts motor activity inside the
+window the electrical rule reads."""
+REFERENCE_SENSITIVE: Final = "reference-sensitive"
+COMMON_START_RULE: Final = (
+    "RULING 2026-10-10 item 7, dose-response safeguard, as revised by Andrea 2026-10-10: for "
+    "comparisons between stim levels, every stim_recovery file of an animal starts each "
+    "analysis - and cuts each output - at the LATEST of the per-stim-level MEDIAN starts, "
+    "measured from each file's mechanical end (recovery never starts before it): per level, "
+    "the median over that level's files of (start - mechanical end), reference-sensitive "
+    "files EXCLUDED; common start = mechanical end + the largest of those medians, never "
+    "before the file's own start. Each file's own start stays PRIMARY; the common-start "
+    "version re-uses each file's outputs and only cuts them later, beside it. Stim levels "
+    "are declared per file (stim_level), never parsed from a name")
+DISAGREE_FRACTION: Final = 0.10
+DISAGREEMENT_RULE: Final = (
+    "RULING 2026-10-10 item 7, fixed 2026-10-10 before any Night 6 result: for one animal x "
+    "output, summarised per stim level (one value per level, the same summary in both "
+    "versions), the own-start and common-start versions DISAGREE when (a) the stim levels' "
+    "rank order differs, or (b) some level's own-start value differs from its common-start "
+    "value by more than 10% of the common-start values' range across levels (with one level, "
+    "or a zero range, 10% of that level's common-start magnitude). A level missing or "
+    "non-finite in either version makes the comparison 'not_comparable', never 'agree'")
+PER_LEVEL_SUMMARY_RULE: Final = (
+    "PROPOSED 2026-10-10 (review of r1010, fix 5) before any Night 6 result; Andrea may "
+    "override it until results exist: for one animal x analysis x output variable, a stim "
+    "level's summary is the MEDIAN, over that level's stim_recovery files, of each file's "
+    "own per-file value - the whole-epoch scalar Night 6 already reports for that output "
+    "(the trim marker's recomputed value: her own expression over the values kept from the "
+    "file's start of that analysis), taken in each version from that version's outputs "
+    "(own start: the epoch folder; common start: its common_start folder). The median is "
+    "PAIRED: a file enters a level only where its value is finite in both versions, so both "
+    "versions summarise the same files; a file finite in one version only is listed as "
+    "unpaired and left out of both. A level with no paired file is missing, which makes the "
+    "comparison not_comparable. A vector output (one value per channel or column) is one "
+    "output variable per element, named <leaf>[k] with k 1-based as MATLAB indexes it")
+"""The per-stim-level summary :data:`DISAGREEMENT_RULE` compares (:func:`per_level_summaries`)."""
 """v5 (RULING 2026-10-09 (i) 3 (c)): stim-off is two times. Every measured file carries
 ``electrical_end_s``, ``mechanical_end_s`` and ``mechanical_end_sample0`` beside the
 electrical settling, and ``input_mask_s`` / ``input_mask_sample0`` = their maximum, with
@@ -1585,6 +1676,51 @@ def input_mask(*, fs: float, electrical_settle_s: float,
             "electrical_settle_sample0": ke, "mechanical_end_sample0": km}
 
 
+def _check_basis(session: str, basis: str, *, electrical_end_s: float,
+                 mechanical_end_s: float, electrical_settle_s: float) -> None:
+    """Refuse a v6 electrical basis that the file's own times contradict."""
+    if basis not in ELECTRICAL_BASES:
+        msg = (f"{session}: electrical basis {basis!r} is none of {sorted(ELECTRICAL_BASES)} "
+               f"({RULING_V6})")
+        raise ValueError(msg)
+    if basis == "mechanical_only_zero" and electrical_settle_s != electrical_end_s:
+        msg = (f"{session}: a mechanical-only file has electrical settling 0, but the settling "
+               f"is at {electrical_settle_s} s and the electrical end at {electrical_end_s} s")
+        raise ValueError(msg)
+    if basis == "from_mechanical_end" and not (
+            electrical_settle_s >= mechanical_end_s
+            and mechanical_end_s - electrical_end_s > MOTOR_PAST_ELECTRICAL_S):
+        msg = (f"{session}: a search from the mechanical end needs the motor to run past the "
+               f"electrical end by > {MOTOR_PAST_ELECTRICAL_S:g} s and the settling at or after "
+               f"the mechanical end; got E {electrical_end_s}, M {mechanical_end_s}, settling "
+               f"{electrical_settle_s}")
+        raise ValueError(msg)
+
+
+def _reference_sensitive(session: str, ref: Mapping[str, Any]) -> dict[str, Any]:
+    """Check the late-reference spread and return the file's reference-sensitive record."""
+    need = ("window_s", "anchor_s", "after_anchor_s", "n_clean", "n_candidates")
+    gap = [k for k in need if k not in ref]
+    after = ref.get("after_anchor_s") or {}
+    if gap or not all(k in after for k in ("chosen", "clean_min", "clean_max")):
+        msg = (f"{session}: a reference-sensitive file needs {list(need)} and after_anchor_s "
+               f"{{chosen, clean_min, clean_max}}; missing {gap}")
+        raise ValueError(msg)
+    lo, ch, hi = (float(after[k]) for k in ("clean_min", "chosen", "clean_max"))
+    if not lo <= ch or not ch <= hi:
+        msg = f"{session}: the chosen settling {ch} lies outside the clean spread [{lo}, {hi}]"
+        raise ValueError(msg)
+    return {"flag": REFERENCE_SENSITIVE, "window_s": [float(x) for x in ref["window_s"]],
+            "anchor_s": float(ref["anchor_s"]),
+            "after_anchor_s": {"chosen": ch, "clean_min": lo, "clean_max": hi},
+            "spread_s": hi - lo, "n_clean": int(ref["n_clean"]),
+            "n_candidates": int(ref["n_candidates"]),
+            "rule": (f"{RULING_V6}: settled against the latest clean 60 s reference window; the "
+                     "early-recovery outputs are reference-sensitive - every output before an "
+                     "analysis's reference_sensitive_until (its start under the latest "
+                     "settling any clean window gives) is flagged")}
+
+
 def _held_record(*, session: str, fs: float | None, electrical_end_s: float | None,
                  mechanical_end_s: float | None, electrical_settle_s: float | None,
                  times_source: str) -> dict[str, Any] | None:
@@ -1613,7 +1749,9 @@ def _held_record(*, session: str, fs: float | None, electrical_end_s: float | No
 
 def file_starts(*, session: str, fs: float | None, electrical_end_s: float | None,
                 mechanical_end_s: float | None, electrical_settle_s: float | None,
-                times_source: str, electrical_source: str,
+                times_source: str, electrical_source: str, animal: str,
+                electrical_basis: str, stim_level: str | None,
+                reference_sensitive: Mapping[str, Any] | None = None,
                 analyses: Sequence[str] | None = None,
                 table: Mapping[str, Analysis] | None = None,
                 fixed_start_s: float = FIXED_START_S) -> dict[str, Any]:
@@ -1631,24 +1769,50 @@ def file_starts(*, session: str, fs: float | None, electrical_end_s: float | Non
     the missing figure named; the others get their own starts. Missing values are absent
     keys. ``fs`` (the file's own rate) may be ``None`` only for a file held before it was
     read.
+
+    v6 (RULING 2026-10-10 item 7): ``animal`` (the store's, for the common start) and
+    ``electrical_basis`` (:data:`ELECTRICAL_BASES`, checked against the times) are required;
+    ``reference_sensitive`` (a late file: ``window_s``, ``anchor_s``, ``after_anchor_s``
+    {chosen, clean_min, clean_max}, ``n_clean``, ``n_candidates``) flags it and gives every
+    analysis its ``reference_sensitive_until``.
+
+    v7 (Andrea, revised 2026-10-10): ``stim_level`` - the file's stim level as DECLARED by the
+    caller (never parsed from the name) - is required for a measured file: the common start is
+    the latest of the per-level median starts (:data:`COMMON_START_RULE`). A held file may
+    pass None.
     """
+    if not animal:
+        msg = f"{session}: v6 needs the file's animal (the common start is per animal)"
+        raise ValueError(msg)
+    level = {"stim_level": str(stim_level)} if stim_level else {}
     names = list(ANALYSES if analyses is None else analyses)
     held = _held_record(session=session, fs=fs, electrical_end_s=electrical_end_s,
                         mechanical_end_s=mechanical_end_s,
                         electrical_settle_s=electrical_settle_s, times_source=times_source)
     if held is not None:
-        return held
+        return {**held, "animal": animal, **level}
     if fs is None or electrical_end_s is None or mechanical_end_s is None \
             or electrical_settle_s is None:  # for the type checker: _held_record covers these
         msg = f"{session}: a measured file needs its fs"
+        raise ValueError(msg)
+    if not level:
+        msg = (f"{session}: v7 needs the file's declared stim level (the common start is the "
+               f"latest per-level median start; {RULING_V7})")
         raise ValueError(msg)
     if electrical_settle_s < electrical_end_s:
         msg = (f"{session}: electrical settling {electrical_settle_s} s precedes the "
                f"electrical end {electrical_end_s} s")
         raise ValueError(msg)
+    _check_basis(session, electrical_basis, electrical_end_s=float(electrical_end_s),
+                 mechanical_end_s=float(mechanical_end_s),
+                 electrical_settle_s=float(electrical_settle_s))
+    rsens = (_reference_sensitive(session, reference_sensitive)
+             if reference_sensitive is not None else None)
     im = input_mask(fs=float(fs), electrical_settle_s=float(electrical_settle_s),
                     mechanical_end_s=float(mechanical_end_s))
     t_mask = float(im["input_mask_s"])
+    t_until = (max(rsens["anchor_s"] + rsens["after_anchor_s"]["clean_max"],
+                   float(mechanical_end_s)) if rsens is not None else None)
     basis_text = (f"max(electrical end + electrical settling ({electrical_source}), "
                   f"mechanical end) ({times_source}; {RULING_TIMES})")
     fixed0 = seconds_to_sample(fixed_start_s, fs)
@@ -1669,6 +1833,10 @@ def file_starts(*, session: str, fs: float | None, electrical_end_s: float | Non
             "own_settling_s": s.settling_s, "binding_output": s.binding_output,
             "source": (f"{RULING}: {basis_text} + own settling "
                        f"(extent.recovery_start.ANALYSES[{name!r}], {SOURCE_LABEL})")}
+        if t_until is not None:
+            until = max(start, t_until + s.settling_s)
+            row["reference_sensitive_until_s"] = until
+            row["reference_sensitive_until_sample0"] = seconds_to_sample(until, fs)
         if k0 < fixed0:
             row["relation"] = "earlier_than_fixed: runs from the fixed start; early part " \
                               "deferred to the add-on"
@@ -1678,12 +1846,16 @@ def file_starts(*, session: str, fs: float | None, electrical_end_s: float | Non
             row["relation"] = "later_than_fixed: trimmed at Night 6"
         rows.append(row)
     cuts = _file_cuts(float(fs), t_mask, float(fixed_start_s), basis_text, table)
-    return {"session": session, "fs": float(fs), "times_source": times_source,
+    return {"session": session, "animal": animal, "fs": float(fs),
+            "times_source": times_source,
+            "electrical_basis": electrical_basis,
+            "electrical_basis_rule": ELECTRICAL_BASES[electrical_basis],
             "electrical_end_s": float(electrical_end_s),
             "mechanical_end_s": float(mechanical_end_s),
             "electrical_settle_s": float(electrical_settle_s),
             "electrical_s": float(electrical_settle_s) - float(electrical_end_s),
-            **im, "analyses": rows, "cuts": cuts}
+            **im, "analyses": rows, "cuts": cuts, **level,
+            **({"reference_sensitive": rsens} if rsens is not None else {})}
 
 
 def _file_cuts(fs: float, input_mask_s: float, fixed_start_s: float, basis_text: str,
@@ -1833,6 +2005,310 @@ def _check_times(sess: str, f: Mapping[str, Any]) -> None:
         raise ValueError(msg)
 
 
+def _check_v6(sess: str, f: Mapping[str, Any]) -> None:
+    """v6 fields: animal, a known electrical basis its times allow, reference-sensitive rows."""
+    if not f.get("animal") or f.get("electrical_basis") not in ELECTRICAL_BASES:
+        msg = (f"{sess}: v6 needs animal and electrical_basis (one of "
+               f"{sorted(ELECTRICAL_BASES)}) ({RULING_V6})")
+        raise ValueError(msg)
+    _check_basis(sess, str(f["electrical_basis"]), electrical_end_s=float(f["electrical_end_s"]),
+                 mechanical_end_s=float(f["mechanical_end_s"]),
+                 electrical_settle_s=float(f["electrical_settle_s"]))
+    if not f.get("stim_level"):
+        msg = f"{sess}: v7 needs the file's declared stim_level ({RULING_V7})"
+        raise ValueError(msg)
+    for r in f["analyses"]:
+        u = r.get("reference_sensitive_until_sample0")
+        if (u is None) != ("reference_sensitive" not in f) or (
+                u is not None and int(u) < int(r["start_sample0"])):
+            msg = (f"{sess}/{r['analysis']}: reference_sensitive_until must be present exactly "
+                   "on a reference-sensitive file, at or after the start")
+            raise ValueError(msg)
+
+
+def _common_starts(measured: list[dict[str, Any]]) -> dict[str, Any]:
+    """Give every analysis and cut its common start (:data:`COMMON_START_RULE`); the record.
+
+    Per animal and per analysis (and per cut id): over the animal's measured files that are
+    NOT reference-sensitive, each stim level's median of (start - mechanical end); the offset
+    is the largest of those medians (ties: the larger level name). Each row's
+    ``common_start_s`` = its file's mechanical end + that offset - never before the row's own
+    start - ``common_start_sample0`` its sample (as starts are converted), and
+    ``common_start_set_by`` the level that set it. A reference-sensitive file gets a common
+    start but never sets one. An analysis whose every file is reference-sensitive has no
+    common start and is refused (ValueError, naming it): never fabricated.
+    """
+    by: dict[str, list[dict[str, Any]]] = {}
+    for f in measured:
+        by.setdefault(str(f["animal"]), []).append(f)
+    record: dict[str, Any] = {}
+    for animal, files in sorted(by.items()):
+        used = [f for f in files if "reference_sensitive" not in f]
+        levels: dict[str, list[str]] = {}
+        for f in used:
+            levels.setdefault(str(f["stim_level"]), []).append(str(f["session"]))
+        rec: dict[str, Any] = {
+            "files": sorted(str(f["session"]) for f in files),
+            "excluded_reference_sensitive": sorted(str(f["session"]) for f in files
+                                                   if "reference_sensitive" in f),
+            "levels": {lv: sorted(v) for lv, v in sorted(levels.items())},
+            "analyses": {}, "cuts": {}}
+        for kind, key in (("analyses", "analysis"), ("cuts", "cut")):
+            offs: dict[str, dict[str, list[tuple[float, str]]]] = {}
+            for f in used:
+                m = float(f["mechanical_end_s"])
+                for r in f[kind]:
+                    offs.setdefault(str(r[key]), {}).setdefault(str(f["stim_level"]), []).append(
+                        (float(r["start_s"]) - m, str(f["session"])))
+            names = sorted({str(r[key]) for f in files for r in f[kind]})
+            best: dict[str, tuple[float, str]] = {}
+            for name in names:
+                if name not in offs:
+                    msg = (f"animal {animal}: {key} {name}: every file is reference-sensitive, so "
+                           "no common start can be computed (COMMON_START_RULE excludes them)")
+                    raise ValueError(msg)
+                med = {lv: float(np.median([o for o, _s in v])) for lv, v in offs[name].items()}
+                top = max(med, key=lambda lv: (med[lv], lv))
+                best[name] = (med[top], top)
+                rec[kind][name] = {
+                    "offset_after_mechanical_end_s": med[top], "set_by_level": top,
+                    "level_medians": {lv: {"median_offset_s": med[lv],
+                                           "files": sorted(s_ for _o, s_ in offs[name][lv])}
+                                      for lv in sorted(med)}}
+            for f in files:
+                m, fs = float(f["mechanical_end_s"]), float(f["fs"])
+                for r in f[kind]:
+                    off, lv = best[str(r[key])]
+                    t = m + off
+                    k = max(seconds_to_sample(t, fs), int(r["start_sample0"]))
+                    r.update(common_start_s=max(t, float(r["start_s"])),
+                             common_start_sample0=k, common_start_set_by=f"stim level {lv}")
+        record[animal] = rec
+    return {"rule": COMMON_START_RULE, "ruling": RULING_V7, "anchor": "mechanical_end",
+            "summary": "latest per-stim-level median start, reference-sensitive files excluded",
+            "by_animal": record}
+
+
+def dose_response_disagreement(own: Mapping[str, float], common: Mapping[str, float]
+                               ) -> dict[str, Any]:
+    """Whether the own-start and common-start versions disagree (:data:`DISAGREEMENT_RULE`).
+
+    ``own`` and ``common`` map each stim level to one animal x output's summary in that
+    version. Returns ``verdict`` ("agree" | "disagree" | "not_comparable"), whether the rank
+    order changed, the levels that moved by more than the tolerance, the tolerance, and the
+    rule.
+    """
+    levels = sorted(set(own) | set(common))
+    bad = [lv for lv in levels if lv not in own or lv not in common
+           or not math.isfinite(float(own[lv])) or not math.isfinite(float(common[lv]))]
+    out: dict[str, Any] = {"rule": DISAGREEMENT_RULE, "levels": levels}
+    if bad or not levels:
+        return {**out, "verdict": "not_comparable", "missing_or_nonfinite": bad}
+    o = {lv: float(own[lv]) for lv in levels}
+    c = {lv: float(common[lv]) for lv in levels}
+    rank_o = sorted(levels, key=lambda lv: (o[lv], lv))
+    rank_c = sorted(levels, key=lambda lv: (c[lv], lv))
+    span = max(c.values()) - min(c.values())
+    tol = {lv: DISAGREE_FRACTION * (span if span > 0 else abs(c[lv])) for lv in levels}
+    moved = [lv for lv in levels if abs(o[lv] - c[lv]) > tol[lv]]
+    changed = rank_o != rank_c
+    return {**out, "verdict": "disagree" if (changed or moved) else "agree",
+            "rank_changed": changed, "rank_own": rank_o, "rank_common": rank_c,
+            "levels_moved": moved, "tolerance": tol}
+
+
+def _h5_value(f: Any, obj: Any) -> Any:  # noqa: ANN401 - a decoded MATLAB value
+    """Decode one MATLAB v7.3 (HDF5) object: a scalar struct, a cell, a char or a numeric."""
+    import h5py  # noqa: PLC0415 - only a v7.3 reader needs it
+
+    cls = obj.attrs.get("MATLAB_class", b"")
+    cls = cls.decode() if isinstance(cls, bytes) else str(cls)
+    if isinstance(obj, h5py.Group):
+        return {k: _h5_value(f, obj[k]) for k in obj if not k.startswith("#")}
+    if "MATLAB_empty" in obj.attrs and bool(np.asarray(obj.attrs["MATLAB_empty"]).ravel()[0]):
+        return "" if cls == "char" else []
+    data = np.asarray(obj[()])
+    if cls == "cell":
+        return [_h5_value(f, f[r]) for r in data.T.ravel()]
+    if cls == "char":
+        return "".join(chr(int(c)) for c in data.T.ravel())
+    return data.T
+
+
+def load_trim_marker(path: Path) -> dict[str, Any]:
+    """Return the :data:`TRIM_MARKER` variable of one Night 6 output file, as plain Python.
+
+    MAT v5 (``scipy.io.loadmat``) and v7.3 (HDF5, her ``-v7.3`` spike file) are both read;
+    only the marker is loaded. A file without the marker is refused by name (ValueError).
+    """
+    import h5py  # noqa: PLC0415
+    from scipy.io import loadmat, whosmat  # noqa: PLC0415
+
+    path = Path(path)
+    if h5py.is_hdf5(path):
+        with h5py.File(path, "r") as f:
+            if TRIM_MARKER not in f:
+                msg = f"{path.name}: no {TRIM_MARKER} (not trimmed by Night 6)"
+                raise ValueError(msg)
+            return dict(_h5_value(f, f[TRIM_MARKER]))
+    if TRIM_MARKER not in {name for name, _s, _c in whosmat(path)}:
+        msg = f"{path.name}: no {TRIM_MARKER} (not trimmed by Night 6)"
+        raise ValueError(msg)
+    m = loadmat(path, variable_names=[TRIM_MARKER], simplify_cells=True)
+    return dict(m[TRIM_MARKER])
+
+
+def _as_list(x: object) -> list[Any]:
+    """Return a MATLAB cell or struct array as loaded (a list, a lone element, or empty)."""
+    if isinstance(x, list | tuple):
+        return list(x)
+    if isinstance(x, np.ndarray) and x.dtype == object:
+        return list(x.ravel())
+    if isinstance(x, np.ndarray) and x.size == 0:
+        return []
+    return [x]
+
+
+def _marker_values(marker: Mapping[str, Any]) -> dict[str, tuple[str, float]]:
+    """``leaf[k]`` -> (path, value) for every recomputed value of one marker (non-finite: NaN)."""
+    out: dict[str, tuple[str, float]] = {}
+    for e in _as_list(marker.get("recomputed", [])):
+        for leaf in _as_list(e["leaves"]):
+            v = np.asarray(leaf["recomputed"], dtype=np.float64).ravel()
+            names = ([str(leaf["leaf"])] if v.size == 1 else
+                     [f"{leaf['leaf']}[{k}]" for k in range(1, v.size + 1)])
+            for name, x in zip(names, v.tolist(), strict=True):
+                if name in out:
+                    msg = f"recomputed leaf {name!r} appears twice in one marker"
+                    raise ValueError(msg)
+                out[name] = (str(e["path"]), float(x))
+    return out
+
+
+def night6_file_values(epoch_dir: Path, *, animal: str, session: str) -> list[dict[str, Any]]:
+    """Each output variable's per-file value in both versions, from one stim_recovery epoch.
+
+    ``epoch_dir`` is Night 6's epoch folder (own-start outputs) holding ``common_start/`` (the
+    common-start version, RULING 2026-10-10 item 7). Every output file matching
+    :data:`OUTPUT_FILES` is read through its trim marker (:func:`load_trim_marker`); each
+    recomputed value whose owner (:data:`OUTPUT_VARS`) is one of the marker's
+    ``run_consumers`` is that analysis's value (a byproduct of another consumer's run is not
+    its owner's value). The output variable is ``<file>:<leaf>`` with the file named without
+    its epoch tag (``slowWaves_ANT1``). Rows: animal, session, analysis, output, and ``own``
+    / ``common`` - absent when not finite (never NaN in a record). A file without its
+    common-start copy, or an (analysis, output) given twice, is refused (ValueError).
+    """
+    import re  # noqa: PLC0415
+
+    epoch_dir = Path(epoch_dir)
+    owner = {(v.file, v.path): _owner(v) for v in OUTPUT_VARS}
+    rows: dict[tuple[str, str], dict[str, Any]] = {}
+    for p in sorted(epoch_dir.glob("*.mat")):
+        kinds = [k for k, f in OUTPUT_FILES.items() if re.search(f.pattern, p.name)]
+        if len(kinds) != 1:
+            continue  # an input copy or a figure: not an output of the map
+        cp = epoch_dir / "common_start" / p.name
+        if not cp.is_file():
+            msg = f"{session}: {p.name} has no common-start copy ({cp})"
+            raise ValueError(msg)
+        own_m, com_m = load_trim_marker(p), load_trim_marker(cp)
+        runs = {str(c) for c in _as_list(own_m.get("run_consumers", []))}
+        own_v, com_v = _marker_values(own_m), _marker_values(com_m)
+        if set(own_v) != set(com_v):
+            msg = f"{session}: {p.name} recomputes {sorted(own_v)} own, {sorted(com_v)} common"
+            raise ValueError(msg)
+        inst = p.stem.split("_", 1)[1] if "_" in p.stem else p.stem
+        for leaf, (path, x) in own_v.items():
+            analysis = owner.get((kinds[0], path))
+            if analysis is None or analysis not in runs:
+                continue
+            key = (analysis, f"{inst}:{leaf}")
+            if key in rows:
+                msg = f"{session}: {key} is given by two output files"
+                raise ValueError(msg)
+            row: dict[str, Any] = {"animal": animal, "session": session, "analysis": analysis,
+                                   "output": key[1]}
+            for name, val in (("own", x), ("common", com_v[leaf][1])):
+                if math.isfinite(val):
+                    row[name] = val
+            rows[key] = row
+    return [rows[k] for k in sorted(rows)]
+
+
+def per_level_summaries(rows: Sequence[Mapping[str, Any]], levels: Mapping[str, str]
+                        ) -> dict[str, dict[str, Any]]:
+    """Return each ``animal|analysis|output``'s per-level summary (PER_LEVEL_SUMMARY_RULE).
+
+    ``rows`` are per-file values (:func:`night6_file_values`); ``levels`` maps each session to
+    its stim level, DECLARED by the caller (never parsed from a name here). A session with no
+    declared level is refused, as is one session giving one output twice. Per key: ``own`` /
+    ``common`` (level -> paired median), ``files`` (level -> the paired sessions) and
+    ``unpaired`` (sessions finite in one version only), and the rule.
+    """
+    by: dict[str, dict[str, dict[str, tuple[float, float]]]] = {}
+    unpaired: dict[str, list[str]] = {}
+    for r in rows:
+        s = str(r["session"])
+        if s not in levels:
+            msg = f"{s}: no stim level declared for it (levels are declared, never inferred)"
+            raise ValueError(msg)
+        key = f"{r['animal']}|{r['analysis']}|{r['output']}"
+        lv = str(levels[s])
+        o, c = r.get("own"), r.get("common")
+        ok = (o is not None and c is not None and math.isfinite(float(o))
+              and math.isfinite(float(c)))
+        if not ok:
+            unpaired.setdefault(key, []).append(s)
+            by.setdefault(key, {})
+            continue
+        per = by.setdefault(key, {}).setdefault(lv, {})
+        if s in per:
+            msg = f"{s} gives {key} twice"
+            raise ValueError(msg)
+        per[s] = (float(o), float(c))  # type: ignore[arg-type]
+    out: dict[str, dict[str, Any]] = {}
+    for key in sorted(by):
+        lv_files = by[key]
+        out[key] = {
+            "rule": PER_LEVEL_SUMMARY_RULE,
+            "own": {lv: float(np.median([v[0] for v in f.values()])) for lv, f in lv_files.items()},
+            "common": {lv: float(np.median([v[1] for v in f.values()]))
+                       for lv, f in lv_files.items()},
+            "files": {lv: sorted(f) for lv, f in lv_files.items()},
+            "unpaired": sorted(unpaired.get(key, []))}
+    return out
+
+
+def dose_response_from_night6(epochs: Mapping[str, tuple[str, Path]], levels: Mapping[str, str]
+                              ) -> dict[str, dict[str, Any]]:
+    """Return the disagreement verdict per ``animal|analysis|output`` from Night 6's outputs.
+
+    ``epochs`` maps each stim_recovery session to (animal, its Night 6 epoch folder);
+    ``levels`` each session to its declared stim level. Every level named for an animal is
+    compared for every output of that animal (a level whose files give no paired value is
+    missing there: ``not_comparable``). Returns, per key, :func:`dose_response_disagreement`
+    on :func:`per_level_summaries`, with the summary beside it.
+    """
+    rows: list[dict[str, Any]] = []
+    for s, (animal, d) in sorted(epochs.items()):
+        rows += night6_file_values(Path(d), animal=animal, session=s)
+    summ = per_level_summaries(rows, levels)
+    animal_levels: dict[str, set[str]] = {}
+    for s, (animal, _d) in epochs.items():
+        if s not in levels:
+            msg = f"{s}: no stim level declared for it (levels are declared, never inferred)"
+            raise ValueError(msg)
+        animal_levels.setdefault(animal, set()).add(str(levels[s]))
+    out: dict[str, dict[str, Any]] = {}
+    for key, sm in summ.items():
+        want = animal_levels[key.split("|", 1)[0]]
+        own = {lv: sm["own"].get(lv, math.nan) for lv in want}
+        common = {lv: sm["common"].get(lv, math.nan) for lv in want}
+        res = dose_response_disagreement(own, common)
+        out[key] = {**res, "summary": sm}
+    return out
+
+
 def recovery_starts_document(files: Sequence[Mapping[str, Any]], *, fs: float,
                              fixed_start_s: float = FIXED_START_S,
                              table: Mapping[str, Analysis] | None = None,
@@ -1859,11 +2335,15 @@ def recovery_starts_document(files: Sequence[Mapping[str, Any]], *, fs: float,
                     raise TypeError(msg)
             _check_cuts(sess, f.get("cuts"))
             _check_times(sess, f)
+            _check_v6(sess, f)
             measured.append(dict(f))
         else:
             held.append(dict(f))
+    common = _common_starts(measured)
     doc: dict[str, Any] = {
-        "schema": SCHEMA, "ruling": RULING, "fs": float(fs),
+        "schema": SCHEMA, "ruling": RULING, "ruling_v6": RULING_V6, "fs": float(fs),
+        "electrical_bases": dict(ELECTRICAL_BASES), "common_start": common,
+        "disagreement_rule": DISAGREEMENT_RULE,
         "fixed_start_s": float(fixed_start_s), "fixed_start_source": FIXED_START_SOURCE,
         "source_files": source_files_record(), "trim_modes": list(TRIM_MODES),
         "withdrawn_trim_modes": dict(WITHDRAWN_TRIM_MODES),
@@ -1888,8 +2368,39 @@ def write_recovery_starts(path: Path, doc: Mapping[str, Any]) -> str:
     return text
 
 
+COMMON_ROW_KEYS: Final = ("common_start_s", "common_start_sample0", "common_start_set_by")
+"""What :func:`_common_starts` writes on every analysis and cut row - and MATLAB reads."""
+
+
+def common_start_mismatches(stored: Mapping[str, Any], again: Mapping[str, Any]) -> list[str]:
+    """Every place the STORED common starts differ from the rule recomputed (exact; samples).
+
+    ``stored`` is a starts document as read; ``again`` the document rebuilt from its files.
+    Compared: the ``common_start`` record, and on every analysis and cut row of every file the
+    :data:`COMMON_ROW_KEYS` - the sample exactly, the time and the setting level exactly. A key
+    absent from a stored row is a mismatch, never a default.
+    """
+    out: list[str] = []
+    if stored.get("common_start") != again["common_start"]:
+        out.append("common_start record")
+    rows = {(str(f["session"]), kind, str(r[key])): r for f in again["files"]
+            for kind, key in (("analyses", "analysis"), ("cuts", "cut")) for r in f[kind]}
+    for f in stored.get("files", []):
+        for kind, key in (("analyses", "analysis"), ("cuts", "cut")):
+            for r in f.get(kind) or []:
+                want = rows.get((str(f["session"]), kind, str(r[key])), {})
+                out += [f"{f['session']}/{r[key]}: {k} {r.get(k)!r} != {want.get(k)!r}"
+                        for k in COMMON_ROW_KEYS if r.get(k) != want.get(k)]
+    return out
+
+
 def read_recovery_starts(path: Path) -> dict[str, Any]:
-    """Read and validate a starts file; refuses a wrong schema or a malformed row by name."""
+    """Read and validate a starts file; refuses a wrong schema or a malformed row by name.
+
+    The common starts are VERIFIED, never recomputed into the result (review 2 finding 3):
+    MATLAB reads the stored ``common_start_*`` values, so the rule is rebuilt on a deep copy and
+    any difference from what the file stores - one sample is enough - is refused by name.
+    """
     doc = json.loads(Path(path).read_text(encoding="utf-8"))
     if doc.get("schema") != SCHEMA:
         msg = f"{path}: schema {doc.get('schema')!r}, expected {SCHEMA!r}"
@@ -1903,14 +2414,21 @@ def read_recovery_starts(path: Path) -> dict[str, Any]:
             or doc["edge_settling_sha256"] != edge_settling_sha256()):
         msg = (f"{path}: its edge_settling (sha256 {str(doc['edge_settling_sha256'])[:16]}) is "
                f"not this build's (sha256 {edge_settling_sha256()[:16]}): the starts were "
-               "derived under other edge settlings - regenerate the file (schema v5)")
+               "derived under other edge settlings - regenerate the file (schema v6)")
         raise ValueError(msg)
-    recovery_starts_document([*doc["files"], *doc["held"]], fs=float(doc["fs"]),
-                             fixed_start_s=float(doc["fixed_start_s"]))
     known = set(expected_consumers())
     for f in doc["files"]:
         for r in f["analyses"]:
             if r["analysis"] not in known:
                 msg = f"{path}: {f['session']} names analysis {r['analysis']!r}, not a consumer"
                 raise ValueError(msg)
+    again = recovery_starts_document(copy.deepcopy([*doc["files"], *doc["held"]]),
+                                     fs=float(doc["fs"]),
+                                     fixed_start_s=float(doc["fixed_start_s"]))
+    bad = common_start_mismatches(doc, again)
+    if bad:
+        msg = (f"{path}: the stored common starts are not the rule's ({len(bad)} differences, "
+               f"first {bad[:3]}): MATLAB reads the stored values - regenerate the file, never "
+               "edit it")
+        raise ValueError(msg)
     return dict(doc)

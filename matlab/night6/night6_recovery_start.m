@@ -4,7 +4,12 @@ function RS = night6_recovery_start(file)
 %   RS = night6_recovery_start(file)
 %
 % The file is written by gems_blanking_v2.extent.recovery_start.write_recovery_starts
-% (schema 'gems-blanking-v2 recovery starts v5'): per stim_rec file BOTH stim times
+% (schema 'gems-blanking-v2 recovery starts v7'; RULING 2026-10-10 item 7 adds per file its
+% animal, its electrical_basis - from_electrical_end, mechanical_only_zero (settling 0) or
+% from_mechanical_end (the search started at the mechanical end) - a reference_sensitive
+% record on the late files with each analysis's reference_sensitive_until_sample0, and per
+% analysis and per cut the animal's common start, common_start_sample0, never before its own
+% start; a v5 file is refused by name): per stim_rec file BOTH stim times
 % (RULING 2026-10-09 (i) 3 (c): electrical_end_s, the stimulator's AmA record, and
 % mechanical_end_s, the gate/MotorOn offset), the electrical settling and the mechanical
 % end as exact 0-based FILE samples (electrical_settle_sample0, mechanical_end_sample0),
@@ -47,7 +52,7 @@ function RS = night6_recovery_start(file)
         error('night6:recoveryStartFile', 'the recovery-starts file %s does not exist', file);
     end
     D = jsondecode(fileread(file));
-    want = 'gems-blanking-v2 recovery starts v5';
+    want = 'gems-blanking-v2 recovery starts v7';
     if ~isstruct(D) || ~isfield(D, 'schema') || ~strcmp(D.schema, want)
         error('night6:recoveryStartFile', '%s is not a ''%s'' file', file, want);
     end
@@ -99,6 +104,7 @@ function RS = night6_recovery_start(file)
             end
         end
         RS.files{k}.cuts = cuts;
+        check_v6(F, file);      % RULING 2026-10-10 item 7: basis, common start, reference
     end
     for k = 1:numel(RS.held)
         seen = add_session(seen, RS.held{k}, file);
@@ -158,6 +164,46 @@ function check_times(F, file)
                 && isnumeric(r.start_sample0) && double(r.start_sample0) < k
             error('night6:recoveryStartFile', ['%s: %s has a measured start (sample %d) ' ...
                   'before its input mask sample %d'], file, F.session, r.start_sample0, k);
+        end
+    end
+end
+
+function check_v6(F, file)
+% RULING 2026-10-10 item 7: the file names its animal and electrical basis; every analysis
+% and cut has a common start (an integer sample, never before its own start); the
+% reference-sensitive "until" is present exactly on a reference-sensitive file, and never
+% before the analysis's start.
+    bases = {'from_electrical_end', 'mechanical_only_zero', 'from_mechanical_end'};
+    if ~isfield(F, 'animal') || ~ischar(F.animal) || isempty(F.animal) ...
+            || ~isfield(F, 'electrical_basis') || ~any(strcmp(F.electrical_basis, bases))
+        error('night6:recoveryStartFile', ['%s: %s has no animal or no known electrical_basis ' ...
+              '(schema v6, RULING 2026-10-10 item 7)'], file, F.session);
+    end
+    % v7 (Andrea, revised 2026-10-10): the common start is the latest per-stim-level median
+    % start, so every measured file declares its stim level
+    if ~isfield(F, 'stim_level') || ~ischar(F.stim_level) || isempty(F.stim_level)
+        error('night6:recoveryStartFile', ['%s: %s declares no stim_level (schema v7: the ' ...
+              'common start is the latest per-level median start)'], file, F.session);
+    end
+    sens = isfield(F, 'reference_sensitive');
+    rows = [as_cells(F.analyses), as_cells(F.cuts)];
+    for j = 1:numel(rows)
+        r = rows{j};
+        if ~isfield(r, 'common_start_sample0') || ~is_sample(r.common_start_sample0) ...
+                || double(r.common_start_sample0) < double(r.start_sample0)
+            error('night6:recoveryStartFile', ['%s: %s has a row without a common start at or ' ...
+                  'after its own start (RULING 2026-10-10 item 7)'], file, F.session);
+        end
+    end
+    rows = as_cells(F.analyses);
+    for j = 1:numel(rows)
+        r = rows{j};
+        has = isfield(r, 'reference_sensitive_until_sample0');
+        if has ~= sens || (has && (~is_sample(r.reference_sensitive_until_sample0) ...
+                || double(r.reference_sensitive_until_sample0) < double(r.start_sample0)))
+            error('night6:recoveryStartFile', ['%s: %s/%s reference_sensitive_until must be ' ...
+                  'present exactly on a reference-sensitive file, at or after the start'], ...
+                  file, F.session, char(r.analysis));
         end
     end
 end

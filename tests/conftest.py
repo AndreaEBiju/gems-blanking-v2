@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict
@@ -2226,3 +2227,141 @@ def make_signal_set(n_nerve: int, fs: float, dur_s: float, *, n_events: int = 20
         slow = 40.0 * np.sin(2 * np.pi * 0.05 * t + srng.uniform(0, 2 * np.pi))
         signals[f"ANT{j + 1}"] = slow + srng.normal(0.0, 8.0, t.size)
     return SignalSet(signals, events, quiet)
+
+
+# ---------------------------------------------------------------------------
+# Night 5 stage 1 split (RULING 2026-10-10 item 4): one epoch's stage-1a inputs
+# ---------------------------------------------------------------------------
+
+STAGE1_SIGNALS: Final = ("L_V1", "L_V2", "L_V3", "L_T", "R_V1", "R_V2", "R_V3", "R_T",
+                         "ANT1", "ANT2", "ANT3", "stomach_ref")
+"""Detection's signals in :func:`make_stage1_epoch` (two cuffs, three stomach channels)."""
+
+
+class Stage1Synth(NamedTuple):
+    """Return of :func:`make_stage1_epoch`."""
+
+    events: dict[str, object]
+    """Event id -> ``types.Event`` (model-scored, calibrated P in ``p_motion``)."""
+    detecting: dict[str, tuple[tuple[str, str], ...]]
+    """Event id -> the (signal, band) pairs that detected it."""
+    zdet: dict[tuple[str, str], F64]
+    """Every detection pair's z on the 10 ms grid, whole epoch."""
+    eng_raw: dict[str, F64]
+    """``L_T`` and ``R_T`` raw, microvolts at ``fs``."""
+    hrv: dict[str, object]
+    """Event id -> ``tolerance.Extent`` or None (beat train unchanged)."""
+    signals: dict[str, tuple[str, ...]]
+    """Consumer -> the signals it reads."""
+    fs: float
+    t0_s: float
+    n_frames: int
+
+
+def make_stage1_epoch(*, seed: int, dur_s: float = 60.0, n_events: int = 24,
+                      t0_s: float = 132.0, fs: float = FS_NOMINAL_HZ) -> Stage1Synth:
+    """One epoch of stage-1 inputs with runs that thresholds split in every way.
+
+    Each event (a core of 0.05-3 s) lifts 1-6 random pairs over ``[start - a, stop + b]``
+    (a, b up to 2 s) at a level of 1.5-15 z, in two steps so a threshold between them
+    shortens the run; unrelated bumps and NaN gaps are scattered over every pair; the base
+    is the log-z null (normal, sigma 1.12: p90 near 1.44). ``L_T`` / ``R_T`` are
+    :func:`make_eng` hosts, half the events adding a large transient (routing then both
+    keeps and rejects). Events on even indices change the beat train (an HRV extent).
+    """
+    from gems_blanking_v2.constants import BANDS  # noqa: PLC0415
+    from gems_blanking_v2.extent import tolerance as tl  # noqa: PLC0415
+    from gems_blanking_v2.types import Candidate, Event  # noqa: PLC0415
+
+    rng = np.random.default_rng([seed, 1010])
+    n = int(math.floor(dur_s / GRID_S))
+    pairs = [(s, b) for s in STAGE1_SIGNALS for b in BANDS]
+    zdet = {q: rng.normal(0.0, 1.12, n) for q in pairs}
+    for q in pairs:
+        z = zdet[q]
+        for _ in range(int(rng.integers(0, 6))):  # unrelated bumps
+            i = int(rng.integers(0, n - 50))
+            z[i:i + int(rng.integers(2, 300))] += rng.uniform(1.0, 9.0)
+        if rng.random() < 0.3:  # a NaN gap
+            i = int(rng.integers(0, n - 100))
+            z[i:i + int(rng.integers(1, 200))] = np.nan
+    eng_raw = {s: make_eng(fs, dur_s, rate_hz=15.0, seed=seed * 7 + k).signal
+               for k, s in enumerate(("L_T", "R_T"))}
+    events: dict[str, object] = {}
+    detecting: dict[str, tuple[tuple[str, str], ...]] = {}
+    hrv: dict[str, object] = {}
+    hrv_pad = 0.14016512
+    for k in range(n_events):
+        a = float(rng.uniform(1.0, dur_s - 4.0))
+        d = float(rng.uniform(0.05, 3.0))
+        start, stop = t0_s + a, t0_s + min(a + d, dur_s - 0.5)
+        chosen = [pairs[i] for i in rng.choice(len(pairs), int(rng.integers(1, 7)),
+                                                replace=False)]
+        for q in chosen:
+            lo = max(0, int(math.floor((start - t0_s - rng.uniform(0, 2.0)) / GRID_S)))
+            hi = min(n, int(math.ceil((stop - t0_s + rng.uniform(0, 2.0)) / GRID_S)))
+            mid = (lo + hi) // 2
+            zdet[q][lo:hi] = np.maximum(zdet[q][lo:hi], rng.uniform(1.5, 6.0))
+            zdet[q][lo + (mid - lo) // 2:mid] = rng.uniform(6.0, 15.0)
+        for s in ("L_T", "R_T"):
+            if rng.random() < 0.5:
+                i = int((start - t0_s) * fs)
+                eng_raw[s][i:i + int(0.002 * fs)] += rng.uniform(300.0, 2000.0)
+        cand = Candidate(start, stop, tuple(sorted({s for s, _b in chosen})),
+                         tuple(sorted({b for _s, b in chosen})), 9.0, "electrical")
+        eid = f"e{int(round(t0_s))}_{k:05d}"
+        events[eid] = Event(cand, "unjudged", float(rng.uniform(0.0, 1.0)), "model")
+        detecting[eid] = tuple(chosen)
+        hrv[eid] = (tl.Extent("hrv", "R_T", "10-150", start - hrv_pad, stop + hrv_pad,
+                              start, stop, hrv_pad, BANDS["10-150"].window_s)
+                    if k % 2 == 0 else None)
+    signals = {"spikes": ("L_T", "R_T"), "mmc": ("ANT1", "ANT2", "ANT3"),
+               "slow_wave": ("ANT1", "ANT2", "ANT3"), "breathing": ("R_T",), "hrv": ("R_T",)}
+    return Stage1Synth(events, detecting, zdet, eng_raw, hrv, signals, fs, t0_s, n)
+
+
+# ---------------------------------------------------------------------------
+# Night 6 outputs with a trim marker (review of r1010, fix 5: the per-level summary)
+# ---------------------------------------------------------------------------
+
+
+def make_night6_stim_outputs(epoch_dir: Path, *, tag: str,
+                             own: dict[str, dict[str, object]],
+                             common: dict[str, dict[str, object]] | None = None,
+                             run_consumers: dict[str, str] | None = None,
+                             skip_common: tuple[str, ...] = ()) -> Path:
+    """Write one stim_recovery epoch's Night 6 outputs (MAT v5) with their trim markers.
+
+    ``own[file][path]`` is a recomputed value (a float or a list: one per channel) of output
+    file ``<tag>_<file>.mat`` in the own-start version; ``common`` the same in
+    ``common_start/`` (default: ``own``). The marker holds ``run_consumers`` (per file; default
+    the file's owner in ``recovery_start.OUTPUT_FILES``) and one ``recomputed`` entry per path
+    with one leaf named after the path, as night6_recovery_trim_outputs writes it.
+    ``skip_common`` files get no common-start copy.
+    """
+    from gems_blanking_v2.extent import recovery_start as rs  # noqa: PLC0415
+    from scipy.io import savemat  # noqa: PLC0415
+
+    common = own if common is None else common
+    (epoch_dir / "common_start").mkdir(parents=True, exist_ok=True)
+
+    def marker(file: str, vals: dict[str, object]) -> dict[str, object]:
+        kind = next(k for k, f in rs.OUTPUT_FILES.items()
+                    if re.search(f.pattern, f"{tag}_{file}.mat"))
+        rec = np.empty(len(vals), dtype=object)
+        for i, (path, v) in enumerate(vals.items()):
+            leaf = {"leaf": path, "original": np.asarray(v, dtype=np.float64),
+                    "recomputed": np.asarray(v, dtype=np.float64)}
+            leaves = np.empty(1, dtype=object)
+            leaves[0] = leaf
+            rec[i] = {"path": path, "kind": "mean_omitnan", "of": path, "leaves": leaves}
+        runs = (run_consumers or {}).get(file, rs.OUTPUT_FILES[kind].owner)
+        return {"schema": "gems-blanking-v2 night6 recovery trim v2", "run_consumers": runs,
+                "recomputed": rec}
+    for file, vals in own.items():
+        savemat(str(epoch_dir / f"{tag}_{file}.mat"),
+                {"x": 1.0, rs.TRIM_MARKER: marker(file, vals)})
+        if file not in skip_common:
+            savemat(str(epoch_dir / "common_start" / f"{tag}_{file}.mat"),
+                    {"x": 1.0, rs.TRIM_MARKER: marker(file, common[file])})
+    return epoch_dir

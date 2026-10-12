@@ -697,3 +697,10 @@ def test_nan_inside_a_list_makes_that_list_absent() -> None:
     doc = json.loads(ar.build_report(rows, ar.Disagreements(), code_commit="c",
                                      generation_sha="g").to_json())
     assert doc["rows"][0]["detail"] == {"kept": [1, 2.5, [3]], "inner": {"n": 4}}
+
+
+def test_core_pad_and_detected_extent_spans_count_as_motion() -> None:
+    """The gated extent rule's span reasons are motion, not unknown codes."""
+    spans = [mk.MaskSpan("mmc", "ANT1", 10.0, 12.0, "core_pad"),
+             mk.MaskSpan("mmc", "ANT1", 11.0, 15.0, "cross_band_detected")]
+    assert ar.masked_motion_seconds(spans, 60.0) == 5.0

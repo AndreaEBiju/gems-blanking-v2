@@ -85,6 +85,8 @@ __all__ = [
     "SPIKE_MAX_SIGMA",
     "SPIKE_REFRACTORY_S",
     "SPIKE_THRESH_SIGMA",
+    "CachedEngTrace",
+    "EngCacheMissError",
     "EngTrace",
     "EventEvidence",
     "LineNoiseThresholds",
@@ -282,6 +284,77 @@ class EngTrace:
     crossings: npt.NDArray[np.int64]
     t0_s: float
 
+    @property
+    def size(self) -> int:
+        """Samples in the trace (at ``rate``)."""
+        return int(self.y.size)
+
+    @property
+    def n_finite(self) -> int:
+        """Finite samples in the whole trace."""
+        return int(np.isfinite(self.y).sum())
+
+    def window(self, sl: slice) -> F64:
+        """Return the trace over ``sl`` (sample indices at ``rate``)."""
+        return self.y[sl]
+
+
+class EngCacheMissError(LookupError):
+    """A :class:`CachedEngTrace` was asked for samples it does not hold.
+
+    Deliberately not a ``ValueError``: callers treat ``ValueError`` from
+    :func:`in_band_verdict` as "not assessable", and a cache miss is a defect, never a verdict.
+    """
+
+
+@dataclass(frozen=True)
+class CachedEngTrace:
+    """An :class:`EngTrace` kept only where routing can read it (Night 5 stage 1a's cache).
+
+    Holds the whole trace's ``sigma``, ``crossings``, ``size`` and ``n_finite`` and the
+    samples of ``segments`` - ``(start, values)`` pairs, sorted and disjoint, at ``rate``.
+    :meth:`window` returns exactly what :meth:`EngTrace.window` would for a slice inside one
+    segment and raises :class:`EngCacheMissError` for any other, so a span the cache was not
+    built for fails loudly instead of being judged on missing samples.
+    """
+
+    signal: str
+    rate: float
+    sigma: float
+    crossings: npt.NDArray[np.int64]
+    t0_s: float
+    size: int
+    n_finite: int
+    segments: tuple[tuple[int, F64], ...]
+
+    @classmethod
+    def from_trace(cls, trace: EngTrace, spans: Iterable[tuple[int, int]]) -> CachedEngTrace:
+        """Keep ``trace`` over ``spans`` (half-open sample indices at its rate), merged."""
+        merged: list[list[int]] = []
+        for a, b in sorted((max(0, int(a)), min(trace.size, int(b))) for a, b in spans):
+            if b <= a:
+                continue
+            if merged and a <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], b)
+            else:
+                merged.append([a, b])
+        segs = tuple((a, np.array(trace.y[a:b], dtype=np.float64)) for a, b in merged)
+        return cls(trace.signal, float(trace.rate), float(trace.sigma),
+                   np.asarray(trace.crossings, dtype=np.int64), float(trace.t0_s), trace.size,
+                   trace.n_finite, segs)
+
+    def window(self, sl: slice) -> F64:
+        """Return the trace over ``sl`` if one segment holds all of it; else raise."""
+        a, b = int(sl.start), int(sl.stop)
+        if b <= a:
+            return np.empty(0, dtype=np.float64)
+        for s0, vals in self.segments:
+            if s0 <= a and b <= s0 + vals.size:
+                return vals[a - s0:b - s0]
+        msg = (f"{self.signal}: ENG samples [{a}, {b}) are outside the cached segments - the "
+               "span exceeds what stage 1a cached (a threshold below its cache floor?)")
+        raise EngCacheMissError(msg)
+
 
 def eng_trace(signal: str, x: npt.ArrayLike, fs: float, *, x_t0_s: float) -> EngTrace:
     """Build a signal's :class:`EngTrace` (once per signal per recording)."""
@@ -323,15 +396,15 @@ def in_band_verdict(ev: EventEvidence, consumer: str, tolerances: ToleranceTable
                    f"{ev.signal}@{ev.x_t0_s} s: never one signal's sigma for another "
                    "(invariant 3)")
             raise ValueError(msg)
-        sl = _span_slice((a_s - tr.t0_s, b_s - tr.t0_s), tr.rate, tr.y.size)
-        seg = tr.y[sl]
+        sl = _span_slice((a_s - tr.t0_s, b_s - tr.t0_s), tr.rate, tr.size)
+        seg = tr.window(sl)
         if not np.isfinite(seg).any():
             msg = f"{consumer}/{tr.signal}: the span holds no finite ENG sample"
             raise ValueError(msg)
         peak = float(np.nanmax(np.abs(seg))) / tr.sigma
         n_in = int(((tr.crossings >= sl.start) & (tr.crossings < sl.stop)).sum())
         t_in = max((sl.stop - sl.start) / tr.rate, 1.0 / tr.rate)
-        t_out = max(float(np.isfinite(tr.y).sum() - np.isfinite(seg).sum()) / tr.rate,
+        t_out = max(float(tr.n_finite - np.isfinite(seg).sum()) / tr.rate,
                     1.0 / tr.rate)
         lam = (tr.crossings.size - n_in) / t_out
         p = float(poisson.sf(n_in - 1, lam * t_in)) if n_in > 0 else 1.0
@@ -382,7 +455,7 @@ class EventEvidence:
     x_t0_s: float
     z: Mapping[tuple[str, str], npt.ArrayLike] | None = None
     z_t0_s: float | None = None
-    eng: EngTrace | None = None
+    eng: EngTrace | CachedEngTrace | None = None
     clipped: bool = False
     mains_dominant: bool = False
     subtract: Callable[[F64], F64] | None = None

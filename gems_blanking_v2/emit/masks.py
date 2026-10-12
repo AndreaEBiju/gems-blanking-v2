@@ -48,7 +48,7 @@ OUTSIDE THE GENERATION HASH.
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
@@ -75,6 +75,7 @@ __all__ = [
     "NO_BEAT_MINUTE_S",
     "NO_BEAT_RULE",
     "NO_HEARTBEAT_REFERENCE",
+    "PERIR_FAILED_REASON",
     "TAPER_S",
     "ConsumerMask",
     "MaskKey",
@@ -179,19 +180,42 @@ def spans_from_routing(extents: Iterable[tuple[str, Extent]],
     return out
 
 
+PERIR_FAILED_REASON: Final = "cuff_distrusted_perir_failed"
+"""Mask reason of a released cuff-epoch distrusted for the primary spike analysis because it
+failed the peri-R test (Andrea 2026-10-11 item 4; ``emit.cuff_trust.PERIR_FAILED_RULE``)."""
+
+
 def distrusted_spike_spans(entry: Mapping[str, Any], *, region_start_s: float,
-                           region_stop_s: float) -> list[MaskSpan]:
+                           region_stop_s: float, released: Collection[str] = (),
+                           perir_failed: Collection[str] = ()) -> list[MaskSpan]:
     """Return the routing entry's spike distrust as spike-consumer spans (recording s).
 
     Ruling 2026-10-03: a cuff's ``distrusted_spans`` (region-relative, half-open s) join
     the spike consumer's mask for that cuff. A cuff whose route is ``distrusted`` outright
-    is invalid for the spike consumer over the whole region. No other consumer is touched.
+    is invalid for the spike consumer over the whole region - unless it is in ``released``
+    (RULING 2026-10-10 item 6, ``emit.cuff_trust``: kept and flagged, never blanked). A
+    released cuff the entry does not distrust outright is refused. A cuff in
+    ``perir_failed`` (Andrea 2026-10-11 item 4: a release that failed the peri-R test, primary
+    scope) keeps its whole-region span under :data:`PERIR_FAILED_REASON`; it cannot also be
+    released. No other consumer is touched.
     """
+    both = sorted(set(released) & set(perir_failed))
+    if both:
+        msg = f"cuffs {both} are both released and distrusted for failing the peri-R test"
+        raise ValueError(msg)
+    spike = entry.get("spike", {})
+    bad = sorted(c for c in released if (spike.get(c) or {}).get("route") != "distrusted")
+    if bad:
+        msg = f"cuffs {bad} are released but the routing entry does not distrust them outright"
+        raise ValueError(msg)
     out: list[MaskSpan] = []
-    for cuff, s in sorted(entry.get("spike", {}).items()):
+    for cuff, s in sorted(spike.items()):
+        if s.get("route") == "distrusted" and cuff in released:
+            continue
         if s.get("route") == "distrusted":
             out.append(MaskSpan("spikes", f"{cuff}_T", region_start_s, region_stop_s,
-                                "cuff_distrusted"))
+                                PERIR_FAILED_REASON if cuff in perir_failed
+                                else "cuff_distrusted"))
             continue
         for a, b in s.get("distrusted_spans", []):
             out.append(MaskSpan("spikes", f"{cuff}_T", region_start_s + float(a),

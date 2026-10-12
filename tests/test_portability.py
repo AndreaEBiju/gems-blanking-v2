@@ -18,6 +18,8 @@ import re
 from pathlib import Path, PureWindowsPath
 
 import pytest
+from gems_blanking_v2.emit.cuff_trust import PERIR_OUTSIDE_CRITERION
+from gems_blanking_v2.extent.tolerance_map import BREATHING_FLOOR_LIMITATION, absolute_paths_in
 from gems_blanking_v2.io.registry_log import (
     LOG_NAME,
     RegistryAction,
@@ -34,6 +36,10 @@ from gems_blanking_v2.io.store import (
     sha256_file,
     utc_stamp,
     validate_component,
+)
+
+from tests.test_tolerance_map import (
+    test_review2_2_threshold_record_is_machine_independent as _machine_independent,
 )
 
 DRIVE_NAME_VARIANTS = pytest.mark.parametrize(
@@ -283,3 +289,32 @@ def test_the_layout_creates_no_symlinks(tmp_path: Path) -> None:
     atomic_write_text(store.session_dir("J", "t01") / "raw.h5", "x")
     for path in store.root.rglob("*"):
         assert not path.is_symlink(), path
+
+
+# ---------------------------------------------------------------------------
+# the threshold-set record (review 2 finding 2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text", [
+    "C:/Users/User/x.json", "G:\\My Drive\\gems_figures\\d.csv", "\\\\server\\share\\f",
+    "/Users/andrea/Library/x", "see /home/a/b.json", "(/tmp/run/x)", "My Drive/gems_figures/x",
+    "Shared drives/BIONICs/x", "d:\\data"])
+def test_an_absolute_local_path_is_found_on_any_platform(text: str) -> None:
+    assert absolute_paths_in({"a": [text]}) == [text]
+    assert absolute_paths_in({text: 1}) == [text]
+
+
+@pytest.mark.parametrize("text", [
+    "data/J/t01/raw.h5", "night5/work/released_cuff_perir.json", "300-3000", "a 3:1 ratio",
+    "|lag| < 30 ms", "gems_figures/2026-10-11_perir_cuffs/methods.md", "https://x.org/y",
+    "Andrea's Drive, gems_figures/x", "e0:1"])
+def test_a_relative_path_or_plain_text_is_not_an_absolute_path(text: str) -> None:
+    assert absolute_paths_in({"a": text}) == []
+
+
+def test_no_absolute_path_appears_in_a_threshold_set_record() -> None:
+    """The record every mask carries, and whose hash is the threshold-set identity."""
+    _machine_independent()
+    assert absolute_paths_in({"criterion": PERIR_OUTSIDE_CRITERION,
+                              "limitation": BREATHING_FLOOR_LIMITATION}) == []
