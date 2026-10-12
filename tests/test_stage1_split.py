@@ -506,3 +506,60 @@ def test_a_record_without_code_keys_takes_its_waves_launch_declaration_or_is_ref
                 {**launch, "driver_sha256": DRIVER.upper()}):
         with pytest.raises(ValueError, match="stage1a_launch"):
             st1.stage1a_code(_code_keys(), bad, wave_id="w1b", what="x")
+
+
+
+# ---------------------------------------------------------------------------
+# Andrea 2026-10-11 night: the declared per-consumer extent rule (gated)
+# ---------------------------------------------------------------------------
+
+GATES_C = {"spikes": "i_or_ii", "breathing": "i_or_ii", "mmc": "ii", "slow_wave": "i",
+           "hrv": "i"}
+FBB = dict.fromkeys(BANDS, st1.CACHE_FLOOR_Z)
+
+
+def _gated(cache: st1.EpochCache, gates: dict[str, str], thr: float = 6.0) -> tuple:
+    return st1.gated_extents_masks(cache, sorted(cache.events), gates=gates,
+                                   tolerances=_table(dict.fromkeys(Z_CONSUMERS, thr)),
+                                   floor_by_band=FBB)
+
+
+def test_a_gated_core_blanks_core_padding_and_its_own_extents_and_a_failing_one_nothing() -> None:
+    cache = _own_cache(1)
+    _c, _e, _d, masks, counts = _gated(cache, GATES_C)
+    pad_of = {c: tl.consumer_settling(c, cache.fs).total_s for c in GATES_C}  # type: ignore[union-attr]
+    for (c, s, b), m in masks.items():
+        own = cache.own_signals[(c, s)]
+        for eid, ev in cache.events.items():
+            i_ok = bool({q[0] for q in cache.detecting[eid]} & own)
+            ii_ok = (cache.hrv.get(eid) is not None if c == "hrv" else
+                     st1.core_visible(cache, eid, s, b, 6.0))
+            passes = {"i": i_ok, "ii": ii_ok, "i_or_ii": i_ok or ii_ok}[GATES_C[c]]
+            a, z = st1.core_frames(ev.candidate.start_s, ev.candidate.stop_s, cache.z_t0_s)
+            core = m.invalid[max(0, a):max(0, min(m.invalid.size, z))]
+            if passes and core.size:
+                assert core.all(), (c, s, eid)  # the core (and its padding) is blanked
+        k = f"{c}|{s}|{b}"
+        assert counts[k]["gate"] == GATES_C[c] and counts[k]["own_signals"] == sorted(own)
+        assert counts[k]["passing"] <= counts[k]["n"]
+        assert pad_of[c] > 0
+    # nested gates: i and ii each blank a subset of i_or_ii, per key
+    full = dict.fromkeys(GATES_C, "i_or_ii")
+    only_i = {**dict.fromkeys(Z_CONSUMERS, "i"), "hrv": "i"}
+    only_ii = {**dict.fromkeys(Z_CONSUMERS, "ii"), "hrv": "i_or_ii"}
+    m_full, m_i, m_ii = (_gated(cache, g)[3] for g in (full, only_i, only_ii))
+    for k in m_full:
+        assert not (m_i[k].invalid & ~m_full[k].invalid).any(), k
+        assert not (m_ii[k].invalid & ~m_full[k].invalid).any(), k
+    assert sum(m_full[k].invalid.sum() for k in m_full) > sum(m_i[k].invalid.sum() for k in m_i)
+
+
+def test_a_core_that_fails_its_gate_leaves_the_consumer_signal_untouched() -> None:
+    cache = _own_cache(3, empty=True)  # no own signals: rule (i) never passes
+    _c, _e, _d, masks, counts = _gated(cache, {**dict.fromkeys(Z_CONSUMERS, "i"), "hrv": "i"})
+    assert all(v["passing"] == 0 for v in counts.values())
+    assert all(not m.invalid.any() for m in masks.values())  # no distrust in this cache
+    with pytest.raises(ValueError, match="no extent gate declared"):
+        _gated(cache, {"spikes": "i"})
+    with pytest.raises(ValueError, match="unknown extent gate"):
+        _gated(_own_cache(3), {**GATES_C, "mmc": "iii"})

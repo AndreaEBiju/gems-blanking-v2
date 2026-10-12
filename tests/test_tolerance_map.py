@@ -752,3 +752,57 @@ def test_a_consumer_without_an_own_signal_population_keeps_its_visible_kind_thre
     assert "pooled floor is NOT adopted" in tm.BREATHING_FLOOR_LIMITATION
     assert _build(extent_floors=decl).record()["extent_floors"]["breathing"]["limitation"] == (
         tm.BREATHING_FLOOR_LIMITATION)
+
+
+
+def _rule(**over: Any) -> dict[str, Any]:  # noqa: ANN401
+    cons = {"spikes": {"gate": "i_or_ii", "candidate": "C1"}, "hrv": {"gate": "i"},
+            "breathing": {"gate": "i_or_ii"}, "mmc": {"gate": "ii", "provisional": "x"},
+            "slow_wave": {"declared": False, "reason": "no extent declared"}}
+    cons.update(over)
+    return {"source": {"ruling": "Andrea 2026-10-11 night",
+                       "decision_files": [{"file": "d.csv", "sha256": "d" * 64}]},
+            "consumers": cons}
+
+
+OWN_SCOPES = dict.fromkeys(("breathing", "mmc", "spikes"), tl.CROSS_BAND_SCOPE_OWN)
+
+
+def test_an_extent_rule_replaces_core_blanking_and_drops_an_undeclared_consumer() -> None:
+    floors = {k: v for k, v in _floors(_own_archive()).items() if k != "slow_wave"}
+    floors["breathing"] = {"none": "no HR channel", "limitation": tm.BREATHING_FLOOR_LIMITATION}
+    t = _build(core_blanking=None, extent_rule=_rule(), cross_band_scope=OWN_SCOPES,
+               extent_floors=floors)
+    assert "slow_wave" not in t.table.z_tol and "slow_wave" not in t.thresholds
+    assert tm.not_emitted(t.extent_rule) == ("slow_wave",)
+    rec = t.record()
+    assert rec["extent_rule"]["consumers"]["mmc"]["provisional"] == "x"
+    assert "core_blanking" not in rec and rec["extent_gates"] == dict(tm.EXTENT_GATES)
+    assert t.table.z_tol["mmc"] == floors["mmc"]["value"]
+    with pytest.raises(ValueError, match="exactly one of core blanking"):
+        _build(extent_rule=_rule(), cross_band_scope=OWN_SCOPES, extent_floors=floors)
+    with pytest.raises(ValueError, match="exactly one of core blanking"):
+        _build(core_blanking=None, cross_band_scope=OWN_SCOPES, extent_floors=floors)
+    with pytest.raises(ValueError, match="own_signals_only"):
+        _build(core_blanking=None, extent_rule=_rule(), extent_floors=floors,
+               cross_band_scope={**OWN_SCOPES, "mmc": tl.CROSS_BAND_SCOPE_ALL})
+    with pytest.raises(ValueError, match="not emitted"):  # slow wave declared false: no floor
+        _build(core_blanking=None, extent_rule=_rule(), cross_band_scope=OWN_SCOPES,
+               extent_floors={**floors, "slow_wave": _floors(_own_archive())["slow_wave"]})
+
+
+@pytest.mark.parametrize(("over", "words"), [
+    ({"slow_wave": {"declared": False}}, "needs a reason"),
+    ({"hrv": {"gate": "ii"}}, "none of"),
+    ({"mmc": {"gate": "sometimes"}}, "none of"),
+    ({"velocity": {"gate": "i"}}, "not consumers"),
+])
+def test_the_extent_rule_is_complete_and_never_defaulted(over: dict, words: str) -> None:
+    with pytest.raises(ValueError, match=words):
+        tm.check_extent_rule(_rule(**over))
+    rule = _rule()
+    del rule["consumers"]["hrv"]
+    with pytest.raises(ValueError, match="undeclared"):
+        tm.check_extent_rule(rule)
+    with pytest.raises(ValueError, match="decision_files"):
+        tm.check_extent_rule({**_rule(), "source": {"ruling": "x"}})

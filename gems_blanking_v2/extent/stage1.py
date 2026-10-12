@@ -71,6 +71,7 @@ __all__ = [
     "CACHE_FLOOR_Z",
     "CORE_PAD_REASON",
     "EXTENT_DEPENDENT",
+    "GATED_DETECTED_REASON",
     "INFERENCE_CONFIG_KEYS",
     "STAGE1A_KEYS",
     "STAGE1A_PROVENANCE_KEYS",
@@ -83,12 +84,14 @@ __all__ = [
     "content_sha256",
     "core_frames",
     "core_pad_spans",
+    "core_visible",
     "eng_cache_spans",
     "event_from_row",
     "event_row",
     "extent_from_json",
     "extent_json",
     "extents_routing_masks",
+    "gated_extents_masks",
     "hull_frames",
     "inference_config",
     "sparse_detection_z",
@@ -623,6 +626,120 @@ def extents_routing_masks(
         spans += core_pad_spans(cache, ids, core_blanking=core_blanking, tolerances=tolerances)
     return conf, ext, decisions, mk.build_masks(cache.signals, spans, n_frames=cache.n_frames,
                                                 t0_s=lo)
+
+
+GATED_DETECTED_REASON: Final = rt.CROSS_BAND_REASON_CODE
+"""The mask reason of a gated core's detected extent (its own detecting pairs)."""
+
+
+def core_visible(cache: EpochCache, eid: str, signal: str, band: str, threshold: float) -> bool:
+    """Rule (ii): the own band is above ``threshold`` in ANY finite frame of the core window."""
+    c = cache.events[eid].candidate
+    zz = np.asarray(cache.z[(signal, band)], dtype=np.float64)
+    i0, i1 = core_frames(c.start_s, c.stop_s, cache.z_t0_s)
+    w = zz[max(0, i0):max(0, min(zz.size, i1))]
+    w = w[np.isfinite(w)]
+    return bool(w.size and float(w.max()) > threshold)
+
+
+def _passes(gate: str, i_ok: bool, ii_ok: bool) -> bool:
+    if gate == "i":
+        return i_ok
+    if gate == "ii":
+        return ii_ok
+    if gate == "i_or_ii":
+        return i_ok or ii_ok
+    msg = f"unknown extent gate {gate!r}"
+    raise ValueError(msg)
+
+
+def gated_extents_masks(
+    cache: EpochCache, confirmed: Iterable[str], *, gates: Mapping[str, str],
+    tolerances: tl.ToleranceTable, floor_by_band: Mapping[str, float],
+    route: Callable[[rt.EventEvidence, str, tl.ToleranceTable], rt.RouteDecision] | None = None,
+) -> tuple[dict[str, Event], list[tuple[str, str, str, tl.Extent | tl.NotAssessable | None]],
+           list[rt.RouteDecision], dict[mk.MaskKey, mk.ConsumerMask], dict[str, Any]]:
+    """Return confirmed events, extents, decisions, masks and per-key gate counts (gated rule).
+
+    Andrea 2026-10-11 night (``tolerance_map.check_extent_rule``; the measurement candidates'
+    semantics, candidate set v2). Per consumer x signal and confirmed core: rule (i) - a detecting
+    pair's signal is in ``cache.own_signals[(consumer, signal)]``; rule (ii) - the own band is
+    above the consumer's threshold in any finite frame of the core window (:func:`core_visible`),
+    for hrv the beat train changed (its cached operational extent exists). A core that passes the
+    consumer's declared gate blanks: core + the consumer's padding (:data:`CORE_PAD_REASON`), its
+    own-band extent routed as before (:func:`extents_routing_masks`, no cross-band, no core rule),
+    and the detected extent over its OWN detecting pairs, each while above its band's
+    ``floor_by_band`` (:data:`GATED_DETECTED_REASON`); for hrv, core + padding and the operational
+    beat-train extent. A core that fails blanks nothing for it. Consumers in ``cache.signals``
+    must all have a gate (a consumer the rule declares false is removed from the cache by the
+    caller). The routing entry's distrust spans apply as before.
+    """
+    ids = list(confirmed)
+    floors = list(floor_by_band.values())
+    _refuse_inexact(cache, ids, tolerances, {}, floors)
+    end = cache.z_t0_s + cache.n_frames * GRID_S
+    conf = {k: cache.events[k] for k in ids}
+    ext_all: list[tuple[str, str, str, tl.Extent | tl.NotAssessable | None]] = []
+    dec_all: list[rt.RouteDecision] = []
+    masks: dict[mk.MaskKey, mk.ConsumerMask] = {}
+    counts: dict[str, Any] = {}
+    for c, sigs in cache.signals.items():
+        if not sigs:
+            continue
+        if c not in gates:
+            msg = f"{c}: no extent gate declared (it reads {list(sigs)}); nothing is defaulted"
+            raise ValueError(msg)
+        settle = tl.consumer_settling(c, cache.fs)
+        if settle is None:  # pragma: no cover - every extent consumer has a chain
+            msg = f"{c}: settling unknown, so its padding is unknown (invariant 19)"
+            raise ValueError(msg)
+        pad = settle.total_s
+        band = tl.extent_consumers()[c].band
+        for s in sigs:
+            own = cache.own_signals[(c, s)]
+            passing: list[str] = []
+            n_i = n_ii = 0
+            for eid in ids:
+                i_ok = any(q[0] in own for q in cache.detecting[eid])
+                ii_ok = (cache.hrv.get(eid) is not None if c == "hrv" else
+                         core_visible(cache, eid, s, band, tolerances.for_consumer(c)))
+                n_i += i_ok
+                n_ii += ii_ok
+                if _passes(gates[c], i_ok, ii_ok):
+                    passing.append(eid)
+            sub = EpochCache(**{**cache.__dict__, "signals": {c: (s,)},
+                                "extra_spans": tuple(x for x in cache.extra_spans
+                                                     if (x.consumer, x.signal) == (c, s))})
+            _cf, ext, dec, base = extents_routing_masks(sub, passing, tolerances=tolerances,
+                                                        scopes=None, route=route)
+            ext_all += ext
+            dec_all += dec
+            spans: list[mk.MaskSpan] = []
+            for eid in passing:
+                cnd = cache.events[eid].candidate
+                a, b = max(cache.z_t0_s, cnd.start_s - pad), min(end, cnd.stop_s + pad)
+                if b > a:
+                    spans.append(mk.MaskSpan(c, s, a, b, CORE_PAD_REASON))
+                if c == "hrv":
+                    continue
+                cross = tl.CrossBand(pairs={eid: cache.detecting[eid]}, z=cache.zdet,
+                                     floor_z=cache.cache_floor_z,
+                                     scope={c: tl.CROSS_BAND_SCOPE_OWN},
+                                     own_signals=cache.own_signals,
+                                     floor_by_band=dict(floor_by_band))
+                d = tl.detected_extent(cache.events[eid], cross, eid, c, signal=s, fs=cache.fs,
+                                       z_t0_s=cache.z_t0_s)
+                if d is not None:
+                    spans.append(mk.MaskSpan(c, s, d.start_s, d.stop_s, GATED_DETECTED_REASON))
+                    ext_all.append((eid, c, s, d))
+            extra = mk.build_masks({c: (s,)}, spans, n_frames=cache.n_frames, t0_s=cache.z_t0_s)
+            for k, m in base.items():
+                inv = m.invalid | extra[k].invalid if k in extra else m.invalid
+                masks[k] = mk.ConsumerMask(*k, inv, m.grid_s, m.t0_s)
+                counts["|".join(k)] = {"gate": gates[c], "n": len(ids), "passing": len(passing),
+                                       "rule_i": n_i, "rule_ii": n_ii,
+                                       "own_signals": sorted(own)}
+    return conf, ext_all, dec_all, masks, counts
 
 
 def blank_seconds(masks: Mapping[mk.MaskKey, mk.ConsumerMask]) -> dict[str, float]:

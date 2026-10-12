@@ -66,7 +66,9 @@ __all__ = [
     "CORE_BLANKING",
     "CORE_PAD_RULE",
     "EXTENT_FLOORS_PER_BAND",
+    "EXTENT_GATES",
     "EXTENT_PERCENTILES",
+    "HRV_GATES",
     "NULL_PERCENTILE_SOURCE",
     "NULL_PERCENTILE_Z",
     "OPTION1_RULE",
@@ -81,7 +83,9 @@ __all__ = [
     "check_cross_band_scope",
     "check_extent_floors",
     "check_extent_percentile",
+    "check_extent_rule",
     "kind_visible",
+    "not_emitted",
     "option1_threshold",
     "option1_tolerances",
     "own_signal_floor_record",
@@ -181,6 +185,79 @@ def check_core_blanking(decl: object) -> dict[str, str]:
     return {c: str(decl[c]) for c in z_consumers()}
 
 
+EXTENT_GATES: Final[Mapping[str, str]] = {
+    "i": "rule (i) only: a confirmed core blanks the consumer x signal only when it was detected "
+         "on that signal's own signals (tolerance.own_signals_by_signal)",
+    "ii": "rule (ii) only: only when the consumer's own band is above its threshold in ANY finite "
+          "frame of the core window (stage1.core_frames); for hrv, when the beat train changed",
+    "i_or_ii": "rule (i) OR rule (ii)",
+}
+"""The gate of the declared extent rule (the measurement candidates' semantics, candidate set
+v2). A core that passes its consumer x signal's gate blanks: core + the consumer's padding, the
+own-band extent (routed, as before), and the detected extent over its OWN detecting pairs (each
+pair while above its band's declared clean-null percentile); for hrv, core + padding and the
+operational beat-train extent. A core that fails blanks nothing for it."""
+HRV_GATES: Final[tuple[str, ...]] = ("i", "i_or_ii")
+"""hrv has no z band: rule (ii) for hrv is the beat-train change, so 'ii' alone is not offered."""
+EXTENT_RULE_SOURCE_KEYS: Final[tuple[str, ...]] = ("ruling", "decision_files")
+
+
+def check_extent_rule(decl: object) -> dict[str, Any]:
+    """Return the declared per-consumer extent rule, or raise ValueError naming the gap.
+
+    ``{"source": {"ruling": ..., "decision_files": [{file, sha256}, ...]}, "consumers":
+    {consumer: {"gate": i | ii | i_or_ii, ...} | {"declared": false, "reason": ...}}}`` for EVERY
+    expected consumer (hrv included; hrv's gate is one of :data:`HRV_GATES`). A consumer declared
+    ``false`` gets no masks at all (stage 1b marks it not computed, Night 6 lists leave it out);
+    a consumer with no entry is refused - nothing is defaulted. Other fields of an entry
+    (candidate, provisional, caveat) are carried as they are.
+    """
+    if not isinstance(decl, Mapping) or not isinstance(decl.get("consumers"), Mapping):
+        msg = f"extent_rule must be {{source, consumers: {{consumer: entry}}}}; got {decl!r}"
+        raise ValueError(msg)
+    src = decl.get("source")
+    if not isinstance(src, Mapping) or any(not src.get(k) for k in EXTENT_RULE_SOURCE_KEYS):
+        msg = f"extent_rule.source must name {list(EXTENT_RULE_SOURCE_KEYS)}"
+        raise ValueError(msg)
+    for f in src["decision_files"]:
+        if not isinstance(f, Mapping) or not f.get("file") or len(str(f.get("sha256", ""))) != 64:  # noqa: PLR2004
+            msg = f"extent_rule.source.decision_files: {f!r} must be {{file, sha256 (64 hex)}}"
+            raise ValueError(msg)
+    cons = decl["consumers"]
+    want = tuple(expected_consumers())
+    missing = [c for c in want if c not in cons]
+    extra = sorted(str(c) for c in cons if c not in want)
+    if missing or extra:
+        msg = (f"extent_rule: undeclared {missing}, not consumers {extra}; every consumer declares "
+               "a gate or declared: false with a reason - nothing is defaulted")
+        raise ValueError(msg)
+    out: dict[str, dict[str, Any]] = {}
+    for c in want:
+        e = cons[c]
+        if not isinstance(e, Mapping):
+            msg = f"extent_rule.{c} must be a mapping"
+            raise ValueError(msg)
+        if e.get("declared") is False:
+            if not str(e.get("reason", "")).strip() or "gate" in e:
+                msg = f"extent_rule.{c}: declared false needs a reason and no gate"
+                raise ValueError(msg)
+        else:
+            ok = HRV_GATES if c == "hrv" else tuple(EXTENT_GATES)
+            if e.get("gate") not in ok or e.get("declared", True) is not True:
+                msg = f"extent_rule.{c}: gate {e.get('gate')!r} is none of {list(ok)}"
+                raise ValueError(msg)
+        out[c] = json.loads(json.dumps(dict(e), sort_keys=True, allow_nan=False))
+    if not any(e.get("declared", True) for e in out.values()):
+        msg = "extent_rule declares no consumer"
+        raise ValueError(msg)
+    return {"source": json.loads(json.dumps(dict(src), sort_keys=True)), "consumers": out}
+
+
+def not_emitted(rule: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return the consumers a checked extent rule declares false (no masks emitted)."""
+    return tuple(c for c, e in sorted(rule["consumers"].items()) if e.get("declared") is False)
+
+
 BREATHING_FLOOR_LIMITATION: Final = (
     "Andrea 2026-10-11: breathing keeps 7.69 and the pooled floor is NOT adopted - no "
     "independent held-out clean population with an HR channel exists for breathing; the only "
@@ -213,7 +290,8 @@ def _cuffed(sig: str) -> bool:
     return bool(_sep) and head in ("L", "R") and tail in ("V1", "V2", "V3", "T")
 
 
-def check_extent_floors(decl: object) -> str | dict[str, dict[str, Any]]:
+def check_extent_floors(decl: object, *, skip: Sequence[str] = ()
+                        ) -> str | dict[str, dict[str, Any]]:
     """Return the declared extent floors, or raise ValueError naming the gap (no default).
 
     Either :data:`EXTENT_FLOORS_PER_BAND` (the per-band values, chosen explicitly) or, per z
@@ -224,7 +302,8 @@ def check_extent_floors(decl: object) -> str | dict[str, dict[str, Any]]:
     :data:`Z_FLOOR` (the stage-1a cache's exact floor) is refused. A consumer that has no
     own-signal population on the baseline (breathing on a baseline with no routed HR channel)
     declares ``{"none": <why>}``: its option-(1) threshold stands, which is allowed only where a
-    visible kind sets it (never for a consumer on the floor).
+    visible kind sets it (never for a consumer on the floor). ``skip``: consumers the extent rule
+    declares false - they must be ABSENT from a per-consumer declaration.
     """
     if decl == EXTENT_FLOORS_PER_BAND:
         return EXTENT_FLOORS_PER_BAND
@@ -233,12 +312,13 @@ def check_extent_floors(decl: object) -> str | dict[str, dict[str, Any]]:
                "-> {value, percentile, population, source}; nothing is defaulted; got "
                f"{decl!r}")
         raise ValueError(msg)
-    missing = [c for c in z_consumers() if c not in decl]
-    extra = sorted(str(c) for c in decl if c not in z_consumers())
+    want = [c for c in z_consumers() if c not in skip]
+    missing = [c for c in want if c not in decl]
+    extra = sorted(str(c) for c in decl if c not in want)
     if missing or extra:
-        msg = f"extent_floors: undeclared {missing}, not z consumers {extra}"
+        msg = (f"extent_floors: undeclared {missing}, not z consumers or not emitted {extra}")
         raise ValueError(msg)
-    return {c: _check_floor_entry(c, decl[c]) for c in z_consumers()}
+    return {c: _check_floor_entry(c, decl[c]) for c in want}
 
 
 SHA256_HEX: Final = 64
@@ -502,7 +582,7 @@ signal or a cross-cuff nerve lead), the stomach columns for mmc and slow_wave. A
 reading of ``tolerance.own_detection_signals``, used only to LIST residual risk."""
 
 
-def check_cross_band_scope(scopes: object) -> dict[str, str]:
+def check_cross_band_scope(scopes: object, *, skip: Sequence[str] = ()) -> dict[str, str]:
     """Return the declared cross-band scope per z consumer, or raise ValueError.
 
     Review 7 finding 2: every z consumer (:func:`z_consumers`) declares exactly one of
@@ -514,15 +594,16 @@ def check_cross_band_scope(scopes: object) -> dict[str, str]:
         msg = (f"the cross-band scope is a mapping consumer -> one of {list(CROSS_BAND_SCOPES)}"
                f", declared for every z consumer {list(z_consumers())}; got {scopes!r}")
         raise ValueError(msg)
-    missing = [c for c in z_consumers() if c not in scopes]
-    extra = sorted(str(c) for c in scopes if c not in z_consumers())
+    want = [c for c in z_consumers() if c not in skip]
+    missing = [c for c in want if c not in scopes]
+    extra = sorted(str(c) for c in scopes if c not in want)
     bad = {str(c): v for c, v in scopes.items() if v not in CROSS_BAND_SCOPES}
     if missing or extra or bad:
         msg = (f"cross-band scope: undeclared {missing}, not z consumers {extra}, unknown "
-               f"values {bad}; each of {list(z_consumers())} declares one of "
+               f"values {bad}; each of {want} declares one of "
                f"{list(CROSS_BAND_SCOPES)}, nothing is defaulted (review 7 finding 2)")
         raise ValueError(msg)
-    return {c: str(scopes[c]) for c in z_consumers()}
+    return {c: str(scopes[c]) for c in want}
 
 
 def scope_residual(scan: Mapping[str, Any], consumer: str, scope: str,
@@ -588,6 +669,10 @@ class Option1Tolerances:
     extent_floors: str | Mapping[str, Mapping[str, Any]] = EXTENT_FLOORS_PER_BAND
     """The DECLARED extent floors (:func:`check_extent_floors`; required by the builder)."""
 
+    extent_rule: Mapping[str, Any] = dataclasses.field(default_factory=dict)
+    """The DECLARED per-consumer extent rule (:func:`check_extent_rule`), when the night config
+    declares one instead of ``core_blanking`` (Andrea 2026-10-11 night); empty otherwise."""
+
     @property
     def cross_band_floor(self) -> dict[str, float]:
         """The cross-band floor per band: the declared percentile's value in each band."""
@@ -602,8 +687,10 @@ class Option1Tolerances:
     def record(self) -> dict[str, Any]:
         """Everything a mask's provenance carries about its thresholds (JSON-ready)."""
         return {"version": TOLERANCE_VERSION, "rule": OPTION1_RULE,
-                "core_pad_rule": CORE_PAD_RULE,
-                "core_blanking": dict(sorted(self.core_blanking.items())),
+                **({"extent_rule": dict(self.extent_rule),
+                    "extent_gates": dict(EXTENT_GATES)} if self.extent_rule else
+                   {"core_pad_rule": CORE_PAD_RULE,
+                    "core_blanking": dict(sorted(self.core_blanking.items()))}),
                 "extent_percentile": self.extent_percentile,
                 "extent_floors": (self.extent_floors if isinstance(self.extent_floors, str)
                                   else {c: dict(v) for c, v in
@@ -656,12 +743,32 @@ def _floored(c: str, t: ConsumerThreshold, floors: str | Mapping[str, Mapping[st
     return t
 
 
+def _declarations(core_blanking: object, extent_rule: object, cross_band_scope: object,
+                  extent_floors: object) -> tuple[Any, ...]:
+    """Check the extent declarations together (:func:`option1_tolerances`)."""
+    if (core_blanking is None) == (extent_rule is None):
+        msg = ("declare exactly one of core blanking (core_blanking, RULING 2026-10-10 item 2) "
+               "and extent_rule (Andrea 2026-10-11 night); nothing is defaulted")
+        raise ValueError(msg)
+    rule = check_extent_rule(extent_rule) if extent_rule is not None else {}
+    skip = not_emitted(rule) if rule else ()
+    scopes = check_cross_band_scope(cross_band_scope, skip=skip)
+    bad = {c: v for c, v in scopes.items() if v != CROSS_BAND_SCOPE_OWN}
+    if rule and bad:
+        msg = (f"under an extent rule every emitted z consumer's cross-band scope is "
+               f"{CROSS_BAND_SCOPE_OWN!r}; got {bad}")
+        raise ValueError(msg)
+    cores = check_core_blanking(core_blanking) if core_blanking is not None else {}
+    return rule, skip, scopes, cores, check_extent_floors(extent_floors, skip=skip)
+
+
 def option1_tolerances(tolerances: Mapping[str, Any], mapping: Mapping[str, Any],
                        scan: Mapping[str, Any], *, tolerances_sha256: str,
                        criterion_sha256: str, mapping_sha256: str, scan_sha256: str,
                        generation: str, cross_band_scope: object,
-                       extent_percentile: object, core_blanking: object,
-                       extent_floors: object) -> Option1Tolerances:
+                       extent_percentile: object, extent_floors: object,
+                       core_blanking: object = None,
+                       extent_rule: object = None) -> Option1Tolerances:
     """Build the option-(1) table from the declared, hashed v2 inputs, or raise ValueError.
 
     Refused by name: tolerances without the v2 harm criterion, or whose ``criterion_v2``
@@ -678,6 +785,12 @@ def option1_tolerances(tolerances: Mapping[str, Any], mapping: Mapping[str, Any]
     its threshold; a consumer with a visible kind keeps its option-(1) threshold (breathing
     7.69). Each consumer's core and padding are blanked per its declared core blanking
     (:func:`check_core_blanking`, :data:`CORE_PAD_RULE`; ``extent.stage1.core_pad_spans``).
+
+    Exactly ONE of ``core_blanking`` (the 2026-10-10 rule) and ``extent_rule`` (Andrea 2026-10-11
+    night, :func:`check_extent_rule`) is declared; neither or both is refused. Under an extent
+    rule every emitted z consumer's cross-band scope must be ``own_signals_only`` (the gate model
+    takes the detected extent over the core's own detecting pairs); a consumer declared false
+    has no scope, floor, threshold or residual-risk row.
 
     ``extent_floors`` (Andrea, revised 2026-10-10; :func:`check_extent_floors`, required):
     :data:`EXTENT_FLOORS_PER_BAND` keeps the rule above; per-consumer own-signal floors make
@@ -714,13 +827,12 @@ def option1_tolerances(tolerances: Mapping[str, Any], mapping: Mapping[str, Any]
                f"declared tolerances {tolerances_sha256} the mapping was made from (review 7 "
                "finding 4): its residual risk would describe other tolerances")
         raise ValueError(msg)
-    scopes = check_cross_band_scope(cross_band_scope)
+    rule, skip, scopes, cores, floors = _declarations(core_blanking, extent_rule,
+                                                      cross_band_scope, extent_floors)
     pct = check_extent_percentile(extent_percentile)
-    cores = check_core_blanking(core_blanking)
-    floors = check_extent_floors(extent_floors)
     thresholds: dict[str, ConsumerThreshold] = {}
     residual: dict[str, dict[str, list[dict[str, Any]]]] = {}
-    for c in z_consumers():
+    for c in (x for x in z_consumers() if x not in skip):
         entry = (mapping.get("consumers") or {}).get(c)
         if not isinstance(entry, Mapping):
             msg = f"the tolerance mapping has no entry for {c}: its threshold is unknown"
@@ -742,4 +854,4 @@ def option1_tolerances(tolerances: Mapping[str, Any], mapping: Mapping[str, Any]
               "mapping_sha256": mapping_sha256, "visibility_scan_sha256": scan_sha256,
               "generation": generation, "mapping_refused": dict(mapping.get("refused") or {})}
     return Option1Tolerances(table, thresholds, residual, flags, inputs, scopes, pct, cores,
-                             floors)
+                             floors, rule)
