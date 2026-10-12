@@ -62,6 +62,14 @@ routed train's region with no beat are KEPT for the spike consumer and flagged, 
 spans) and the provenance's ``spike_no_heartbeat_reference``. ``gate_json`` reports
 ``spike_no_heartbeat_reference_s``; the gate and the hold never see them.
 
+**The stomach reference's recipe (Andrea, 2026-10-12).** Whenever a consumer reads
+``stomach_ref``, the file's provenance carries ``stomach_ref_recipe`` - how the signal was
+built (``derive.stomach_recipe.stomach_ref_recipe``: how, config, contacts in order, the
+positive input, the weights, the notch or an explicit none), read off the derivation and
+verified on the recording by its one builder - and Night 6 builds ``stomach_ref`` from that
+block only. ``stomach_ref_recipe`` is the writer's argument; a file that reads
+``stomach_ref`` without it, or carries one while nothing reads ``stomach_ref``, is refused.
+
 OUTSIDE THE GENERATION HASH.
 """
 
@@ -77,6 +85,11 @@ import numpy as np
 import numpy.typing as npt
 from scipy.io import savemat
 
+from gems_blanking_v2.derive.stomach_recipe import (
+    STOMACH_REF,
+    StomachRecipeError,
+    validate_stomach_ref_recipe,
+)
 from gems_blanking_v2.emit.line_distrust import LineDistrustRecord, minute_sample_bounds
 from gems_blanking_v2.emit.masks import (
     NO_BEAT_RULE,
@@ -305,6 +318,32 @@ def _with_line_distrust(provenance: MaskProvenance, line_distrust: LineDistrustR
         msg = "provenance names a different spike line-distrust rule than the record carried"
         raise ProvenanceError(msg)
     return dataclasses.replace(provenance, spike_line_distrust=want)
+
+
+def _with_stomach_ref_recipe(provenance: MaskProvenance, recipe: Mapping[str, Any] | None,
+                             *, signals: Mapping[str, Sequence[str]]) -> MaskProvenance:
+    """Check the recipe against what this file reads; return the provenance that carries it."""
+    readers = sorted(c for c, v in signals.items() if STOMACH_REF in v)
+    have = dict(provenance.stomach_ref_recipe)
+    if recipe is None and not have:
+        if readers:
+            msg = (f"{readers} read {STOMACH_REF}: the file must carry its recipe "
+                   "(stomach_ref_recipe, Andrea 2026-10-12); none given")
+            raise ValueError(msg)
+        return provenance
+    if not readers:
+        msg = f"a stomach_ref_recipe is given but no consumer reads {STOMACH_REF} in this file"
+        raise ValueError(msg)
+    want = json.loads(json.dumps(dict(recipe if recipe is not None else have), allow_nan=False))
+    try:
+        validate_stomach_ref_recipe(want)
+    except StomachRecipeError as exc:
+        msg = f"the stomach_ref recipe is incomplete: {exc}"
+        raise ValueError(msg) from exc
+    if have and have != want:
+        msg = "provenance carries a different stomach_ref recipe than the one given"
+        raise ProvenanceError(msg)
+    return dataclasses.replace(provenance, stomach_ref_recipe=want)
 
 
 def _with_peri_r(provenance: MaskProvenance, peri_r: PeriRRecord | None, *,
@@ -587,7 +626,8 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
                     epoch_start_sample: int | None = None,
                     no_beat_minutes: Sequence[NoBeatMinute] | None = None,
                     cuff_release: Mapping[str, Mapping[str, Any]] | None = None,
-                    elsewhere: Mapping[str, str] | None = None) -> Path:
+                    elsewhere: Mapping[str, str] | None = None,
+                    stomach_ref_recipe: Mapping[str, Any] | None = None) -> Path:
     """Write the masks as MATLAB blank spans with their provenance and QC gate.
 
     The file carries the epoch's exact first sample as :data:`EPOCH_START_SAMPLE_KEY`
@@ -606,6 +646,12 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
     ``cuff_release`` maps each released cuff's spike signal to its classification (RULING
     2026-10-10 item 6, :func:`cuff_release_record`): flagged "no heartbeat reference" every
     minute in ``cuffrelease_json`` / ``cuffrelease_spikes_<cuff>_T`` - flags, never blank spans.
+
+    ``stomach_ref_recipe`` is how ``stomach_ref`` was built
+    (``derive.stomach_recipe.stomach_ref_recipe``, the one builder): required whenever a
+    consumer reads ``stomach_ref`` here, refused when none does or when it is incomplete,
+    and written into ``provenance_json`` as ``stomach_ref_recipe`` - Night 6 builds the
+    signal from it (Andrea, 2026-10-12).
 
     ``elsewhere`` maps each consumer this file does NOT finish to where it is finished (RULING
     2026-10-10 item 5, see the module docstring): it reads nothing in this file - no masks, no
@@ -647,6 +693,7 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
     signals = {c: (() if c in away else tuple(v)) for c, v in signals.items()}
     _check_coverage(masks, signals)
     _check_not_computed(not_computed or {}, signals)
+    provenance = _with_stomach_ref_recipe(provenance, stomach_ref_recipe, signals=signals)
     provenance = _with_peri_r(
         _with_line_distrust(provenance, line_distrust, signals=signals, fs=fs,
                             n_samples=n_samples, epoch_start_s=epoch_start_s),
