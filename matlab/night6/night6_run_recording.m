@@ -822,16 +822,11 @@ function [c, dirty] = code_commit()
 end
 
 function write_json(f, R)
-% UTF-8, \n line endings, atomic (cross-platform rules 10, 11). jsonencode writes a
-% NaN or Inf as null; a missing value must be an absent key, so any non-finite
-% number anywhere in the record is refused before encoding.
+% UTF-8, \n line endings, atomic and checked (night6_write_text_atomic; rules 10, 11).
+% jsonencode writes a NaN or Inf as null; a missing value must be an absent key, so any
+% non-finite number anywhere in the record is refused before encoding.
     assert_finite(R, 'record', f);
-    txt = jsonencode(R, 'PrettyPrint', true);
-    tmp = [f '.tmp'];
-    fid = fopen(tmp, 'w', 'n', 'UTF-8');
-    fwrite(fid, strrep(txt, sprintf('\r\n'), newline), 'char');
-    fclose(fid);
-    movefile(tmp, f, 'f');
+    night6_write_text_atomic(f, jsonencode(R, 'PrettyPrint', true));
 end
 
 function assert_finite(v, where, f)

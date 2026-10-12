@@ -1,0 +1,85 @@
+"""Night 6 writes its records atomically AND checked (found 2026-10-12, a full C: drive).
+
+``night6_run_recording``'s ``write_json`` wrote ``<record>.tmp`` without checking ``fwrite``
+or ``fclose`` and then renamed it over the record: on a full disk an empty ``.tmp`` replaced
+``night6_record.json`` (A gems_a_t01_ms1_sr_164150 e132, 0 bytes). The write now has one
+site, ``matlab/night6/night6_write_text_atomic.m``, which proves the ``.tmp`` holds exactly
+the text (fwrite count, fclose status, byte-for-byte read-back) before the rename and
+otherwise raises ``night6:writeFailed`` leaving the record as it was.
+
+``tests/matlab/check_write_atomic.m`` runs the writer with ``fwrite`` / ``fclose`` shadowed
+for it alone (``tests/matlab/fault_io``) to simulate each failure. ``N6_WRITER_DIR`` picks the
+writer under test (revert check: ``tests/matlab/mutants/n6_unchecked_write`` is the old
+code, and these tests fail against it).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from tests.test_matlab_acceptance import _matlab
+
+NIGHT6 = Path(__file__).resolve().parents[1] / "matlab" / "night6"
+HARNESS = Path(__file__).parent / "matlab"
+WRITER = Path(os.environ.get("N6_WRITER_DIR", str(NIGHT6)))
+NEW = '{\n  "new": "µV café"\n}'
+
+
+@pytest.fixture(scope="module")
+def results(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
+    matlab = _matlab()
+    if matlab is None:
+        pytest.skip("MATLAB is not on this machine (set GEMS_MATLAB)")
+    out = tmp_path_factory.mktemp("write_atomic") / "result.json"
+    cmd = (f"addpath('{HARNESS.as_posix()}'); check_write_atomic('{out.as_posix()}', "
+           f"'{WRITER.as_posix()}', '{(HARNESS / 'fault_io').as_posix()}');")
+    done = subprocess.run([str(matlab), "-batch", cmd], capture_output=True, text=True,
+                          timeout=600, check=False)
+    assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
+    res: dict[str, Any] = json.loads(out.read_text(encoding="utf-8"))
+    return res
+
+
+def test_a_good_write_replaces_the_record_exactly(results: dict[str, Any]) -> None:
+    r = results["none"]
+    assert r["error_id"] == "" and r["new_bytes_exact"] is True, r
+    assert r["final_text"].encode("latin-1").decode("utf-8") == NEW
+    assert r["tmp_left"] is False
+
+
+@pytest.mark.parametrize("fault", ["short", "fclose", "truncate"])
+def test_a_failed_write_raises_and_the_old_record_survives(results: dict[str, Any],
+                                                           fault: str) -> None:
+    r = results[fault]
+    assert r["final_text"] == "OLD", r  # the record that was there is still there
+    assert r["error_id"] == "night6:writeFailed", r
+    assert "night6_record.json left unchanged" in r["message"], r
+    assert r["tmp_left"] is False, r  # the failed .tmp is not left to be mistaken for output
+    # each failure is caught by its own check, naming its cause (the read-back alone would
+    # catch all three, but would not say which)
+    n = len(NEW.encode("utf-8"))
+    cause = {"short": f"0 of {n} bytes written", "fclose": f"{n} of {n} bytes written, fclose "
+             "status -1", "truncate": f"reads back as 0 bytes, not the {n} written"}[fault]
+    assert cause in r["message"], r
+
+
+def test_every_night6_text_record_goes_through_the_checked_writer() -> None:
+    """No other unchecked fopen-for-write / movefile of a text record in matlab/night6."""
+    rec = (NIGHT6 / "night6_run_recording.m").read_text(encoding="utf-8")
+    body = rec[rec.index("function write_json(f, R)"):]
+    body = body[:body.index("\nend\n")]
+    assert "night6_write_text_atomic(f, jsonencode(R" in body and "fopen" not in body
+    batch = (NIGHT6 / "night6_batch.m").read_text(encoding="utf-8")
+    assert "night6_write_text_atomic(f, jsonencode(summary" in batch
+    for m in sorted(NIGHT6.glob("*.m")):
+        if m.name == "night6_write_text_atomic.m":
+            continue
+        src = m.read_text(encoding="utf-8")
+        assert not re.search(r"fopen\([^)]*'w'", src), f"{m.name} opens a file for writing"
