@@ -66,4 +66,6 @@ def test_the_resume_step_requires_it() -> None:
                      r"&& hrOk\s*records\{k\} = R;\s*todo\(k\) = false;", src), \
         "a complete record may be skipped only when night6_hr_runs_resumable passes"
     assert "complete before (i) 4 (%s), rerun" in src
-    assert re.search(r"ours = \{[^}]*'night6_hr_runs_resumable'", src)  # hashed in provenance
+    # hashed in provenance: the wrapper's own functions are derived from what the run reaches
+    # (tests/test_night6_write_atomic.py checks the derivation)
+    assert "ours = night6_wrapper_functions(here);" in src

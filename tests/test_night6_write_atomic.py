@@ -80,16 +80,61 @@ def test_a_failed_rename_raises_and_leaves_the_record_and_no_tmp(
     assert r["tmp_left"] is False, r
 
 
-def test_the_writer_is_hashed_and_shadow_checked_in_the_record() -> None:
-    """The writer is one of the wrapper's own functions in the record's provenance.
+def _reached_by_calls() -> set[str]:
+    """Every matlab/night6 file night6_run_recording calls, directly or through another.
 
-    function_provenance refuses a copy that shadows night6_write_text_atomic and records its
-    hash (review of night6-atomic-json).
+    A call is ``name(`` or ``@name``; computed here independently of the MATLAB derivation.
+    """
+    stems = {m.stem for m in NIGHT6.glob("*.m")}
+    seen: set[str] = set()
+    todo = ["night6_run_recording"]
+    while todo:
+        src = (NIGHT6 / f"{todo.pop()}.m").read_text(encoding="utf-8")
+        for c in (set(re.findall(r"\b(\w+)\s*\(", src)) | set(re.findall(r"@(\w+)", src))) & stems:
+            if c not in seen and c != "night6_run_recording":
+                seen.add(c)
+                todo.append(c)
+    return seen
+
+
+@pytest.fixture(scope="module")
+def wrapper_functions(tmp_path_factory: pytest.TempPathFactory) -> list[str]:
+    matlab = _matlab()
+    if matlab is None:
+        pytest.skip("MATLAB is not on this machine (set GEMS_MATLAB)")
+    out = tmp_path_factory.mktemp("ours") / "ours.json"
+    cmd = (f"addpath('{NIGHT6.as_posix()}'); f = fopen('{out.as_posix()}', 'w'); "
+           f"fwrite(f, jsonencode(night6_wrapper_functions('{NIGHT6.as_posix()}')), 'char'); "
+           "fclose(f);")
+    done = subprocess.run([str(matlab), "-batch", cmd], capture_output=True, text=True,
+                          timeout=600, check=False)
+    assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
+    got: list[str] = json.loads(out.read_text(encoding="utf-8"))
+    return got
+
+
+def test_every_night6_function_the_run_reaches_is_hashed_and_shadow_checked(
+        wrapper_functions: list[str]) -> None:
+    """function_provenance's ``ours`` (refused if shadowed, hash recorded) is derived.
+
+    Review of night6-atomic-json: the hand-written list missed night6_write_text_atomic,
+    night6_calls, night6_consumer_input, night6_mmc_opts, night6_prepare_epoch,
+    night6_first_sample, night6_hold_unit and night6_signal_from_token. It is now
+    night6_wrapper_functions(here); every file the run reaches by a call must be in it.
     """
     rec = (NIGHT6 / "night6_run_recording.m").read_text(encoding="utf-8")
-    m = re.search(r"ours = \{(.*?)\};", rec, flags=re.S)
-    assert m is not None
-    assert "night6_write_text_atomic" in re.findall(r"'(\w+)'", m.group(1))
+    fp = rec[rec.index("function F = function_provenance()"):]
+    fp = fp[:fp.index("\nend\n")]
+    assert "ours = night6_wrapper_functions(here);" in fp
+    assert not re.search(r"ours = \{", fp)  # no hand list beside it
+    reached = _reached_by_calls()
+    assert {"night6_write_text_atomic", "night6_calls", "night6_consumer_input",
+            "night6_mmc_opts", "night6_prepare_epoch", "night6_wrapper_functions",
+            "process_dataset_v2"} <= reached  # the probe itself sees what it must
+    missing = sorted(reached - set(wrapper_functions))
+    assert not missing, f"called from night6_run_recording but not in ours: {missing}"
+    assert "night6_run_recording" not in wrapper_functions
+    assert wrapper_functions == sorted(wrapper_functions)
 
 
 def test_every_night6_text_record_goes_through_the_checked_writer() -> None:
