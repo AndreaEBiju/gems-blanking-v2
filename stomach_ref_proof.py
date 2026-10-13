@@ -145,11 +145,19 @@ MAX_PATH: Final = 259
 
 
 def check_path_length(path: Path) -> None:
-    """Refuse, by name, a path a Windows machine without long paths could not create."""
-    n = len(str(path))
+    """Refuse, by name, a path a Windows machine without long paths could not create.
+
+    Measured ABSOLUTE (review 2026-10-12): a relative ``--out`` is joined to the working
+    directory by the OS, so its own string undercounts. ``Path.absolute()``, not
+    ``resolve()``: resolve expands an 8.3 alias (``C--USE~2`` -> its long name, +75
+    characters for the scratchpad), which is the workaround the alias exists for - the OS
+    limit applies to the path as passed, so resolving would refuse paths Windows accepts.
+    """
+    full = path.absolute()
+    n = len(str(full))
     if n > MAX_PATH:
         msg = (f"output path would be {n} characters (> {MAX_PATH}, Windows MAX_PATH; "
-               f"cross-platform rule 5): {path}; choose a shorter --out")
+               f"cross-platform rule 5): {full}; choose a shorter --out")
         raise ProofRefusedError(msg)
 
 
@@ -532,7 +540,7 @@ def run(args: argparse.Namespace) -> int:
     root = find_gems_root(Path(args.gems_root) if args.gems_root else None)
     st = GemsStore(root)
     masks_root = Path(args.masks_root) if args.masks_root else root
-    out = Path(args.out)
+    out = Path(args.out).absolute()     # every path below is measured and recorded whole
     for guarded in (root, masks_root):
         if _inside(out, guarded):
             print(f"refused: --out {out} lies inside {guarded}; this script never writes there")

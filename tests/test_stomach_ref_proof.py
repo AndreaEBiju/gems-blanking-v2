@@ -30,6 +30,8 @@ from gems_blanking_v2.extent.grid import n_grid_frames
 from tests.conftest import make_multichannel
 
 SESSION = "syn_a_t01_bl_100000_20260101T150000Z"
+MAX_DIR = 247
+"""The longest directory Windows creates without long paths (MAX_PATH less an 8.3 name)."""
 
 
 def test_write_once_refuses_an_existing_file_and_leaves_it_alone(tmp_path: Path) -> None:
@@ -239,6 +241,22 @@ def test_a_path_beyond_windows_max_path_is_refused_with_a_clear_message(
         proof.claim_outputs(deep, "A", SESSION, "20261012T200000Z")
     with pytest.raises(proof.ProofRefusedError, match="choose a shorter --out"):
         proof.write_once(deep / "f.json", "{}\n")
+
+
+def test_a_relative_out_is_measured_from_the_working_directory(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review 2026-10-12: ``out`` is short as typed, too long once the OS joins it to cwd."""
+    cwd = tmp_path / ("w" * (MAX_DIR - len(str(tmp_path)) - 1))
+    cwd.mkdir()
+    rel = Path("o")
+    longest = sr.proven_recipe_path(rel, "A", SESSION)
+    assert len(str(longest)) < proof.MAX_PATH                      # short as typed
+    assert len(str(cwd / longest)) > proof.MAX_PATH                # too long in fact
+    monkeypatch.chdir(cwd)
+    with pytest.raises(proof.ProofRefusedError, match=r"MAX_PATH; cross-platform rule 5"):
+        proof.claim_outputs(rel, "A", SESSION, "20261012T200000Z")
+    monkeypatch.chdir(tmp_path)                                    # a short cwd: accepted
+    proof.claim_outputs(rel, "A", SESSION, "20261012T200000Z")
 
 
 def test_an_absent_proven_recipe_is_refused_by_name(proved: dict[str, Any],
