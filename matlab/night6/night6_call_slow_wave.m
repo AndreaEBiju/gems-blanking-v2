@@ -18,8 +18,9 @@ function S = night6_call_slow_wave(X, fs, W, outDir, label, base, signals, keep,
 % (a) the masked spans go to her function as NaN ONLY - blankIdx = [] - so her
 %     edgeBufferSec (W.edgeBufferSec, 15 s) guards the file's own start and end and no
 %     masked span; (b)-(d) are applied to her detected peaks after the call, per kept
-%     channel, by night6_slow_wave_apply_rule (W.spanRule): peaks inside a span or < 5 s
-%     from one are ignored, both peaks of a consecutive pair < 7 s apart within 15 s of a
+%     channel, by night6_slow_wave_apply_rule (W.spanRule): peaks inside a span or
+%     < exclusionSec (10 s) from one are ignored and that time is left out of the rate's
+%     clean time, both peaks of a consecutive detected pair < 7 s apart within 15 s of a
 %     span are dropped, and the rate, its average and the implausible fraction are
 %     recomputed from the kept peaks. NOT covered by the harm test (W.spanRule.harm_test).
 %

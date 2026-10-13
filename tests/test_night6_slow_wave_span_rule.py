@@ -1,12 +1,15 @@
-"""RULING 2026-10-12 (Andrea): slow-wave peaks near masked spans (PILOT).
+"""RULING 2026-10-12 (Andrea), v2 (decided after pilot v1): slow-wave peaks near masked spans.
 
 (a) masked spans go to ``slowWaveAnalysis_new`` as NaN only (no ``blankIdx``, so no 15 s
 buffer around them; tested in ``test_night6_slow_wave.py``); after detection
 (``night6_slow_wave_span_rule``):
 
-* (b) a peak inside a masked span or less than 5 s from its edge is ignored;
-* (c) two consecutive peaks less than 7 s apart are BOTH dropped when both lie within 15 s
-  of a masked span (either side); elsewhere close peaks are kept;
+* (b) a peak inside a masked span or less than 10 s from its edge is ignored, and the time
+  in those 10 s zones is left out of the clean time her rate pools
+  (``night6_slow_wave_zone_mask``, ``night6_slow_wave_apply_rule``);
+* (c) two consecutive DETECTED peaks (her list, before (b)) less than 7 s apart are BOTH
+  dropped when both lie within 15 s of a masked span - the union of every span's zones,
+  either side; elsewhere close peaks are kept;
 * (d) rate and timing use only the kept peaks - ``night6_slow_wave_rate_series`` is her rate
   loop on a given peak list, checked here against an independent implementation (and, in
   every real call, against her own output bit for bit: ``night6:rateReplica``).
@@ -30,7 +33,8 @@ FS = 24414.0625
 NIGHT6 = Path(__file__).resolve().parents[1] / "matlab" / "night6"
 HARNESS = Path(__file__).parent / "matlab"
 SPAN = (100.0, 110.0)
-"""One masked span, seconds; its 5 s exclusion is (95, 115) and its 15 s zone [85, 125]."""
+SPAN2 = (140.0, 150.0)
+"""One masked span, seconds; its 10 s exclusion is (90, 120) and its 15 s zone [85, 125]."""
 
 
 def _row(t_s: float) -> int:
@@ -44,43 +48,80 @@ def _spans(*spans: tuple[float, float]) -> list[list[int]]:
 CASES: dict[str, dict[str, Any]] = {
     # name: peaks (s), spans (s), expected 1-based indices kept / (b) / (c)
     "inside": {"peaks": [105.0], "spans": [SPAN], "kept": [], "b": [1], "c": [], "inside": [1]},
-    "before_4p9": {"peaks": [95.1], "spans": [SPAN], "kept": [], "b": [1], "c": []},
-    "before_5p1": {"peaks": [94.9], "spans": [SPAN], "kept": [1], "b": [], "c": []},
-    "after_4p9": {"peaks": [114.9], "spans": [SPAN], "kept": [], "b": [1], "c": []},
-    "after_5p1": {"peaks": [115.1], "spans": [SPAN], "kept": [1], "b": [], "c": []},
-    "pair_6p9_in_zone": {"peaks": [116.0, 122.9], "spans": [SPAN], "kept": [], "b": [],
-                         "c": [1, 2]},
-    "pair_7p1_in_zone": {"peaks": [116.0, 123.1], "spans": [SPAN], "kept": [1, 2], "b": [],
-                         "c": []},
-    "pair_6p9_before_span": {"peaks": [87.0, 93.9], "spans": [SPAN], "kept": [],
-                             "b": [], "c": [1, 2]},
+    "before_9p9": {"peaks": [90.1], "spans": [SPAN], "kept": [], "b": [1], "c": []},
+    "before_10p1": {"peaks": [89.9], "spans": [SPAN], "kept": [1], "b": [], "c": []},
+    "after_9p9": {"peaks": [119.9], "spans": [SPAN], "kept": [], "b": [1], "c": []},
+    "after_10p1": {"peaks": [120.1], "spans": [SPAN], "kept": [1], "b": [], "c": []},
+    "pair_6p9_b_then_zone": {"peaks": [114.0, 120.9], "spans": [SPAN], "kept": [], "b": [1],
+                             "c": [2]},
+    "pair_7p1_b_then_zone": {"peaks": [114.0, 121.1], "spans": [SPAN], "kept": [2], "b": [1],
+                             "c": []},
+    "pair_6p9_before_span": {"peaks": [85.5, 92.4], "spans": [SPAN], "kept": [], "b": [2],
+                             "c": [1]},
+    "pair_both_c_only_two_spans": {"peaks": [121.0, 127.9], "spans": [SPAN, SPAN2],
+                                   "kept": [], "b": [], "c": [1, 2]},
+    "pair_7p1_two_spans": {"peaks": [121.0, 128.1], "spans": [SPAN, SPAN2], "kept": [1, 2],
+                           "b": [], "c": []},
     "pair_6p9_outside_zone": {"peaks": [200.0, 206.9], "spans": [SPAN], "kept": [1, 2],
                               "b": [], "c": []},
     "pair_7p1_outside_zone": {"peaks": [200.0, 207.1], "spans": [SPAN], "kept": [1, 2],
                               "b": [], "c": []},
-    "pair_one_in_one_out": {"peaks": [121.0, 127.9], "spans": [SPAN], "kept": [1, 2],
+    "pair_one_in_one_out": {"peaks": [124.0, 130.9], "spans": [SPAN], "kept": [1, 2],
                             "b": [], "c": []},
-    "pair_one_out_one_in_before": {"peaks": [80.0, 86.9], "spans": [SPAN], "kept": [1, 2],
+    "pair_one_out_one_in_before": {"peaks": [79.0, 85.9], "spans": [SPAN], "kept": [1, 2],
                                    "b": [], "c": []},
-    "pair_far_peak_14p9": {"peaks": [118.0, 124.9], "spans": [SPAN], "kept": [], "b": [],
-                           "c": [1, 2]},
-    "pair_far_peak_15p1": {"peaks": [118.2, 125.1], "spans": [SPAN], "kept": [1, 2], "b": [],
+    "pair_far_peak_14p9": {"peaks": [118.0, 124.9], "spans": [SPAN], "kept": [], "b": [1],
+                           "c": [2]},
+    "pair_far_peak_15p1": {"peaks": [118.2, 125.1], "spans": [SPAN], "kept": [2], "b": [1],
                            "c": []},
     "no_spans": {"peaks": [10.0, 16.5], "spans": [], "kept": [1, 2], "b": [], "c": []},
-    "chain_of_three": {"peaks": [116.0, 122.5, 129.0], "spans": [SPAN], "kept": [3], "b": [],
-                       "c": [1, 2]},
-    "b_then_pair_partner": {"peaks": [114.5, 121.0], "spans": [SPAN], "kept": [], "b": [1],
-                            "c": [2]},
-    "two_spans_union_zone": {"peaks": [118.0, 124.0], "spans": [SPAN, (130.0, 140.0)],
-                             "kept": [], "b": [], "c": [1, 2]},
+    "chain_of_three": {"peaks": [117.0, 123.5, 130.0], "spans": [SPAN], "kept": [3], "b": [1],
+                       "c": [2]},
 }
-"""The 15 s zone is measured from the span's edges: 87.0 is 13 s before 100, 93.9 is 6.1 s.
-chain_of_three: 129 is 19 s from the span, so (122.5, 129) is a pair with one peak out.
-b_then_pair_partner: 114.5 is 4.5 s after the span ((b)); 121 is its consecutive partner in
-her list, 6.5 s on, both in the zone, so (c) drops 121 as well (the literal reading); judged
-on (b)'s survivors 121 would have no partner (pairs_after_b, reported only).
-two_spans_union_zone: 118 is 8 s after span 1, 124 is 6 s before span 2.
-pair_far_peak_14p9 / 15p1: the zone's own edge - the later peak 14.9 s (in) or 15.1 s (out)."""
+"""Distances are measured from the span's edges. pair_6p9_b_then_zone: 114 is 4 s after the
+span ((b)); 120.9 (10.9 s, in the zone) is its consecutive partner in her DETECTED list, 6.9 s
+on, so (c) drops it too (Andrea 2026-10-12: (c) before (b)); judged on (b)'s survivors 120.9
+would have no partner (pairs_after_b, reported only). pair_6p9_before_span: 85.5 is 14.5 s
+before the span (zone only), 92.4 is 7.6 s ((b)). pair_both_c_only_two_spans: 121 is 11 s
+after span 1 and 127.9 is 12.1 s before span 2 - neither within 10 s of a span, both in the
+union of 15 s zones (Andrea 2026-10-12: a pair near two different spans counts).
+chain_of_three: 117 is (b), 123.5 (13.5 s) its partner 6.5 s on, 130 (20 s) out of the zone,
+so (123.5, 130) is no pair. pair_far_peak_14p9 / 15p1: the zone's own edge - the later peak
+14.9 s (in) or 15.1 s (out)."""
+
+
+ZONE_ROWS_S = (89.9, 90.1, 100.0, 105.0, 110.0, 119.9, 120.1)
+"""Epoch times (s) around SPAN: in the < 10 s zone (or inside) iff 90 < t < 120."""
+ZONE_WANT = [False, True, True, True, True, True, False]
+
+APPLY_FACTORS = {"full": 1, "decimated": 78}
+"""Apply-rule cases: her file at 10 Hz; the epoch at 10 Hz (full) or 780 Hz (decimated by 78)."""
+APPLY_PEAKS_S = (25.0, 35.0, 45.0, 54.0, 62.0, 76.0, 82.5, 92.0, 102.0, 112.0, 122.0)
+"""Called-rate peak times; the masked span is called rows 701-720 (70.0-71.9 s). 62 is 8 s
+before it and 76 is 4.1 s after it ((b)); 82.5 is 10.6 s after it and 6.5 s after 76 ((c));
+54 is 16 s before it and 7.9 s before 62 (kept); 92 is 20.1 s after it (kept)."""
+APPLY_KEPT_S = (25.0, 35.0, 45.0, 54.0, 92.0, 102.0, 112.0, 122.0)
+
+
+def _apply_case(factor: int) -> dict[str, Any]:
+    n, fsc = 1500, 10.0
+    called = [1 + int(round(s * fsc)) for s in APPLY_PEAKS_S]
+    span_called = (701, 720)
+    spans = [[(span_called[0] - 1) * factor + 1, span_called[1] * factor]]
+    return {"n": n, "fs": fsc, "fs_epoch": fsc * factor, "factor": factor, "called": called,
+            "invalid": [list(span_called)], "edge": [[1, 150], [n - 149, n]], "spans": spans}
+
+
+def _zone_rows(c: dict[str, Any]) -> np.ndarray:
+    """Return the zone mask of the called rows, computed independently.
+
+    Called row j is epoch row (j - 1) factor + 1; it is in the zone iff its distance to the
+    span (0 inside) is < 10 s at the epoch rate.
+    """
+    (a, b), = c["spans"]
+    r = (np.arange(c["n"]) * c["factor"] + 1).astype(float)
+    d = np.where(r < a, (a - r) / c["fs_epoch"], np.where(r > b, (r - b) / c["fs_epoch"], 0.0))
+    return d < 10.0
 
 
 def _rate_case() -> dict[str, Any]:
@@ -134,7 +175,11 @@ def result(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     tmp = tmp_path_factory.mktemp("sw_span_rule")
     cases = {k: {"peaks": [_row(t) for t in v["peaks"]], "spans": _spans(*v["spans"])}
              for k, v in CASES.items()}
-    case = {"night6": NIGHT6.as_posix(), "fs": FS, "cases": cases, "rate": _rate_case()}
+    case = {"night6": NIGHT6.as_posix(), "fs": FS, "cases": cases, "rate": _rate_case(),
+            "zone": {"rows": [_row(s) for s in ZONE_ROWS_S], "spans": _spans(SPAN), "fs": FS},
+            "apply": {k: _apply_case(f) for k, f in APPLY_FACTORS.items()},
+            "work": (tmp / "work").as_posix()}
+    (tmp / "work").mkdir()
     case_file, res_file = tmp / "case.json", tmp / "result.json"
     case_file.write_text(json.dumps(case), encoding="utf-8", newline="\n")
     cmd = (f"addpath('{HARNESS.as_posix()}'); "
@@ -152,16 +197,18 @@ def _ints(x: object) -> list[int]:
     return [int(v) for v in np.atleast_1d(np.asarray(x, dtype=float)).ravel()]
 
 
-def test_the_declared_rule_is_5_15_7() -> None:
+def test_the_declared_rule_is_10_15_7_with_zone_time_out_of_clean_time() -> None:
     text = (NIGHT6 / "night6_slow_wave_settings.m").read_text(encoding="utf-8")
-    assert "'exclusionSec', 5, 'pairZoneSec', 15, 'pairMinSec', 7" in text
+    assert "'exclusionSec', 10, 'pairZoneSec', 15, 'pairMinSec', 7" in text
+    assert "'exclusionFromCleanTime', true" in text
     assert "NOT covered by the harm test" in text
 
 
 def test_the_rule_struct_the_harness_used(result: dict[str, Any]) -> None:
     r = result["rule"]
-    assert (r["exclusionSec"], r["pairZoneSec"], r["pairMinSec"]) == (5, 15, 7)
-    assert r["name"] == "sw_span_rule_20261012"
+    assert (r["exclusionSec"], r["pairZoneSec"], r["pairMinSec"]) == (10, 15, 7)
+    assert r["exclusionFromCleanTime"] is True
+    assert r["name"] == "sw_span_rule_20261012_v2"
 
 
 @pytest.mark.parametrize("name", sorted(CASES))
@@ -178,26 +225,26 @@ def test_each_peak_is_kept_or_dropped_by_the_rule_that_applies(result: dict[str,
 
 
 def test_a_pair_is_dropped_whole_never_one_peak(result: dict[str, Any]) -> None:
-    for name in ("pair_6p9_in_zone", "pair_6p9_before_span", "two_spans_union_zone"):
+    for name in ("pair_6p9_b_then_zone", "pair_6p9_before_span", "pair_both_c_only_two_spans"):
         p = np.asarray(result["cases"][name]["pairs"], dtype=float).reshape(-1, 2)
         assert p.tolist() == [[1.0, 2.0]], name
 
 
 def test_the_other_reading_of_consecutive_is_reported_not_applied(
         result: dict[str, Any]) -> None:
-    """b_then_pair_partner: (c) on her list drops 121; on (b)'s survivors there is no pair."""
-    got = result["cases"]["b_then_pair_partner"]
+    """(c) on her detected list drops 120.9; on (b)'s survivors there is no pair."""
+    got = result["cases"]["pair_6p9_b_then_zone"]
     assert np.asarray(got["pairs"], dtype=float).reshape(-1, 2).tolist() == [[1.0, 2.0]]
     assert np.asarray(got["pairs_after_b"], dtype=float).size == 0
 
 
 def test_a_pair_across_two_spans_names_both_spans(result: dict[str, Any]) -> None:
-    got = result["cases"]["two_spans_union_zone"]
+    got = result["cases"]["pair_both_c_only_two_spans"]
     assert np.asarray(got["pairs_spans"], dtype=float).reshape(-1, 2).tolist() == [[1.0, 2.0]]
 
 
 def test_distances_are_measured_from_the_span_edges(result: dict[str, Any]) -> None:
-    for name, want in (("before_4p9", 4.9), ("after_5p1", 5.1), ("inside", 0.0)):
+    for name, want in (("before_9p9", 9.9), ("after_10p1", 10.1), ("inside", 0.0)):
         assert float(np.atleast_1d(result["cases"][name]["dist"])[0]) == pytest.approx(
             want, abs=2 / FS), name
     # no span: the distance is Inf, which MATLAB's jsonencode writes as null
@@ -220,3 +267,37 @@ def test_the_rate_from_a_given_peak_list_is_her_rule(result: dict[str, Any]) -> 
 def test_bad_inputs_are_refused_by_name(result: dict[str, Any]) -> None:
     assert result["refused"] == {"unsorted": "night6:spanRule", "reversed": "night6:spanRule",
                                  "no_rule": "night6:spanRule"}
+
+
+def test_the_zone_mask_is_the_10_s_distance(result: dict[str, Any]) -> None:
+    got = [bool(v) for v in np.atleast_1d(result["zone"]["mask"])]
+    assert got == ZONE_WANT
+
+
+@pytest.mark.parametrize("variant", sorted(APPLY_FACTORS))
+def test_the_rule_rate_leaves_the_10_s_zones_out_of_clean_time(result: dict[str, Any],
+                                                               variant: str) -> None:
+    """Rule (b) + (d) on a file of hers: the kept peaks and the rate.
+
+    Her rate over clean = ~invalid & ~edge & ~zone, computed here independently; the v1
+    reading (zone counted as clean) differs.
+    """
+    c, got = _apply_case(APPLY_FACTORS[variant]), result["apply"][variant]
+    assert got["error"] == "", got["error"]
+    kept_called = [1 + int(round(s * c["fs"])) for s in APPLY_KEPT_S]
+    assert _ints(got["kept_called"]) == kept_called
+    assert _ints(got["kept_epoch"]) == [(k - 1) * c["factor"] + 1 for k in kept_called]
+    assert (got["n_detected"], got["n_dropped_b"], got["n_dropped_c"]) == (11, 2, 1)
+    zone = _zone_rows(c)
+    runs = np.flatnonzero(np.diff(np.concatenate(([0], zone.astype(int), [0]))))
+    unclean = c["edge"] + [[int(a) + 1, int(b)] for a, b in runs.reshape(-1, 2)]
+    want, _, _ = _independent_rate({"fs": c["fs"], "n": c["n"], "locs": kept_called,
+                                    "invalid": c["invalid"], "unclean": unclean})
+    rate = np.asarray([np.nan if v is None else v for v in got["rate"]], dtype=float)
+    assert np.array_equal(np.isnan(rate), np.isnan(want))
+    ok = ~np.isnan(want)
+    assert ok.sum() > 10 and np.allclose(rate[ok], want[ok], rtol=0, atol=1e-9)
+    counted, _, _ = _independent_rate({"fs": c["fs"], "n": c["n"], "locs": kept_called,
+                                       "invalid": c["invalid"], "unclean": c["edge"]})
+    assert not np.allclose(np.nan_to_num(counted), np.nan_to_num(want))  # the zone matters
+    assert float(got["avg"]) == pytest.approx(float(np.nanmean(want)), abs=1e-9)

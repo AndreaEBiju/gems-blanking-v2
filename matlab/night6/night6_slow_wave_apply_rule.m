@@ -13,16 +13,22 @@ function A = night6_slow_wave_apply_rule(outDir, files, spans, fsEpoch, rule)
 %   2. her rate loop replayed on HER peaks and HER clean mask must give her
 %      slowWaveRateSeries bit for bit, and her implausible fraction likewise
 %      ('night6:rateReplica') - the replica is checked on every call before it is used;
-%   3. (d) slowWavePeakLocs (and decimation.peak_locs_called) become the kept peaks,
-%      slowWaveRateSeries the rate from the kept peaks (her clean mask unchanged),
-%      avgSlowWave its mean (omitnan, her expression), sw_implausibleFraction from the kept
-%      peaks (her expression);
-%   4. everything she detected is kept beside it in the added variable
+%   3. (b) the rows less than rule.exclusionSec from a span (night6_slow_wave_zone_mask)
+%      are left out of the clean time: clean = ~invalidMask & ~edgeMask & ~zone (her
+%      invalidMask and edgeMask variables are NOT changed);
+%   4. (d) slowWavePeakLocs (and decimation.peak_locs_called) become the kept peaks,
+%      slowWaveRateSeries the rate from the kept peaks over that clean time, avgSlowWave its
+%      mean (omitnan, her expression), sw_implausibleFraction from the kept peaks (her
+%      expression);
+%   5. everything she detected is kept beside it in the added variable
 %      slow_wave_span_rule: the rule, her peaks, rate, average and implausible fraction,
 %      the rows dropped by (b) (inside a span listed too) and by (c), the (c) pairs, the
-%      pairs the other reading would give, and - a SENSITIVITY, never an output - the kept
-%      peaks' rate with the < exclusionSec zones also left out of the clean time.
+%      pairs the after-(b) reading would give (reported), the zone mask's runs, and - for
+%      comparison only - the kept peaks' rate with the zone time COUNTED as clean (v1).
 % A.<channel> = counts and averages for the run record.
+    if ~isfield(rule, 'exclusionFromCleanTime') || ~islogical(rule.exclusionFromCleanTime)
+        error('night6:spanRule', 'rule.exclusionFromCleanTime is required (logical)');
+    end
     A = struct();
     for f = files(:)'
         p = fullfile(outDir, f{1});
@@ -30,13 +36,16 @@ function A = night6_slow_wave_apply_rule(outDir, files, spans, fsEpoch, rule)
         fsc = double(S.fs);
         peaks = double(S.slowWavePeakLocs(:));
         dec = isfield(S, 'decimation');
+        nc = numel(S.invalidMask);
         if dec
             called = double(S.decimation.peak_locs_called(:));
             if ~isequal((called - 1) * S.decimation.factor + 1, peaks)
                 error('night6:spanRule', '%s: peak rows do not map to her called rows', f{1});
             end
+            rowsEpoch = ((1:nc)' - 1) * S.decimation.factor + 1;
         else
             called = peaks;
+            rowsEpoch = (1:nc)';
         end
         K = night6_slow_wave_span_rule(peaks, spans, fsEpoch, rule);
         inv = logical(S.invalidMask(:));
@@ -49,9 +58,14 @@ function A = night6_slow_wave_apply_rule(outDir, files, spans, fsEpoch, rule)
                   'slowWaveRateSeries / sw_implausibleFraction from her own peaks'], f{1});
         end
         keptCalled = called(K.kept);
-        rateKept = night6_slow_wave_rate_series(keptCalled, inv, cleanHer, args{:});
-        zone5 = near_rows(numel(inv), dec, S, spans, fsEpoch, rule.exclusionSec);
-        rateZone = night6_slow_wave_rate_series(keptCalled, inv, cleanHer & ~zone5, args{:});
+        zone = night6_slow_wave_zone_mask(rowsEpoch, spans, fsEpoch, rule.exclusionSec);
+        if rule.exclusionFromCleanTime
+            cleanRule = cleanHer & ~zone;
+        else
+            cleanRule = cleanHer;
+        end
+        rateKept = night6_slow_wave_rate_series(keptCalled, inv, cleanRule, args{:});
+        rateCounted = night6_slow_wave_rate_series(keptCalled, inv, cleanHer, args{:});
 
         R = struct('rule', rule, 'spans_epoch_rows', spans, 'fs_epoch', fsEpoch, ...
                    'peaks_detected', peaks, 'peaks_detected_called', called, ...
@@ -63,11 +77,13 @@ function A = night6_slow_wave_apply_rule(outDir, files, spans, fsEpoch, rule)
                    'pairs_c_if_after_b', reshape(peaks(K.pairs_c_after_b), [], 2), ...
                    'dist_s', K.dist_s, 'n_detected', K.n, 'n_kept', K.n_kept, ...
                    'n_dropped_b', K.n_b, 'n_dropped_c', K.n_c, ...
-                   'rate_kept_zone_excluded', rateZone, ...
-                   'avg_kept_zone_excluded', mean(rateZone, 'omitnan'), ...
-                   'zone_excluded_note', ['SENSITIVITY only: the kept peaks'' rate with the ' ...
-                                          '< exclusionSec zones also removed from the clean ' ...
-                                          'time (the ruling counts peaks only)'], ...
+                   'zone_runs_called', runs(zone), ...
+                   'zone_s', nnz(zone & ~inv) / fsc, ...
+                   'clean_s_her', nnz(cleanHer) / fsc, 'clean_s_rule', nnz(cleanRule) / fsc, ...
+                   'rate_kept_zone_counted', rateCounted, ...
+                   'avg_kept_zone_counted', mean(rateCounted, 'omitnan'), ...
+                   'zone_counted_note', ['COMPARISON only (pilot v1): the kept peaks'' rate with ' ...
+                                         'the < exclusionSec zones counted as clean time'], ...
                    'replica_check', 'her rate and implausible fraction reproduced bit for bit');
         S.slowWavePeakLocs = peaks(K.kept);
         if dec, S.decimation.peak_locs_called = keptCalled; end
@@ -81,8 +97,8 @@ function A = night6_slow_wave_apply_rule(outDir, files, spans, fsEpoch, rule)
                         'n_dropped_b', K.n_b, 'n_dropped_b_inside', nnz(K.inside), ...
                         'n_dropped_c', K.n_c, 'n_pairs_c', size(K.pairs_c, 1), ...
                         'n_pairs_c_if_after_b', size(K.pairs_c_after_b, 1), ...
-                        'avg_detected', R.avg_detected, 'avg_kept', S.avgSlowWave, ...
-                        'avg_kept_zone_excluded', R.avg_kept_zone_excluded);
+                        'zone_s', R.zone_s, 'avg_detected', R.avg_detected, ...
+                        'avg_kept', S.avgSlowWave, 'avg_kept_zone_counted', R.avg_kept_zone_counted);
     end
 end
 
@@ -94,16 +110,7 @@ function v = implausible(locs, fs)
     end
 end
 
-function z = near_rows(Nc, dec, S, spans, fsEpoch, sec)
-% rows (at the rate she ran at) whose epoch row is < sec from a span or inside one
-% (sensitivity only)
-    if dec
-        rows = ((1:Nc)' - 1) * S.decimation.factor + 1;
-    else
-        rows = (1:Nc)';
-    end
-    z = false(Nc, 1);
-    for k = 1:size(spans, 1)   % distance < sec, as rule (b): strict on both sides
-        z = z | (rows > spans(k, 1) - sec * fsEpoch & rows < spans(k, 2) + sec * fsEpoch);
-    end
+function r = runs(b)
+    e = diff([false; b(:); false]);
+    r = [find(e == 1), find(e == -1) - 1];
 end
