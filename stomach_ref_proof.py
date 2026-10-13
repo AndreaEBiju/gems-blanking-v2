@@ -140,14 +140,40 @@ def _code() -> dict[str, Any]:
             "script_sha256": _sha256(Path(__file__).resolve())}
 
 
+MAX_PATH: Final = 259
+"""Cross-platform rule 5: the longest path this script will create (Windows MAX_PATH 260)."""
+
+
+def check_path_length(path: Path) -> None:
+    """Refuse, by name, a path a Windows machine without long paths could not create."""
+    n = len(str(path))
+    if n > MAX_PATH:
+        msg = (f"output path would be {n} characters (> {MAX_PATH}, Windows MAX_PATH; "
+               f"cross-platform rule 5): {path}; choose a shorter --out")
+        raise ProofRefusedError(msg)
+
+
 def write_once(path: Path, text: str) -> None:
-    """Create ``path`` with ``text`` (UTF-8, LF); refuse if it exists - never overwrite."""
+    """Create ``path`` with ``text`` (UTF-8, LF), atomically; refuse if it exists.
+
+    The final name is claimed exclusively first (an empty file, ``open('x')``), the text
+    is written to a temporary file beside it, and ``Path.replace`` (``os.replace``) moves it
+    onto the claimed name - so the name is never taken from another writer, and a reader
+    never sees a
+    partial file (an interrupted write leaves the claim empty, which no JSON reader
+    accepts). Never overwrites.
+    """
+    check_path_length(path.with_name(f".{path.name}.tmp"))
     try:
-        with path.open("x", encoding="utf-8", newline="\n") as fh:
-            fh.write(text)
+        with path.open("x", encoding="utf-8"):
+            pass
     except FileExistsError as exc:
         msg = f"{path} exists; nothing is ever overwritten"
         raise ProofRefusedError(msg) from exc
+    tmp = path.with_name(f".{path.name}.tmp")
+    with tmp.open("x", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
+    tmp.replace(path)          # os.replace: atomic on both platforms
 
 
 def claim_outputs(out: Path, animal: str, session: str, stamp: str
@@ -162,6 +188,8 @@ def claim_outputs(out: Path, animal: str, session: str, stamp: str
     report = out / f"stomach_ref_proof_{session}_{stamp}.json"
     case = out / f"real_case_{session}.json"
     proven = proven_recipe_path(out, animal, session)
+    for p in (report, case, proven):
+        check_path_length(p.with_name(f".{p.name}.tmp"))
     if report.exists():
         msg = f"{report} exists; nothing is ever overwritten"
         raise ProofRefusedError(msg)
@@ -452,6 +480,8 @@ def _prove_recording(st: GemsStore, masks_root: Path, out: Path, table: Mapping[
     folder = _mask_folder(masks_root, animal, session)
     report["mask_folder"] = folder.relative_to(masks_root).as_posix()
     dst = out / folder.relative_to(masks_root)
+    longest = max((f.name for f in folder.iterdir()), key=len)
+    check_path_length(dst.with_name(dst.name + ".partial") / f".{longest}.tmp")
     if dst.exists() or dst.with_name(dst.name + ".partial").exists():
         msg = f"{dst} (or its .partial) exists; refused before any work - nothing is overwritten"
         raise ProofRefusedError(msg)

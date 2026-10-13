@@ -282,7 +282,7 @@ def test_the_writer_takes_no_recipe_argument() -> None:
 
 
 def test_reading_stomach_ref_without_its_recipe_is_refused(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="must carry its recipe"):
+    with pytest.raises(ValueError, match=r"^syn: .*must carry its recipe"):  # names it
         _write(tmp_path / "a.mat", READS, _prov())
 
 
@@ -297,7 +297,7 @@ def test_a_recipe_is_checked_even_when_nobody_reads_stomach_ref(tmp_path: Path) 
 
 def test_an_incomplete_recipe_is_refused(tmp_path: Path) -> None:
     broken = {k: v for k, v in _good().items() if k != "notch"}
-    with pytest.raises(ValueError, match="lacks notch"):
+    with pytest.raises(ValueError, match=r"^syn: .*lacks notch"):
         _write(tmp_path / "a.mat", READS, _prov(broken))
 
 
@@ -305,10 +305,12 @@ def test_the_finalise_reader_reads_nothing_when_no_consumer_reads_stomach_ref(
         tmp_path: Path) -> None:
     none_read = {**READS, "hrv": (), "breathing": ()}
     assert sr.proven_stomach_ref_recipe(tmp_path, "A", "syn", signals=none_read,
-                                        routing_entry={}, generation_sha="x") == {}
+                                        routing_entry={}, generation_sha="x",
+                                        reference_values={}) == {}
     with pytest.raises(sr.StomachRecipeError, match="no proven recipe"):
         sr.proven_stomach_ref_recipe(tmp_path, "A", "syn", signals=READS,
-                                     routing_entry={"stomach_ref": {}}, generation_sha="x")
+                                     routing_entry={"stomach_ref": {}}, generation_sha="x",
+                                     reference_values={"e0": {}})
 
 
 @settings(max_examples=60, deadline=None)
