@@ -77,6 +77,13 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
 % elsewhere_json was written before 2026-10-10: a held recording was then never published,
 % and every file finished every consumer, so both read as empty (plan.gateNotes says so).
 %
+% SIGNAL RECIPES (plan.recipes; night6_signal_recipe, applied by night6_apply_recipe) are
+% formed for the signals of plan.runs ONLY (2026-10-12): a signal that only a held,
+% skipped, elsewhere or not-computed consumer reads is never formed, so it cannot refuse the
+% consumers that do run (K t01 cme1: its QC-held hrv/breathing read stomach_ref, and that
+% blocked its mmc). stomach_ref is formed from the mask provenance's stomach_ref_recipe and
+% nothing else (Andrea, 2026-10-12), refused by name without it.
+%
 % RECOVERY START (RULING 2026-10-08 (k) 2), name-value 'Recovery', struct(starts, session,
 % mode) - mode is the declared trim mode (night6_trim_modes), refused by name if unknown
 % or withdrawn:
@@ -174,17 +181,6 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
             plan.notMeasuredMmc.(matlab.lang.makeValidName(sig)) = ...
                 check_spans(M.(names{i}), plan.n, names{i});
         end
-    end
-
-    % ---- signal recipes: x = Y(:, cols) * weights * scaleToVolts ---------------
-    plan.recipes = struct();
-    for k = 1:numel(masks)
-        key = matlab.lang.makeValidName(masks(k).signal);
-        r = recipe(masks(k).signal, fileLabels, channels);
-        if isfield(plan.recipes, key) && ~isequal(plan.recipes.(key), r)
-            error('night6:recipeKey', 'two signals share the recipe key %s (invariant 27)', key);
-        end
-        plan.recipes.(key) = r;
     end
 
     % ---- the epoch's beats (whole-file beats re-based to the epoch) ------------
@@ -303,6 +299,35 @@ function plan = night6_prepare_epoch(M, fileLabels, metaChannels, nFile, fsFile,
                                         'keep', {sigs}); %#ok<AGROW>
         end
     end
+
+    % ---- signal recipes, for the signals the runs read and no others ----------
+    % (gate fix, 2026-10-12: a held, skipped or not-computed consumer's signal is never
+    % formed, so a signal only it needed cannot refuse the consumers that do run.)
+    % x = night6_apply_recipe(recipe, Y, rows) * scaleToVolts.
+    plan.recipes = struct();
+    srRecipe = stomach_ref_recipe_of(M);
+    for k = 1:numel(plan.runs)
+        for s = plan.runs(k).signals
+            key = matlab.lang.makeValidName(s{1});
+            r = night6_signal_recipe(s{1}, fileLabels, channels, srRecipe);
+            if isfield(plan.recipes, key) && ~isequal(plan.recipes.(key), r)
+                error('night6:recipeKey', 'two signals share the recipe key %s (invariant 27)', key);
+            end
+            plan.recipes.(key) = r;
+        end
+    end
+end
+
+function R = stomach_ref_recipe_of(M)
+% The mask provenance's stomach_ref_recipe (Andrea, 2026-10-12), or [] when it has none:
+% night6_signal_recipe refuses stomach_ref by name without it, and nothing else reads it.
+    R = [];
+    if isfield(M, 'provenance_json')
+        P = jsondecode(char(M.provenance_json));
+        if isfield(P, 'stomach_ref_recipe')
+            R = P.stomach_ref_recipe;
+        end
+    end
 end
 
 % ==========================================================================
@@ -379,41 +404,6 @@ end
 function g = stomach_labels(channels)
     isStomach = cellfun(@(c) isfield(c, 'role') && strcmp(c.role, 'stomach'), channels);
     g = cellfun(@(c) char(c.label), channels(isStomach), 'UniformOutput', false);
-end
-
-function r = recipe(sig, labels, channels)
-% How a consumer's signal is formed from the file's columns (in the file's units).
-    col = @(lab) find_one(labels, lab, sig);
-    tok = regexp(sig, '^([A-Za-z]+)_T$', 'tokens', 'once');
-    if contains(sig, '-')
-        parts = strsplit(sig, '-');
-        r = struct('kind', 'pair', 'cols', [col(parts{1}) col(parts{2})], 'weights', [1; -1]);
-    elseif ~isempty(tok)
-        % Software tripole, task 04: T = a*V1 + b*V3 - V2 with a = b = 0.5 (applied
-        % weights are naive by ruling; never fitted). Contacts from meta.json.
-        cuff = tok{1};
-        cols = zeros(1, 3);
-        for k = 1:3
-            hit = cellfun(@(c) isfield(c, 'cuff_id') && strcmp(c.cuff_id, cuff) && ...
-                isfield(c, 'contact_index') && c.contact_index == k && ...
-                strcmp(c.config, 'independent'), channels);
-            if nnz(hit) ~= 1
-                error('night6:tripole', '%s: cuff %s needs exactly one independent contact %d', ...
-                      sig, cuff, k);
-            end
-            cols(k) = col(char(channels{hit}.label));
-        end
-        r = struct('kind', 'tripole', 'cols', cols, 'weights', [0.5; -1; 0.5]);
-    else
-        r = struct('kind', 'raw', 'cols', col(sig), 'weights', 1);
-    end
-end
-
-function i = find_one(labels, lab, sig)
-    i = find(strcmp(labels, lab));
-    if numel(i) ~= 1
-        error('night6:label', 'signal %s needs channel %s, found %d in the file', sig, lab, numel(i));
-    end
 end
 
 function P = check_peri_r(M, masks, n)

@@ -594,23 +594,14 @@ end
 
 function F = function_provenance()
 % Andrea's functions must resolve to processing_new - a stray copy would shadow them -
-% and the wrapper's own (process_dataset_v2 and its step list) to this folder.
+% and the wrapper's own to this folder. The wrapper's own are DERIVED
+% (night6_wrapper_functions: every file of this folder the run reaches), never listed.
     F = struct();
     C = night6_calls();
-    ours = {'process_dataset_v2', 'night6_v2_steps', 'night6_v2_params', ...
-            'night6_step1a_fallback', 'night6_sha256_file', 'night6_recovery_start', ...
-            'night6_recovery_lead_in', 'night6_recovery_trim_outputs', ...
-            'night6_trim_modes', 'night6_check_trim_mode', 'night6_edge_settling', ...
-            'night6_slow_wave_rates', 'night6_check_decimation', 'night6_decimate_masked', ...
-            'night6_call_slow_wave', 'night6_keep_slow_wave', 'night6_slow_wave_settings', ...
-            'night6_slow_wave_caveats', 'night6_pilot_root', 'night6_hr_outputs', ...
-            'night6_hr_runs_resumable', 'night6_consumer_gate', 'night6_consumer_subset', ...
-            'night6_common_start_rec', 'night6_slow_wave_span_rule', ...
-            'night6_slow_wave_rate_series', 'night6_slow_wave_apply_rule', ...
-            'night6_slow_wave_zone_mask'};
+    here = fileparts(mfilename('fullpath'));
+    ours = night6_wrapper_functions(here);
     hers = [setdiff({C.name}, ours, 'stable'), night6_v2_steps(), ...
             {'step1a_blank_cardiac', 'pipeline_params', 'bulk_load_one'}];   % step1a: (j) 1 fallback
-    here = fileparts(mfilename('fullpath'));
     for name = [hers, ours]
         p = which(name{1});
         [d, ~] = fileparts(p);
@@ -832,16 +823,11 @@ function [c, dirty] = code_commit()
 end
 
 function write_json(f, R)
-% UTF-8, \n line endings, atomic (cross-platform rules 10, 11). jsonencode writes a
-% NaN or Inf as null; a missing value must be an absent key, so any non-finite
-% number anywhere in the record is refused before encoding.
+% UTF-8, \n line endings, atomic and checked (night6_write_text_atomic; rules 10, 11).
+% jsonencode writes a NaN or Inf as null; a missing value must be an absent key, so any
+% non-finite number anywhere in the record is refused before encoding.
     assert_finite(R, 'record', f);
-    txt = jsonencode(R, 'PrettyPrint', true);
-    tmp = [f '.tmp'];
-    fid = fopen(tmp, 'w', 'n', 'UTF-8');
-    fwrite(fid, strrep(txt, sprintf('\r\n'), newline), 'char');
-    fclose(fid);
-    movefile(tmp, f, 'f');
+    night6_write_text_atomic(f, jsonencode(R, 'PrettyPrint', true));
 end
 
 function assert_finite(v, where, f)

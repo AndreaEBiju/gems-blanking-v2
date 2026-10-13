@@ -603,6 +603,10 @@ def test_night6_trims_in_mode_b_to_the_sample(  # noqa: PLR0915 - one MATLAB run
     assert ndrec["input_mask_sample0"] == ndrec["electrical_settle_sample0"] == I0 + 1
     assert "mechanical_end_sample0" not in ndrec and "mechanical_end_s" not in ndrec
     assert ndrec["electrical_basis"] == rs.NO_MECHANICAL_DRIVE
+    # review follow-up 6: the record's rule names no mechanical term for a no-drive file
+    assert "mechanical end" not in ndrec["rule"] and "max(" not in ndrec["rule"], ndrec["rule"]
+    assert "electrical end + electrical settling; this file has no measured motor drive" \
+        in ndrec["rule"], ndrec["rule"]
     assert {ndrec["consumers"][c]["trimmed_rows"] for c in CONSUMERS} == {1}
     t1 = _inputs(got["elec1"]["trim"])
     assert t1[("spikes", "L_T")][:2].tolist() == [True, False]  # one sample, not two

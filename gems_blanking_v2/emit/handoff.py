@@ -62,6 +62,22 @@ routed train's region with no beat are KEPT for the spike consumer and flagged, 
 spans) and the provenance's ``spike_no_heartbeat_reference``. ``gate_json`` reports
 ``spike_no_heartbeat_reference_s``; the gate and the hold never see them.
 
+**The stomach reference's recipe (Andrea, 2026-10-12).** Whenever a consumer reads
+``stomach_ref``, the file's provenance carries ``stomach_ref_recipe`` - how the signal was
+built (how, config, contacts in order, the positive input, the weights, the notch or an
+explicit none), read off the derivation and verified on the recording by its one builder,
+``derive.stomach_recipe.stomach_ref_recipe``, proved per recording by
+``stomach_ref_proof.py`` - and Night 6 builds ``stomach_ref`` from that block only. It is
+a field of :class:`~gems_blanking_v2.emit.provenance.MaskProvenance` and NOT an argument of
+the writer (review 2026-10-12), so every copy of the provenance - the ``.mat``'s
+``provenance_json`` and any sidecar a driver writes from the same object - carries the same
+recipe. A file that reads ``stomach_ref`` with no recipe in its provenance, or with an
+incomplete one, is refused. The finalise driver's call (it loads no recording)::
+
+    prov = MaskProvenance(..., stomach_ref_recipe=proven_stomach_ref_recipe(
+        root, animal, session, signals=signals, routing_entry=entry,
+        generation_sha=GENERATION))
+
 OUTSIDE THE GENERATION HASH.
 """
 
@@ -77,6 +93,11 @@ import numpy as np
 import numpy.typing as npt
 from scipy.io import savemat
 
+from gems_blanking_v2.derive.stomach_recipe import (
+    STOMACH_REF,
+    StomachRecipeError,
+    validate_stomach_ref_recipe,
+)
 from gems_blanking_v2.emit.line_distrust import LineDistrustRecord, minute_sample_bounds
 from gems_blanking_v2.emit.masks import (
     NO_BEAT_RULE,
@@ -305,6 +326,29 @@ def _with_line_distrust(provenance: MaskProvenance, line_distrust: LineDistrustR
         msg = "provenance names a different spike line-distrust rule than the record carried"
         raise ProvenanceError(msg)
     return dataclasses.replace(provenance, spike_line_distrust=want)
+
+
+def _check_stomach_ref_recipe(provenance: MaskProvenance, *,
+                              signals: Mapping[str, Sequence[str]]) -> None:
+    """Refuse a file that reads stomach_ref without a complete recipe in its provenance.
+
+    A recipe is checked whenever the provenance carries one, read or not: a driver may put a
+    recording's recipe into every file of that recording.
+    """
+    readers = sorted(c for c, v in signals.items() if STOMACH_REF in v)
+    have = dict(provenance.stomach_ref_recipe)
+    if not have:
+        if readers:
+            msg = (f"{readers} read {STOMACH_REF}: the provenance must carry its recipe "
+                   "(MaskProvenance.stomach_ref_recipe, from derive.stomach_recipe."
+                   "proven_stomach_ref_recipe; Andrea 2026-10-12); it carries none")
+            raise ValueError(msg)
+        return
+    try:
+        validate_stomach_ref_recipe(have)
+    except StomachRecipeError as exc:
+        msg = f"the provenance's stomach_ref recipe is incomplete: {exc}"
+        raise ValueError(msg) from exc
 
 
 def _with_peri_r(provenance: MaskProvenance, peri_r: PeriRRecord | None, *,
@@ -607,6 +651,13 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
     2026-10-10 item 6, :func:`cuff_release_record`): flagged "no heartbeat reference" every
     minute in ``cuffrelease_json`` / ``cuffrelease_spikes_<cuff>_T`` - flags, never blank spans.
 
+    ``provenance.stomach_ref_recipe`` is how ``stomach_ref`` was built
+    (``derive.stomach_recipe.proven_stomach_ref_recipe`` at finalise): required whenever a
+    consumer reads ``stomach_ref`` here, and refused when incomplete; it reaches
+    ``provenance_json`` with the rest of the provenance - Night 6 builds the signal from it
+    (Andrea, 2026-10-12). It is not an argument here, so a sidecar written from the same
+    provenance object cannot disagree with the ``.mat``.
+
     ``elsewhere`` maps each consumer this file does NOT finish to where it is finished (RULING
     2026-10-10 item 5, see the module docstring): it reads nothing in this file - no masks, no
     gate, no spike records when it is the spike consumer - and ``elsewhere_json`` names it. A
@@ -647,6 +698,7 @@ def write_mask_file(path: Path, masks: Mapping[MaskKey, ConsumerMask],
     signals = {c: (() if c in away else tuple(v)) for c, v in signals.items()}
     _check_coverage(masks, signals)
     _check_not_computed(not_computed or {}, signals)
+    _check_stomach_ref_recipe(provenance, signals=signals)
     provenance = _with_peri_r(
         _with_line_distrust(provenance, line_distrust, signals=signals, fs=fs,
                             n_samples=n_samples, epoch_start_s=epoch_start_s),

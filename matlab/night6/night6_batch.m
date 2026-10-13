@@ -152,9 +152,7 @@ function summary = night6_batch(listFile, nWorkers, varargin)
     stamp = char(datetime('now', 'Format', 'yyyyMMdd''T''HHmmss'));
     if ~isfolder(L.out_root), mkdir(L.out_root); end
     f = fullfile(L.out_root, ['night6_batch_' stamp '.json']);
-    fid = fopen(f, 'w', 'n', 'UTF-8');
-    fwrite(fid, jsonencode(summary, 'PrettyPrint', true), 'char');
-    fclose(fid);
+    night6_write_text_atomic(f, jsonencode(summary, 'PrettyPrint', true));
     fprintf('[night6] done: %d/%d ok in %.0f s -> %s\n', summary.n_ok, n, summary.wall_s, f);
 end
 
