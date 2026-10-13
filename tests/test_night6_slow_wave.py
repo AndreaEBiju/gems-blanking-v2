@@ -289,6 +289,7 @@ def test_a_decimated_runs_file_is_trimmed_at_her_rate(result: dict[str, Any]) ->
         lo, hi = max(1, c - h), min(n, c + h)
         her.append(float(her_valid[lo - 1:hi].mean()))
     assert not np.allclose(got, her, rtol=0, atol=1e-12)   # her invalidMask alone differs
+    assert tr["sw_windows_equal"] is True   # night6_sw_windows: the same fraction, bit for bit
     assert 0.0 < got.min() < 1.0 == got.max()   # the masked span shows, at her rate
     cuts = {c["cut"]: int(c["rows"]) for c in tr["cuts"]}
     lp = cuts["slow_wave.sw_peaks.filled_or_filtered"]

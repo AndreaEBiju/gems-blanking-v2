@@ -154,6 +154,9 @@ function check_slow_wave_rate(caseFile, outFile)
         tr.fs = B.fs;
         tr.invalid_runs = runs(B.invalidMask);
         tr.zone_runs = B.slow_wave_span_rule.zone_runs_called;   % Andrea 2026-10-12
+        Wsw = night6_sw_windows(B, 0);   % the one window definition Night 6 records
+        tr.sw_windows_equal = isequal(Wsw.valid_fraction(:), ...
+                                      double(A.slowWaveRateSeries_validFraction(:)));
         tr.n = numel(B.invalidMask);
         tr.rate_win = B.rateWinSec;
         tr.fraction = A.slowWaveRateSeries_validFraction(:)';

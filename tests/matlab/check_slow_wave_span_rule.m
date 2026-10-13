@@ -53,6 +53,26 @@ function check_slow_wave_span_rule(caseFile, outFile)
                                                   double(c.kept));
         out.p2t.(f{1}) = struct('amp', {num2cell(a')}, 'trough', {num2cell(tr')});
     end
+    % --- night6_sw_windows: counted / valid / rate windows and the channel status ------
+    out.windows = struct();
+    for f = fieldnames(C.windows)'
+        c = C.windows.(f{1});
+        n = c.n;
+        inv = false(n, 1);
+        iv = reshape(double(c.invalid), [], 2);
+        for k = 1:size(iv, 1), inv(iv(k, 1):iv(k, 2)) = true; end
+        F = struct('fs', c.fs, 'invalidMask', inv, 'rateWinSec', 60, ...
+                   'slowWaveRateTime', (0:floor((n - 1) / c.fs))', ...
+                   'slow_wave_span_rule', struct('zone_runs_called', ...
+                       reshape(double(c.zone), [], 2), 'rule', W.spanRule));
+        rate = NaN(numel(F.slowWaveRateTime), 1);
+        rate(double(c.rate_at) + 1) = 5;
+        F.slowWaveRateSeries = rate;
+        Wn = night6_sw_windows(F, c.start_s);
+        out.windows.(f{1}) = struct('n_windows', Wn.n_windows, 'n_valid_windows', ...
+            Wn.n_valid_windows, 'n_rate_windows', Wn.n_rate_windows, 'status', Wn.status, ...
+            'fr', Wn.valid_fraction');
+    end
     out.prespan_refused = attempt(@() night6_slow_wave_pre_span_peaks([1; 2], 1, [], 10, ...
         W.preSpanDiagnostic));
     % --- apply rule on a hand-made file of hers, full and decimated --------------------

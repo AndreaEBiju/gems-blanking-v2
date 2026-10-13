@@ -114,6 +114,45 @@ kept peaks, median 10, threshold 20. 45 s is exactly 25.0 s before the span (lis
 25 uV); 54 s is 16 s before it (listed, 50 uV - its signed value would be 30); 35 s is 35 s
 before it (not listed)."""
 
+WINDOW_CASES: dict[str, dict[str, Any]] = {
+    # her file at 10 Hz, 150 s: windows centred 30..119 s fit (her edge rule)
+    "rate": {"fs": 10.0, "n": 1500, "invalid": [[1, 300]], "zone": [[301, 400]],
+             "start_s": 0.0, "rate_at": [60, 61]},
+    "no_valid_window": {"fs": 10.0, "n": 1500, "invalid": [[1, 700], [901, 1500]],
+                        "zone": [[701, 750], [851, 900]], "start_s": 0.0, "rate_at": []},
+    "valid_but_no_rate": {"fs": 10.0, "n": 1500, "invalid": [], "zone": [], "start_s": 0.0,
+                          "rate_at": []},
+    "after_the_start": {"fs": 10.0, "n": 1500, "invalid": [], "zone": [], "start_s": 100.0,
+                        "rate_at": [10, 110]},
+    "too_short": {"fs": 10.0, "n": 100, "invalid": [], "zone": [], "start_s": 0.0,
+                  "rate_at": []},
+}
+"""night6_sw_windows (RULING 2026-10-13): windows centred on whole seconds; counted = her edge
+rule (30 s <= t <= T - 30 s) and after the slow-wave start; valid = counted and >= 50% of the
+window neither invalid nor zone; rate at 0-based stamps rate_at (rate_at 10 in
+after_the_start is before the start and outside the fit, so it is not counted)."""
+
+
+def _windows_want(c: dict[str, Any]) -> tuple[int, int, int, str, list[float]]:
+    fs, n = c["fs"], c["n"]
+    valid = np.ones(n, dtype=bool)
+    for a, b in c["invalid"] + c["zone"]:
+        valid[a - 1:b] = False
+    t = np.arange(0, int((n - 1) // fs) + 1, dtype=float)
+    h = int(np.floor(60 * fs / 2 + 0.5))
+    frs, cnt, val, rat = [], 0, 0, 0
+    for i, tc in enumerate(t):
+        ce = int(np.floor(tc * fs + 0.5)) + 1
+        fr = valid[max(1, ce - h) - 1:min(n, ce + h)].mean()
+        frs.append(float(fr))
+        if 30 <= tc <= (n - 1) / fs - 30 and tc >= c["start_s"]:
+            cnt += 1
+            val += int(fr >= 0.5)
+            rat += int(i in c["rate_at"])
+    st = "ran" if rat else ("no valid window" if val == 0 else "ran: no rate")
+    return cnt, val, rat, st, frs
+
+
 P2T_CASES: dict[str, dict[str, Any]] = {
     # ys (None = NaN), detected and kept rows -> peak-to-trough and trough row (None = NaN)
     "two_peaks": {"ys": [0, -1, 5, -3, -2, 4, 0], "detected": [3, 6], "kept": [3, 6],
@@ -312,6 +351,7 @@ def result(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             "prespan": {k: _prespan_case(v) for k, v in PRESPAN_CASES.items()},
             "p2t": {k: {"ys": v["ys"], "detected": v["detected"], "kept": v["kept"]}
                     for k, v in P2T_CASES.items()},
+            "windows": WINDOW_CASES,
             "extent": {k: json.dumps(v, sort_keys=True) for k, v in EXTENT_CASES.items()},
             "extent_pilot": {k: k in EXTENT_PILOT_RUN for k in EXTENT_CASES},
             "resume": {k: {"record": json.dumps(v["record"], sort_keys=True),
@@ -535,3 +575,13 @@ def test_the_peak_to_trough_amplitude_and_its_trough(result: dict[str, Any], nam
     tr = [None if v is None else float(v) for v in np.atleast_1d(got["trough"]).tolist()]
     assert amp == [None if v is None else float(v) for v in want["amp"]]
     assert tr == [None if v is None else float(v) for v in want["trough"]]
+
+
+@pytest.mark.parametrize("name", sorted(WINDOW_CASES))
+def test_the_window_counts_and_status_night6_records(result: dict[str, Any], name: str) -> None:
+    cnt, val, rat, st, frs = _windows_want(WINDOW_CASES[name])
+    got = result["windows"][name]
+    assert (got["n_windows"], got["n_valid_windows"], got["n_rate_windows"]) == (cnt, val, rat)
+    assert got["status"] == st
+    assert np.allclose(np.atleast_1d(np.asarray(got["fr"], dtype=float)), frs, rtol=0,
+                       atol=1e-12)

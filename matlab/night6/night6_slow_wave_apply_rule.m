@@ -123,6 +123,23 @@ function A = night6_slow_wave_apply_rule(outDir, files, spans, fsEpoch, W)
                 'dist_s', D.dist_s, 'trough_t_epoch_s', D.trough_t_epoch_s, ...
                 'amplitude_kind', D.amplitude_kind, 'what', D.what);
         end
+        % RULING 2026-10-13: an epoch with no valid window has no rate, so its averages
+        % (and a diagnostic median with no kept peak) are NaN. A value that was not
+        % computed is ABSENT from the record (CLAUDE.md conventions), never NaN or null.
+        A.(ch) = finite_only(A.(ch));
+    end
+end
+
+function s = finite_only(s)
+% s with every numeric SCALAR field that is NaN or Inf removed, recursively through struct
+% fields (an array with a non-finite element is left for the record writer to refuse).
+    for fn = fieldnames(s)'
+        v = s.(fn{1});
+        if isnumeric(v) && isscalar(v) && ~isfinite(v)
+            s = rmfield(s, fn{1});
+        elseif isstruct(v) && isscalar(v)
+            s.(fn{1}) = finite_only(v);
+        end
     end
 end
 

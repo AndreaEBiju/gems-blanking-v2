@@ -503,6 +503,9 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
                 end
                 run.status = 'ok';
                 R = set_status(R, r, perChannel, ternary(o.DryRun, 'planned', 'ran'), '');
+                if perChannel && ~o.DryRun   % RULING 2026-10-13: per-window rule, per channel
+                    [R, run.windows] = slow_wave_windows(R, r, outDir, base, plan, o);
+                end
             end
         catch ME
             failed = true;
@@ -716,15 +719,51 @@ function R = set_status(R, r, perChannel, status, reason)
     end
 end
 
+function [R, Wrec] = slow_wave_windows(R, r, outDir, base, plan, o)
+% RULING 2026-10-13 (slow-wave release): no epoch-level hold; each rate window is protected
+% by the >= 50%-valid rule (10 s zones not valid), and a channel with no valid window has no
+% rate and is recorded as 'no valid window' - never held, never failed. Read from each kept
+% channel's FINAL file (after the stim-recovery trim), counted from the slow-wave start.
+    startS = 0;
+    if drop_outputs(plan, o)
+        cuts = plan.recoveryStart.cuts;
+        if ~iscell(cuts), cuts = num2cell(cuts); end
+        hit = cellfun(@(c) strcmp(c.cut, 'slow_wave.sw_rate.filled_or_filtered'), cuts);
+        if nnz(hit) ~= 1
+            error('night6:slowWaveWindows', 'the recovery start has %d slow-wave rate cut(s)', ...
+                  nnz(hit));
+        end
+        startS = double(cuts{hit}.output_rows_before_start) / plan.fs;
+    end
+    Wrec = struct();
+    for s = r.keep(:)'
+        key = matlab.lang.makeValidName(s{1});
+        F = load(fullfile(outDir, sprintf('%s_slowWaves_%s.mat', base, s{1})));
+        Wn = night6_sw_windows(F, startS);
+        Wrec.(key) = struct('status', Wn.status, 'n_windows', Wn.n_windows, ...
+                            'n_valid_windows', Wn.n_valid_windows, ...
+                            'n_rate_windows', Wn.n_rate_windows, 'start_s', startS);
+        st = R.consumers.slow_wave.channels.(key);
+        st.windows = Wrec.(key);
+        if strcmp(Wn.status, 'no valid window')
+            st.status = 'no valid window';
+            st.reason = ['RULING 2026-10-13: no rate window with >= 50% valid time (10 s ' ...
+                         'zones not valid); no rate, not held'];
+        end
+        R.consumers.slow_wave.channels.(key) = st;
+    end
+end
+
 function R = slow_wave_status(R)
 % slow_wave's overall status from its channels: failed if any failed, else ran/planned
-% if any did, else skipped (every channel's reason is in .channels).
+% if any did, else 'no valid window' when every channel that ran has none (RULING
+% 2026-10-13), else skipped (every channel's reason is in .channels).
     if ~isfield(R.consumers, 'slow_wave') || ~isfield(R.consumers.slow_wave, 'channels')
         return
     end
     ch = struct2cell(R.consumers.slow_wave.channels);
     st = cellfun(@(c) c.status, ch, 'UniformOutput', false);
-    order = {'failed', 'ran', 'planned', 'skipped_no_valid_samples'};
+    order = {'failed', 'ran', 'planned', 'no valid window', 'skipped_no_valid_samples'};
     for k = 1:numel(order)
         if any(strcmp(st, order{k}))
             R.consumers.slow_wave.status = order{k};
