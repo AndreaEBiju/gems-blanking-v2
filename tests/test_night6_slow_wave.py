@@ -227,6 +227,9 @@ def test_every_slow_wave_call_records_the_amplitude_caveat_and_known_properties(
             assert "decimated" not in cav["setting"]
         else:
             assert "decimated x78 (stages 13 x 6)" in cav["setting"]
+        # Andrea 2026-10-12 (go): every slow-wave result says it
+        assert cav["extent"] == ("slow wave is C1 at floor 7.42 and NOT covered by the harm "
+                                 "test (Andrea 2026-10-12)")
         props = cav["known_properties"]
         assert len(props) == 2 and all("(f) 1" in p and "both rates" in p for p in props)
         assert "findpeaks near-ties" in props[0] and "30 s clean-length gate" in props[1]
@@ -265,6 +268,13 @@ def test_a_decimated_runs_file_is_trimmed_at_her_rate(result: dict[str, Any]) ->
     valid = np.ones(n, dtype=bool)
     for a, b in _runs(tr["invalid_runs"]):
         valid[a - 1:b] = False
+    her_valid = valid.copy()
+    # Andrea 2026-10-12: the span rule's < 10 s zones are not valid either (slow wave only)
+    zone = _runs(tr["zone_runs"])
+    assert zone, "the decimated run's span leaves a zone"
+    for a, b in zone:
+        valid[a - 1:b] = False
+    assert not np.array_equal(valid, her_valid)   # the zone reaches past her invalidMask
     h = _mround(tr["rate_win"] * fsd / 2)
     want = []
     for tc in np.atleast_1d(tr["rate_t"]):
@@ -273,6 +283,12 @@ def test_a_decimated_runs_file_is_trimmed_at_her_rate(result: dict[str, Any]) ->
         want.append(float(valid[lo - 1:hi].mean()))
     got = np.atleast_1d(tr["fraction"]).astype(float)
     assert got.size == len(want) and np.allclose(got, want, rtol=0, atol=1e-12)
+    her = []
+    for tc in np.atleast_1d(tr["rate_t"]):
+        c = _mround(float(tc) * fsd) + 1
+        lo, hi = max(1, c - h), min(n, c + h)
+        her.append(float(her_valid[lo - 1:hi].mean()))
+    assert not np.allclose(got, her, rtol=0, atol=1e-12)   # her invalidMask alone differs
     assert 0.0 < got.min() < 1.0 == got.max()   # the masked span shows, at her rate
     cuts = {c["cut"]: int(c["rows"]) for c in tr["cuts"]}
     lp = cuts["slow_wave.sw_peaks.filled_or_filtered"]

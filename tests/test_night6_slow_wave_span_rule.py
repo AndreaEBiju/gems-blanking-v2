@@ -14,6 +14,11 @@ buffer around them; tested in ``test_night6_slow_wave.py``); after detection
   loop on a given peak list, checked here against an independent implementation (and, in
   every real call, against her own output bit for bit: ``night6:rateReplica``).
 
+Also (Andrea 2026-10-12, go): every slow-wave result carries "slow wave is C1 at floor 7.42 and
+NOT covered by the harm test", and a DIAGNOSTIC (``night6_slow_wave_pre_span_peaks``) lists
+the kept peaks within 25 s before a span start whose amplitude is more than 2 x the channel's
+median kept-peak amplitude - with no effect on any rate (bit-identical with it off).
+
 Synthetic peaks at the production rate, every expectation written out by hand below.
 """
 
@@ -101,6 +106,66 @@ APPLY_PEAKS_S = (25.0, 35.0, 45.0, 54.0, 62.0, 76.0, 82.5, 92.0, 102.0, 112.0, 1
 before it and 76 is 4.1 s after it ((b)); 82.5 is 10.6 s after it and 6.5 s after 76 ((c));
 54 is 16 s before it and 7.9 s before 62 (kept); 92 is 20.1 s after it (kept)."""
 APPLY_KEPT_S = (25.0, 35.0, 45.0, 54.0, 92.0, 102.0, 112.0, 122.0)
+APPLY_AMP_UV = {35.0: 30.0, 45.0: 25.0, 54.0: 30.0}
+"""Her trace at the peaks (uV; 10 elsewhere): the kept median is 10, the threshold 20. 45 s is
+exactly 25.0 s before the span (listed: <= 25 s), 54 s is 16 s before it, 35 s is 35 s before
+it (not listed)."""
+
+PRESPAN_FS = 10.0
+PRESPAN_CASES: dict[str, dict[str, Any]] = {
+    # rows at 10 Hz (row = 10 t + 1), amplitudes (uV), spans (s); want rows / spans listed
+    "equal_to_2x_is_not_listed": {"t": [50.0, 60.0, 90.0], "amp": [10.0, 10.0, 20.0],
+                                  "spans": [(100.0, 110.0)], "want": [], "want_span": []},
+    "window_25p1_is_not_listed": {"t": [50.0, 60.0, 74.9], "amp": [10.0, 10.0, 50.0],
+                                  "spans": [(100.0, 110.0)], "want": [], "want_span": []},
+    "window_24p9_is_listed": {"t": [50.0, 60.0, 75.1], "amp": [10.0, 10.0, 50.0],
+                              "spans": [(100.0, 110.0)], "want": [75.1], "want_span": [1]},
+    "the_next_span_counts": {"t": [40.0, 50.0, 60.0, 112.0, 180.0],
+                             "amp": [10.0, 10.0, 10.0, 50.0, 50.0],
+                             "spans": [(100.0, 110.0), (200.0, 210.0)], "want": [180.0],
+                             "want_span": [2]},
+    "after_the_last_span": {"t": [50.0, 60.0, 215.0], "amp": [10.0, 10.0, 50.0],
+                            "spans": [(100.0, 110.0)], "want": [], "want_span": []},
+    "spans_unsorted": {"t": [10.0, 20.0, 90.0], "amp": [10.0, 10.0, 50.0],
+                       "spans": [(200.0, 210.0), (100.0, 110.0)], "want": [90.0],
+                       "want_span": [2]},
+    "median_not_positive": {"t": [50.0, 60.0, 90.0], "amp": [-10.0, -10.0, 5.0],
+                            "spans": [(100.0, 110.0)], "want": [], "want_span": []},
+}
+"""window_25p1: 74.9 s is 25.1 s before 100 s; window_24p9: 75.1 s is 24.9 s before it.
+the_next_span_counts: 112 s (after span 1) is 88 s before span 2 - not listed; 180 s is 20 s
+before span 2. median_not_positive: the threshold is not defined, nothing is listed."""
+
+
+def _tol(sw: dict[str, Any] | None, floor: float | None) -> dict[str, Any]:
+    tol: dict[str, Any] = {}
+    if sw is not None:
+        tol["extent_rule"] = {"consumers": {"slow_wave": sw, "spikes": {"candidate": "C1"}}}
+    if floor is not None:
+        tol["cross_band_floor"] = {"0-2": floor, "300-3000": 4.35}
+    return {"thresholds": {"tolerances": tol}, "extra": {}}
+
+
+EXTENT_CASES: dict[str, dict[str, Any]] = {
+    "declared_c1": _tol({"candidate": "C1", "gate": "i_or_ii"}, 7.42),
+    "declared_c2": _tol({"candidate": "C2", "gate": "ii"}, 7.42),
+    "undeclared": _tol({"declared": False, "reason": "x"}, 7.42),
+    "undeclared_pilot": {**_tol({"declared": False, "reason": "x"}, 7.42),
+                         "extra": {"SW_PILOT": {"what": "pilot"}}},
+    "floor_7": _tol({"candidate": "C1"}, 7.0),
+    "floor_7p4249": _tol({"candidate": "C1"}, 7.4249),
+    "nothing_recorded": {"thresholds": {"source": "synthetic"}},
+}
+"""Mask provenances (the shape emit writes: thresholds.tolerances.extent_rule and
+cross_band_floor, whose "0-2" key jsondecode renames). The caveat "slow wave is C1 at floor
+7.42" is refused where the mask says otherwise and recorded unchecked where it says nothing."""
+
+
+def _prespan_case(c: dict[str, Any]) -> dict[str, Any]:
+    return {"rows": [int(round(s * PRESPAN_FS)) + 1 for s in c["t"]],
+            "amps": [a * 1e-6 for a in c["amp"]],
+            "spans": [[int(round(a * PRESPAN_FS)) + 1, int(round(b * PRESPAN_FS)) + 1]
+                      for a, b in c["spans"]], "fs": PRESPAN_FS}
 
 
 def _apply_case(factor: int) -> dict[str, Any]:
@@ -108,7 +173,9 @@ def _apply_case(factor: int) -> dict[str, Any]:
     called = [1 + int(round(s * fsc)) for s in APPLY_PEAKS_S]
     span_called = (701, 720)
     spans = [[(span_called[0] - 1) * factor + 1, span_called[1] * factor]]
+    amps = [APPLY_AMP_UV.get(s, 10.0) * 1e-6 for s in APPLY_PEAKS_S]
     return {"n": n, "fs": fsc, "fs_epoch": fsc * factor, "factor": factor, "called": called,
+            "amps": amps,
             "invalid": [list(span_called)], "edge": [[1, 150], [n - 149, n]], "spans": spans}
 
 
@@ -178,6 +245,8 @@ def result(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     case = {"night6": NIGHT6.as_posix(), "fs": FS, "cases": cases, "rate": _rate_case(),
             "zone": {"rows": [_row(s) for s in ZONE_ROWS_S], "spans": _spans(SPAN), "fs": FS},
             "apply": {k: _apply_case(f) for k, f in APPLY_FACTORS.items()},
+            "prespan": {k: _prespan_case(v) for k, v in PRESPAN_CASES.items()},
+            "extent": {k: json.dumps(v, sort_keys=True) for k, v in EXTENT_CASES.items()},
             "work": (tmp / "work").as_posix()}
     (tmp / "work").mkdir()
     case_file, res_file = tmp / "case.json", tmp / "result.json"
@@ -301,3 +370,72 @@ def test_the_rule_rate_leaves_the_10_s_zones_out_of_clean_time(result: dict[str,
                                        "invalid": c["invalid"], "unclean": c["edge"]})
     assert not np.allclose(np.nan_to_num(counted), np.nan_to_num(want))  # the zone matters
     assert float(got["avg"]) == pytest.approx(float(np.nanmean(want)), abs=1e-9)
+
+
+@pytest.mark.parametrize("name", sorted(PRESPAN_CASES))
+def test_the_pre_span_diagnostic_lists_exactly_the_large_peaks_before_a_span(
+        result: dict[str, Any], name: str) -> None:
+    c, got = PRESPAN_CASES[name], result["prespan"][name]
+    want_rows = [int(round(s * PRESPAN_FS)) + 1 for s in c["want"]]
+    assert got["n"] == len(want_rows)
+    assert _ints(got["row"]) == want_rows
+    assert _ints(got["span"]) == c["want_span"]
+    assert got["defined"] is (name != "median_not_positive")
+
+
+def test_the_pre_span_diagnostic_refuses_mismatched_inputs(result: dict[str, Any]) -> None:
+    assert result["prespan_refused"] == "night6:preSpan"
+
+
+@pytest.mark.parametrize("variant", sorted(APPLY_FACTORS))
+def test_the_diagnostic_in_the_output_file_and_the_record(result: dict[str, Any],
+                                                          variant: str) -> None:
+    got = result["apply"][variant]
+    assert got["error"] == "", got["error"]
+    pre = got["pre"]
+    assert pre["n"] == 2 and got["record_pre_n"] == 2
+    assert np.allclose(np.asarray(pre["t_epoch_s"], dtype=float), [45.0, 54.0], atol=1e-9)
+    assert np.allclose(np.asarray(pre["amplitude_uV"], dtype=float), [25.0, 30.0], atol=1e-9)
+    assert np.allclose(np.asarray(pre["dist_s"], dtype=float), [25.0, 16.0], atol=1e-9)
+    assert float(pre["median"]) == pytest.approx(10e-6, abs=1e-15)
+
+
+@pytest.mark.parametrize("variant", sorted(APPLY_FACTORS))
+def test_rates_are_bit_identical_with_and_without_the_diagnostic(result: dict[str, Any],
+                                                                 variant: str) -> None:
+    got = result["apply"][variant]
+    assert got["error"] == "", got["error"]
+    assert got["no_diag_field"] is True
+    assert got["identical_without_diagnostic"] is True   # every variable, bit for bit
+    assert got["rate_bits_equal"] is True
+
+
+CAVEAT = "slow wave is C1 at floor 7.42 and NOT covered by the harm test"
+
+
+@pytest.mark.parametrize("variant", sorted(APPLY_FACTORS))
+def test_every_slow_wave_result_says_c1_floor_742_not_harm_tested(result: dict[str, Any],
+                                                                   variant: str) -> None:
+    got = result["apply"][variant]
+    assert CAVEAT in got["caveat"] and CAVEAT in got["record_caveat"]
+
+
+@pytest.mark.parametrize(("name", "error"), [
+    ("declared_c1", ""), ("declared_c2", "night6:slowWaveExtent"),
+    ("undeclared", "night6:slowWaveExtent"), ("undeclared_pilot", ""),
+    ("floor_7", "night6:slowWaveExtent"), ("floor_7p4249", ""), ("nothing_recorded", "")])
+def test_the_caveat_is_checked_against_the_mask_provenance(result: dict[str, Any], name: str,
+                                                           error: str) -> None:
+    got = result["extent"][name]
+    assert got["error_id"] == error
+    if error:
+        return
+    assert got["statement"].startswith(CAVEAT)
+    if name == "nothing_recorded":
+        assert got["candidate_checked"].startswith("unchecked")
+        assert got["floor_checked"].startswith("unchecked")
+    elif name == "undeclared_pilot":
+        assert got["candidate_checked"].startswith("pilot mask")
+    else:
+        assert got["candidate_checked"].endswith("slow_wave candidate C1")
+        assert got["floor_checked"].startswith("mask provenance cross_band_floor 0-2")

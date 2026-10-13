@@ -343,6 +343,16 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
                          'sha256', plan.beats.sha256);
     end
     R.consumers = plan.consumers;
+    % Andrea 2026-10-12 (go): the stomach_ref recipe this result applied - its sha256
+    % (canonical JSON, night6_recipe_sha256 = derive.stomach_recipe.stomach_ref_recipe_sha256)
+    % or 'none' - and, when slow wave runs, its caveat checked against the mask provenance
+    % (night6_slow_wave_extent: C1 at floor 7.42, NOT covered by the harm test).
+    R.stomach_ref_recipe_sha256 = night6_recipe_sha256(R.mask_provenance_json, ...
+                                                       isfield(plan.recipes, 'stomach_ref'));
+    if isstruct(plan.runs) && isfield(plan.runs, 'call') ...
+            && any(strcmp({plan.runs.call}, 'slowWaveAnalysis_new'))
+        R.slow_wave_extent = night6_slow_wave_extent(prov, night6_slow_wave_settings());
+    end
     for c = fieldnames(plan.consumers)'
         st = plan.consumers.(c{1});
         if ~strcmp(st.status, 'to_run')
@@ -387,6 +397,9 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
     failed = false;
     for r = plan.runs
         run = struct('call', r.call, 'consumers', {r.consumers}, 'signals', {r.signals});
+        if any(strcmp(r.signals, 'stomach_ref'))   % the recipe this run applied (2026-10-12)
+            run.stomach_ref_recipe_sha256 = R.stomach_ref_recipe_sha256;
+        end
         if strcmp(r.call, 'HR_BR_HRVAnalysis_beats')   % (i) 4: what this call is read for
             run.outputs_used = night6_hr_outputs(r.consumers);
         end

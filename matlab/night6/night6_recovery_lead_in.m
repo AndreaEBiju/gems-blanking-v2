@@ -24,9 +24,10 @@ function [lead, rec] = night6_recovery_lead_in(RS, session, condition, i0, n, fs
 %   (night6_recovery_trim_outputs, by the output time map's class and cut).
 %
 % The added span is NaN like any motion span (invariant 1) and honoured by her functions
-% exactly as one. Slow wave's 15 s edge guard DOES act at it: Night 6 passes each run's
-% masked spans, this lead-in included, as blankIdx (RULING 2026-10-09 (c) 6). HR's does
-% not: HR gets blankIdx = [], and its edge mask sits only at blankIdx and the array ends.
+% exactly as one. Slow wave's 15 s edge guard does NOT act at it: Night 6 passes slow wave's
+% masked spans, this lead-in included, as NaN only (RULING 2026-10-12 (a)); its span rule
+% (night6_slow_wave_apply_rule) ignores peaks < 10 s from it and leaves that time out of the
+% rate's clean time. HR gets blankIdx = [], and its edge mask sits only at the array ends.
 %
 % lead.<consumer> = number of leading INPUT rows to mask (0 .. n);
 % rec.cuts{} = cut, owner, output_key, trim_class, basis, start_s, start_sample0 and

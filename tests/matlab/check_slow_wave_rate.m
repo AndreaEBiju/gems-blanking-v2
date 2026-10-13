@@ -153,6 +153,7 @@ function check_slow_wave_rate(caseFile, outFile)
         tr.rate_t = B.slowWaveRateTime(:)';
         tr.fs = B.fs;
         tr.invalid_runs = runs(B.invalidMask);
+        tr.zone_runs = B.slow_wave_span_rule.zone_runs_called;   % Andrea 2026-10-12
         tr.n = numel(B.invalidMask);
         tr.rate_win = B.rateWinSec;
         tr.fraction = A.slowWaveRateSeries_validFraction(:)';

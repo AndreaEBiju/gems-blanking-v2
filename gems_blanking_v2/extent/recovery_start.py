@@ -64,9 +64,12 @@ What counts, and what does not (RULING 2026-10-09 (c) 3, :data:`RULING_SETTLING`
   refractory period is negligible. RULING 2026-10-09 (d) 3: the mmc rate window looks back
   5 s and is counted, so the mmc rate's cut is its input's settling + 5 s.
 * **edge guards** (step2's 10.5 ms pad, HR's 0.75 s and slow wave's 15 s edge buffers) act
-  AFTER an edge and do not reach back. Slow wave's acts at every masked span, the
-  electrical lead-in included, because Night 6 passes each channel's masked spans as
-  ``blankIdx`` (RULING 2026-10-09 (c) 6); HR's acts only at the array ends (``blankIdx = []``).
+  AFTER an edge and do not reach back. Both act only at the array ends: Night 6 passes
+  ``blankIdx = []`` to HR, and to slow wave its masked spans as NaN only (RULING 2026-10-12
+  (a), replacing RULING 2026-10-09 (c) 6). At a masked span, slow wave instead applies the
+  span rule to its peaks (Night 6 ``night6_slow_wave_apply_rule``): peaks < 10 s from the
+  span are ignored and that time is left out of the rate's clean time, which covers the
+  8.17 s low-pass settling + 2.5 s smoothing half-window, the electrical lead-in included.
 * **epoch-wide statistics** (session sigma, detrend, averages) have no time to trim by;
   the input is masked through the input mask point (max of the electrical settling and
   the mechanical end), which keeps them free of unsettled data, and they are computed over
@@ -758,9 +761,10 @@ _SW_LP = Stage("low-pass 0.15 Hz order 2 (batch_process settings, night6 params)
                "over NaN filled for the filter", "filter impulse response", "impz",
                f"{_SW}:133 (fill :126; butter :131)", "filtSignal = filtfilt(sos, g, xFill);",
                "measured", filter=CONSUMER_FILTERS["slow_wave"],
-               note="task 13's measured 8.17 s (extent.tolerance, impz at 24414 Hz); her 15 s "
-                    "edgeBufferSec covers it at every masked span, which Night 6 now passes "
-                    "as blankIdx (RULING 2026-10-09 (c) 6)")
+               note="task 13's measured 8.17 s (extent.tolerance, impz at 24414 Hz); at a "
+                    "masked span it is covered by the Night 6 span rule's 10 s exclusion "
+                    "(8.17 s + the 2.5 s smoothing half-window, RULING 2026-10-12), not by "
+                    "her edgeBufferSec, which Night 6 no longer applies at masked spans")
 _SW_SMOOTH = Stage("gaussian smoothdata, window 5 s (night6 params), centred", "centred window",
                    "half", f"{_SW}:156", "smoothdata(filteredSignal, 1, 'gaussian', windowlen)",
                    "code", window_s=5.0, note="runs on the filtered data")
@@ -786,11 +790,13 @@ _SLOW_WAVE = Analysis(
         ), f"{_SW}:225-280", key="sw_rate", own_window=True),
     ),
     (
-        Excluded("edgeBufferSec 15 s at every masked span (Night 6 passes each channel's "
-                 "masked spans as blankIdx, RULING 2026-10-09 (c) 6) and at the signal ends",
+        Excluded("edgeBufferSec 15 s at the signal ends only (Night 6 passes the masked "
+                 "spans as NaN only, blankIdx = [], RULING 2026-10-12 (a))",
                  "edge guard", f"{_SW}:108-118",
-                 "acts after an edge; does not reach back. It covers the ~8 s low-pass "
-                 "settling at a masked edge, the electrical lead-in included"),
+                 "acts after an edge; does not reach back. At a masked span (the electrical "
+                 "lead-in included) the Night 6 span rule acts instead: peaks < 10 s from "
+                 "the span are ignored and that time is not clean time for the rate "
+                 "(RULING 2026-10-12 (b)), covering the 8.17 s low-pass settling"),
         Excluded("detrend over the whole epoch; avgSlowWave = mean of the rate series",
                  "epoch-wide statistic", f"{_SW}:139, :283",
                  "untimed: masking the input keeps them settled"),

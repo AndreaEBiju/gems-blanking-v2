@@ -162,7 +162,8 @@ def _cases(root: Path, rec: Recording) -> dict[str, Any]:
                                                      dtype=object),
                                   "fs": FS, "n": float(n),
                                   "meta_json": json.dumps(_meta(rec))})
-    return {"recipe": recipe, "masks": masks, "nan_rec": nan_rec, "mutants": sorted(mutants),
+    return {"recipe": recipe, "recipe_read": prov["stomach_ref_recipe"], "masks": masks,
+            "nan_rec": nan_rec, "mutants": sorted(mutants),
             "want7": wide["want7"]}
 
 
@@ -230,6 +231,14 @@ def test_stomach_ref_reads_the_stomach_columns_only(night6: dict[str, Any]) -> N
     stomach = [c.index + 1 for c in rec.channels if c.role == "stomach"]   # 1-based
     assert night6["res"]["ok"]["stomach_cols"] == stomach
     assert night6["res"]["contacts_nerve"]["error_id"] == "night6:stomachRefContacts"
+
+
+def test_the_record_hashes_the_recipe_it_applied_or_says_none(night6: dict[str, Any]) -> None:
+    """Andrea 2026-10-12: the sha256 of the applied stomach_ref_recipe, or "none"."""
+    res = night6["res"]
+    assert res["ok"]["recipe_sha256"] == sr.stomach_ref_recipe_sha256(night6["recipe_read"])
+    # hrv / breathing held: stomach_ref is never formed, so no recipe was applied
+    assert res["held_norecipe"]["recipe_sha256"] == "none"
 
 
 def test_a_mask_file_without_the_recipe_is_refused_by_name(night6: dict[str, Any]) -> None:

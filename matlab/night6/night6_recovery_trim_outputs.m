@@ -434,6 +434,11 @@ function [S, vfr] = add_valid_fraction(S, S0, d, sparts, sibling, fixed, fs, OT)
     suffix = OT.suffix;
     vf = d.valid_fraction;
     vfr = struct('kind', vf.kind, 'source', vf.source, 'variable', '', 'added', false);
+    if strcmp(vf.kind, 'sw_window') && isfield(S0, 'slow_wave_span_rule')
+        vfr.not_valid_also = ['the slow-wave span rule''s zones (rows < exclusionSec from a ' ...
+                              'masked span; slow_wave_span_rule.zone_runs_called), Andrea ' ...
+                              '2026-10-12; invalidMask and edgeMask unchanged'];
+    end
     if strcmp(vf.kind, 'her')
         vfr.variable = vf.variable;           % her own sibling already holds it
         return
@@ -488,6 +493,31 @@ function L = leaf_chains(S, parts)
     for i = 1:numel(L), L{i}.chain = [L{i}.chain, substruct('.', parts{end})]; end
 end
 
+function z = span_rule_zone(S0, N, what)
+% The slow-wave span rule's zone rows at her rate (RULING 2026-10-12 (b)): rows less than
+% exclusionSec from a masked span, which her rate does not count as clean time. All false
+% for a file without the span rule, or one whose rule keeps the zone time
+% (exclusionFromCleanTime false).
+    z = false(N, 1);
+    if ~isfield(S0, 'slow_wave_span_rule'), return, end
+    R = S0.slow_wave_span_rule;
+    if ~isfield(R, 'rule') || ~isfield(R.rule, 'exclusionFromCleanTime') ...
+            || ~R.rule.exclusionFromCleanTime
+        return
+    end
+    if ~isfield(R, 'zone_runs_called')
+        error('night6:trimShape', '%s: the span rule records no zone runs', what);
+    end
+    rr = reshape(double(R.zone_runs_called), [], 2);
+    for k = 1:size(rr, 1)
+        if rr(k, 1) < 1 || rr(k, 2) > N || rr(k, 2) < rr(k, 1)
+            error('night6:trimShape', '%s: span-rule zone run [%d %d] outside 1..%d', what, ...
+                  rr(k, 1), rr(k, 2), N);
+        end
+        z(rr(k, 1):rr(k, 2)) = true;
+    end
+end
+
 function fr = fraction(vf, val, stamp, k, S0, fs, what, sw)
 % One leaf's fractions, the shape of its value (VALID_FRACTION_KINDS, Python).
     switch vf.kind
@@ -520,6 +550,10 @@ function fr = fraction(vf, val, stamp, k, S0, fs, what, sw)
                           want, fs, sw.factor);
                 end
             end
+            % Andrea 2026-10-12: for slow wave only, the span rule's < 10 s zones are not
+            % valid time either (night6_slow_wave_apply_rule records their runs at her
+            % rate); her invalidMask and edgeMask are not changed.
+            valid = valid(:) & ~span_rule_zone(S0, N, what);
             c = round(double(stamp(:)) * fv) + 1;
             h = round(W * fv / 2);
             fr = shape(window_frac(valid(:), max(1, c - h), min(N, c + h)), val, what);

@@ -32,6 +32,9 @@ function check_stomach_ref(caseDir, outFile, outMat)
                 r.statuses.(c{1}) = plan.consumers.(c{1}).status;
             end
             r.recipes = fieldnames(plan.recipes)';
+            % 2026-10-12: what night6_run_recording records for this plan
+            r.recipe_sha256 = night6_recipe_sha256(char(M.provenance_json), ...
+                                                   isfield(plan.recipes, 'stomach_ref'));
             if isfield(plan.recipes, 'stomach_ref')
                 r.stomach_cols = plan.recipes.stomach_ref.cols;
             end

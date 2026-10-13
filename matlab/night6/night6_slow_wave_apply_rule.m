@@ -1,12 +1,14 @@
-function A = night6_slow_wave_apply_rule(outDir, files, spans, fsEpoch, rule)
+function A = night6_slow_wave_apply_rule(outDir, files, spans, fsEpoch, W)
 % NIGHT6_SLOW_WAVE_APPLY_RULE  RULING 2026-10-12 (b)-(d) on each kept slow-wave file of one run.
 %
-%   A = night6_slow_wave_apply_rule(outDir, files, spans, fsEpoch, rule)
+%   A = night6_slow_wave_apply_rule(outDir, files, spans, fsEpoch, W)
 %
 %   files    the <base>_slowWaves_<channel>.mat files night6_keep_slow_wave wrote
 %   spans    the run's masked spans, [nSeg x 2] 1-based inclusive EPOCH rows (the NaN of the
 %            input; passed to her function as NaN only, RULING 2026-10-12 (a))
-%   fsEpoch  the epoch's rate; rule = night6_slow_wave_settings().spanRule
+%   fsEpoch  the epoch's rate
+%   W        night6_slow_wave_settings(): its spanRule, extent (the caveat every result
+%            carries) and preSpanDiagnostic (W.preSpanDiagnostic = [] skips the diagnostic)
 %
 % Per file, in place (the file was just written by night6_keep_slow_wave, before any trim):
 %   1. night6_slow_wave_span_rule on her peaks (epoch rows) and the spans: kept / (b) / (c);
@@ -24,8 +26,13 @@ function A = night6_slow_wave_apply_rule(outDir, files, spans, fsEpoch, rule)
 %      slow_wave_span_rule: the rule, her peaks, rate, average and implausible fraction,
 %      the rows dropped by (b) (inside a span listed too) and by (c), the (c) pairs, the
 %      pairs the after-(b) reading would give (reported), the zone mask's runs, and - for
-%      comparison only - the kept peaks' rate with the zone time COUNTED as clean (v1).
+%      comparison only - the kept peaks' rate with the zone time COUNTED as clean (v1),
+%      W.extent.statement (slow wave is C1 at floor 7.42 and NOT covered by the harm test),
+%      and the DIAGNOSTIC pre_span_peaks (night6_slow_wave_pre_span_peaks: large kept peaks
+%      within 25 s before a span start). The diagnostic is computed last, from the kept
+%      peaks only, and changes no other variable.
 % A.<channel> = counts and averages for the run record.
+    rule = W.spanRule;
     if ~isfield(rule, 'exclusionFromCleanTime') || ~islogical(rule.exclusionFromCleanTime)
         error('night6:spanRule', 'rule.exclusionFromCleanTime is required (logical)');
     end
@@ -84,12 +91,18 @@ function A = night6_slow_wave_apply_rule(outDir, files, spans, fsEpoch, rule)
                    'avg_kept_zone_counted', mean(rateCounted, 'omitnan'), ...
                    'zone_counted_note', ['COMPARISON only (pilot v1): the kept peaks'' rate with ' ...
                                          'the < exclusionSec zones counted as clean time'], ...
-                   'replica_check', 'her rate and implausible fraction reproduced bit for bit');
+                   'replica_check', 'her rate and implausible fraction reproduced bit for bit', ...
+                   'caveat', W.extent.statement, 'extent', W.extent);
         S.slowWavePeakLocs = peaks(K.kept);
         if dec, S.decimation.peak_locs_called = keptCalled; end
         S.slowWaveRateSeries = cast(rateKept, 'like', S.slowWaveRateSeries);
         S.avgSlowWave = mean(S.slowWaveRateSeries, 'omitnan');
         S.sw_implausibleFraction = implausible(keptCalled, fsc);
+        if ~isempty(W.preSpanDiagnostic)   % DIAGNOSTIC: reads the kept peaks only
+            ys = S.slowWaveTimeSeries(:);
+            R.pre_span_peaks = night6_slow_wave_pre_span_peaks(peaks(K.kept), ...
+                ys(keptCalled), spans, fsEpoch, W.preSpanDiagnostic);
+        end
         S.slow_wave_span_rule = R;
         save(p, '-struct', 'S');
         ch = matlab.lang.makeValidName(char(S.channel));
@@ -98,7 +111,14 @@ function A = night6_slow_wave_apply_rule(outDir, files, spans, fsEpoch, rule)
                         'n_dropped_c', K.n_c, 'n_pairs_c', size(K.pairs_c, 1), ...
                         'n_pairs_c_if_after_b', size(K.pairs_c_after_b, 1), ...
                         'zone_s', R.zone_s, 'avg_detected', R.avg_detected, ...
-                        'avg_kept', S.avgSlowWave, 'avg_kept_zone_counted', R.avg_kept_zone_counted);
+                        'avg_kept', S.avgSlowWave, 'avg_kept_zone_counted', R.avg_kept_zone_counted, ...
+                        'caveat', W.extent.statement);
+        if isfield(R, 'pre_span_peaks')
+            D = R.pre_span_peaks;
+            A.(ch).pre_span_peaks = struct('n', D.n, 'median_amplitude_uV', D.median * 1e6, ...
+                'defined', D.defined, 't_epoch_s', D.t_epoch_s, 'amplitude_uV', D.amplitude_uV, ...
+                'dist_s', D.dist_s, 'what', D.what);
+        end
     end
 end
 

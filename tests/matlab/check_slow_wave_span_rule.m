@@ -37,10 +37,35 @@ function check_slow_wave_span_rule(caseFile, outFile)
     Z = C.zone;
     out.zone = struct('mask', night6_slow_wave_zone_mask(double(Z.rows), ...
         reshape(double(Z.spans), [], 2), Z.fs, W.spanRule.exclusionSec)');
+    % --- pre-span diagnostic on its own -------------------------------------------------
+    out.prespan = struct();
+    for f = fieldnames(C.prespan)'
+        c = C.prespan.(f{1});
+        P = night6_slow_wave_pre_span_peaks(double(c.rows), double(c.amps), ...
+            reshape(double(c.spans), [], 2), c.fs, W.preSpanDiagnostic);
+        out.prespan.(f{1}) = struct('n', P.n, 'row', P.row', 'dist_s', P.dist_s', ...
+            'span', P.span', 'defined', P.defined, 'median', P.median);
+    end
+    out.prespan_refused = attempt(@() night6_slow_wave_pre_span_peaks([1; 2], 1, [], 10, ...
+        W.preSpanDiagnostic));
     % --- apply rule on a hand-made file of hers, full and decimated --------------------
     out.apply = struct();
     for f = fieldnames(C.apply)'
-        out.apply.(f{1}) = apply_case(C.apply.(f{1}), fullfile(C.work, f{1}), W.spanRule);
+        out.apply.(f{1}) = apply_case(C.apply.(f{1}), fullfile(C.work, f{1}), W);
+    end
+    % --- the slow-wave caveat checked against a mask provenance --------------------------
+    out.extent = struct();
+    for f = fieldnames(C.extent)'
+        r = struct('error_id', '', 'candidate_checked', '', 'floor_checked', '', 'statement', '');
+        try
+            E = night6_slow_wave_extent(jsondecode(C.extent.(f{1})), W);
+            r.candidate_checked = E.candidate_checked;
+            r.floor_checked = E.floor_checked;
+            r.statement = E.statement;
+        catch ME
+            r.error_id = ME.identifier;
+        end
+        out.extent.(f{1}) = r;
     end
     out.refused = struct( ...
         'unsorted', attempt(@() night6_slow_wave_span_rule([5; 3], zeros(0, 2), 1, W.spanRule)), ...
@@ -51,7 +76,7 @@ function check_slow_wave_span_rule(caseFile, outFile)
     fclose(fid);
 end
 
-function r = apply_case(c, d, rule)
+function r = apply_case(c, d, W)
 % A file as night6_keep_slow_wave writes it: her rate from her own peaks (so the replica
 % check holds), then night6_slow_wave_apply_rule; what it left in the file.
     r = struct('error', '');
@@ -65,6 +90,10 @@ function r = apply_case(c, d, rule)
         called = double(c.called(:));
         S = struct('fs', fs, 'invalidMask', inv, 'edgeMask', edge, 'rateWinSec', 60, ...
                    'minStretchSec', 30, 'minPeaksInStretch', 3, 'channel', 'ANT1');
+        ys = zeros(n, 1);
+        ys(called) = double(c.amps(:));   % her trace at her peaks (volts)
+        ys(inv) = NaN;
+        S.slowWaveTimeSeries = ys;
         [S.slowWaveRateSeries, S.slowWaveRateTime] = night6_slow_wave_rate_series(called, ...
             inv, ~inv & ~edge, fs, 60, 30, 3);
         S.avgSlowWave = mean(S.slowWaveRateSeries, 'omitnan');
@@ -76,9 +105,27 @@ function r = apply_case(c, d, rule)
             S.decimation = struct('factor', c.factor, 'peak_locs_called', called);
         end
         save(fullfile(d, 'e0_slowWaves_ANT1.mat'), '-struct', 'S');
+        d0 = [d '_nodiag'];   % the same file, the diagnostic off
+        mkdir(d0);
+        save(fullfile(d0, 'e0_slowWaves_ANT1.mat'), '-struct', 'S');
         A = night6_slow_wave_apply_rule(d, {'e0_slowWaves_ANT1.mat'}, ...
-            reshape(double(c.spans), [], 2), c.fs_epoch, rule);
+            reshape(double(c.spans), [], 2), c.fs_epoch, W);
+        W0 = W; W0.preSpanDiagnostic = [];
+        night6_slow_wave_apply_rule(d0, {'e0_slowWaves_ANT1.mat'}, ...
+            reshape(double(c.spans), [], 2), c.fs_epoch, W0);
         F = load(fullfile(d, 'e0_slowWaves_ANT1.mat'));
+        F0 = load(fullfile(d0, 'e0_slowWaves_ANT1.mat'));
+        Fx = F; Fx.slow_wave_span_rule = rmfield(Fx.slow_wave_span_rule, 'pre_span_peaks');
+        r.identical_without_diagnostic = isequaln(Fx, F0);
+        r.no_diag_field = ~isfield(F0.slow_wave_span_rule, 'pre_span_peaks');
+        r.rate_bits_equal = isequal(typecast(F.slowWaveRateSeries(:), 'uint64'), ...
+                                    typecast(F0.slowWaveRateSeries(:), 'uint64'));
+        P = F.slow_wave_span_rule.pre_span_peaks;
+        r.pre = struct('n', P.n, 't_epoch_s', P.t_epoch_s', 'amplitude_uV', P.amplitude_uV', ...
+                       'dist_s', P.dist_s', 'median', P.median);
+        r.caveat = F.slow_wave_span_rule.caveat;
+        r.record_caveat = A.ANT1.caveat;
+        r.record_pre_n = A.ANT1.pre_span_peaks.n;
         r.kept_epoch = F.slowWavePeakLocs(:)';
         if c.factor == 1
             r.kept_called = F.slowWavePeakLocs(:)';

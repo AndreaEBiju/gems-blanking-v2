@@ -1203,6 +1203,11 @@ def test_mode_b_cuts_her_real_outputs_per_variable(  # noqa: PLR0915 - one run
                       and x["slow_wave_rate"]["name"] == "full"
                       and x["blank_idx"]["fs"] == FS for x in sw)
     assert rd["slow_wave_rate"]["name"] == "full"
+    # Andrea 2026-10-12: the recipe applied (none here: no consumer reads stomach_ref) and the
+    # slow-wave caveat, in every record
+    assert rd["stomach_ref_recipe_sha256"] == rr["stomach_ref_recipe_sha256"] == "none"
+    assert rd["slow_wave_extent"]["statement"].startswith(
+        "slow wave is C1 at floor 7.42 and NOT covered by the harm test")
     assert all("recovery_trim" in x for x in rr["runs"] if x["status"] == "ok")
     files = {f["file"]: f for f in r["files"]}
     kinds = {f["kind"] for f in files.values()}

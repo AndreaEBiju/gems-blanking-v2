@@ -35,6 +35,7 @@ OUTSIDE THE GENERATION HASH (nothing in the candidate chain imports this module)
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from collections.abc import Mapping, Sequence
@@ -64,6 +65,7 @@ __all__ = [
     "proven_recipe_record",
     "proven_stomach_ref_recipe",
     "stomach_ref_recipe",
+    "stomach_ref_recipe_sha256",
     "validate_stomach_ref_recipe",
 ]
 
@@ -93,6 +95,21 @@ _ROUTING_KEYS: Final = frozenset({"notch_hz", "contacts"})
 _SOURCE: Final = ("gems_blanking_v2.derive.derivations.build_stomach_reference (weights = its "
                   "unit-impulse response per contact; recipe verified bit for bit on the "
                   "recording by derive.stomach_recipe.stomach_ref_recipe)")
+
+
+def stomach_ref_recipe_sha256(recipe: Mapping[str, Any]) -> str:
+    """Return the sha256 Night 6 records for the ``stomach_ref_recipe`` it applied.
+
+    The ONE canonical form on both sides of the MATLAB/Python boundary (invariant 22): the
+    UTF-8 bytes of the recipe as canonical JSON - sorted keys, ASCII escapes, separators
+    ``","`` and ``":"``, no NaN - which is exactly how ``MaskProvenance.to_json`` writes it
+    inside ``provenance_json``. ``recipe`` is the block as it stands in the provenance (read
+    back with ``json.loads``). MATLAB's ``night6_recipe_sha256`` hashes those bytes as they
+    stand in the stored text instead of re-serialising (its jsonencode writes 5.0 as 5).
+    """
+    text = json.dumps(dict(recipe), sort_keys=True, ensure_ascii=True, separators=(",", ":"),
+                      allow_nan=False)
+    return hashlib.sha256(text.encode("ascii")).hexdigest()
 
 
 class StomachRecipeError(ValueError):
