@@ -107,9 +107,29 @@ before it and 76 is 4.1 s after it ((b)); 82.5 is 10.6 s after it and 6.5 s afte
 54 is 16 s before it and 7.9 s before 62 (kept); 92 is 20.1 s after it (kept)."""
 APPLY_KEPT_S = (25.0, 35.0, 45.0, 54.0, 92.0, 102.0, 112.0, 122.0)
 APPLY_AMP_UV = {35.0: 30.0, 45.0: 25.0, 54.0: 30.0}
-"""Her trace at the peaks (uV; 10 elsewhere): the kept median is 10, the threshold 20. 45 s is
-exactly 25.0 s before the span (listed: <= 25 s), 54 s is 16 s before it, 35 s is 35 s before
-it (not listed)."""
+APPLY_TROUGH = (53.0, -20.0)
+"""Her trace at the peaks (uV; 10 elsewhere; 0 between peaks) and one trough of -20 uV at 53 s,
+before the 54 s peak. Peak-to-trough (Andrea 2026-10-12): 10 / 30 / 25 / 50 / 10 x4 for the
+kept peaks, median 10, threshold 20. 45 s is exactly 25.0 s before the span (listed: <= 25 s,
+25 uV); 54 s is 16 s before it (listed, 50 uV - its signed value would be 30); 35 s is 35 s
+before it (not listed)."""
+
+P2T_CASES: dict[str, dict[str, Any]] = {
+    # ys (None = NaN), detected and kept rows -> peak-to-trough and trough row (None = NaN)
+    "two_peaks": {"ys": [0, -1, 5, -3, -2, 4, 0], "detected": [3, 6], "kept": [3, 6],
+                  "amp": [6, 7], "trough": [2, 4]},
+    "dropped_peak_bounds_the_trough": {"ys": [0, -5, 3, -1, 2, 0, 4], "detected": [3, 5, 7],
+                                       "kept": [3, 7], "amp": [8, 4], "trough": [2, 6]},
+    "never_across_a_nan": {"ys": [0, -9, None, -2, 3], "detected": [5], "kept": [5],
+                           "amp": [5], "trough": [4]},
+    "empty_stretch_is_nan": {"ys": [1, None, 3], "detected": [3], "kept": [3],
+                             "amp": [None], "trough": [None]},
+    "first_peak_from_the_start": {"ys": [-4, 0, 2], "detected": [3], "kept": [3],
+                                  "amp": [6], "trough": [1]},
+}
+"""dropped_peak_bounds_the_trough: the 7th row's previous DETECTED peak is row 5 (dropped), so
+its trough is row 6 (0), not row 4 (-1) beyond it. never_across_a_nan: row 2 (-9) lies before
+the NaN at row 3, so the trough is row 4."""
 
 PRESPAN_FS = 10.0
 PRESPAN_CASES: dict[str, dict[str, Any]] = {
@@ -131,6 +151,8 @@ PRESPAN_CASES: dict[str, dict[str, Any]] = {
                        "want_span": [2]},
     "median_not_positive": {"t": [50.0, 60.0, 90.0], "amp": [-10.0, -10.0, 5.0],
                             "spans": [(100.0, 110.0)], "want": [], "want_span": []},
+    "nan_amplitude_left_out": {"t": [40.0, 50.0, 60.0, 90.0], "amp": [10.0, None, 10.0, 50.0],
+                               "spans": [(100.0, 110.0)], "want": [90.0], "want_span": [1]},
 }
 """window_25p1: 74.9 s is 25.1 s before 100 s; window_24p9: 75.1 s is 24.9 s before it.
 the_next_span_counts: 112 s (after span 1) is 88 s before span 2 - not listed; 180 s is 20 s
@@ -204,7 +226,7 @@ cross_band_floor, whose "0-2" key jsondecode renames). The caveat "slow wave is 
 
 def _prespan_case(c: dict[str, Any]) -> dict[str, Any]:
     return {"rows": [int(round(s * PRESPAN_FS)) + 1 for s in c["t"]],
-            "amps": [a * 1e-6 for a in c["amp"]],
+            "amps": [None if a is None else a * 1e-6 for a in c["amp"]],
             "spans": [[int(round(a * PRESPAN_FS)) + 1, int(round(b * PRESPAN_FS)) + 1]
                       for a, b in c["spans"]], "fs": PRESPAN_FS}
 
@@ -217,6 +239,7 @@ def _apply_case(factor: int) -> dict[str, Any]:
     amps = [APPLY_AMP_UV.get(s, 10.0) * 1e-6 for s in APPLY_PEAKS_S]
     return {"n": n, "fs": fsc, "fs_epoch": fsc * factor, "factor": factor, "called": called,
             "amps": amps,
+            "troughs": [[1 + int(round(APPLY_TROUGH[0] * fsc)), APPLY_TROUGH[1] * 1e-6]],
             "invalid": [list(span_called)], "edge": [[1, 150], [n - 149, n]], "spans": spans}
 
 
@@ -287,6 +310,8 @@ def result(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             "zone": {"rows": [_row(s) for s in ZONE_ROWS_S], "spans": _spans(SPAN), "fs": FS},
             "apply": {k: _apply_case(f) for k, f in APPLY_FACTORS.items()},
             "prespan": {k: _prespan_case(v) for k, v in PRESPAN_CASES.items()},
+            "p2t": {k: {"ys": v["ys"], "detected": v["detected"], "kept": v["kept"]}
+                    for k, v in P2T_CASES.items()},
             "extent": {k: json.dumps(v, sort_keys=True) for k, v in EXTENT_CASES.items()},
             "extent_pilot": {k: k in EXTENT_PILOT_RUN for k in EXTENT_CASES},
             "resume": {k: {"record": json.dumps(v["record"], sort_keys=True),
@@ -439,8 +464,11 @@ def test_the_diagnostic_in_the_output_file_and_the_record(result: dict[str, Any]
     pre = got["pre"]
     assert pre["n"] == 2 and got["record_pre_n"] == 2
     assert np.allclose(np.asarray(pre["t_epoch_s"], dtype=float), [45.0, 54.0], atol=1e-9)
-    assert np.allclose(np.asarray(pre["amplitude_uV"], dtype=float), [25.0, 30.0], atol=1e-9)
+    # peak-to-trough (Andrea 2026-10-12): 54 s is 30 - (-20) = 50 uV, its trough at 53 s
+    assert np.allclose(np.asarray(pre["amplitude_uV"], dtype=float), [25.0, 50.0], atol=1e-9)
     assert np.allclose(np.asarray(pre["dist_s"], dtype=float), [25.0, 16.0], atol=1e-9)
+    assert float(np.asarray(pre["trough_t_epoch_s"], dtype=float)[1]) == pytest.approx(53.0)
+    assert pre["kind"].startswith("peak-to-trough")
     assert float(pre["median"]) == pytest.approx(10e-6, abs=1e-15)
 
 
@@ -498,3 +526,12 @@ def test_the_resume_step_uses_the_one_span_rule_check() -> None:
     rec = (NIGHT6 / "night6_run_recording.m").read_text(encoding="utf-8")
     assert "&& night6_span_rule_resumable(R, o.Consumers, SpanRuleNow)" in rec
     assert "isfield(R, 'slow_wave_span_rule')" not in rec   # no unconditional requirement
+
+
+@pytest.mark.parametrize("name", sorted(P2T_CASES))
+def test_the_peak_to_trough_amplitude_and_its_trough(result: dict[str, Any], name: str) -> None:
+    want, got = P2T_CASES[name], result["p2t"][name]
+    amp = [None if v is None else float(v) for v in np.atleast_1d(got["amp"]).tolist()]
+    tr = [None if v is None else float(v) for v in np.atleast_1d(got["trough"]).tolist()]
+    assert amp == [None if v is None else float(v) for v in want["amp"]]
+    assert tr == [None if v is None else float(v) for v in want["trough"]]

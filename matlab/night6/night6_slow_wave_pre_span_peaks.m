@@ -1,10 +1,15 @@
-function P = night6_slow_wave_pre_span_peaks(rows, amps, spans, fsEpoch, D)
+function P = night6_slow_wave_pre_span_peaks(rows, amps, spans, fsEpoch, D, troughRows)
 % NIGHT6_SLOW_WAVE_PRE_SPAN_PEAKS  DIAGNOSTIC: large kept peaks shortly BEFORE a masked span.
 %
 %   P = night6_slow_wave_pre_span_peaks(rows, amps, spans, fsEpoch, D)
+%   P = night6_slow_wave_pre_span_peaks(..., troughRows)
 %
 %   rows     the KEPT peaks, epoch rows (1-based, ascending)
-%   amps     their amplitudes: her slowWaveTimeSeries at each peak (the input's units, volts)
+%   amps     their PEAK-TO-TROUGH amplitudes (night6_slow_wave_peak_to_trough; Andrea
+%            2026-10-12: the signed peak value of a detrended trace can have a median <= 0),
+%            the input's units (volts); NaN where no trough is defined - such a peak is left
+%            out of the median and never listed
+%   troughRows  optional: each peak's trough, epoch rows (recorded beside the peak)
 %   spans    the run's masked spans, [nSeg x 2] 1-based inclusive epoch rows
 %   D        night6_slow_wave_settings().preSpanDiagnostic: windowSec (25), ampFactor (2)
 %
@@ -12,14 +17,16 @@ function P = night6_slow_wave_pre_span_peaks(rows, amps, spans, fsEpoch, D)
 % (0 < (start - row) / fs <= windowSec, the next span after the peak) and whose amplitude is
 % more than D.ampFactor x the median amplitude of the channel's kept peaks in this epoch.
 % A DIAGNOSTIC ONLY: it reads the kept peaks and changes nothing - no peak, rate, average or
-% fraction depends on it. With a median <= 0 (a detrended trace can put it there) the
-% threshold is not defined: P.defined is false and nothing is listed.
+% fraction depends on it. The median is over the finite amplitudes; with none, or a median
+% <= 0, the threshold is not defined: P.defined is false and nothing is listed.
 %
 % P.median, P.threshold, P.defined, P.n, and per listed peak (column vectors): row,
 % t_epoch_s = (row - 1) / fsEpoch, amplitude (input units), amplitude_uV (x 1e6, volts in),
 % dist_s (to the span start), span (its index), span_start_row.
     rows = double(rows(:));
     amps = double(amps(:));
+    if nargin < 6 || isempty(troughRows), troughRows = NaN(size(rows)); end
+    troughRows = double(troughRows(:));
     if numel(rows) ~= numel(amps)
         error('night6:preSpan', 'one amplitude per kept peak: %d rows, %d amplitudes', ...
               numel(rows), numel(amps));
@@ -31,13 +38,15 @@ function P = night6_slow_wave_pre_span_peaks(rows, amps, spans, fsEpoch, D)
     end
     if isempty(spans), spans = zeros(0, 2); end
     spans = double(spans);
-    med = median(amps);
-    if isempty(amps), med = NaN; end
+    fin = amps(isfinite(amps));
+    med = NaN;
+    if ~isempty(fin), med = median(fin); end
     P = struct('median', med, 'threshold', D.ampFactor * med, 'defined', med > 0, ...
                'window_s', D.windowSec, 'amp_factor', D.ampFactor, 'n', 0, ...
                'row', zeros(0, 1), 't_epoch_s', zeros(0, 1), 'amplitude', zeros(0, 1), ...
                'amplitude_uV', zeros(0, 1), 'dist_s', zeros(0, 1), 'span', zeros(0, 1), ...
-               'span_start_row', zeros(0, 1), ...
+               'span_start_row', zeros(0, 1), 'trough_t_epoch_s', zeros(0, 1), ...
+               'amplitude_kind', 'peak-to-trough (night6_slow_wave_peak_to_trough)', ...
                'what', ['DIAGNOSTIC only (Andrea 2026-10-12): kept peaks within window_s before ' ...
                         'a masked span''s start, amplitude > amp_factor x the median kept-peak ' ...
                         'amplitude; no rate depends on it']);
@@ -48,7 +57,7 @@ function P = night6_slow_wave_pre_span_peaks(rows, amps, spans, fsEpoch, D)
         k = find(starts > rows(i), 1);   % the next span after the peak
         if isempty(k), continue, end
         d = (starts(k) - rows(i)) / fsEpoch;
-        if d > 0 && d <= D.windowSec && amps(i) > P.threshold
+        if d > 0 && d <= D.windowSec && isfinite(amps(i)) && amps(i) > P.threshold
             P.row(end + 1, 1) = rows(i);
             P.t_epoch_s(end + 1, 1) = (rows(i) - 1) / fsEpoch;
             P.amplitude(end + 1, 1) = amps(i);
@@ -56,6 +65,7 @@ function P = night6_slow_wave_pre_span_peaks(rows, amps, spans, fsEpoch, D)
             P.dist_s(end + 1, 1) = d;
             P.span(end + 1, 1) = order(k);
             P.span_start_row(end + 1, 1) = starts(k);
+            P.trough_t_epoch_s(end + 1, 1) = (troughRows(i) - 1) / fsEpoch;
         end
     end
     P.n = numel(P.row);

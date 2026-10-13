@@ -46,6 +46,13 @@ function check_slow_wave_span_rule(caseFile, outFile)
         out.prespan.(f{1}) = struct('n', P.n, 'row', P.row', 'dist_s', P.dist_s', ...
             'span', P.span', 'defined', P.defined, 'median', P.median);
     end
+    out.p2t = struct();
+    for f = fieldnames(C.p2t)'
+        c = C.p2t.(f{1});
+        [a, tr] = night6_slow_wave_peak_to_trough(double(c.ys), double(c.detected), ...
+                                                  double(c.kept));
+        out.p2t.(f{1}) = struct('amp', {num2cell(a')}, 'trough', {num2cell(tr')});
+    end
     out.prespan_refused = attempt(@() night6_slow_wave_pre_span_peaks([1; 2], 1, [], 10, ...
         W.preSpanDiagnostic));
     % --- apply rule on a hand-made file of hers, full and decimated --------------------
@@ -101,6 +108,8 @@ function r = apply_case(c, d, W)
                    'minStretchSec', 30, 'minPeaksInStretch', 3, 'channel', 'ANT1');
         ys = zeros(n, 1);
         ys(called) = double(c.amps(:));   % her trace at her peaks (volts)
+        tr = reshape(double(c.troughs), [], 2);   % [row value]: troughs placed by the case
+        ys(tr(:, 1)) = tr(:, 2);
         ys(inv) = NaN;
         S.slowWaveTimeSeries = ys;
         [S.slowWaveRateSeries, S.slowWaveRateTime] = night6_slow_wave_rate_series(called, ...
@@ -131,7 +140,8 @@ function r = apply_case(c, d, W)
                                     typecast(F0.slowWaveRateSeries(:), 'uint64'));
         P = F.slow_wave_span_rule.pre_span_peaks;
         r.pre = struct('n', P.n, 't_epoch_s', P.t_epoch_s', 'amplitude_uV', P.amplitude_uV', ...
-                       'dist_s', P.dist_s', 'median', P.median);
+                       'dist_s', P.dist_s', 'median', P.median, ...
+                       'trough_t_epoch_s', P.trough_t_epoch_s', 'kind', P.amplitude_kind);
         r.caveat = F.slow_wave_span_rule.caveat;
         r.record_caveat = A.ANT1.caveat;
         r.record_pre_n = A.ANT1.pre_span_peaks.n;

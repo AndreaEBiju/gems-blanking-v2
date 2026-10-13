@@ -28,8 +28,9 @@ function A = night6_slow_wave_apply_rule(outDir, files, spans, fsEpoch, W)
 %      pairs the after-(b) reading would give (reported), the zone mask's runs, and - for
 %      comparison only - the kept peaks' rate with the zone time COUNTED as clean (v1),
 %      W.extent.statement (slow wave is C1 at floor 7.42 and NOT covered by the harm test),
-%      and the DIAGNOSTIC pre_span_peaks (night6_slow_wave_pre_span_peaks: large kept peaks
-%      within 25 s before a span start). The diagnostic is computed last, from the kept
+%      and the DIAGNOSTIC pre_span_peaks (night6_slow_wave_pre_span_peaks: kept peaks
+%      within 25 s before a span start whose PEAK-TO-TROUGH amplitude
+%      (night6_slow_wave_peak_to_trough) is > 2 x the channel's median). The diagnostic is computed last, from the kept
 %      peaks only, and changes no other variable.
 % A.<channel> = counts and averages for the run record.
     rule = W.spanRule;
@@ -99,9 +100,11 @@ function A = night6_slow_wave_apply_rule(outDir, files, spans, fsEpoch, W)
         S.avgSlowWave = mean(S.slowWaveRateSeries, 'omitnan');
         S.sw_implausibleFraction = implausible(keptCalled, fsc);
         if ~isempty(W.preSpanDiagnostic)   % DIAGNOSTIC: reads the kept peaks only
-            ys = S.slowWaveTimeSeries(:);
+            [p2t, trCalled] = night6_slow_wave_peak_to_trough(S.slowWaveTimeSeries, ...
+                called, keptCalled);   % peak-to-trough (Andrea 2026-10-12)
+            if dec, trEpoch = (trCalled - 1) * S.decimation.factor + 1; else, trEpoch = trCalled; end
             R.pre_span_peaks = night6_slow_wave_pre_span_peaks(peaks(K.kept), ...
-                ys(keptCalled), spans, fsEpoch, W.preSpanDiagnostic);
+                p2t, spans, fsEpoch, W.preSpanDiagnostic, trEpoch);
         end
         S.slow_wave_span_rule = R;
         save(p, '-struct', 'S');
@@ -117,7 +120,8 @@ function A = night6_slow_wave_apply_rule(outDir, files, spans, fsEpoch, W)
             D = R.pre_span_peaks;
             A.(ch).pre_span_peaks = struct('n', D.n, 'median_amplitude_uV', D.median * 1e6, ...
                 'defined', D.defined, 't_epoch_s', D.t_epoch_s, 'amplitude_uV', D.amplitude_uV, ...
-                'dist_s', D.dist_s, 'what', D.what);
+                'dist_s', D.dist_s, 'trough_t_epoch_s', D.trough_t_epoch_s, ...
+                'amplitude_kind', D.amplitude_kind, 'what', D.what);
         end
     end
 end
