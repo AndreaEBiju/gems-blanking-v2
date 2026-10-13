@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -29,6 +30,8 @@ from gems_blanking_v2.extent.grid import n_grid_frames
 from tests.conftest import make_multichannel
 
 SESSION = "syn_a_t01_bl_100000_20260101T150000Z"
+MAX_DIR = 247
+"""The longest directory Windows creates without long paths (MAX_PATH less an 8.3 name)."""
 
 
 def test_write_once_refuses_an_existing_file_and_leaves_it_alone(tmp_path: Path) -> None:
@@ -128,8 +131,12 @@ def proved(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
                     elsewhere={"spikes": "synthetic: per animal"})
     recipe, pr, _prov = proof.prove_epoch(rec, mat, ENTRY, _table(root))
     record = sr.proven_recipe_record(rec.session, recipe, {"e0_masks.mat": pr})
+    # the same recording from 5 s on: another epoch region, same entry and generation
+    sub = rec.data[int(5.0 * FS):]
+    x15 = build_derivations(replace(rec, data=sub))[0]["stomach_ref"]
+    other = proof._refs(np.asarray(x15), FS, {"stomach_ref|0.5-3": {}})
     return {"root": root, "session": rec.session, "recipe": recipe, "record": record,
-            "gen": gen, "rec": rec}
+            "gen": gen, "rec": rec, "refs": {"e0": refs}, "other_refs": {"e0": other}}
 
 
 def _store(root: Path, session: str, record: dict[str, Any]) -> None:
@@ -140,7 +147,7 @@ def _store(root: Path, session: str, record: dict[str, Any]) -> None:
 
 def _read(p: dict[str, Any], root: Path, **kw: Any) -> dict[str, Any]:  # noqa: ANN401
     args: dict[str, Any] = {"signals": FINALISE_READS, "routing_entry": ENTRY,
-                            "generation_sha": p["gen"], **kw}
+                            "generation_sha": p["gen"], "reference_values": p["refs"], **kw}
     return sr.proven_stomach_ref_recipe(root, "A", p["session"], **args)
 
 
@@ -189,6 +196,67 @@ def test_finalise_refuses_another_routing_entry_or_generation(proved: dict[str, 
     with pytest.raises(sr.StomachRecipeError, match="no stomach_ref field"):
         _read(proved, tmp_path, routing_entry={k: v for k, v in ENTRY.items()
                                                if k != "stomach_ref"})
+
+
+def test_a_proof_from_another_epoch_region_is_refused(proved: dict[str, Any],
+                                                       tmp_path: Path) -> None:
+    """Refuse a self-consistent proof made on other masks (review 2026-10-12).
+
+    Same routing entry, same generation - but another epoch region. The masks being
+    finalised decide.
+    """
+    _store(tmp_path, proved["session"], proved["record"])
+    assert proved["other_refs"]["e0"] != proved["refs"]["e0"]
+    with pytest.raises(sr.StomachRecipeError, match="a proof of other masks"):
+        _read(proved, tmp_path, reference_values=proved["other_refs"])
+
+
+def test_the_proofs_epochs_must_be_the_masks_epochs(proved: dict[str, Any],
+                                                    tmp_path: Path) -> None:
+    _store(tmp_path, proved["session"], proved["record"])
+    two = {"e0": proved["refs"]["e0"], "e132": proved["refs"]["e0"]}
+    with pytest.raises(sr.StomachRecipeError, match="covers epochs"):
+        _read(proved, tmp_path, reference_values=two)
+    with pytest.raises(sr.StomachRecipeError, match="covers epochs"):
+        _read(proved, tmp_path, reference_values={"e5": proved["refs"]["e0"]})
+    no_sr = {"e0": {"ANT1|2-50": {"median": 1.0}}}
+    with pytest.raises(sr.StomachRecipeError, match="record no stomach_ref reference"):
+        _read(proved, tmp_path, reference_values=no_sr)
+    extra_band = {"e0": {**proved["refs"]["e0"], "stomach_ref|10-150": {"median": 1.0}}}
+    with pytest.raises(sr.StomachRecipeError, match="a proof of other masks"):
+        _read(proved, tmp_path, reference_values=extra_band)
+
+
+def test_write_once_is_atomic_and_leaves_no_temporary(tmp_path: Path) -> None:
+    f = tmp_path / "x.json"
+    proof.write_once(f, '{"a": 1}\n')
+    assert f.read_bytes() == b'{"a": 1}\n'
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["x.json"]
+
+
+def test_a_path_beyond_windows_max_path_is_refused_with_a_clear_message(
+        tmp_path: Path) -> None:
+    deep = tmp_path / ("d" * 120) / ("e" * 120)
+    with pytest.raises(proof.ProofRefusedError, match=r"MAX_PATH; cross-platform rule 5"):
+        proof.claim_outputs(deep, "A", SESSION, "20261012T200000Z")
+    with pytest.raises(proof.ProofRefusedError, match="choose a shorter --out"):
+        proof.write_once(deep / "f.json", "{}\n")
+
+
+def test_a_relative_out_is_measured_from_the_working_directory(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review 2026-10-12: ``out`` is short as typed, too long once the OS joins it to cwd."""
+    cwd = tmp_path / ("w" * (MAX_DIR - len(str(tmp_path)) - 1))
+    cwd.mkdir()
+    rel = Path("o")
+    longest = sr.proven_recipe_path(rel, "A", SESSION)
+    assert len(str(longest)) < proof.MAX_PATH                      # short as typed
+    assert len(str(cwd / longest)) > proof.MAX_PATH                # too long in fact
+    monkeypatch.chdir(cwd)
+    with pytest.raises(proof.ProofRefusedError, match=r"MAX_PATH; cross-platform rule 5"):
+        proof.claim_outputs(rel, "A", SESSION, "20261012T200000Z")
+    monkeypatch.chdir(tmp_path)                                    # a short cwd: accepted
+    proof.claim_outputs(rel, "A", SESSION, "20261012T200000Z")
 
 
 def test_an_absent_proven_recipe_is_refused_by_name(proved: dict[str, Any],

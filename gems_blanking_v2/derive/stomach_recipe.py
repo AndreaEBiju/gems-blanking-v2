@@ -356,7 +356,9 @@ def proven_recipe_record(session: str, recipe: Mapping[str, Any],
 def proven_stomach_ref_recipe(root: Path, animal: str, session: str, *,
                               signals: Mapping[str, Sequence[str]],
                               routing_entry: Mapping[str, Any],
-                              generation_sha: str) -> dict[str, Any]:
+                              generation_sha: str,
+                              reference_values: Mapping[str, Mapping[str, Any]]
+                              ) -> dict[str, Any]:
     """Return ``MaskProvenance.stomach_ref_recipe`` for one recording at finalise.
 
     Finalise loads no recording, so it never BUILDS the recipe: it reads the one
@@ -371,10 +373,19 @@ def proven_stomach_ref_recipe(root: Path, animal: str, session: str, *,
     finalise runs under), its generation sha must be the masks' and the code's AND
     ``generation_sha``, and the recipe's routing variant must be ``routing_entry``'s.
 
+    **The proof must be about THESE masks** (review 2026-10-12): ``reference_values`` maps
+    every epoch tag of the recording being finalised (``"e0"``, ``"e132"``) to that epoch's
+    ``MaskProvenance.reference_values``. The proof's epochs must be exactly those tags, and
+    each epoch's ``expected`` must equal that epoch's ``stomach_ref|<band>`` reference values
+    exactly - every band, no more, no fewer. A proof made on another epoch region, under the
+    same routing entry and generation, is refused.
+
     The finalise driver::
 
-        recipe = proven_stomach_ref_recipe(root, animal, session, signals=signals,
-                                           routing_entry=entry, generation_sha=GENERATION)
+        recipe = proven_stomach_ref_recipe(
+            root, animal, session, signals=signals, routing_entry=entry,
+            generation_sha=GENERATION,
+            reference_values={e["tag"]: e["reference_values"] for e in epochs})
         prov = MaskProvenance(..., stomach_ref_recipe=recipe)   # every copy carries it
         write_mask_file(path, masks, prov, signals=signals, ...)
     """
@@ -396,12 +407,42 @@ def proven_stomach_ref_recipe(root: Path, animal: str, session: str, *,
     from gems_blanking_v2.emit.routing import entry_hash  # noqa: PLC0415 - layer: emit
     _check_proven(rec, session, entry_hash_want=entry_hash(routing_entry),
                   generation_sha=str(generation_sha))
+    _check_against_masks(rec["proofs"], reference_values, session)
     if rec["recipe"]["routing_stomach_ref"] != dict(routing_entry["stomach_ref"]):
         msg = (f"{session}: the proven recipe is for routing stomach_ref "
                f"{rec['recipe']['routing_stomach_ref']}, the entry names "
                f"{dict(routing_entry['stomach_ref'])}")
         raise StomachRecipeError(msg)
     return dict(rec["recipe"])
+
+
+def _epoch_tag(name: str) -> str:
+    """``"e0_masks.mat"`` (the proof's key) or ``"e0"`` -> ``"e0"``."""
+    return name.removesuffix("_masks.mat")
+
+
+def _check_against_masks(proofs: Mapping[str, Mapping[str, Any]],
+                         reference_values: Mapping[str, Mapping[str, Any]],
+                         session: str) -> None:
+    """Refuse unless the proof's epochs and expected values are the masks' own."""
+    have = {_epoch_tag(k): v for k, v in proofs.items()}
+    want = {_epoch_tag(k): v for k, v in reference_values.items()}
+    if sorted(have) != sorted(want):
+        msg = (f"{session}: the proof covers epochs {sorted(have)}, the masks being finalised "
+               f"are epochs {sorted(want)}")
+        raise StomachRecipeError(msg)
+    for tag, proof in have.items():
+        masks_refs = {k: dict(v) for k, v in want[tag].items()
+                      if k.split("|", 1)[0] == STOMACH_REF}
+        expected = {k: dict(v) for k, v in dict(proof.get("expected") or {}).items()}
+        if not masks_refs:
+            msg = (f"{session} {tag}: the masks being finalised record no {STOMACH_REF} "
+                   "reference value, so the proof cannot be tied to them")
+            raise StomachRecipeError(msg)
+        if expected != masks_refs:
+            msg = (f"{session} {tag}: the proof was made against reference values {expected}, "
+                   f"the masks being finalised record {masks_refs} - a proof of other masks")
+            raise StomachRecipeError(msg)
 
 
 def _check_proven(rec: Mapping[str, Any], session: str, *, entry_hash_want: str | None,

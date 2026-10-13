@@ -339,7 +339,8 @@ def _check_stomach_ref_recipe(provenance: MaskProvenance, *,
     have = dict(provenance.stomach_ref_recipe)
     if not have:
         if readers:
-            msg = (f"{readers} read {STOMACH_REF}: the provenance must carry its recipe "
+            msg = (f"{provenance.recording}: {readers} read {STOMACH_REF}: the provenance "
+                   "must carry its recipe "
                    "(MaskProvenance.stomach_ref_recipe, from derive.stomach_recipe."
                    "proven_stomach_ref_recipe; Andrea 2026-10-12); it carries none")
             raise ValueError(msg)
@@ -347,7 +348,7 @@ def _check_stomach_ref_recipe(provenance: MaskProvenance, *,
     try:
         validate_stomach_ref_recipe(have)
     except StomachRecipeError as exc:
-        msg = f"the provenance's stomach_ref recipe is incomplete: {exc}"
+        msg = f"{provenance.recording}: the provenance's stomach_ref recipe is incomplete: {exc}"
         raise ValueError(msg) from exc
 
 
