@@ -1221,6 +1221,23 @@ def _stand_in_folder(root: Path) -> Path:
     return dst
 
 
+MODEL_SWP = "5b2e0123456789abcdef0123456789ab"
+"""SESSION_A's masks with extra.SW_PILOT: a slow-wave PILOT mask (review of 3ce6575)."""
+
+
+def _sw_pilot_folder(root: Path) -> Path:
+    src = root / "data" / "T" / SESSION_A / "masks" / MODEL
+    dst = src.parent / MODEL_SWP
+    dst.mkdir()
+    for f in sorted(src.glob("e*_masks.mat")):
+        m = {k: v for k, v in loadmat(f).items() if not k.startswith("__")}
+        prov = json.loads(str(np.asarray(m["provenance_json"]).ravel()[0]))
+        prov["extra"]["SW_PILOT"] = {"what": "SLOW-WAVE PILOT ONLY (test)"}
+        m["provenance_json"] = json.dumps(prov, sort_keys=True, ensure_ascii=True)
+        savemat(dst / f.name, m, do_compression=True)
+    return dst
+
+
 MODEL_HB = "4b0e0123456789abcdef0123456789ab"
 """SESSION_A's masks with breathing's spans set to hrv's: identical masks, still two calls."""
 
@@ -1284,6 +1301,9 @@ def gates(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             g("beats_none", folder_a, pilot / "out_bn", pilot, None, move=True),
             g("beats_no_pilot", folder_a, tmp / "out_bnp", None, tmp / "beats_ok"),
             g("hr_same_masks", _same_hr_folder(root), tmp / "out_hb")]
+    folder_swp = _sw_pilot_folder(root)
+    runs += [g("swp_no_pilot", folder_swp, tmp / "out_swp_np"),
+             g("swp_pilot_ok", folder_swp, pilot / "out_swp", pilot)]
     junctions = (_junction(tmp / "pilot_link", tmp / "prodj")
                  and _junction(tmp / "via", tmp / "prodv"))
     if junctions:
@@ -1352,6 +1372,16 @@ def test_a_stand_in_tolerance_mask_is_read_only_in_a_declared_pilot_run(
     assert "pilot_root" not in _record(tmp / "out_plain")
     b = gates["res"]["batch"]["b_si_no_pilot"]
     assert b.startswith("returned: error: night6:toleranceStandIn"), b
+
+
+def test_a_slow_wave_pilot_mask_is_read_only_in_a_declared_pilot_run(
+        gates: dict[str, Any]) -> None:
+    """Review of 3ce6575: extra.SW_PILOT outside a pilot run is refused before anything runs."""
+    r, tmp, pilot = gates["res"]["run"], gates["tmp"], gates["pilot"]
+    assert r["swp_no_pilot"].startswith("night6:slowWavePilot"), r["swp_no_pilot"]
+    assert not (tmp / "out_swp_np").exists()  # refused before anything was written
+    assert r["swp_pilot_ok"] == "", r["swp_pilot_ok"]
+    assert _record(pilot / "out_swp", MODEL_SWP)["status"] == "dry_run"
 
 
 def test_beats_root_is_pilot_only_and_hash_checked(gates: dict[str, Any]) -> None:

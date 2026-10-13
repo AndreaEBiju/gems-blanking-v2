@@ -58,7 +58,8 @@ function check_slow_wave_span_rule(caseFile, outFile)
     for f = fieldnames(C.extent)'
         r = struct('error_id', '', 'candidate_checked', '', 'floor_checked', '', 'statement', '');
         try
-            E = night6_slow_wave_extent(jsondecode(C.extent.(f{1})), W);
+            E = night6_slow_wave_extent(jsondecode(C.extent.(f{1})), W, ...
+                                        logical(C.extent_pilot.(f{1})));
             r.candidate_checked = E.candidate_checked;
             r.floor_checked = E.floor_checked;
             r.statement = E.statement;
@@ -66,6 +67,14 @@ function check_slow_wave_span_rule(caseFile, outFile)
             r.error_id = ME.identifier;
         end
         out.extent.(f{1}) = r;
+    end
+    % --- the span rule's part of the resume key (review of 3ce6575) ---------------------
+    out.resume = struct();
+    for f = fieldnames(C.resume)'
+        c = C.resume.(f{1});
+        [tf, why] = night6_span_rule_resumable(jsondecode(c.record), c.subset, ...
+                                               W.spanRule.name);
+        out.resume.(f{1}) = struct('tf', tf, 'why', why);
     end
     out.refused = struct( ...
         'unsorted', attempt(@() night6_slow_wave_span_rule([5; 3], zeros(0, 2), 1, W.spanRule)), ...

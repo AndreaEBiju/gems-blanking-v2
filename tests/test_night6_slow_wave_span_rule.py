@@ -155,7 +155,48 @@ EXTENT_CASES: dict[str, dict[str, Any]] = {
     "floor_7": _tol({"candidate": "C1"}, 7.0),
     "floor_7p4249": _tol({"candidate": "C1"}, 7.4249),
     "nothing_recorded": {"thresholds": {"source": "synthetic"}},
+    "undeclared_pilot_production_run": {**_tol({"declared": False, "reason": "x"}, 7.42),
+                                        "extra": {"SW_PILOT": {"what": "pilot"}}},
+    "declared_c1_pilot_mark_production_run": {**_tol({"candidate": "C1"}, 7.42),
+                                              "extra": {"SW_PILOT": {"what": "pilot"}}},
 }
+EXTENT_PILOT_RUN = frozenset({"undeclared_pilot"})
+"""Cases run as a DECLARED pilot run (PilotRoot); every other case is a production run."""
+
+
+def _record(subset: list[str], sw_status: str, rule: str | None) -> dict[str, Any]:
+    """Return a complete record's resume-relevant part, as night6_run_recording writes it."""
+    statuses = {"breathing": "ran", "hrv": "ran", "mmc": "ran", "slow_wave": sw_status,
+                "spikes": "skipped_elsewhere", "velocity": "skipped_not_in_batch"}
+    r: dict[str, Any] = {"status": "complete", "consumer_subset": subset,
+                         "consumers": {c: {"status": s, "reason": "x"}
+                                       for c, s in statuses.items()},
+                         "slow_wave_rate": {"name": "decimated78", "factors": [13, 6],
+                                            "factor": 78}}
+    if rule is not None:
+        r["slow_wave_span_rule"] = rule
+    return r
+
+
+NONSPIKE = ["breathing", "hrv", "mmc"]
+RULE_NOW = "sw_span_rule_20261012_v2"
+RESUME_CASES: dict[str, dict[str, Any]] = {
+    # f844719 wrote no slow_wave_span_rule: its {hrv, breathing, mmc} records must resume
+    "f844719_nonspike": {"record": _record(NONSPIKE, "skipped_not_in_batch", None),
+                         "subset": NONSPIKE, "want": True},
+    "slow_wave_without_rule": {"record": _record(["slow_wave"], "ran", None),
+                               "subset": ["slow_wave"], "want": False},
+    "slow_wave_old_rule": {"record": _record(["slow_wave"], "ran", "sw_span_rule_20261012"),
+                           "subset": ["slow_wave"], "want": False},
+    "slow_wave_rule_now": {"record": _record(["slow_wave"], "ran", RULE_NOW),
+                           "subset": ["slow_wave"], "want": True},
+    "all_consumers_slow_wave_ran_no_rule": {"record": _record([], "ran", None), "subset": [],
+                                            "want": False},
+    "all_consumers_slow_wave_not_computed": {
+        "record": _record([], "skipped_not_computed", None), "subset": [], "want": True},
+}
+"""The span rule's resume key (review of 3ce6575): required only when slow wave is in the
+batch's consumers - and, for every consumer ({}), only when the record's slow wave ran."""
 """Mask provenances (the shape emit writes: thresholds.tolerances.extent_rule and
 cross_band_floor, whose "0-2" key jsondecode renames). The caveat "slow wave is C1 at floor
 7.42" is refused where the mask says otherwise and recorded unchecked where it says nothing."""
@@ -247,6 +288,9 @@ def result(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             "apply": {k: _apply_case(f) for k, f in APPLY_FACTORS.items()},
             "prespan": {k: _prespan_case(v) for k, v in PRESPAN_CASES.items()},
             "extent": {k: json.dumps(v, sort_keys=True) for k, v in EXTENT_CASES.items()},
+            "extent_pilot": {k: k in EXTENT_PILOT_RUN for k in EXTENT_CASES},
+            "resume": {k: {"record": json.dumps(v["record"], sort_keys=True),
+                           "subset": v["subset"]} for k, v in RESUME_CASES.items()},
             "work": (tmp / "work").as_posix()}
     (tmp / "work").mkdir()
     case_file, res_file = tmp / "case.json", tmp / "result.json"
@@ -423,7 +467,9 @@ def test_every_slow_wave_result_says_c1_floor_742_not_harm_tested(result: dict[s
 @pytest.mark.parametrize(("name", "error"), [
     ("declared_c1", ""), ("declared_c2", "night6:slowWaveExtent"),
     ("undeclared", "night6:slowWaveExtent"), ("undeclared_pilot", ""),
-    ("floor_7", "night6:slowWaveExtent"), ("floor_7p4249", ""), ("nothing_recorded", "")])
+    ("floor_7", "night6:slowWaveExtent"), ("floor_7p4249", ""), ("nothing_recorded", ""),
+    ("undeclared_pilot_production_run", "night6:slowWavePilot"),
+    ("declared_c1_pilot_mark_production_run", "night6:slowWavePilot")])
 def test_the_caveat_is_checked_against_the_mask_provenance(result: dict[str, Any], name: str,
                                                            error: str) -> None:
     got = result["extent"][name]
@@ -439,3 +485,16 @@ def test_the_caveat_is_checked_against_the_mask_provenance(result: dict[str, Any
     else:
         assert got["candidate_checked"].endswith("slow_wave candidate C1")
         assert got["floor_checked"].startswith("mask provenance cross_band_floor 0-2")
+
+
+@pytest.mark.parametrize("name", sorted(RESUME_CASES))
+def test_the_span_rule_is_a_resume_key_only_where_slow_wave_runs(result: dict[str, Any],
+                                                                 name: str) -> None:
+    got = result["resume"][name]
+    assert got["tf"] is RESUME_CASES[name]["want"], got["why"]
+
+
+def test_the_resume_step_uses_the_one_span_rule_check() -> None:
+    rec = (NIGHT6 / "night6_run_recording.m").read_text(encoding="utf-8")
+    assert "&& night6_span_rule_resumable(R, o.Consumers, SpanRuleNow)" in rec
+    assert "isfield(R, 'slow_wave_span_rule')" not in rec   # no unconditional requirement

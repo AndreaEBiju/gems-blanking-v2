@@ -1,10 +1,11 @@
-function E = night6_slow_wave_extent(prov, W)
+function E = night6_slow_wave_extent(prov, W, pilotRun)
 % NIGHT6_SLOW_WAVE_EXTENT  The caveat every slow-wave result carries, checked against the mask.
 %
-%   E = night6_slow_wave_extent(prov, W)
+%   E = night6_slow_wave_extent(prov, W, pilotRun)
 %
-%   prov  the mask file's provenance (jsondecode of provenance_json)
-%   W     night6_slow_wave_settings(): W.extent (candidate C1, floor_z 7.42, band 0-2)
+%   prov      the mask file's provenance (jsondecode of provenance_json)
+%   W         night6_slow_wave_settings(): W.extent (candidate C1, floor_z 7.42, band 0-2)
+%   pilotRun  true only in a DECLARED pilot run (night6_run_recording's PilotRoot)
 %
 % Andrea, 2026-10-12 (go): every slow-wave result says "slow wave is C1 at floor 7.42 and NOT
 % covered by the harm test". The sentence is only true of a mask made that way, so where the
@@ -13,9 +14,17 @@ function E = night6_slow_wave_extent(prov, W)
 %   thresholds.tolerances.extent_rule.consumers.slow_wave  - candidate must be W's; declared
 %       false is accepted only for a pilot mask (extra.SW_PILOT), whose C1 spans were added
 %       by the pilot from candidate set v2;
+%   extra.SW_PILOT                                          - read only when pilotRun is true
+%       (review of 3ce6575: a production batch never writes pilot slow-wave results;
+%       'night6:slowWavePilot', also refused before loading by night6_run_recording);
 %   thresholds.tolerances.cross_band_floor.<band>          - must equal floor_z (to 0.005).
 % Absent fields are recorded as unchecked, never assumed.
     X = W.extent;
+    isPilotMask = isfield(prov, 'extra') && isstruct(prov.extra) && isfield(prov.extra, 'SW_PILOT');
+    if isPilotMask && ~(islogical(pilotRun) && isscalar(pilotRun) && pilotRun)
+        error('night6:slowWavePilot', ['the mask carries slow-wave PILOT masks ' ...
+              '(extra.SW_PILOT) and this is not a declared pilot run']);
+    end
     E = struct('statement', X.statement, 'candidate', X.candidate, 'floor_z', X.floor_z, ...
                'floor_band', X.floor_band, 'candidate_checked', 'unchecked: no extent_rule for slow_wave in the mask provenance', ...
                'floor_checked', 'unchecked: no cross_band_floor for the band in the mask provenance');
@@ -28,7 +37,7 @@ function E = night6_slow_wave_extent(prov, W)
             && isfield(tol.extent_rule, 'consumers') && isfield(tol.extent_rule.consumers, 'slow_wave')
         sw = tol.extent_rule.consumers.slow_wave;
         if isfield(sw, 'declared') && isequal(sw.declared, false)
-            if isfield(prov, 'extra') && isstruct(prov.extra) && isfield(prov.extra, 'SW_PILOT')
+            if isPilotMask
                 E.candidate_checked = ['pilot mask: extent_rule declares slow wave false; ' ...
                                        'extra.SW_PILOT added candidate-set v2 C1 spans'];
             else

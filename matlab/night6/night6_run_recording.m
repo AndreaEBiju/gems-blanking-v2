@@ -141,12 +141,20 @@ function records = night6_run_recording(maskFolder, varargin)
     [~, order] = sort(starts);
     files = files(order);
     % Review 2026-10-10 fix 1: a mask made on the STAND-IN tolerance table is read only in a
-    % declared pilot run - refused by name before anything is loaded or resumed.
+    % declared pilot run - refused by name before anything is loaded or resumed. The same for
+    % a slow-wave PILOT mask (extra.SW_PILOT; review of 3ce6575): a production batch can never
+    % write pilot slow-wave results.
     if isempty(o.PilotRoot)
         for k = 1:numel(files)
             Mp = load(fullfile(files(k).folder, files(k).name), 'provenance_json');
             if ~isfield(Mp, 'provenance_json'), continue, end
-            tol = tolerance_stand_in(jsondecode(char(Mp.provenance_json)));
+            Pp = jsondecode(char(Mp.provenance_json));
+            if isfield(Pp, 'extra') && isstruct(Pp.extra) && isfield(Pp.extra, 'SW_PILOT')
+                error('night6:slowWavePilot', ['%s carries slow-wave PILOT masks ' ...
+                      '(extra.SW_PILOT): read only in a declared pilot run (PilotRoot)'], ...
+                      fullfile(files(k).folder, files(k).name));
+            end
+            tol = tolerance_stand_in(Pp);
             if ~isempty(tol)
                 error('night6:toleranceStandIn', ['%s was made on the stand-in tolerance ' ...
                       'table (%s): read only in a declared pilot run (PilotRoot; RULING ' ...
@@ -177,8 +185,7 @@ function records = night6_run_recording(maskFolder, varargin)
                 && same_recovery_start(R, o.RS, o.RecoveryTrimMode) ...
                 && isfield(R, 'slow_wave_rate') && isstruct(R.slow_wave_rate) ...
                 && strcmp(R.slow_wave_rate.name, o.SW.name) ...   % (c) 6: same rate
-                && isfield(R, 'slow_wave_span_rule') ...   % RULING 2026-10-12: same rule
-                && strcmp(R.slow_wave_span_rule, SpanRuleNow) ...
+                && night6_span_rule_resumable(R, o.Consumers, SpanRuleNow) ...   % 2026-10-12
                 && isfield(R, 'edge_settling') && isstruct(R.edge_settling) ...
                 && isfield(R.edge_settling, 'sha256') ...
                 && strcmp(R.edge_settling.sha256, EdNow.sha256) ...   % same edge settlings
@@ -351,7 +358,8 @@ function R = run_epoch(maskFile, S, meta, src, outDir, o)
                                                        isfield(plan.recipes, 'stomach_ref'));
     if isstruct(plan.runs) && isfield(plan.runs, 'call') ...
             && any(strcmp({plan.runs.call}, 'slowWaveAnalysis_new'))
-        R.slow_wave_extent = night6_slow_wave_extent(prov, night6_slow_wave_settings());
+        R.slow_wave_extent = night6_slow_wave_extent(prov, night6_slow_wave_settings(), ...
+                                                     ~isempty(o.PilotRoot));
     end
     for c = fieldnames(plan.consumers)'
         st = plan.consumers.(c{1});
