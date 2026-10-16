@@ -151,6 +151,27 @@ Version 6 (RULING 2026-10-10 item 7)
   per-stim-level summary it compares, and :func:`dose_response_from_night6` reads both
   versions' per-file values from Night 6's outputs (the trim marker's recomputed values).
 
+Electrical settling not measurable (Andrea 2026-10-15, :data:`SETTLING_NOT_MEASURABLE`)
+----------------------------------------------------------------------------------------
+A file whose electrical-settling measurement was HELD (e.g. ``held_no_clean_late_reference``:
+every late reference window failed the no-motion test, so no settling can be measured) used
+to get no row, so Night 6 could not run it. Andrea's ruling, verbatim:
+:data:`RULING_NOT_MEASURABLE` ("compute as is with whatever is not blanked."). Implemented as
+the electrical basis ``settling_not_measurable_ruled``: the electrical settling was NOT
+measured (and cannot be); the start is computed WITHOUT an electrical-settling term - input
+mask point = max(electrical end, mechanical end) (:func:`input_mask`), then each analysis's
+own settling and each cut's reach exactly as for every other basis - and the motion/artifact
+blanking masks are what protect the data. The row carries NO ``electrical_settle_s`` /
+``electrical_settle_sample0`` / ``electrical_s`` (absent, never 0 and never a number dressed
+up as a measurement: invariant 8); it carries ``electrical_end_sample0`` (the electrical term
+of its input mask point) and the ``electrical_settling_not_measured`` record - status
+``not_measured``, the held reason, why, the ruling verbatim, by whom and when, and this
+interpretation (:data:`NOT_MEASURABLE_INTERPRETATION`). The writer and both readers refuse
+the basis without that record, with any settling field, or (Python) for a session the ruling
+does not name (:data:`NOT_MEASURABLE_SESSIONS`). For the common start it is treated like a
+reference-sensitive file: it GETS its animal's common start but never sets or moves one
+(listed per animal as ``excluded_settling_not_measured``).
+
 Electrical settling only: no term here, and nothing that feeds one, uses heart rate,
 firing rate or slow-wave rate (RULING (j) 6).
 
@@ -207,12 +228,18 @@ __all__ = [
     "HELD_NO_SETTLING",
     "HELD_UNDETECTED",
     "MOTOR_PAST_ELECTRICAL_S",
+    "NOT_MEASURABLE_INTERPRETATION",
+    "NOT_MEASURABLE_SESSIONS",
+    "NOT_MEASURED_KEY",
     "OUTPUT_FILES",
     "OUTPUT_VARS",
     "PER_LEVEL_SUMMARY_RULE",
     "RECOMPUTE_KINDS",
     "REFERENCE_SENSITIVE",
     "RULING",
+    "RULING_NOT_MEASURABLE",
+    "RULING_NOT_MEASURABLE_BY",
+    "RULING_NOT_MEASURABLE_ON",
     "RULING_SETTLING",
     "RULING_TIMES",
     "RULING_TRIM",
@@ -220,6 +247,7 @@ __all__ = [
     "RULING_V7",
     "RULING_V8",
     "SCHEMA",
+    "SETTLING_NOT_MEASURABLE",
     "SOURCE_FILES",
     "SOURCE_LABEL",
     "TRIM_CLASSES",
@@ -273,6 +301,30 @@ RULING_V8: Final = (
 """v8: the starts file of record from 2026-10-12 (v7 is superseded, refused like v6)."""
 NO_MECHANICAL_DRIVE: Final = "no_mechanical_drive"
 """The v8 electrical basis of a file whose MotorOn gate opened but whose ADC2 shows no drive."""
+SETTLING_NOT_MEASURABLE: Final = "settling_not_measurable_ruled"
+"""The electrical basis of a file whose electrical settling was not measured and cannot be,
+started without an electrical-settling term by Andrea's ruling of 2026-10-15."""
+RULING_NOT_MEASURABLE: Final = "compute as is with whatever is not blanked."
+"""Andrea's ruling of 2026-10-15, VERBATIM (the readers compare it character for character)."""
+RULING_NOT_MEASURABLE_BY: Final = "Andrea"
+RULING_NOT_MEASURABLE_ON: Final = "2026-10-15"
+NOT_MEASURABLE_INTERPRETATION: Final = (
+    "the electrical settling was NOT measured and cannot be (the measurement held the file); "
+    "the recovery start is computed WITHOUT an electrical-settling term: input mask point = "
+    "max(electrical end, mechanical end), then each analysis's own settling (and each cut's "
+    "class reach) exactly as for every other basis; the motion/artifact blanking masks are what "
+    "protect the data. No electrical settling is recorded - absent, never 0 and never a number "
+    "presented as a measurement (invariant 8). The file gets its animal's common start but "
+    "never sets or moves one")
+"""How :data:`RULING_NOT_MEASURABLE` is implemented; stored verbatim in the row's record."""
+NOT_MEASURABLE_SESSIONS: Final[tuple[str, ...]] = (
+    "gems_j_t09_3_3_sr_203835_20261015T003839Z",)
+"""The files the ruling was made for (animal J, 10/14, M100+E1000; measurement
+``held_no_clean_late_reference``). The basis is refused for any other session: applying it to
+another held file is a new decision, not this one."""
+NOT_MEASURED_KEY: Final = "electrical_settling_not_measured"
+"""The row's record of the unmeasured settling (required exactly on the basis)."""
+_SETTLE_KEYS: Final = ("electrical_settle_s", "electrical_settle_sample0", "electrical_s")
 ELECTRICAL_BASES: Final[Mapping[str, str]] = {
     "from_electrical_end": "the electrical-only rule, measured from the electrical end "
                            "(RULING 2026-10-09 (i) 3 (a)-(c))",
@@ -287,6 +339,17 @@ ELECTRICAL_BASES: Final[Mapping[str, str]] = {
                          "search starts at the electrical end, the input mask point is the "
                          "electrical end + settling, and the file has no mechanical_end_* "
                          "fields (" + RULING_V8 + ")",
+    SETTLING_NOT_MEASURABLE: "the electrical settling was NOT measured and cannot be (the "
+                             "measurement held the file, e.g. held_no_clean_late_reference: "
+                             "every late reference window failed the no-motion test); by "
+                             f"{RULING_NOT_MEASURABLE_BY}'s ruling of {RULING_NOT_MEASURABLE_ON}"
+                             f", verbatim '{RULING_NOT_MEASURABLE}', the start has NO "
+                             "electrical-settling term: input mask point = max(electrical end, "
+                             "mechanical end), then each analysis's own settling; the "
+                             "motion/artifact blanking masks protect the data. The file has no "
+                             "electrical_settle_* field, records the held reason and the ruling "
+                             f"in {NOT_MEASURED_KEY}, and gets its animal's common start but "
+                             "never sets one",
 }
 """How each file's electrical settling was obtained (v6: required per measured file)."""
 MOTOR_PAST_ELECTRICAL_S: Final = 1.0
@@ -1673,13 +1736,20 @@ def trim_cuts() -> list[tuple[str, str, str]]:
     return sorted(out)
 
 
-def input_mask(*, fs: float, electrical_settle_s: float,
-               mechanical_end_s: float | None) -> dict[str, Any]:
+def input_mask(*, fs: float, electrical_settle_s: float | None,
+               mechanical_end_s: float | None,
+               electrical_end_s: float | None = None) -> dict[str, Any]:
     """Return the file's input mask point: max(electrical end + settling, mechanical end).
 
     v8 (:data:`RULING_V8`): ``mechanical_end_s`` None = a file with no measured motor drive -
     no mechanical term, so the point is the electrical end + settling, binding
     ``electrical_only``, and no ``mechanical_end_sample0`` is returned.
+
+    :data:`SETTLING_NOT_MEASURABLE` (Andrea 2026-10-15): ``electrical_settle_s`` None = the
+    electrical settling was not measured, so there is NO settling term: the point is
+    max(``electrical_end_s``, ``mechanical_end_s``) - both required - returned with
+    ``electrical_end_sample0`` (the electrical term) instead of ``electrical_settle_sample0``,
+    binding ``electrical_end``, ``mechanical`` or ``both``.
 
     The ONE place it is derived (invariant 33). Returned in seconds and as exact 0-based
     FILE samples, each the FIRST SAMPLE AT OR AFTER its time (``ceil(t fs)``, the rule's
@@ -1690,6 +1760,21 @@ def input_mask(*, fs: float, electrical_settle_s: float,
     asserts the identity and each conversion - with which time binds: ``electrical``,
     ``mechanical``, or ``both`` on the same sample.
     """
+    if electrical_settle_s is None:
+        if electrical_end_s is None or mechanical_end_s is None:
+            msg = ("an input mask point without an electrical settling "
+                   f"({SETTLING_NOT_MEASURABLE}) needs both the electrical and the mechanical end")
+            raise ValueError(msg)
+        ke = first_sample_at_or_after(float(electrical_end_s), fs)
+        km = first_sample_at_or_after(float(mechanical_end_s), fs)
+        t = max(float(electrical_end_s), float(mechanical_end_s))
+        k = first_sample_at_or_after(t, fs)
+        if k != max(ke, km):
+            msg = f"input mask sample {k} is not max({ke}, {km})"
+            raise AssertionError(msg)
+        bind = "both" if ke == km else ("electrical_end" if ke > km else "mechanical")
+        return {"input_mask_s": t, "input_mask_sample0": k, "input_mask_binding": bind,
+                "electrical_end_sample0": ke, "mechanical_end_sample0": km}
     ke = first_sample_at_or_after(float(electrical_settle_s), fs)
     if mechanical_end_s is None:
         return {"input_mask_s": float(electrical_settle_s), "input_mask_sample0": ke,
@@ -1706,11 +1791,14 @@ def input_mask(*, fs: float, electrical_settle_s: float,
 
 
 def _check_basis(session: str, basis: str, *, electrical_end_s: float,
-                 mechanical_end_s: float | None, electrical_settle_s: float) -> None:
+                 mechanical_end_s: float | None, electrical_settle_s: float | None) -> None:
     """Refuse a v6 electrical basis that the file's own times contradict.
 
     v8: a :data:`NO_MECHANICAL_DRIVE` file has NO mechanical end (None), every other basis has
     one - a mechanical term on a no-drive file, or none on another, is refused by name.
+    :data:`SETTLING_NOT_MEASURABLE`: the file has NO electrical settling (None), every other
+    basis has one - a settling on such a file, or none on another, is refused by name; and
+    the basis is refused for a session the ruling does not name.
     """
     if basis not in ELECTRICAL_BASES:
         msg = (f"{session}: electrical basis {basis!r} is none of {sorted(ELECTRICAL_BASES)} "
@@ -1721,7 +1809,17 @@ def _check_basis(session: str, basis: str, *, electrical_end_s: float,
                f"basis has one; got basis {basis!r} with mechanical end {mechanical_end_s!r} "
                f"({RULING_V8})")
         raise ValueError(msg)
-    if mechanical_end_s is None:
+    if (basis == SETTLING_NOT_MEASURABLE) != (electrical_settle_s is None):
+        msg = (f"{session}: a {SETTLING_NOT_MEASURABLE} file has no electrical settling (not "
+               "measured: absent, never a number) and every other basis has a measured one; got "
+               f"basis {basis!r} with electrical settling {electrical_settle_s!r}")
+        raise ValueError(msg)
+    if basis == SETTLING_NOT_MEASURABLE and session not in NOT_MEASURABLE_SESSIONS:
+        msg = (f"{session}: {RULING_NOT_MEASURABLE_BY} {RULING_NOT_MEASURABLE_ON} "
+               f"('{RULING_NOT_MEASURABLE}') was ruled for {list(NOT_MEASURABLE_SESSIONS)} "
+               f"only; {SETTLING_NOT_MEASURABLE} for another file is a new decision")
+        raise ValueError(msg)
+    if mechanical_end_s is None or electrical_settle_s is None:
         return
     if basis == "mechanical_only_zero" and electrical_settle_s != electrical_end_s:
         msg = (f"{session}: a mechanical-only file has electrical settling 0, but the settling "
@@ -1761,10 +1859,64 @@ def _reference_sensitive(session: str, ref: Mapping[str, Any]) -> dict[str, Any]
                      "settling any clean window gives) is flagged")}
 
 
+def _not_measured_record(session: str, given: Mapping[str, Any], *,
+                         reference_sensitive: bool) -> dict[str, Any]:
+    """Return the stored :data:`NOT_MEASURED_KEY` record from the caller's held measurement.
+
+    ``given`` names WHY the settling was not measured: ``held_reason`` (the measurement's own
+    held basis, ``held_...``) and ``why`` (text), and may carry ``measurement`` (where it is,
+    as data). The ruling, verbatim, who made it, when, and :data:`NOT_MEASURABLE_INTERPRETATION`
+    are added here - one construction site (invariant 33). A ``reference_sensitive`` file is
+    refused: with no measured settling there is no reference spread to be sensitive about.
+    """
+    if reference_sensitive:
+        msg = (f"{session}: a {SETTLING_NOT_MEASURABLE} file has no measured settling, so it "
+               "has no reference spread to be reference-sensitive about")
+        raise ValueError(msg)
+    extra = sorted(set(given) - {"held_reason", "why", "measurement"})
+    if extra:
+        msg = f"{session}: unknown fields {extra} in the not-measured settling record"
+        raise ValueError(msg)
+    rec = {"status": "not_measured", **{k: given[k] for k in sorted(given)},
+           "ruling": RULING_NOT_MEASURABLE, "ruled_by": RULING_NOT_MEASURABLE_BY,
+           "ruled_on": RULING_NOT_MEASURABLE_ON,
+           "interpretation": NOT_MEASURABLE_INTERPRETATION}
+    _check_not_measured_record(session, rec)
+    return rec
+
+
+def _check_not_measured_record(session: str, rec: object) -> None:
+    """Refuse a :data:`SETTLING_NOT_MEASURABLE` row whose ruling is not recorded, exactly."""
+    want = {"status": "not_measured", "ruling": RULING_NOT_MEASURABLE,
+            "ruled_by": RULING_NOT_MEASURABLE_BY, "ruled_on": RULING_NOT_MEASURABLE_ON,
+            "interpretation": NOT_MEASURABLE_INTERPRETATION}
+    if not isinstance(rec, Mapping):
+        msg = (f"{session}: a {SETTLING_NOT_MEASURABLE} file needs its {NOT_MEASURED_KEY} "
+               "record (the held reason and the ruling): the basis is never accepted without "
+               "the ruling recorded")
+        raise ValueError(msg)
+    bad = sorted(k for k, v in want.items() if rec.get(k) != v)
+    reason, why = rec.get("held_reason"), rec.get("why")
+    if not (isinstance(reason, str) and reason.startswith("held_")):
+        bad.append("held_reason")
+    if not (isinstance(why, str) and why.strip()):
+        bad.append("why")
+    if bad:
+        msg = (f"{session}: {NOT_MEASURED_KEY} does not record the ruling exactly (fields "
+               f"{bad}; the ruling is {RULING_NOT_MEASURABLE_BY} {RULING_NOT_MEASURABLE_ON}, "
+               f"verbatim '{RULING_NOT_MEASURABLE}', and held_reason a held measurement basis)")
+        raise ValueError(msg)
+
+
 def _held_record(*, session: str, fs: float | None, electrical_end_s: float | None,
                  mechanical_end_s: float | None, electrical_settle_s: float | None,
-                 times_source: str, no_drive: bool = False) -> dict[str, Any] | None:
-    """Return the held record of a file that gets no starts, or ``None`` if it gets them."""
+                 times_source: str, no_drive: bool = False,
+                 settling_ruled: bool = False) -> dict[str, Any] | None:
+    """Return the held record of a file that gets no starts, or ``None`` if it gets them.
+
+    ``settling_ruled``: a :data:`SETTLING_NOT_MEASURABLE` file has no settling by ruling, so
+    a missing settling does not hold it (missing stim times still do).
+    """
     held: dict[str, Any] = {"session": session, "times_source": times_source}
     if fs is not None:
         if not (math.isfinite(fs) and fs > 0):
@@ -1782,7 +1934,7 @@ def _held_record(*, session: str, fs: float | None, electrical_end_s: float | No
         return {**held, "basis": HELD_UNDETECTED,
                 "why": f"stim end not determined ({' and '.join(gone)}): the start is never "
                        f"assumed (invariant 41, {RULING_TIMES})"}
-    if electrical_settle_s is None:
+    if electrical_settle_s is None and not settling_ruled:
         return {**held, "basis": HELD_NO_SETTLING,
                 "why": "the electrical-only rule found no settling (RULING 2026-10-09 (i) 3)"}
     return None
@@ -1795,7 +1947,8 @@ def file_starts(*, session: str, fs: float | None, electrical_end_s: float | Non
                 reference_sensitive: Mapping[str, Any] | None = None,
                 analyses: Sequence[str] | None = None,
                 table: Mapping[str, Analysis] | None = None,
-                fixed_start_s: float = FIXED_START_S) -> dict[str, Any]:
+                fixed_start_s: float = FIXED_START_S,
+                settling_not_measured: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Return one file's record: per-analysis starts, or the reason the file is held.
 
     RULING 2026-10-09 (i) 3 (c): ``electrical_end_s`` (the stimulator's ``AmA`` record) and
@@ -1825,6 +1978,16 @@ def file_starts(*, session: str, fs: float | None, electrical_end_s: float | Non
     v8 (:data:`RULING_V8`): ``electrical_basis`` :data:`NO_MECHANICAL_DRIVE` with
     ``mechanical_end_s`` None - no mechanical term: each start is electrical end + electrical
     settling + own settling, and the record carries no ``mechanical_end_*`` field.
+
+    :data:`SETTLING_NOT_MEASURABLE` (Andrea 2026-10-15, verbatim
+    :data:`RULING_NOT_MEASURABLE`): ``electrical_settle_s`` None - the electrical settling was
+    NOT measured and cannot be - with ``settling_not_measured`` {``held_reason``, ``why``,
+    optional ``measurement``} naming why: the start is computed WITHOUT an electrical-settling
+    term - input mask point = max(electrical end, mechanical end), then each analysis's own
+    settling - and the motion/artifact blanking masks protect the data. The record carries no
+    ``electrical_settle_*`` / ``electrical_s`` field, an ``electrical_end_sample0``, and the
+    :data:`NOT_MEASURED_KEY` record with the ruling verbatim (:func:`_not_measured_record`).
+    ``settling_not_measured`` is refused on any other basis.
     """
     if not animal:
         msg = f"{session}: v6 needs the file's animal (the common start is per animal)"
@@ -1832,38 +1995,40 @@ def file_starts(*, session: str, fs: float | None, electrical_end_s: float | Non
     level = {"stim_level": str(stim_level)} if stim_level else {}
     names = list(ANALYSES if analyses is None else analyses)
     no_drive = electrical_basis == NO_MECHANICAL_DRIVE
+    not_meas = _not_measured_wanted(session, electrical_basis, settling_not_measured)
     held = _held_record(session=session, fs=fs, electrical_end_s=electrical_end_s,
                         mechanical_end_s=mechanical_end_s,
                         electrical_settle_s=electrical_settle_s, times_source=times_source,
-                        no_drive=no_drive)
+                        no_drive=no_drive, settling_ruled=not_meas)
     if held is not None:
         return {**held, "animal": animal, **level}
     if fs is None or electrical_end_s is None or (mechanical_end_s is None and not no_drive) \
-            or electrical_settle_s is None:  # for the type checker: _held_record covers these
+            or (electrical_settle_s is None and not not_meas):  # _held_record covers these
         msg = f"{session}: a measured file needs its fs"
         raise ValueError(msg)
     if not level:
         msg = (f"{session}: v7 needs the file's declared stim level (the common start is the "
                f"latest per-level median start; {RULING_V7})")
         raise ValueError(msg)
-    if electrical_settle_s < electrical_end_s:
+    settle = None if electrical_settle_s is None else float(electrical_settle_s)
+    if settle is not None and settle < electrical_end_s:
         msg = (f"{session}: electrical settling {electrical_settle_s} s precedes the "
                f"electrical end {electrical_end_s} s")
         raise ValueError(msg)
     mech = None if mechanical_end_s is None else float(mechanical_end_s)
     _check_basis(session, electrical_basis, electrical_end_s=float(electrical_end_s),
-                 mechanical_end_s=mech, electrical_settle_s=float(electrical_settle_s))
+                 mechanical_end_s=mech, electrical_settle_s=settle)
+    not_rec = (_not_measured_record(session, settling_not_measured,
+                                    reference_sensitive=reference_sensitive is not None)
+               if settling_not_measured is not None else None)
     rsens = (_reference_sensitive(session, reference_sensitive)
              if reference_sensitive is not None else None)
-    im = input_mask(fs=float(fs), electrical_settle_s=float(electrical_settle_s),
-                    mechanical_end_s=mech)
+    im = input_mask(fs=float(fs), electrical_settle_s=settle, mechanical_end_s=mech,
+                    electrical_end_s=float(electrical_end_s))
     t_mask = float(im["input_mask_s"])
     t_until = (max(rsens["anchor_s"] + rsens["after_anchor_s"]["clean_max"],
                    mech if mech is not None else -math.inf) if rsens is not None else None)
-    basis_text = (f"electrical end + electrical settling ({electrical_source}); no mechanical "
-                  f"term ({times_source}; {RULING_V8})" if mech is None else
-                  f"max(electrical end + electrical settling ({electrical_source}), "
-                  f"mechanical end) ({times_source}; {RULING_TIMES})")
+    basis_text = _basis_text(not_rec, mech, electrical_source, times_source)
     fixed0 = seconds_to_sample(fixed_start_s, fs)
     rows: list[dict[str, Any]] = []
     for name in names:
@@ -1901,10 +2066,39 @@ def file_starts(*, session: str, fs: float | None, electrical_end_s: float | Non
             "electrical_basis_rule": ELECTRICAL_BASES[electrical_basis],
             "electrical_end_s": float(electrical_end_s),
             **({"mechanical_end_s": mech} if mech is not None else {}),
-            "electrical_settle_s": float(electrical_settle_s),
-            "electrical_s": float(electrical_settle_s) - float(electrical_end_s),
+            **({"electrical_settle_s": settle,
+                "electrical_s": settle - float(electrical_end_s)} if settle is not None else
+               {NOT_MEASURED_KEY: not_rec}),
             **im, "analyses": rows, "cuts": cuts, **level,
             **({"reference_sensitive": rsens} if rsens is not None else {})}
+
+
+def _not_measured_wanted(session: str, electrical_basis: str,
+                         settling_not_measured: Mapping[str, Any] | None) -> bool:
+    """Whether the file is :data:`SETTLING_NOT_MEASURABLE`; its record is required exactly then."""
+    not_meas = electrical_basis == SETTLING_NOT_MEASURABLE
+    if not_meas != (settling_not_measured is not None):
+        msg = (f"{session}: settling_not_measured (why the electrical settling was not "
+               f"measured) is required exactly with basis {SETTLING_NOT_MEASURABLE}; got basis "
+               f"{electrical_basis!r} {'with' if settling_not_measured is not None else 'without'}"
+               " it")
+        raise ValueError(msg)
+    return not_meas
+
+
+def _basis_text(not_rec: Mapping[str, Any] | None, mech: float | None, electrical_source: str,
+                times_source: str) -> str:
+    """How the file's input mask point was obtained, for every start's and cut's source."""
+    if not_rec is not None:
+        return (f"max(electrical end, mechanical end) - NO electrical-settling term: the "
+                f"electrical settling was not measured ({not_rec['held_reason']}); "
+                f"{RULING_NOT_MEASURABLE_BY} {RULING_NOT_MEASURABLE_ON}, verbatim "
+                f"'{RULING_NOT_MEASURABLE}' ({times_source}; {RULING_TIMES})")
+    if mech is None:
+        return (f"electrical end + electrical settling ({electrical_source}); no "
+                f"mechanical term ({times_source}; {RULING_V8})")
+    return (f"max(electrical end + electrical settling ({electrical_source}), "
+            f"mechanical end) ({times_source}; {RULING_TIMES})")
 
 
 def _file_cuts(fs: float, input_mask_s: float, fixed_start_s: float, basis_text: str,
@@ -2012,7 +2206,15 @@ def _check_times(sess: str, f: Mapping[str, Any]) -> None:
     conversion); the electrical settling may not precede the electrical end; and no
     measured start or cut may precede the input mask point: a file that disagrees with
     itself is refused at write time and at read time (invariant 27).
+
+    A :data:`SETTLING_NOT_MEASURABLE` file carries no electrical settling field: its
+    ``input_mask_sample0`` must equal max(``electrical_end_sample0``,
+    ``mechanical_end_sample0``) and its ``input_mask_s`` max(``electrical_end_s``,
+    ``mechanical_end_s``) exactly (:func:`_check_times_not_measured`).
     """
+    if f.get("electrical_basis") == SETTLING_NOT_MEASURABLE:
+        _check_times_not_measured(sess, f)
+        return
     no_drive = f.get("electrical_basis") == NO_MECHANICAL_DRIVE
     mech_keys = ("mechanical_end_s", "mechanical_end_sample0")
     if no_drive and any(k in f for k in mech_keys):
@@ -2056,11 +2258,63 @@ def _check_times(sess: str, f: Mapping[str, Any]) -> None:
                f"electrical_end_s {f['electrical_end_s']!r}: the settling is measured from the "
                f"electrical end ({RULING_TIMES})")
         raise ValueError(msg)
+    _check_no_start_before(sess, f, k)
+
+
+def _check_no_start_before(sess: str, f: Mapping[str, Any], k: int) -> None:
+    """No measured start or cut precedes the input mask sample ``k``."""
     late = [str(r.get("analysis", r.get("cut"))) for r in (*f["analyses"], *f.get("cuts", []))
             if r.get("basis") in (BASIS_MEASURED, BASIS_CUT) and int(r["start_sample0"]) < k]
     if late:
         msg = f"{sess}: measured start(s) {late} precede the input mask sample {k}"
         raise ValueError(msg)
+
+
+def _check_times_not_measured(sess: str, f: Mapping[str, Any]) -> None:
+    """:func:`_check_times` for a :data:`SETTLING_NOT_MEASURABLE` file (Andrea 2026-10-15).
+
+    No ``electrical_settle_*`` / ``electrical_s`` field (the settling was not measured: absent);
+    both stim times and their samples, each the first sample at or after its seconds field;
+    ``input_mask_sample0`` = max(``electrical_end_sample0``, ``mechanical_end_sample0``) and
+    ``input_mask_s`` = max(``electrical_end_s``, ``mechanical_end_s``) exactly - no settling
+    term can hide in it; no measured start or cut before it.
+    """
+    present = [key for key in _SETTLE_KEYS if key in f]
+    if present:
+        msg = (f"{sess}: a {SETTLING_NOT_MEASURABLE} file has no measured electrical settling, "
+               f"but carries {present} ({RULING_NOT_MEASURABLE_BY} {RULING_NOT_MEASURABLE_ON}; "
+               "invariant 8)")
+        raise ValueError(msg)
+    pairs = (("electrical_end_sample0", "electrical_end_s"),
+             ("mechanical_end_sample0", "mechanical_end_s"), ("input_mask_sample0", "input_mask_s"))
+    for ks, ts in pairs:
+        if not _is_sample(f.get(ks)):
+            msg = f"{sess}: {ks} must be an int >= 0 (mode (B), {RULING_TIMES})"
+            raise TypeError(msg)
+        v = f.get(ts)
+        if not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v):
+            msg = f"{sess}: {ts} is absent or not a finite number ({RULING_TIMES})"
+            raise TypeError(msg)
+    fs = f.get("fs")
+    if not isinstance(fs, (int, float)) or isinstance(fs, bool) or not (
+            math.isfinite(fs) and fs > 0):
+        msg = f"{sess}: fs must be a positive finite number, got {fs!r}"
+        raise ValueError(msg)
+    for ks, ts in pairs:
+        want = first_sample_at_or_after(float(f[ts]), float(fs))
+        if int(f[ks]) != want:
+            msg = (f"{sess}: {ks} {f[ks]} is not the first sample at or after {ts} "
+                   f"{f[ts]!r} s at fs {fs!r} ({want}; extent.grid.first_sample_at_or_after, "
+                   f"{RULING_TIMES})")
+            raise ValueError(msg)
+    ke, km, k = (int(f[ks]) for ks, _ts in pairs)
+    t = max(float(f["electrical_end_s"]), float(f["mechanical_end_s"]))
+    if k != max(ke, km) or float(f["input_mask_s"]) != t:
+        msg = (f"{sess}: input_mask_sample0 {k} / input_mask_s {f['input_mask_s']!r} is not "
+               f"max(electrical_end_sample0 {ke}, mechanical_end_sample0 {km}) / max of the two "
+               f"stim times {t!r}: a {SETTLING_NOT_MEASURABLE} file has no settling term")
+        raise ValueError(msg)
+    _check_no_start_before(sess, f, k)
 
 
 def _check_v6(sess: str, f: Mapping[str, Any]) -> None:
@@ -2072,7 +2326,18 @@ def _check_v6(sess: str, f: Mapping[str, Any]) -> None:
     _check_basis(sess, str(f["electrical_basis"]), electrical_end_s=float(f["electrical_end_s"]),
                  mechanical_end_s=(float(f["mechanical_end_s"]) if "mechanical_end_s" in f
                                    else None),
-                 electrical_settle_s=float(f["electrical_settle_s"]))
+                 electrical_settle_s=(float(f["electrical_settle_s"])
+                                      if "electrical_settle_s" in f else None))
+    if f["electrical_basis"] == SETTLING_NOT_MEASURABLE:
+        _check_not_measured_record(sess, f.get(NOT_MEASURED_KEY))
+        if "reference_sensitive" in f:
+            msg = (f"{sess}: a {SETTLING_NOT_MEASURABLE} file has no measured settling, so it "
+                   "cannot be reference-sensitive")
+            raise ValueError(msg)
+    elif NOT_MEASURED_KEY in f:
+        msg = (f"{sess}: {NOT_MEASURED_KEY} on a file with basis {f['electrical_basis']!r}: the "
+               f"record belongs only to {SETTLING_NOT_MEASURABLE}")
+        raise ValueError(msg)
     if not f.get("stim_level"):
         msg = f"{sess}: v7 needs the file's declared stim_level ({RULING_V7})"
         raise ValueError(msg)
@@ -2109,13 +2374,19 @@ def _common_starts(measured: list[dict[str, Any]]) -> dict[str, Any]:
     ``common_start_set_by`` the level that set it. A reference-sensitive file gets a common
     start but never sets one. An analysis whose every file is reference-sensitive has no
     common start and is refused (ValueError, naming it): never fabricated.
+
+    A :data:`SETTLING_NOT_MEASURABLE` file (Andrea 2026-10-15) is treated exactly like a
+    reference-sensitive one here - it gets the common start, never sets or moves one - and is
+    listed as ``excluded_settling_not_measured`` (the key is present only when it lists a
+    file, so every other animal's record is unchanged).
     """
     by: dict[str, list[dict[str, Any]]] = {}
     for f in measured:
         by.setdefault(str(f["animal"]), []).append(f)
     record: dict[str, Any] = {}
     for animal, files in sorted(by.items()):
-        used = [f for f in files if "reference_sensitive" not in f]
+        used = [f for f in files if "reference_sensitive" not in f
+                and f.get("electrical_basis") != SETTLING_NOT_MEASURABLE]
         levels: dict[str, list[str]] = {}
         for f in used:
             levels.setdefault(str(f["stim_level"]), []).append(str(f["session"]))
@@ -2129,6 +2400,10 @@ def _common_starts(measured: list[dict[str, Any]]) -> dict[str, Any]:
                           if f.get("electrical_basis") == NO_MECHANICAL_DRIVE)
         if no_drive:
             rec["anchored_at_electrical_end"] = no_drive
+        not_meas = sorted(str(f["session"]) for f in files
+                          if f.get("electrical_basis") == SETTLING_NOT_MEASURABLE)
+        if not_meas:
+            rec["excluded_settling_not_measured"] = not_meas
         for kind, key in (("analyses", "analysis"), ("cuts", "cut")):
             offs: dict[str, dict[str, list[tuple[float, str]]]] = {}
             for f in used:
@@ -2140,8 +2415,9 @@ def _common_starts(measured: list[dict[str, Any]]) -> dict[str, Any]:
             best: dict[str, tuple[float, str]] = {}
             for name in names:
                 if name not in offs:
-                    msg = (f"animal {animal}: {key} {name}: every file is reference-sensitive, so "
-                           "no common start can be computed (COMMON_START_RULE excludes them)")
+                    msg = (f"animal {animal}: {key} {name}: every file is reference-sensitive "
+                           f"(or {SETTLING_NOT_MEASURABLE}), so no common start can be computed "
+                           "(COMMON_START_RULE excludes them)")
                     raise ValueError(msg)
                 med = {lv: float(np.median([o for o, _s in v])) for lv, v in offs[name].items()}
                 top = max(med, key=lambda lv: (med[lv], lv))

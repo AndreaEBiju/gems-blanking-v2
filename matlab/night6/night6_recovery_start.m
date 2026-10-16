@@ -23,7 +23,17 @@ function RS = night6_recovery_start(file)
 % not mode (B)), a v3 file (no edge-settling hash) and a v4 file (one stim time) are
 % refused by name; so are v6 and v7 - v8 (Andrea 2026-10-12) is the starts file of record: a
 % file with no measured motor drive (electrical_basis no_mechanical_drive) has no mechanical
-% term, no mechanical_end_* field, and its input mask point is the electrical settling. It is a
+% term, no mechanical_end_* field, and its input mask point is the electrical settling.
+% Andrea 2026-10-15, verbatim 'compute as is with whatever is not blanked.': a file whose
+% electrical settling was NOT measured and cannot be (electrical_basis
+% settling_not_measurable_ruled) has NO electrical-settling term - no electrical_settle_s,
+% electrical_settle_sample0 or electrical_s field (absent, never 0: invariant 8); its input
+% mask point is max(electrical end, mechanical end), checked against electrical_end_sample0
+% and mechanical_end_sample0 (and input_mask_s against the two times, exactly); and it must
+% carry its electrical_settling_not_measured record with status not_measured, a held_reason
+% held_..., and the ruling verbatim, by Andrea, on 2026-10-15 - refused without it, and the
+% record refused on any other basis (Python extent.recovery_start.SETTLING_NOT_MEASURABLE;
+% Python alone also checks the session is one the ruling names). It is a
 % DECLARED input: its path and SHA-256 go into every record (RS.file, RS.sha256).
 % An empty path returns [] - Night 6 then refuses every stim_recovery epoch by name
 % (night6_recovery_lead_in), never runs one untrimmed.
@@ -120,6 +130,12 @@ function check_times(F, file)
 % v8 (Andrea 2026-10-12): a file with no measured motor drive (electrical_basis
 % 'no_mechanical_drive') has NO mechanical term - it carries no mechanical_end_* field and its
 % input mask point is the electrical end + settling, to the sample.
+% Andrea 2026-10-15: a settling_not_measurable_ruled file has NO electrical settling field and
+% its input mask point is max(electrical end, mechanical end) (check_times_not_measured).
+    if isfield(F, 'electrical_basis') && strcmp(F.electrical_basis, 'settling_not_measurable_ruled')
+        check_times_not_measured(F, file);
+        return
+    end
     noDrive = isfield(F, 'electrical_basis') && strcmp(F.electrical_basis, 'no_mechanical_drive');
     mech = {'mechanical_end_sample0', 'mechanical_end_s'};
     if noDrive
@@ -184,6 +200,64 @@ function check_times(F, file)
               'electrical_end_s %.17g: the settling is measured from the electrical end'], ...
               file, F.session, F.electrical_settle_s, F.electrical_end_s);
     end
+    check_no_start_before(F, k, file);
+end
+
+function check_times_not_measured(F, file)
+% Andrea 2026-10-15, verbatim 'compute as is with whatever is not blanked.' (Python
+% extent.recovery_start._check_times_not_measured): the electrical settling was NOT measured,
+% so the file carries no electrical_settle_s, electrical_settle_sample0 or electrical_s
+% (absent, never 0); both stim times and their samples, each the first sample at or after
+% its seconds field; input_mask_sample0 = max(electrical_end_sample0, mechanical_end_sample0)
+% and input_mask_s = max(electrical_end_s, mechanical_end_s) exactly (no settling term can
+% hide in it); no measured start or cut before it.
+    settle = {'electrical_settle_s', 'electrical_settle_sample0', 'electrical_s'};
+    present = settle(cellfun(@(g) isfield(F, g), settle));
+    if ~isempty(present)
+        error('night6:recoveryStartFile', ['%s: %s is a settling_not_measurable_ruled file ' ...
+              'but carries %s: its electrical settling was not measured (Andrea 2026-10-15)'], ...
+              file, F.session, strjoin(present, ', '));
+    end
+    pairs = {'electrical_end_sample0', 'electrical_end_s'; ...
+             'mechanical_end_sample0', 'mechanical_end_s'; ...
+             'input_mask_sample0', 'input_mask_s'};
+    for g = pairs'
+        if ~isfield(F, g{1}) || ~is_sample(F.(g{1}))
+            error('night6:recoveryStartFile', '%s: %s %s must be one integer >= 0', ...
+                  file, F.session, g{1});
+        end
+        if ~isfield(F, g{2}) || ~isnumeric(F.(g{2})) || ~isscalar(F.(g{2})) ...
+                || ~isfinite(F.(g{2}))
+            error('night6:recoveryStartFile', ['%s: %s has no %s (both stim times are ' ...
+                  'required, RULING 2026-10-09 (i) 3 (c))'], file, F.session, g{2});
+        end
+    end
+    if ~isfield(F, 'fs') || ~isnumeric(F.fs) || ~isscalar(F.fs) || ~isfinite(F.fs) ...
+            || F.fs <= 0
+        error('night6:recoveryStartFile', '%s: %s has no positive finite fs', file, F.session);
+    end
+    for g = pairs'
+        want = night6_first_sample(F.(g{2}), F.fs);
+        if double(F.(g{1})) ~= want
+            error('night6:recoveryStartFile', ['%s: %s %s %d is not the first sample at ' ...
+                  'or after %s %.17g s at fs %.17g (%d; night6_first_sample)'], file, ...
+                  F.session, g{1}, F.(g{1}), g{2}, F.(g{2}), F.fs, want);
+        end
+    end
+    k = double(F.input_mask_sample0);
+    if k ~= max(double(F.electrical_end_sample0), double(F.mechanical_end_sample0)) ...
+            || F.input_mask_s ~= max(F.electrical_end_s, F.mechanical_end_s)
+        error('night6:recoveryStartFile', ['%s: %s input_mask_sample0 %d is not ' ...
+              'max(electrical_end_sample0 %d, mechanical_end_sample0 %d), or input_mask_s ' ...
+              '%.17g is not the later stim time: a settling_not_measurable_ruled file has no ' ...
+              'settling term'], file, F.session, k, F.electrical_end_sample0, ...
+              F.mechanical_end_sample0, F.input_mask_s);
+    end
+    check_no_start_before(F, k, file);
+end
+
+function check_no_start_before(F, k, file)
+% No measured start or cut precedes the input mask sample k.
     rows = as_cells(F.analyses);
     if isfield(F, 'cuts'), rows = [rows, as_cells(F.cuts)]; end
     for j = 1:numel(rows)
@@ -203,12 +277,13 @@ function check_v6(F, file)
 % reference-sensitive "until" is present exactly on a reference-sensitive file, and never
 % before the analysis's start.
     bases = {'from_electrical_end', 'mechanical_only_zero', 'from_mechanical_end', ...
-             'no_mechanical_drive'};
+             'no_mechanical_drive', 'settling_not_measurable_ruled'};
     if ~isfield(F, 'animal') || ~ischar(F.animal) || isempty(F.animal) ...
             || ~isfield(F, 'electrical_basis') || ~any(strcmp(F.electrical_basis, bases))
         error('night6:recoveryStartFile', ['%s: %s has no animal or no known electrical_basis ' ...
               '(schema v6, RULING 2026-10-10 item 7)'], file, F.session);
     end
+    check_not_measured(F, file);
     % v7 (Andrea, revised 2026-10-10): the common start is the latest per-stim-level median
     % start, so every measured file declares its stim level
     if ~isfield(F, 'stim_level') || ~ischar(F.stim_level) || isempty(F.stim_level)
@@ -235,6 +310,46 @@ function check_v6(F, file)
                   'present exactly on a reference-sensitive file, at or after the start'], ...
                   file, F.session, char(r.analysis));
         end
+    end
+end
+
+function check_not_measured(F, file)
+% Andrea 2026-10-15: the basis settling_not_measurable_ruled is accepted ONLY with its
+% electrical_settling_not_measured record - status not_measured, held_reason a held
+% measurement basis (held_...), the ruling VERBATIM, by Andrea, on 2026-10-15 - and never on a
+% reference-sensitive file (it has no measured settling to be sensitive about); the record
+% on any other basis is refused. Python: extent.recovery_start._check_not_measured_record.
+    key = 'electrical_settling_not_measured';
+    notMeas = strcmp(F.electrical_basis, 'settling_not_measurable_ruled');
+    if ~notMeas
+        if isfield(F, key)
+            error('night6:recoveryStartFile', ['%s: %s carries %s but its basis is %s: the ' ...
+                  'record belongs only to settling_not_measurable_ruled'], file, F.session, ...
+                  key, F.electrical_basis);
+        end
+        return
+    end
+    want = struct('status', 'not_measured', ...
+                  'ruling', 'compute as is with whatever is not blanked.', ...
+                  'ruled_by', 'Andrea', 'ruled_on', '2026-10-15');
+    ok = isfield(F, key) && isstruct(F.(key)) && isscalar(F.(key));
+    if ok
+        R = F.(key);
+        for g = fieldnames(want)'
+            ok = ok && isfield(R, g{1}) && ischar(R.(g{1})) && strcmp(R.(g{1}), want.(g{1}));
+        end
+        ok = ok && isfield(R, 'held_reason') && ischar(R.held_reason) ...
+             && startsWith(R.held_reason, 'held_');
+    end
+    if ~ok
+        error('night6:recoveryStartFile', ['%s: %s is settling_not_measurable_ruled without ' ...
+              'the ruling recorded: %s needs status not_measured, a held_reason held_..., ' ...
+              'and the ruling verbatim (''compute as is with whatever is not blanked.'', ' ...
+              'Andrea, 2026-10-15)'], file, F.session, key);
+    end
+    if isfield(F, 'reference_sensitive')
+        error('night6:recoveryStartFile', ['%s: %s is settling_not_measurable_ruled and ' ...
+              'reference-sensitive: it has no measured settling'], file, F.session);
     end
 end
 

@@ -1391,3 +1391,174 @@ def test_v8_a_file_with_no_mechanical_drive_has_no_mechanical_term(tmp_path: Pat
              "v7 is superseded by v8")):
         with pytest.raises(ValueError, match=words):
             rs.read_recovery_starts(edited(edit, tag))
+
+
+# ---------------------------------------------------------------------------
+# Andrea 2026-10-15: "compute as is with whatever is not blanked." - a file whose electrical
+# settling was not measured (and cannot be) starts WITHOUT an electrical-settling term
+# ---------------------------------------------------------------------------
+
+NM = rs.NOT_MEASURABLE_SESSIONS[0]
+NM_HELD = {"held_reason": "held_no_clean_late_reference",
+           "why": "every late reference window failed the no-motion test"}
+
+
+def _nm(e_end: float = 118.71423072, m_end: float = 120.748770236969, *,
+        session: str = NM, level: str = "M100+E1000",
+        **kw: Any) -> dict[str, Any]:  # noqa: ANN401
+    return rs.file_starts(session=session, animal="A", electrical_basis=rs.SETTLING_NOT_MEASURABLE,
+                          fs=FS, electrical_end_s=e_end, mechanical_end_s=m_end,
+                          electrical_settle_s=None, times_source="tsq",
+                          electrical_source="not measured", stim_level=level,
+                          settling_not_measured=NM_HELD, **kw)
+
+
+def test_a_settling_not_measured_file_starts_at_the_later_stim_time_plus_own_settling() -> None:
+    """The input mask point is max(E, M): no settling term.
+
+    Every start and cut is that point plus the same reach as any other basis - equal, to the
+    sample, to a file whose input mask point is the same time. No settling field is written
+    (absent, never 0).
+    """
+    e, m = 118.71423072, 120.748770236969
+    f = _nm(e, m)
+    for key in ("electrical_settle_s", "electrical_settle_sample0", "electrical_s"):
+        assert key not in f, key
+    assert f["electrical_basis"] == rs.SETTLING_NOT_MEASURABLE == "settling_not_measurable_ruled"
+    assert f["input_mask_s"] == m and f["input_mask_binding"] == "mechanical"
+    assert f["input_mask_sample0"] == f["mechanical_end_sample0"] == first_sample_at_or_after(m, FS)
+    assert f["electrical_end_sample0"] == first_sample_at_or_after(e, FS)
+    rec = f[rs.NOT_MEASURED_KEY]
+    assert rec["status"] == "not_measured"
+    assert rec["held_reason"] == "held_no_clean_late_reference"
+    assert rec["ruling"] == "compute as is with whatever is not blanked."   # verbatim
+    assert (rec["ruled_by"], rec["ruled_on"]) == ("Andrea", "2026-10-15")
+    assert rec["interpretation"] == rs.NOT_MEASURABLE_INTERPRETATION
+    # the same point reached by a measured basis (settling 0 at M): identical starts and cuts
+    same = _v6("ref", m, m, m, basis="from_electrical_end")
+    for kind, key in (("analyses", "analysis"), ("cuts", "cut")):
+        got = {r[key]: (r["start_s"], r["start_sample0"], r["basis"]) for r in f[kind]}
+        want = {r[key]: (r["start_s"], r["start_sample0"], r["basis"]) for r in same[kind]}
+        assert got == want, kind
+    for r in f["analyses"]:
+        own = rs.analysis_settling(r["analysis"], FS).settling_s
+        assert own is not None and r["start_s"] == m + own
+        assert "NO electrical-settling term" in r["source"]
+        assert "compute as is with whatever is not blanked." in r["source"]
+    # the electrical end binds when it is later (no from_mechanical_end condition applies)
+    g = _nm(121.0, 120.5)
+    assert g["input_mask_s"] == 121.0 and g["input_mask_binding"] == "electrical_end"
+    assert g["input_mask_sample0"] == g["electrical_end_sample0"]
+
+
+def test_a_settling_not_measured_file_is_refused_without_the_ruling_or_with_a_settling() -> None:
+    with pytest.raises(ValueError, match="has no electrical settling"):
+        rs.file_starts(
+            session=NM, animal="A", electrical_basis=rs.SETTLING_NOT_MEASURABLE, fs=FS,
+            electrical_end_s=118.7, mechanical_end_s=120.7, electrical_settle_s=125.0,
+            times_source="tsq", electrical_source="x", stim_level="L1",
+            settling_not_measured=NM_HELD)
+    with pytest.raises(ValueError, match="required exactly with basis"):
+        rs.file_starts(session=NM, animal="A", electrical_basis=rs.SETTLING_NOT_MEASURABLE,
+                       fs=FS, electrical_end_s=118.7, mechanical_end_s=120.7,
+                       electrical_settle_s=None, times_source="tsq", electrical_source="x",
+                       stim_level="L1")
+    with pytest.raises(ValueError, match="required exactly with basis"):
+        rs.file_starts(
+            session="x", animal="A", electrical_basis="from_electrical_end", fs=FS,
+            electrical_end_s=118.7, mechanical_end_s=120.7, electrical_settle_s=125.0,
+            times_source="tsq", electrical_source="x", stim_level="L1",
+            settling_not_measured=NM_HELD)
+    with pytest.raises(ValueError, match="was ruled for"):
+        _nm(session="gems_j_t09_3_3_sr_204101_20261010T004105Z")
+    with pytest.raises(ValueError, match="no reference spread"):
+        _nm(reference_sensitive=REF)
+    with pytest.raises(ValueError, match="held_reason"):
+        rs.file_starts(session=NM, animal="A", electrical_basis=rs.SETTLING_NOT_MEASURABLE,
+                       fs=FS, electrical_end_s=118.7, mechanical_end_s=120.7,
+                       electrical_settle_s=None, times_source="tsq", electrical_source="x",
+                       stim_level="L1", settling_not_measured={**NM_HELD, "held_reason": "x"})
+    # a measured basis with its settling missing is still HELD, never started without one
+    held = _v6("y", 118.7, None, 120.7, basis="from_mechanical_end")  # type: ignore[arg-type]
+    assert held["basis"] == rs.HELD_NO_SETTLING
+
+
+def test_a_settling_not_measured_file_gets_its_common_start_but_never_moves_one() -> None:
+    """Like a reference-sensitive file: it gets its animal's common start, never sets one.
+
+    Counted, it would move the L1 median (own offset 0 + own settling, against 4 and 6 s)
+    and, tied with a level of its own, set the offset: excluded, the animal's record and
+    every other file's common starts are exactly those of the document without it.
+    """
+    plain = [_v6(f"p{i}", 120.0, 120.0 + d, 120.0, basis="from_electrical_end", level="L1")
+             for i, d in enumerate((4.0, 6.0))]
+    for level in ("L1", "Z9"):
+        nm = _nm(118.0, 120.0, level=level)
+        without = rs.recovery_starts_document(json.loads(json.dumps(plain)), fs=FS)
+        doc = rs.recovery_starts_document([*json.loads(json.dumps(plain)), nm], fs=FS)
+        a, b = without["common_start"]["by_animal"]["A"], doc["common_start"]["by_animal"]["A"]
+        assert b["excluded_settling_not_measured"] == [NM]
+        assert b["files"] == sorted([*a["files"], NM])
+        drop = ("files", "excluded_settling_not_measured")
+        assert {k: v for k, v in b.items() if k not in drop} == \
+            {k: v for k, v in a.items() if k != "files"}
+        assert "excluded_settling_not_measured" not in a
+        assert [f for f in doc["files"] if f["session"] != NM] == without["files"]
+        name = sorted(rs.ANALYSES)[0]
+        off = b["analyses"][name]["offset_after_anchor_s"]
+        r = _row(doc, NM, name)
+        assert r["common_start_s"] == max(120.0 + off, r["start_s"])  # anchored at M
+        assert r["common_start_sample0"] >= r["start_sample0"]
+        assert r["common_start_set_by"] == "stim level L1"
+    # alone (no measured file of the animal) it cannot set a common start: refused
+    with pytest.raises(ValueError, match="every file is reference-sensitive"):
+        rs.recovery_starts_document([_nm()], fs=FS)
+
+
+def test_the_readers_refuse_a_settling_not_measured_row_without_its_ruling(
+        tmp_path: Path) -> None:
+    plain = [_v6(f"p{i}", 120.0, 120.0 + d, 120.0, basis="from_electrical_end", level="L1")
+             for i, d in enumerate((4.0, 6.0))]
+    good = tmp_path / "nm.json"
+    rs.write_recovery_starts(good, rs.recovery_starts_document([*plain, _nm()], fs=FS))
+    back = rs.read_recovery_starts(good)
+    assert next(f for f in back["files"] if f["session"] == NM)["electrical_basis"] == \
+        rs.SETTLING_NOT_MEASURABLE
+    assert rs.SETTLING_NOT_MEASURABLE in back["electrical_bases"]
+
+    def edited(edit: Any, tag: str) -> Path:  # noqa: ANN401
+        d = json.loads(good.read_text(encoding="utf-8"))
+        f = next(x for x in d["files"] if x["session"] == NM)
+        p0 = next(x for x in d["files"] if x["session"] == "p0")
+        edit(f, p0)
+        p = tmp_path / f"{tag}.json"
+        p.write_text(json.dumps(d), encoding="utf-8", newline="\n")
+        return p
+    k_e = first_sample_at_or_after(118.71423072, FS)
+    for tag, edit, words in (
+            ("no_record", lambda f, p: f.pop(rs.NOT_MEASURED_KEY),
+             "never accepted without the ruling recorded"),
+            ("ruling_paraphrased", lambda f, p: f[rs.NOT_MEASURED_KEY].update(
+                ruling="compute as is with whatever is not blanked"), "ruling"),
+            ("not_held", lambda f, p: f[rs.NOT_MEASURED_KEY].update(held_reason="measured"),
+             "held_reason"),
+            ("other_date", lambda f, p: f[rs.NOT_MEASURED_KEY].update(ruled_on="2026-10-16"),
+             "ruled_on"),
+            ("settle_zero", lambda f, p: f.update(electrical_settle_s=f["electrical_end_s"],
+                                                  electrical_settle_sample0=k_e,
+                                                  electrical_s=0.0),
+             "has no measured electrical settling, but carries"),
+            ("mask_with_a_settling", lambda f, p: f.update(
+                input_mask_s=f["input_mask_s"] + 1.0,
+                input_mask_sample0=first_sample_at_or_after(f["input_mask_s"] + 1.0, FS)),
+             "has no settling term"),
+            # within the same sample: only the exact max(E, M) check sees a term added
+            ("mask_seconds_moved", lambda f, p: f.update(
+                input_mask_s=f["input_mask_sample0"] / FS), "has no settling term"),
+            ("no_electrical_sample", lambda f, p: f.pop("electrical_end_sample0"),
+             "electrical_end_sample0 must be an int"),
+            ("record_on_measured", lambda f, p: p.update(
+                {rs.NOT_MEASURED_KEY: f[rs.NOT_MEASURED_KEY]}), "belongs only to"),
+            ("other_session", lambda f, p: f.update(session="gems_j_other_sr"), "was ruled for")):
+        with pytest.raises((ValueError, TypeError), match=words):
+            rs.read_recovery_starts(edited(edit, tag))

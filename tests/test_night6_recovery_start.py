@@ -1080,6 +1080,111 @@ def test_the_trim_modes_are_one_list_on_both_sides() -> None:
     assert set(re.findall(r"'([^']+)'", gone.group(1))) == set(rs.WITHDRAWN_TRIM_MODES)
 
 
+NM = rs.NOT_MEASURABLE_SESSIONS[0]
+"""The file Andrea's 2026-10-15 ruling names (electrical settling not measurable)."""
+NM_WORDS = {
+    "nm_no_record": "without the ruling recorded",
+    "nm_ruling": "without the ruling recorded",
+    "nm_not_held": "without the ruling recorded",
+    "nm_settle": "is a settling_not_measurable_ruled file but carries electrical_settle_s, "
+                 "electrical_settle_sample0",
+    "nm_mask_s": "has no settling term",
+    "nm_mask_lowered": "has no settling term",
+    "nm_record_on_other": "the record belongs only to settling_not_measurable_ruled",
+    "nm_no_e_sample": "electrical_end_sample0 must be one integer >= 0",
+}
+"""MATLAB refusals of a settling_not_measurable_ruled row, each by its own check's words."""
+
+
+def test_a_settling_not_measured_file_is_read_and_masked_as_python_computes(
+        tmp_path: Path) -> None:
+    """Andrea 2026-10-15 ('compute as is with whatever is not blanked.'), MATLAB side.
+
+    A Python-written row with no electrical settling (electrical end 5 samples BEFORE the
+    epoch, mechanical end 3 samples into it): night6_recovery_start accepts it, and
+    night6_recovery_lead_in masks every input on exactly rows 1..3 - Python's input mask
+    point, max(electrical end, mechanical end), to the sample - reports every analysis's
+    start, cut and common start as Python wrote them, and carries the not-measured record;
+    the reader refuses the row without its ruling, with a settling field, or with a mask
+    point that is not max(E, M), and the record on another basis.
+    """
+    _need_matlab()
+    e_s, m_s = (I0 - 5.3) / FS, (I0 + 2.6) / FS
+    nm = rs.file_starts(session=NM, animal="A", electrical_basis=rs.SETTLING_NOT_MEASURABLE,
+                        fs=FS, electrical_end_s=e_s, mechanical_end_s=m_s,
+                        electrical_settle_s=None, times_source="synthetic",
+                        electrical_source="not measured", stim_level="M100+E1000",
+                        settling_not_measured={"held_reason": "held_no_clean_late_reference",
+                                               "why": "synthetic"})
+    assert nm["electrical_end_sample0"] == I0 - 5 and nm["input_mask_sample0"] == I0 + 3
+    plain = _file([_row(c, I0 + 1) for c in CONSUMERS], session="plain_a")
+    d = tmp_path / "starts"
+    d.mkdir()
+    doc = rs.recovery_starts_document([nm, plain], fs=FS)
+    good = d / "nm.json"
+    rs.write_recovery_starts(good, doc)
+    py = next(f for f in doc["files"] if f["session"] == NM)
+
+    def nmf(j: dict[str, Any]) -> dict[str, Any]:
+        return next(f for f in j["files"] if f["session"] == NM)
+
+    def other(j: dict[str, Any]) -> dict[str, Any]:
+        return next(f for f in j["files"] if f["session"] != NM)
+    rec_key = rs.NOT_MEASURED_KEY
+    readers = [{"name": "nm_ok", "file": good.as_posix()}]
+    for name, edit in (
+            ("nm_no_record", lambda j: nmf(j).pop(rec_key)),
+            ("nm_ruling", lambda j: nmf(j)[rec_key].update(
+                ruling="compute as is with whatever is not blanked")),
+            ("nm_not_held", lambda j: nmf(j)[rec_key].update(held_reason="measured")),
+            ("nm_settle", lambda j: nmf(j).update(electrical_settle_s=e_s,
+                                                  electrical_settle_sample0=I0 - 5)),
+            ("nm_mask_s", lambda j: nmf(j).update(input_mask_s=(I0 + 3) / FS)),
+            ("nm_mask_lowered", lambda j: nmf(j).update(input_mask_s=e_s,
+                                                        input_mask_sample0=I0 - 5)),
+            ("nm_record_on_other", lambda j: other(j).update({rec_key: nmf(j)[rec_key]})),
+            ("nm_no_e_sample", lambda j: nmf(j).pop("electrical_end_sample0"))):
+        j = json.loads(good.read_text(encoding="utf-8"))
+        edit(j)
+        f = d / f"reader_{name}.json"
+        f.write_text(json.dumps(j), encoding="utf-8", newline="\n")
+        readers.append({"name": name, "file": f.as_posix()})
+    st = _store(tmp_path / "store", name=NM)
+    plan = {"labels": list(LABELS), "fs": FS, "n_file": N_FILE, "session": NM,
+            "meta_json": st["meta_json"], "name": "nm", "starts_file": good.as_posix(),
+            "condition": "stim_recovery", "mode": MODE_B,
+            "mask_file": st["mask_file"].as_posix(), "beats_file": st["beats_file"].as_posix(),
+            "record_json": st["record_json"]}
+    res = _run_harness(tmp_path, {"plans": [plan], "readers": readers}, 600)
+    got = _as_list(res["plans"])[0]
+    lead = int(py["input_mask_sample0"]) - I0
+    assert lead == 3
+    _check_trim(got, dict.fromkeys(CONSUMERS, lead))
+    rec = json.loads(got["record"])
+    assert rec["electrical_basis"] == rs.SETTLING_NOT_MEASURABLE
+    assert rec["input_mask_sample0"] == py["input_mask_sample0"]
+    assert rec["electrical_end_sample0"] == py["electrical_end_sample0"] == I0 - 5
+    assert rec["mechanical_end_sample0"] == py["mechanical_end_sample0"] == I0 + 3
+    assert not {"electrical_settle_s", "electrical_settle_sample0", "electrical_s"} & set(rec)
+    assert rec[rec_key]["ruling"] == rs.RULING_NOT_MEASURABLE
+    assert "NO electrical-settling term" in rec["rule"], rec["rule"]
+    rows = {r["analysis"]: r for r in py["analyses"]}
+    for c in CONSUMERS:
+        e = rec["consumers"][c]
+        assert e["trimmed_rows"] == lead and e["status"] == "trimmed"
+        for k in ("start_sample0", "common_start_sample0"):
+            assert e[k] == rows[c][k], (c, k)
+    cuts = {c["cut"]: c for c in py["cuts"]}
+    for c in _as_list(rec["cuts"]):
+        assert c["start_sample0"] == cuts[c["cut"]]["start_sample0"], c["cut"]
+        assert c["common_start_sample0"] == cuts[c["cut"]]["common_start_sample0"], c["cut"]
+    out = {r["name"]: r for r in _as_list(res["readers"])}
+    assert out["nm_ok"]["error"] == "", out["nm_ok"]
+    for name, words in NM_WORDS.items():
+        assert out[name]["error"] == "night6:recoveryStartFile", (name, out[name])
+        assert words in out[name]["message"], (name, out[name]["message"])
+
+
 TRIM_KE = seconds_to_sample(2.5, FS)
 """The electrical settling of the end-to-end case: 0.5 s into the epoch."""
 TRIM_CUT_S = {
